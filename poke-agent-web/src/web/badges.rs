@@ -15,8 +15,7 @@ const SHADES: [[u8; 4]; 4] = [
     [0xFF, 0xFF, 0xFF, 0xFF],
 ];
 
-/// The sheet, encoded once. A few kilobytes, immutable for the life of the process — the ROM does
-/// not change while it is running.
+/// The sheet, encoded once: the ROM does not change while the process runs.
 pub fn sheet() -> &'static [u8] {
     static SHEET: OnceLock<Vec<u8>> = OnceLock::new();
     SHEET.get_or_init(encode)
@@ -40,8 +39,7 @@ fn encode() -> Vec<u8> {
     png.into_inner()
 }
 
-/// `GET /api/badges.png`. Immutable: the sheet is a function of the cartridge, so a viewer may
-/// cache it for as long as it likes.
+/// `GET /api/badges.png`. Immutable: the sheet is a function of the cartridge.
 pub async fn badges() -> Response {
     (
         [

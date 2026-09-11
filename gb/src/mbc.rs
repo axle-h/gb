@@ -76,8 +76,8 @@ impl BankCounts {
         match self.ram {
             0 => None,
             banks if banks.is_power_of_two() => Some(bank & (banks - 1)),
-            // Unreachable for any legal header, but D8 will start defaulting unknown sizes and an
-            // out-of-bounds bank index here would be a panic in the memory path.
+            // Unreachable for any legal header, but an out-of-bounds bank index here would be a
+            // panic in the memory path.
             banks => Some(bank % banks),
         }
     }
@@ -229,7 +229,7 @@ impl Mbc for RomOnly {
     }
 }
 
-/// D3. MBC1: a 5-bit `BANK1` register, a 2-bit `BANK2` register, and a mode bit that decides what
+/// MBC1: a 5-bit `BANK1` register, a 2-bit `BANK2` register, and a mode bit that decides what
 /// `BANK2` is wired to.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Mbc1 {
@@ -294,7 +294,7 @@ impl Mbc for Mbc1 {
     }
 }
 
-/// D4. MBC2: a 4-bit ROM-bank register and 512 nibbles of RAM built into the mapper.
+/// MBC2: a 4-bit ROM-bank register and 512 nibbles of RAM built into the mapper.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Mbc2 {
     banks: BankCounts,
@@ -346,7 +346,7 @@ impl Mbc for Mbc2 {
     }
 }
 
-/// D5. MBC3: a 7-bit ROM-bank register, four RAM banks, and — on the `0x0F`/`0x10` cartridge
+/// MBC3: a 7-bit ROM-bank register, four RAM banks, and — on the `0x0F`/`0x10` cartridge
 /// types — a real-time clock whose five registers replace RAM at `0xA000` when `0x08..=0x0C` is
 /// selected.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
@@ -423,7 +423,7 @@ impl Mbc for Mbc3 {
     }
 }
 
-/// D6. MBC5: a 9-bit ROM-bank register split across two halves of the `0x2000` range, and a 4-bit
+/// MBC5: a 9-bit ROM-bank register split across two halves of the `0x2000` range, and a 4-bit
 /// RAM-bank register.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Mbc5 {
@@ -481,7 +481,7 @@ impl Mbc for Mbc5 {
     }
 }
 
-/// D7. HuC1: MBC1's shape with an infrared port where the RAM-enable register would be.
+/// HuC1: MBC1's shape with an infrared port where the RAM-enable register would be.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct HuC1 {
     banks: BankCounts,
@@ -547,7 +547,6 @@ mod tests {
         BankCounts { rom, ram }
     }
 
-    /// D1's acceptance trace, now owned by the mapper that actually has it.
     #[test]
     fn mbc1_wraps_a_bank_selection_onto_bank_zero() {
         let mut mbc = Mbc1::new(banks(4, 1));

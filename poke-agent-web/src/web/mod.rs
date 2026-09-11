@@ -1,21 +1,5 @@
-//! ```text
-//! GET  /                            the SPA (`web/dist`, embedded — see `assets.rs`)
-//! GET  /{*path}                     its assets
-//! GET  /favicon.png, /favicon.ico   the overworld Poké Ball, decoded from the cartridge
-//! GET  /reset-game                  start the game over; HTTP Basic (needs GB_ADMIN_TOKEN)
-//! GET  /version                     which build this is: crate version, build date, branch, commit
-//! GET  /api/healthz                 liveness
-//! GET  /api/events                  SSE — the status heartbeat, plus agent events as they happen
-//! GET  /api/video                   binary — a keyframe, then block deltas, deflated per connection
-//! GET  /api/audio                   binary — a header, then raw Opus packets; **not** compressed
-//! GET  /api/badges.png              the eight gym badges, decoded from the cartridge
-//! GET  /api/pokemon/{dex}/front.png one Pokémon's front sprite, decompressed from the cartridge
-//! GET  /api/tool-image/{seq}/image.png  the picture a tool answered with, while it is still held
-//! GET  /api/history?since=          the transcript from a sequence number, for a fresh page
-//! GET  /api/leaderboard?limit=      the runs that have finished the game, fastest first
-//! POST /api/new-run                 the same reset, for a script; `X-GB-Token`
-//! POST /api/clear                   throw away the model's conversation and plan; `X-GB-Token`
-//! ```
+//! The HTTP server: the SPA, the event, video and audio streams, and the admin routes. `routes`
+//! lists every route; the README says what each one serves.
 
 pub mod assets;
 pub mod audio;
@@ -69,8 +53,7 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) struct AppState {
     published: Arc<Published>,
     started: Instant,
-    /// The run directory, read through rather than copied out, because `POST /api/new-run` can
-    /// change it under a live server.
+    /// Read through rather than copied out, because `POST /api/new-run` can swap it live.
     run: Arc<CurrentRun>,
     /// The seam into the emulator thread.
     control: Arc<ControlRequests>,
@@ -80,18 +63,16 @@ pub(crate) struct AppState {
     audio: Option<[u8; audio::HEADER_LEN]>,
 }
 
-/// `gb serve`. Blocks until the process is interrupted.
+/// Serve the run. Blocks until the process is interrupted.
 pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> {
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    // The LLM configuration is read first, because a missing API key should be an error before a
-    // run directory is created for a run that cannot start.
+    // Read first, so a missing API key fails before a run directory is created.
     let llm = match policy {
         ServePolicy::Llm => Some(poke_agent::llm::LlmConfig::from_env()?),
         ServePolicy::Random | ServePolicy::Deterministic => None,
     };
-    // `RunMeta::model` is the *policy's* name under anything but `--policy llm`, and it is a
-    // model id only there.
+    // `RunMeta::model` is a model id only under `--policy llm`, and the policy's name otherwise.
     let model = match policy {
         ServePolicy::Random => "random".to_string(),
         ServePolicy::Deterministic => "scripted".to_string(),
@@ -105,15 +86,12 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     let (run, origin, resumed) = RunDir::open(&root, new_run, &model, &|bytes| {
         GameBoy::dmg(poke_agent::pokemon::roms::POKERED).load_state(bytes).is_ok()
     })?;
-    // From here on nothing holds the `RunDir` directly: `POST /api/new-run` can replace it under
-    // a live process, and the checkpointer, the transcript thread, `/api/history` and the model's
-    // notes all have to move together when it does.
+    // Nothing holds the `RunDir` directly from here on: `POST /api/new-run` can replace it, and
+    // every writer has to move with it.
     let current = Arc::new(CurrentRun::new(root, model.clone(), run));
     let run = current.get();
     println!(
         "gb serve {} — {} run {} in {}",
-        // The same four facts `/version` serves: the first question asked of a container that is
-        // behaving oddly is which build it is, and its log is the first place anyone looks.
         version::BuildInfo::current().summary(),
         match origin {
             Origin::Fresh => "new",
@@ -124,16 +102,14 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     );
     let starting_state = resumed.unwrap_or_else(|| poke_agent::pokemon::data::START_OF_GAME.to_vec());
 
-    // The transcript writer is started before the emulator, so the first event of the run is in
-    // it — and the event counter continues from where the last process left off, which is what
-    // makes `/api/history?since=` mean anything across a restart.
+    // Started before the emulator so the run's first event is in it; the counter continues from
+    // the last process's, so `/api/history?since=` holds across a restart.
     let transcript_path = run.transcript_path();
     let published = Published::resuming(transcript::last_seq(&transcript_path).map_or(0, |seq| seq + 1));
     let transcript =
         transcript::spawn(Arc::clone(&current), Arc::clone(&published), Arc::clone(&shutdown))?;
-    // Published *after* the writer is subscribed, so it lands in the transcript: it is the marker
-    // that explains why turn numbers start again from 1 below it, the generation counter being
-    // per-process.
+    // Published after the writer subscribes, so the transcript marks where per-process turn
+    // numbers restart from 1.
     published.publish_event(published::UiEventBody::Notice {
         level: "info",
         message: match origin {
@@ -142,18 +118,14 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         },
     });
 
-    // The policy is a factory, built on the emulator thread — `Policy` is not `Send` and
-    // `LlmPolicy` owns channel endpoints.
+    // A factory, run on the emulator thread: `Policy` is not `Send`.
     let make_policy: Box<dyn FnOnce() -> Box<dyn poke_agent::pokemon::policy::Policy> + Send> = match policy
     {
         ServePolicy::Random => Box::new(|| Box::new(RandomPolicy::default())),
-        // The same policy, the same seed and the same queue `full_playthrough` runs — it is that
-        // test with the page in front of it rather than a second route that could disagree with
-        // it.
+        // The same policy, seed and queue `full_playthrough` runs.
         ServePolicy::Deterministic => {
             let run_dir = run.path().to_path_buf();
-            // Only this knows a cursorless run from a new one, and `resuming_in` parks rather
-            // than guessing — see its doc comment for the rollout that made the difference.
+            // Only this knows a cursorless run from a new one; `resuming_in` parks rather than guess.
             let from_the_beginning = matches!(origin, Origin::Fresh);
             Box::new(move || {
                 use poke_agent::pokemon::policy::{DeterministicPolicy, PolicyStep};
@@ -168,23 +140,17 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             let config = llm.expect("built above");
             println!("gb serve — {} via {}", config.model, config.base_url);
             let endpoint = Box::new(OpenAiClient::new(&config));
-            // Read off before `config` is moved into the worker.
             let stuck_timeout = config.stuck_timeout;
-            // The model's own plan lives in the run directory, so it survives both a compaction
-            // and a restart.
+            // The plan, the battle script and the conversation live in the run directory, so they
+            // survive both a compaction and a restart.
             let todo = TodoList::open(Some(run.path()));
-            // The battle script, beside the plan and for the same reason: it is a decision about
-            // how to play that has to survive both a compaction and a restart.
             let battle_script = poke_agent::llm::battle_script::BattleScript::open(Some(run.path()));
-            // The conversation itself, beside the plan and for the same reason.
             let history = poke_agent::llm::history::History::open(Some(run.path()));
             if let Some(restored) = history.restored() {
                 published.publish_event(published::UiEventBody::Notice {
                     level: "info",
                     message: format!("resumed the conversation: {} messages", restored.messages),
                 });
-                // A changed system prompt is a `warn`, not an `info`, and it is deliberately
-                // loud.
                 if restored.system_prompt_changed {
                     published.publish_event(published::UiEventBody::Notice {
                         level: "warn",
@@ -194,13 +160,11 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
                     });
                 }
             }
-            // `with_run` rather than a constructor argument: it is the one thing the worker does
-            // that is not part of answering a turn, and the records go to whichever run is
-            // current when the press happens rather than to this one — see `llm::incident`.
+            // Incident records go to whichever run is current when the press happens, not to this
+            // one; see `llm::incident`.
             let (worker, handles) = worker::channels(endpoint, config, Arc::clone(&published), todo, battle_script, history);
             let worker = worker.with_run(Arc::clone(&current));
-            // The worker outlives this function; it ends when the policy is dropped and its
-            // channels close, which happens when the emulator thread stops.
+            // It ends when the emulator thread drops the policy and its channels close.
             worker.spawn()?;
             Box::new(move || Box::new(LlmPolicy::new(handles, stuck_timeout)))
         }
@@ -219,8 +183,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             status_interval: status_interval()?,
             model: hardware_model(std::env::var("GB_HARDWARE").ok().as_deref())?,
             audio_bitrate,
-            // A resume must keep the trainer it already has; only a game starting from
-            // `START_OF_GAME` is named after whoever is about to play it.
+            // Only a game from `START_OF_GAME` is named after its player; a resume keeps its trainer.
             fresh_game: matches!(origin, Origin::Fresh),
             ..HostConfig::default()
         },
@@ -243,8 +206,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         audio_bitrate.map(|_| audio::header()),
     );
 
-    // The order matters: the emulator's last act is a checkpoint (`EmulatorHost::run`), so it is
-    // joined *before* the process is allowed to end.
+    // The emulator's last act is a checkpoint, so it is joined before the process ends.
     shutdown.store(true, Ordering::Relaxed);
     let _ = emulator.join();
     published.publish_event(published::UiEventBody::Notice {
@@ -328,12 +290,12 @@ fn serve_http(
         }
     });
 
-    // Dropping the `serve` future above ends the *accept* loop and nothing else.
+    // Dropping the `serve` future ends the accept loop and nothing else.
     runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
     result
 }
 
-/// Every route, in one place — the module doc's table above says the same thing in prose.
+/// Every route, in one place.
 fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/healthz", get(healthz))
@@ -350,8 +312,7 @@ fn routes() -> Router<AppState> {
         .route("/reset-game", get(reset_game))
         .route("/favicon.png", get(sprites::favicon))
         .route("/favicon.ico", get(sprites::favicon))
-        // At the root rather than under `/api`, because it is not the SPA's business — it is the
-        // one URL an operator types to find out what is deployed.
+        // At the root: it is for an operator asking what is deployed, not for the SPA.
         .route("/version", get(version::version))
         // Last, so the catch-all cannot shadow an API route it happens to match.
         .route("/", get(assets::index))
@@ -383,9 +344,7 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
         "version": crate::cli::VERSION,
         "uptime_ms": state.started.elapsed().as_millis() as u64,
         "video_seq": state.published.latest_keyframe().map(|k| k.seq),
-        // Read per request rather than captured: `POST /api/new-run` changes it, and a liveness
-        // endpoint reporting the run the process *started* with would be quietly wrong
-        // afterwards.
+        // Read per request, because `POST /api/new-run` changes it.
         "run_id": state.run.get().run_id(),
     }))
 }
@@ -395,19 +354,17 @@ fn admin_token() -> Option<String> {
     std::env::var("GB_ADMIN_TOKEN").ok().map(|token| token.trim().to_string()).filter(|token| !token.is_empty())
 }
 
-/// Compare without an early return, so the time taken says nothing about how much of the token
-/// was right.
+/// Compare without an early return, so the time taken says nothing about how much was right.
 fn tokens_match(offered: &str, expected: &str) -> bool {
-    // `expected` is this server's own configuration rather than anything a caller sent, so
-    // returning early on it leaks nothing — and it is what keeps the index below in bounds.
+    // `expected` is our own configuration, so returning early on it leaks nothing; it keeps the
+    // index below in bounds.
     if expected.is_empty() {
         return false;
     }
     let (offered, expected) = (offered.as_bytes(), expected.as_bytes());
     let mut difference = offered.len() ^ expected.len();
     for (index, byte) in offered.iter().enumerate() {
-        // Index into `expected` cyclically, so a wrong *length* still walks the whole offered
-        // token.
+        // Cyclic, so a wrong length still walks the whole offered token.
         difference |= (byte ^ expected[index % expected.len()]) as usize;
     }
     difference == 0
@@ -434,8 +391,7 @@ async fn ask(
         Ok(Ok(Ok(run_id))) => Ok(run_id),
         // The emulator tried and could not.
         Ok(Ok(Err(failure))) => Err((refused, failure)),
-        // The sender was dropped, or never taken: either way the emulator thread is not running,
-        // and `Obituary` will have said so on `/api/events` already.
+        // The emulator thread is not running, and `Obituary` has already said so.
         Ok(Err(_)) | Err(_) => Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "the emulator thread did not answer — see /api/events".to_string(),
@@ -443,8 +399,7 @@ async fn ask(
     }
 }
 
-/// The `X-GB-Token` gate both JSON admin routes share: `Some(refusal)` to answer with, or `None`
-/// to carry on.
+/// The `X-GB-Token` gate: `Some(refusal)` to answer with, or `None` to carry on.
 fn admin_gate(state: &AppState, headers: &HeaderMap) -> Option<Response> {
     let Some(expected) = state.admin_token.as_deref() else {
         return Some((StatusCode::NOT_FOUND, Json(serde_json::json!({
@@ -486,8 +441,8 @@ async fn clear(State(state): State<AppState>, headers: HeaderMap) -> Response {
     }
 }
 
-/// `GET /reset-game` — [`ask`] for a person, gated on HTTP Basic, so the browser collects the
-/// password in its own dialog and the SPA needs no token-handling code at all.
+/// `GET /reset-game`: [`ask`] gated on HTTP Basic, so the browser collects the password and the
+/// SPA holds no token.
 async fn reset_game(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(expected) = state.admin_token.as_deref() else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
@@ -541,8 +496,7 @@ fn reset_page(heading: &str, detail: &str) -> Response {
     ([(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
-/// Enough for the two things that reach the page: a run id and an error message from the
-/// emulator.
+/// Enough for what reaches the page: a run id and an error message from the emulator.
 fn html_escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
@@ -553,8 +507,7 @@ struct Since {
     since: u64,
 }
 
-/// The backlog, so a page that has just loaded shows the run it joined rather than an empty log
-/// until the next thing happens.
+/// The backlog, so a page that has just loaded shows the run it joined.
 async fn history(State(state): State<AppState>, Query(query): Query<Since>) -> Json<serde_json::Value> {
     let path = state.run.get().transcript_path();
     let events = tokio::task::spawn_blocking(move || transcript::read_since(&path, query.since))
@@ -577,8 +530,7 @@ async fn events(State(state): State<AppState>) -> Sse<impl Stream<Item = Result<
 /// The picture a tool answered with, by the seq of the `tool_result` event that named it.
 async fn tool_image(State(state): State<AppState>, Path(seq): Path<u64>) -> Response {
     match state.published.tool_image(seq) {
-        // Immutable: a seq is never reused within a process, so the one answer this URL has ever
-        // had is the one it will always have.
+        // Immutable: a seq is never reused within a process.
         Some(png) => (
             [
                 (header::CONTENT_TYPE, "image/png"),
@@ -603,12 +555,10 @@ async fn video_stream(State(state): State<AppState>) -> Response {
 
     let opening = keyframe.map(|keyframe| stream.frame(&keyframe.bytes)).unwrap_or_default();
 
-    // Merged rather than `Sse::keep_alive`d: the keep-alive has to go through the same compressor
-    // as everything else, since a deflate stream is a single ordered thing and not a sequence of
-    // messages that can be interleaved with something else.
+    // Merged in rather than sent beside: a deflate stream is one ordered thing, so the keep-alive
+    // goes through the same compressor.
     let mut interval = tokio::time::interval(KEEP_ALIVE);
-    // A starved task must not come back and fire every missed tick at once — the point is
-    // liveness, and a burst of keep-alives says nothing a single one does not.
+    // A starved task sends one keep-alive, not every missed tick at once.
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let beats = IntervalStream::new(interval).map(|_| None);
     let messages = BroadcastStream::new(receiver).map(Some);
@@ -619,8 +569,7 @@ async fn video_stream(State(state): State<AppState>) -> Response {
             Some(Ok(message)) if message.seq > floor => message,
             // Already covered by the keyframe this connection opened with.
             Some(Ok(_)) => return None,
-            // The client fell out of the ring buffer, so its palette and its screen are both
-            // suspect.
+            // Fell out of the ring buffer: its palette and screen are suspect, so resync.
             Some(Err(BroadcastStreamRecvError::Lagged(_))) => published.latest_keyframe()?,
         };
         floor = message.seq;
@@ -632,8 +581,7 @@ async fn video_stream(State(state): State<AppState>) -> Response {
         [
             (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
             (axum::http::header::CACHE_CONTROL, "no-store"),
-            // Nginx-family proxies buffer an unknown-length body by default, which would turn a
-            // livestream into a slideshow.
+            // Nginx-family proxies buffer an unknown-length body by default.
             (axum::http::HeaderName::from_static("x-accel-buffering"), "no"),
         ],
         axum::body::Body::from_stream(body),
@@ -657,10 +605,8 @@ async fn audio_stream(State(state): State<AppState>) -> Response {
     let beats = IntervalStream::new(interval).map(|_| None);
     let packets = BroadcastStream::new(receiver).map(Some);
     let live = packets.merge(beats).filter_map(move |item| match item {
-        // The keep-alive is doing more work here than it does for video.
         None => Some(Ok::<_, Infallible>(stream.frame(&[]))),
         Some(Ok(packet)) => Some(Ok(stream.frame(&packet))),
-        // Skipped, and that is the whole of the handling.
         Some(Err(BroadcastStreamRecvError::Lagged(_))) => None,
     });
 
@@ -702,8 +648,7 @@ impl Default for VideoStream {
 impl VideoStream {
     fn frame(&mut self, message: &[u8]) -> Vec<u8> {
         use std::io::Write;
-        // In-memory writes: the only way `write_all` fails here is an allocation failure, which
-        // is not something this connection can do anything about.
+        // In-memory writes fail only on allocation failure.
         let _ = self.deflate.write_all(&(message.len() as u32).to_le_bytes());
         let _ = self.deflate.write_all(message);
         let _ = self.deflate.flush();
@@ -715,11 +660,7 @@ impl VideoStream {
 mod tests {
     use super::*;
 
-    // ── /api/audio
-    // ───────────────────────────────────────────────────────────────────────────────
-
-    /// The framing is a `u32` length and then the bytes, and a reader has to be able to split a
-    /// concatenation back into exactly what went in — including an empty message and a large one.
+    /// A concatenation of `u32`-length-prefixed messages splits back into exactly what went in.
     #[test]
     fn the_audio_stream_is_length_prefixed_and_carries_its_payload_verbatim() {
         let mut stream = AudioStream;
@@ -740,7 +681,6 @@ mod tests {
         assert_eq!(read, sent);
     }
 
-    /// The guard on the decision, not on the code.
     #[test]
     fn nothing_compresses_the_audio_stream() {
         let mut stream = AudioStream;
@@ -749,9 +689,7 @@ mod tests {
         assert_eq!(&stream.frame(&packet)[4..], &packet[..], "the payload was transformed");
     }
 
-    /// The twin of `a_keepalive_puts_bytes_on_the_wire_and_no_message_in_the_stream`, and it
-    /// matters more here: a parked run produces no audio for hours, so this is the only thing
-    /// between a listening page and its `STALE_MS` watchdog.
+    /// A parked run sends no audio for hours, so the keep-alive is all that holds off `STALE_MS`.
     #[test]
     fn an_audio_keepalive_puts_bytes_on_the_wire_and_no_packet_in_the_stream() {
         let mut stream = AudioStream;
@@ -759,8 +697,7 @@ mod tests {
         assert_eq!(beat, vec![0, 0, 0, 0], "a keep-alive is a zero length and nothing after it");
     }
 
-    /// `GB_AUDIO_BITRATE`: the default when nobody said, `0` for off, and a loud refusal
-    /// otherwise.
+    /// `GB_AUDIO_BITRATE`: the default when unset, `0` for off, and a refusal otherwise.
     #[test]
     fn the_audio_bitrate_variable_defaults_and_refuses_nonsense() {
         assert_eq!(audio_bitrate(None).unwrap(), Some(audio::DEFAULT_BITRATE));
@@ -774,27 +711,21 @@ mod tests {
         }
     }
 
-    /// `GB_HARDWARE` picks the machine, and the default is the DMG — the whole test suite and
-    /// every committed fixture were captured on one, and the video bench asserts a four-shade
-    /// screen.
+    /// `GB_HARDWARE` defaults to the DMG, which every fixture was captured on.
     #[test]
     fn the_hardware_variable_defaults_to_a_dmg_and_refuses_anything_it_does_not_know() {
         assert_eq!(hardware_model(None), Ok(Model::Dmg));
-        // Blank counts as unset, for the reason `GB_ADMIN_TOKEN` does: that is the shape a
-        // placeholder value takes in a Deployment.
+        // Blank counts as unset: that is how a placeholder looks in a Deployment.
         assert_eq!(hardware_model(Some("   ")), Ok(Model::Dmg));
         assert_eq!(hardware_model(Some("dmg")), Ok(Model::Dmg));
         assert_eq!(hardware_model(Some("cgb")), Ok(Model::Cgb));
         assert_eq!(hardware_model(Some(" CGB ")), Ok(Model::Cgb), "trimmed and case-insensitive");
 
-        // Refused rather than ignored: a container that silently served the wrong picture would
-        // be diagnosed by looking at the video codec, which is the wrong place entirely.
         let error = hardware_model(Some("color")).unwrap_err();
         assert!(error.contains("GB_HARDWARE") && error.contains("color"), "{error}");
     }
 
-    /// The transport contract, end to end without a socket: what `/api/video` writes must inflate
-    /// as one deflate stream and split back into exactly the messages that went in.
+    /// What `/api/video` writes inflates as one stream and splits back into the messages sent.
     #[test]
     fn the_video_stream_is_one_deflate_stream_of_length_prefixed_messages() {
         use std::io::Write;
@@ -827,8 +758,7 @@ mod tests {
         assert!(compressed < plain.len() / 2, "{compressed} B for {} B of input", plain.len());
     }
 
-    /// A zero-length message is the keep-alive, and it has to reach the wire — an idle screen
-    /// that sends nothing at all is a connection a proxy closes.
+    /// A zero-length keep-alive still puts bytes on the wire, or a proxy closes an idle screen.
     #[test]
     fn a_keepalive_puts_bytes_on_the_wire_and_no_message_in_the_stream() {
         let mut stream = VideoStream::default();
@@ -884,9 +814,7 @@ mod tests {
         assert!(!tokens_match("", "s3cret"));
     }
 
-    /// The router is built at startup and a bad path panics there, so a route axum's matcher
-    /// rejects — `/api/pokemon/{dex}.png`, which needs a dynamic suffix it does not support —
-    /// would take the server down on boot rather than 404.
+    /// A path axum rejects, such as a dynamic suffix, panics at startup rather than 404ing.
     #[test]
     fn every_route_pattern_is_one_axum_accepts() {
         let _: Router<AppState> = routes();

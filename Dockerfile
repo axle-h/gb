@@ -1,11 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# (A parser directive only while it is the first line of the file.)
-#
-#   docker build -t gb .
-#   docker run -d -p 8080:8080 -v gb-runs:/runs -e OPENAI_API_KEY=sk-… -e GB_MODEL=… gb
-#
-# The ROM and `web/dist` are both baked into the binary at compile time and neither is in git, so
-# stages 1 and 2 build them before stage 3 runs cargo.
+# The ROM and `web/dist` are baked into the binary and neither is in git, so stages 1 and 2 build them.
 
 # ── 1. the cartridge ─────────────────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS rom
@@ -34,14 +28,14 @@ RUN test -f main.asm || { \
         exit 1; \
     }
 
-# The sha1 check is load-bearing: every fixture and generated symbol is pinned to these bytes.
+# Every fixture and generated symbol is pinned to these bytes, hence the sha1 check.
 RUN make -j"$(nproc)" pokered.gbc \
     && grep ' \*pokered\.gbc$' roms.sha1 | sha1sum -c - \
     && test -s pokered.sym
 
 # ── 2. the SPA ───────────────────────────────────────────────────────────────────────────────────
 FROM node:22-alpine AS web
-# pnpm's version comes from `packageManager` via corepack, which Node 25 and later no longer bundle.
+# pnpm's version comes from `packageManager` via corepack, which Node 25 and later do not bundle.
 ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH
 RUN corepack enable
 WORKDIR /web
@@ -56,8 +50,7 @@ FROM rust:1-bookworm AS build
 WORKDIR /src
 
 # Only what the compile reads, so a doc edit does not invalidate this layer. `poke-agent-sdl` is never
-# built, but cargo will not load the workspace without it: its real manifest keeps `Cargo.lock` exact,
-# and a stub `main.rs` gives it the one target cargo insists on.
+# built, but its real manifest keeps `Cargo.lock` exact and a stub `main.rs` gives it a target.
 COPY Cargo.toml Cargo.lock ./
 COPY gb/Cargo.toml ./gb/
 COPY gb/src/ ./gb/src/

@@ -1,4 +1,3 @@
-
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,8 +20,7 @@ use crate::pokemon::integration_tests::fixture::TestFixture;
 use crate::pokemon::llm_policy::LlmPolicy;
 use crate::published::{Published, UiEvent, UiEventBody};
 
-// ── What a brain is allowed to see
-// ───────────────────────────────────────────────────────────────
+// ── What a brain is allowed to see ──
 
 /// One message, as the endpoint received it.
 #[derive(Debug, Clone)]
@@ -48,7 +46,7 @@ pub struct TurnRequest {
 }
 
 impl TurnRequest {
-    /// The newest `user` message — the situation this turn is being asked about.
+    /// The newest `user` message: the situation this turn is asked about.
     pub fn situation(&self) -> &str {
         self.messages
             .iter()
@@ -57,8 +55,7 @@ impl TurnRequest {
             .map_or("", |message| message.text.as_str())
     }
 
-    /// The ids the situation offered, in the order it offered them. Parsed out of the rendered
-    /// menu exactly as a model would have to — there is no other way in, by construction.
+    /// The ids the situation offered, in order, parsed out of the rendered menu as a model must.
     pub fn menu_ids(&self) -> Vec<String> {
         self.situation()
             .lines()
@@ -68,8 +65,7 @@ impl TurnRequest {
             .collect()
     }
 
-    /// The menu as `(id, description)`, parsed out of the rendered situation exactly as a model
-    /// would have to.
+    /// The menu as `(id, description)`, parsed out of the rendered situation as a model must.
     pub fn menu_rows(&self) -> Vec<(String, String)> {
         self.situation()
             .lines()
@@ -81,8 +77,7 @@ impl TurnRequest {
             .collect()
     }
 
-    /// The map the situation says the player is on. `None` on a turn that carries no location
-    /// line, which is every kind but the overworld.
+    /// The map the situation says the player is on; `None` on every kind but the overworld.
     pub fn location(&self) -> Option<String> {
         self.situation()
             .lines()
@@ -99,7 +94,6 @@ impl TurnRequest {
         self.tools.iter().any(|tool| tool.name == name)
     }
 
-    /// A battle turn is the one that can commit a battle action.
     pub fn is_battle(&self) -> bool {
         self.has_tool("choose_battle_action")
     }
@@ -110,8 +104,7 @@ impl TurnRequest {
             && !self.has_tool("choose_battle_action")
     }
 
-    /// Compaction's own request. No tools at all, and the last user message is the instruction —
-    /// see [`crate::llm::compaction::summary_request`].
+    /// Compaction's own request: no tools, and the last user message is the instruction.
     pub fn is_summary(&self) -> bool {
         self.tools.is_empty()
             && self.situation().starts_with(
@@ -126,8 +119,7 @@ impl TurnRequest {
 
 }
 
-// ── What a brain answers with
-// ────────────────────────────────────────────────────────────────────
+// ── What a brain answers with ──
 
 /// One tool call, before it is fragmented onto the wire.
 #[derive(Debug, Clone)]
@@ -141,7 +133,7 @@ impl Call {
         Self { name: name.to_string(), arguments }
     }
 
-    /// The terminal `wait`, which every brain needs as its "I have nothing" answer.
+    /// The terminal `wait`, every brain's "I have nothing" answer.
     pub fn wait(ticks: u64) -> Self {
         Self::new("wait", serde_json::json!({ "ticks": ticks }))
     }
@@ -151,8 +143,8 @@ impl Call {
 pub enum Reply {
     /// Tool calls, fragmented across `data:` frames by the endpoint.
     Calls(Vec<Call>),
-    /// Prose and no tool call — the nudge-then-force path in [`worker::Worker::decide`], and what
-    /// a compaction summary is answered with.
+    /// Prose and no tool call: the nudge-then-force path in [`worker::Worker::decide`], and a
+    /// compaction summary.
     Content(String),
     Fault(Fault),
 }
@@ -169,8 +161,7 @@ pub enum Fault {
     Http { status: u16, message: String },
     /// A 429.
     RateLimited { retry_after: Option<Duration>, message: String },
-    /// A 200 whose body starts and then stops arriving, for longer than
-    /// `GB_REQUEST_TIMEOUT_SECS`.
+    /// A 200 whose body stops arriving for longer than `GB_REQUEST_TIMEOUT_SECS`.
     Timeout,
     /// Valid SSE, arguments that are not JSON.
     MalformedToolArgs,
@@ -191,7 +182,7 @@ impl<F: FnMut(&TurnRequest) -> Reply + Send> Brain for F {
     }
 }
 
-/// A brain that answers with the same thing every time. The fault tests are all one of these.
+/// A brain that answers with the same thing every time.
 pub struct Always(pub Reply);
 
 impl Brain for Always {
@@ -205,8 +196,7 @@ pub struct FaultThen {
     pub fault: Fault,
     pub count: usize,
     pub then: Reply,
-    /// How many faults have actually been served, so a test can say "and it really did fail N
-    /// times".
+    /// How many faults have actually been served.
     pub served: Arc<AtomicUsize>,
 }
 
@@ -218,9 +208,8 @@ impl FaultThen {
 
 impl Brain for FaultThen {
     fn respond(&mut self, _request: &TurnRequest) -> Reply {
-        // Counted per *request*, not per turn: a retryable fault is asked several times by
-        // `stream_with_retries` for one turn, and a test that counted turns would be measuring
-        // the retry policy by accident.
+        // Counted per request, not per turn: `stream_with_retries` asks a retryable fault several
+        // times in one turn.
         let served = self.served.load(Ordering::SeqCst);
         if served < self.count {
             self.served.store(served + 1, Ordering::SeqCst);
@@ -230,15 +219,13 @@ impl Brain for FaultThen {
     }
 }
 
-// ── The endpoint
-// ─────────────────────────────────────────────────────────────────────────────────
+// ── The endpoint ──
 
 #[derive(Clone)]
 struct Endpoint {
     brain: Arc<Mutex<Box<dyn Brain>>>,
     seen: Arc<AtomicUsize>,
-    /// Every request the endpoint was sent, kept so a test can assert on what the model was shown
-    /// without the brain having to hoard it.
+    /// Every request the endpoint was sent, so a test can assert on what the model was shown.
     log: Arc<Mutex<Vec<TurnRequest>>>,
     /// How long a `Timeout` fault holds the body open for.
     timeout_hold: Duration,
@@ -387,10 +374,9 @@ async fn serve_fault(fault: Fault, timeout_hold: Duration) -> Response {
             )
                 .into_response()
         }
-        // A 200 with the body half-written, not a slow *response*: `timeout_recv_response` and
-        // `timeout_recv_body` are separate deadlines and the deployed failure is the second one.
+        // A 200 with the body half-written: `timeout_recv_body` is a separate deadline from
+        // `timeout_recv_response`.
         Fault::Timeout => {
-            // One chunk, then a silence longer than the client will wait.
             let (sender, receiver) =
                 tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(1);
             tokio::spawn(async move {
@@ -411,8 +397,7 @@ async fn serve_fault(fault: Fault, timeout_hold: Duration) -> Response {
             ([(header::CONTENT_TYPE, "text/event-stream")], sse_raw_call("choose_action", "{not json"))
                 .into_response()
         }
-        // Ends part-way through a `data:` line, which is what `read_stream` sees when the socket
-        // closes mid-frame: the partial line is the last thing `lines()` yields.
+        // Ends part-way through a `data:` line, as `read_stream` sees a socket closed mid-frame.
         Fault::TruncatedStream => (
             [(header::CONTENT_TYPE, "text/event-stream")],
             "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"hel".to_string(),
@@ -471,9 +456,8 @@ fn usage_frame() -> String {
     }))
 }
 
-/// One completion, as an OpenAI-compatible stream — with the arguments deliberately chopped into
-/// three-character fragments, and every call's fragments interleaved with every other's, which is
-/// what a parallel tool call actually looks like on the wire.
+/// One completion as an OpenAI-compatible stream, arguments chopped into three-character fragments
+/// and interleaved across calls as a parallel tool call is.
 fn sse_calls(calls: &[Call]) -> impl IntoResponse {
     let rendered: Vec<(String, String)> = calls
         .iter()
@@ -532,8 +516,7 @@ fn chunks(text: &str, size: usize) -> Vec<&str> {
     out
 }
 
-// ── The assembled stack
-// ──────────────────────────────────────────────────────────────────────────
+// ── The assembled stack ──
 
 /// How the harness paces the emulator by default.
 pub const HOST_TICK: Duration = Duration::from_millis(20);
@@ -542,7 +525,7 @@ pub const HOST_TICK: Duration = Duration::from_millis(20);
 pub const NO_BACKOFF: RetryPolicy =
     RetryPolicy { attempts: 3, base: Duration::ZERO, max: Duration::ZERO };
 
-/// The deployed streak, parked for long enough to tick through and no longer.
+/// The deployed refusal streak, parked just long enough to tick through.
 pub const SHORT_REFUSAL_PARK: RefusalPark =
     RefusalPark { after: 3, first: Duration::from_millis(100), max: Duration::from_millis(200) };
 
@@ -550,14 +533,14 @@ pub const SHORT_REFUSAL_PARK: RefusalPark =
 pub struct LlmRun {
     pub endpoint: MockEndpoint,
     pub published: Arc<Published>,
-    /// Where `history.json`, `conversation.jsonl`, `todo.json` and `battle-script.json` live —
-    /// exactly as they do in deployment.
+    /// Where `history.json`, `conversation.jsonl`, `todo.json` and `battle-script.json` live, as
+    /// deployed.
     pub run_dir: std::path::PathBuf,
     /// `None` only between a restart's teardown and its bring-up.
     fixture: Option<TestFixture>,
     run: Option<Arc<crate::run::CurrentRun>>,
     root: std::path::PathBuf,
-    /// Kept so the directory outlives the run and is removed when it does not.
+    /// Kept so the directory outlives the run.
     _scratch: crate::run::Scratch,
     config: LlmConfig,
     retry: RetryPolicy,
@@ -633,12 +616,12 @@ impl LlmRunBuilder {
         self
     }
 
-    /// Names the scratch directory, so a failing test says which run's files to look at.
     pub fn refusal_park(mut self, park: RefusalPark) -> Self {
         self.refusal_park = park;
         self
     }
 
+    /// Names the scratch directory, so a failing test says which run's files to look at.
     pub fn named(mut self, name: &'static str) -> Self {
         self.name = name;
         self
@@ -651,8 +634,8 @@ impl LlmRunBuilder {
     }
 
     pub fn start(self, brain: Box<dyn Brain>) -> LlmRun {
-        // A `Timeout` fault has to outlast the client's patience and nothing more, or every test
-        // that provokes one pays the difference in wall clock.
+        // A `Timeout` fault outlasts the client's patience and nothing more, to keep wall clock
+        // down.
         let endpoint = MockEndpoint::start_with_timeout_hold(
             brain,
             self.request_timeout * 3 + Duration::from_millis(200),
@@ -708,12 +691,11 @@ impl LlmRun {
         LlmRunBuilder::new(fixture)
     }
 
-    /// Open (or resume) the run directory, build the worker on it, and hang a fresh fixture off
-    /// the policy.
+    /// Open or resume the run directory, build the worker on it, and hang a fresh fixture off the
+    /// policy.
     fn bring_up(&mut self, carry: Option<MachineCycles>) {
-        // `new_run` is false on every start after the first, and the resume then depends on there
-        // being a `state.gbst` to find — which is why [`Self::restart`] checkpoints before it
-        // tears down.
+        // `new_run` is false after the first start, and the resume needs the `state.gbst` that
+        // [`Self::restart`] checkpoints.
         let fresh = self.processes == 0;
         let (run, _origin, saved) =
             crate::run::RunDir::open(&self.root, fresh, "mock", &|bytes| !bytes.is_empty())
@@ -741,14 +723,14 @@ impl LlmRun {
         );
 
         let policy = Box::new(LlmPolicy::new(handles, self.stuck_timeout));
-        // Resumed from `state.gbst`, not from the emulator we were just holding.
+        // Resumed from `state.gbst`, not from the emulator just held.
         let state = saved.unwrap_or_else(|| self.fixture_state.to_vec());
         let mut fixture = TestFixture::with_policy(&state, self.max_game_time, policy);
         if self.want_coverage {
             fixture = fixture.with_coverage();
         }
         fixture.total_cycles = carry.unwrap_or(MachineCycles::ZERO);
-        // The coverage log belongs to the *run*, not to the process.
+        // The coverage log belongs to the run, not the process.
         if let Some(carried) = self.coverage_log.take() {
             fixture.coverage = Some(carried);
         }
@@ -756,15 +738,13 @@ impl LlmRun {
         self.processes += 1;
     }
 
-    /// Checkpoint, then drop the worker and the fixture, then rebuild both from the run
-    /// directory.
+    /// Checkpoint, drop the worker and the fixture, and rebuild both from the run directory.
     pub fn restart(&mut self) {
         self.checkpoint();
         self.restart_from_last_checkpoint();
     }
 
-    /// Restart without checkpointing first, so the process comes back up on whatever
-    /// [`Self::checkpoint`] last wrote rather than on where the game has since got to.
+    /// Restart on whatever [`Self::checkpoint`] last wrote, not where the game has since got to.
     pub fn restart_from_last_checkpoint(&mut self) {
         let carry = self.fixture().total_cycles;
         self.coverage_log = self.fixture().coverage.take();
@@ -783,8 +763,7 @@ impl LlmRun {
             .expect("the run directory is writable");
     }
 
-    /// Drop the policy — which closes the turn channel — and wait for the worker thread to
-    /// notice.
+    /// Drop the policy, closing the turn channel, and wait for the worker thread to notice.
     fn tear_down(&mut self) {
         self.fixture = None;
         self.run = None;
@@ -797,7 +776,7 @@ impl LlmRun {
         self.fixture.as_mut().expect("the run is between processes")
     }
 
-    /// One iteration of the host loop, and the park honoured exactly as `host.rs` honours it.
+    /// One iteration of the host loop, honouring the park as `host.rs` does.
     pub fn tick(&mut self) {
         self.drain_events();
         if self
@@ -813,7 +792,7 @@ impl LlmRun {
         if self.cheats.is_some() {
             let state = match self.fixture().try_game_state() {
                 Ok(state) => state,
-                // Mid-transition, mid-load: there is nothing to hold the game to yet.
+                // Mid-transition or mid-load: nothing to hold the game to yet.
                 Err(_) => return,
             };
             let mut cheats = self.cheats.take().expect("checked above");
@@ -898,8 +877,8 @@ impl LlmRun {
     }
 
     #[cfg(feature = "slow-tests")]
-    /// How long each completed turn took the worker, in milliseconds: `TurnStarted` to
-    /// `Decision`, off the events' own wall-clock stamps.
+    /// Each completed turn's worker time in ms, `TurnStarted` to `Decision`, off the events'
+    /// stamps.
     pub fn turn_latencies_ms(&self) -> Vec<u64> {
         let mut opened: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
         let mut out = Vec::new();
@@ -931,7 +910,7 @@ impl LlmRun {
             .collect()
     }
 
-    /// `history.json` as it stands on disk — the file a restart resumes on.
+    /// `history.json` on disk: the file a restart resumes on.
     pub fn saved_history(&self) -> serde_json::Value {
         let path = self.run_dir.join(crate::run::files::HISTORY);
         let text = std::fs::read_to_string(&path)
@@ -939,8 +918,7 @@ impl LlmRun {
         serde_json::from_str(&text).expect("history.json is JSON")
     }
 
-    /// The cartridge's own clock, which is the figure the leaderboard ranks on and therefore the
-    /// one a park has to stop.
+    /// The cartridge's own clock: what the leaderboard ranks on, and what a park has to stop.
     pub fn playtime_seconds(&mut self) -> u32 {
         let api = self.fixture().api();
         crate::pokemon::observe::playtime_seconds(&api)
@@ -951,17 +929,16 @@ impl LlmRun {
     }
 
     #[cfg(feature = "slow-tests")]
-    /// The map, or `None` where the game has no readable state — mid-warp, mid-transition, or on
-    /// the tick a starter is being written into an empty party.
+    /// The map, or `None` mid-warp, mid-transition, or while a starter is written into an empty
+    /// party.
     pub fn map_if_readable(&mut self) -> Option<crate::pokemon::map::Map> {
         self.fixture().try_game_state().ok().map(|state| state.map.map)
     }
 }
 
 impl Drop for LlmRun {
-    /// Close the turn channel and let the worker thread finish, so a test that ends while a
-    /// backoff is in flight does not leave one running against a port the next test may be
-    /// handed.
+    /// Close the turn channel and let the worker finish, so no backoff outlives the test on a port
+    /// the next one may get.
     fn drop(&mut self) {
         self.tear_down();
     }

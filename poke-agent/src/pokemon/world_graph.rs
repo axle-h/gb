@@ -6,12 +6,11 @@ use crate::pokemon::map::Map;
 use crate::pokemon::tile::MetaTile;
 use crate::pokemon::tile_map::MetaTileMap;
 
-/// How the player moves from one map to the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeKind {
-    /// Seamless walking transition (N/S/E/W map border strip).
+    /// A walk across a map border strip.
     Connection,
-    /// Instantaneous teleport (door, cave entrance, warp tile, etc.).
+    /// A door, cave entrance or warp tile.
     Warp,
 }
 
@@ -33,13 +32,11 @@ impl MapCoordinates {
     }
 }
 
-/// A directed edge in the world graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Edge {
-    /// The tile the player steps on to trigger the transition, in the source map's expanded tile
-    /// coordinates (raw wXCoord/wYCoord + connection-strip offsets).
+    /// The tile that triggers the transition, in the source map's expanded tile coordinates.
     pub from: MapCoordinates,
-    /// The position the player lands on in the destination map (raw wXCoord/wYCoord).
+    /// Where the player lands, in raw `wXCoord`/`wYCoord`.
     pub to: MapCoordinates,
     pub kind: EdgeKind,
 }
@@ -50,22 +47,19 @@ impl Display for Edge {
     }
 }
 
-/// One step in a path through the world.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapStep {
     pub map: Map,
-    /// How the player arrived at this map. `None` for the starting map.
+    /// How the player arrived; `None` for the starting map.
     pub via: Option<EdgeKind>,
-    /// The tile on the previous map that `via` leaves from, in that map's action-id coordinates —
-    /// which warp to choose there. `None` with `via`.
+    /// The tile on the previous map `via` leaves from, in action-id coordinates.
     pub via_at: Option<Point8>,
 }
 
-/// Connected graph of reachable Pokémon Red maps built by BFS over the tile layer.
+/// The maps observed so far, keyed by `(map, entry)` so disconnected sections of one map stay apart.
 #[derive(Debug, Clone, Default)]
 pub struct WorldGraph {
     adjacency: HashMap<(Map, Point8), Vec<Edge>>,
-    /// The most recent map arrival — see [`Arrival`].
     arrival: Option<Arrival>,
 }
 
@@ -73,27 +67,21 @@ pub struct WorldGraph {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Arrival {
     pub map: Map,
-    /// In the tile map's own coordinates — the ones the action ids and the ruler use — not the
-    /// raw `wXCoord`/`wYCoord` the graph keys its sections on.
+    /// In the tile map's coordinates, not the raw `wXCoord`/`wYCoord` the graph keys sections on.
     pub at: Point8,
-    /// The map the player was on before this one. `None` for the first map seen by this process.
     pub from: Option<Map>,
 }
 
 impl WorldGraph {
-    /// A new, empty world graph.
     pub fn new() -> Self {
         Self { adjacency: HashMap::new(), arrival: None }
     }
 
-    /// Derive the warp/connection edges reachable by BFS from the player position in `tile_map`.
     fn edges_from_reachable(tile_map: &MetaTileMap, map: Map) -> Vec<Edge> {
         tile_map
             .all_reachable_warps_and_connections()
             .into_iter()
             .filter_map(|(src_pos, tile)| {
-                // Both warp and connection `to_position` are already in raw (wXCoord/wYCoord)
-                // space — no conversion needed.
                 let (to_map, raw_entry, kind) = match tile {
                     MetaTile::Warp { to_map, to_position } => (to_map, to_position, EdgeKind::Warp),
                     MetaTile::Connection { to_map, to_position } => (to_map, to_position, EdgeKind::Connection),
@@ -108,7 +96,7 @@ impl WorldGraph {
             .collect()
     }
 
-    /// Refine the graph node `(map, entry)` from the agent's *live* map view.
+    /// Refine the node `(map, entry)` from the live map view, once per arrival.
     pub fn observe(&mut self, map: Map, entry: Point8, tile_map: &MetaTileMap) {
         let edges = Self::edges_from_reachable(tile_map, map);
         self.adjacency.insert((map, entry), edges);
@@ -116,13 +104,12 @@ impl WorldGraph {
         self.arrival = Some(Arrival { map, at: tile_map.player_position, from });
     }
 
-    /// How the player got onto the map they are on now, or `None` before the first arrival this
-    /// process has seen — a resumed run does not know until it next changes map.
+    /// `None` before the first arrival this process sees, so a resumed run does not know until it
+    /// changes map.
     pub fn arrival(&self) -> Option<Arrival> {
         self.arrival
     }
 
-    /// All outgoing edges from `map`, across all entry-point sections.
     pub fn neighbors(&self, map: Map) -> Vec<Edge> {
         self.adjacency.iter()
             .filter(|((m, _), _)| *m == map)
@@ -131,13 +118,10 @@ impl WorldGraph {
             .collect()
     }
 
-    /// Number of distinct maps in the graph.
     pub fn map_count(&self) -> usize {
         self.adjacency.keys().map(|(m, _)| *m).collect::<HashSet<_>>().len()
     }
 
-    /// BFS on the `(Map, Point8)` graph from a set of start nodes to the first node whose map
-    /// equals `to`.
     fn bfs_to_map(&self, starts: &[(Map, Point8)], to: Map) -> Option<Vec<MapStep>> {
         self.bfs_nodes(starts, to)
             .map(|nodes| nodes.into_iter().map(|((m, _), via)| MapStep {
@@ -151,7 +135,7 @@ impl WorldGraph {
         let mut came_from: HashMap<Node, (Node, (EdgeKind, Point8))> = HashMap::new();
         let mut queue: VecDeque<Node> = VecDeque::new();
 
-        // Resolve a (map, position) reference to an actually-observed node.
+        // Snap to the nearest observed node, or keep the raw position when none is near.
         let resolve = |map: Map, pos: Point8| -> Point8 {
             if self.adjacency.contains_key(&(map, pos)) {
                 return pos;
@@ -164,7 +148,6 @@ impl WorldGraph {
                 .filter(|(_, d)| *d <= SNAP_THRESHOLD)
                 .min_by_key(|(_, d)| *d)
                 .map(|(p, _)| p)
-                // No nearby observed node: keep the raw position.
                 .unwrap_or(pos)
         };
 
@@ -181,10 +164,7 @@ impl WorldGraph {
         while let Some((m, p)) = queue.pop_front() {
             let cost = dist[&(m, p)];
             for edge in self.adjacency.get(&(m, p)).map(Vec::as_slice).unwrap_or(&[]) {
-                // Snap the edge target to the nearest observed node so intermediate connection
-                // hops (whose geometric `to_position` is a tile or two off the keyed raw landing)
-                // don't dead-end; falls back to the raw position when nothing is near (see
-                // `resolve`).
+                // A connection's `to_position` can be a tile or two off the keyed landing, so snap.
                 let next = (edge.to.map, resolve(edge.to.map, edge.to.location));
                 if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(next) {
                     e.insert(cost + 1);
@@ -194,18 +174,15 @@ impl WorldGraph {
             }
         }
 
-        // Among all entry-points of `to` that were reached by the BFS, pick the closest.
         let goal = dist.keys()
             .filter(|(m, _)| *m == to)
             .min_by_key(|n| dist[n])
             .copied()?;
 
-        // Reconstruct the path from goal back to whichever start node was used.
         let mut path_rev: Vec<(Node, Option<(EdgeKind, Point8)>)> = vec![(goal, None)];
         let mut current = goal;
         while !start_set.contains(&current) {
             let &(prev, kind) = came_from.get(&current)?;
-            // Fix up the via for the just-pushed node, then push the predecessor.
             path_rev.last_mut().unwrap().1 = Some(kind);
             path_rev.push((prev, None));
             current = prev;
@@ -215,12 +192,11 @@ impl WorldGraph {
         Some(path_rev)
     }
 
-    /// All observed `(map, entry)` section nodes with their outgoing edges.
     pub fn nodes(&self) -> Vec<((Map, Point8), Vec<Edge>)> {
         self.adjacency.iter().map(|(k, v)| (*k, v.clone())).collect()
     }
 
-    /// Shortest path from `from` to `to`, considering all entry sections of `from`.
+    /// Shortest path from any entry section of `from` to `to`.
     pub fn shortest_path(&self, from: Map, to: Map) -> Option<Vec<MapStep>> {
         if from == to {
             return Some(vec![MapStep { map: from, via: None, via_at: None }]);
@@ -232,7 +208,6 @@ impl WorldGraph {
         self.bfs_to_map(&starts, to)
     }
 
-    /// Hop count from a specific entry point of `from` to `to`.
     pub fn shortest_path_from_entry(&self, from: Map, from_entry: Point8, to: Map) -> Option<usize> {
         if from == to {
             return Some(1);
@@ -249,9 +224,7 @@ impl WorldGraph {
                     MetaTile::Warp      { to_map, to_position } => (to_map, to_position),
                     _ => return None,
                 };
-                // Entry-aware routing: start the BFS from the exact raw landing section so
-                // disconnected sections of `to_map` (e.g. Route 2 north vs south, or a maze) are
-                // never falsely short-cut.
+                // From the exact landing section, or Route 2's two halves would short-cut each other.
                 let d = self.shortest_path_from_entry(to_map, to_position, target)?;
                 Some((d, a.clone()))
             })
@@ -262,8 +235,7 @@ impl WorldGraph {
 
 #[cfg(test)]
 impl WorldGraph {
-    /// Test-only: record a section `(map, entry)` with a fixed set of outgoing edges, mimicking
-    /// what `observe` derives from a live map.
+    /// Record a section with fixed edges, as `observe` would from a live map.
     pub(crate) fn observe_edges(&mut self, map: Map, entry: Point8, edges: &[(Point8, Map, Point8, EdgeKind)]) {
         let edges = edges
             .iter()
@@ -283,8 +255,7 @@ mod tests {
 
     fn p(x: u8, y: u8) -> Point8 { Point8 { x, y } }
 
-    /// `observe` runs once per arrival, so it is where the arrival is remembered: where the
-    /// player landed, and which map they were on before.
+    /// An arrival remembers where the player landed and the map before.
     #[test]
     fn an_arrival_remembers_where_it_came_from() {
         use crate::pokemon::integration_tests::fixture::TestFixture;
@@ -299,9 +270,7 @@ mod tests {
         assert_eq!(g.arrival().map(|a| (a.map, a.from)), Some((Map::PalletTown, Some(Map::Route1))));
     }
 
-    /// A small synthetic world observed incrementally, mirroring how the agent would build it as
-    /// it walks: PalletTown ⇄ Route1 ⇄ ViridianCity, PalletTown ⇄ OaksLab (warp), RedsHouse1F ⇄
-    /// RedsHouse2F (warp-only), and PalletTown → Route21 (dead-end).
+    /// Pallet ⇄ Route 1 ⇄ Viridian, Pallet ⇄ Oak's Lab, Red's house by warps, and a dead-end Route 21.
     fn small_world() -> WorldGraph {
         use EdgeKind::*;
         let mut g = WorldGraph::new();
@@ -335,7 +304,6 @@ mod tests {
     fn empty_graph_has_no_paths() {
         let g = WorldGraph::new();
         assert!(g.shortest_path(Map::PalletTown, Map::Route1).is_none());
-        // Trivial same-map path is always available
         assert_eq!(g.shortest_path(Map::Route1, Map::Route1).unwrap().len(), 1);
     }
 
@@ -392,7 +360,6 @@ mod tests {
 
     #[test]
     fn cyclic_graph_no_infinite_loop() {
-        // PalletTown ⇄ Route1 ⇄ ViridianCity forms cycles; pathfinding must terminate.
         let g = small_world();
         let _ = g.shortest_path(Map::ViridianCity, Map::OaksLab);
     }
@@ -400,25 +367,18 @@ mod tests {
     #[test]
     fn no_path_to_unobserved_map() {
         let g = small_world();
-        // We never observed anything reaching CeruleanCity — so it is unreachable, the "hard
-        // fail" signal that a deterministic policy is under-specified.
         assert!(g.shortest_path(Map::PalletTown, Map::CeruleanCity).is_none());
-        // Route21 is observed but a dead-end; still no path onward.
         assert!(g.shortest_path(Map::Route21, Map::Route1).is_none());
     }
 
     #[test]
     fn disconnected_sections_keyed_separately() {
-        // The same map reached at two different landing positions must not conflate edges:
-        // section A only reaches X, section B only reaches Y.
         use EdgeKind::Warp;
         let mut g = WorldGraph::new();
         g.observe_edges(Map::Route2, p(3, 5), &[(p(3, 5), Map::ViridianForest, p(5, 0), Warp)]);
         g.observe_edges(Map::Route2, p(3, 60), &[(p(3, 60), Map::PewterCity, p(14, 35), Warp)]);
-        // From the south section we can reach ViridianForest but not PewterCity...
         assert!(g.shortest_path_from_entry(Map::Route2, p(3, 5), Map::ViridianForest).is_some());
         assert!(g.shortest_path_from_entry(Map::Route2, p(3, 5), Map::PewterCity).is_none());
-        // ...and vice versa from the north section.
         assert!(g.shortest_path_from_entry(Map::Route2, p(3, 60), Map::PewterCity).is_some());
     }
 
@@ -426,8 +386,6 @@ mod tests {
     fn pick_shortest_path_action_routes_toward_target() {
         use crate::pokemon::tile::MetaTile;
         let g = small_world();
-        // On PalletTown, two candidate warps/connections: toward Route1 (leads to Viridian) and
-        // toward OaksLab (dead-endish).
         let mk = |to_map: Map, to: Point8| OverworldAction {
             map: Map::PalletTown,
             origin: p(9, 7),

@@ -1,47 +1,19 @@
 import { useMemo, useState } from 'react';
 import type { BattleScriptView } from '../api';
 
-/**
- * The program deciding the run's battle turns — the model's `set_battle_script`, on the page.
- *
- * The one panel here that shows something the model *wrote* rather than something it did. A scripted
- * battle is otherwise completely invisible from outside: it costs no request, produces no turn and
- * publishes no decision, so a viewer watching a run tear through Route 3 has no way of knowing
- * whether it is playing well or whether a program is playing for it. This is that program.
- *
- * ⚠️ **A disclosure rather than a panel, and the default is closed.** It is up to six kilobytes of
- * source that changes a handful of times in a playthrough, sitting under a plan and a party that
- * change every few turns — open by default it would push both off a laptop screen to show something
- * that is the same as it was an hour ago. The head is the part worth a permanent line, because
- * `armed` is a live fact: it is what says whether the battles going past are being decided here or
- * one paid request at a time.
- *
- * ⚠️ **`armed` and "there is a source" are separate questions and both are shown.** A script that
- * fails is **kept and disarmed** — the source stays because it is the thing the model has to edit —
- * so a panel that took a source as proof of a running script would say the opposite of what is
- * happening for the rest of the run. When it is disarmed the reason is the first thing in the box,
- * above the code, since that is what a reader is there to find out.
- */
+/** The model's battle script: a disclosure, closed by default, whose head shows whether it is armed. */
 export function BattleScriptPanel({
   script,
   alwaysOpen = false,
 }: {
   script: BattleScriptView | null;
-  /**
-   * The phone's Script tab, where this panel *is* the pane. A disclosure that has to be opened after
-   * choosing the tab that shows it is a click that asks the same question twice, so the tab answers
-   * it and the chevron is not drawn.
-   */
+  /** The phone's Script tab, where the panel is the pane: always open, no chevron. */
   alwaysOpen?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  // Hooks before the early return: a run that never sets a script would otherwise unmount them, and
-  // a run that sets one mid-playthrough would change the hook count between two renders.
+  // Hooks before the early return, so the hook count never changes between renders.
   const lines = useMemo(() => highlight(script?.source ?? ''), [script?.source]);
 
-  // Nothing to show: a fresh run, a model that has not written one, or any policy that is not an LLM
-  // and never will. Same rule as `PlanPanel` — an empty box on half the deployments is worse than no
-  // box at all.
   if (!script?.source) return null;
 
   const showing = alwaysOpen || open;
@@ -52,10 +24,7 @@ export function BattleScriptPanel({
     <div className={`battle-script${showing ? ' open' : ''}`}>
       <div className="script-head">
         <span className="script-title">Battle script</span>
-        {/* Three states, not two. `default` is the run that has not written a script yet: a real
-            source, not armed, nothing wrong with it — calling that "disarmed" would report a fault
-            where there is none, and calling it "armed" would say the battles going past are free
-            when the run is paying a full request for every one. */}
+        {/* `default` is unarmed but not a fault, so it is shown as neither armed nor disarmed. */}
         <span className={`script-state ${state}`}>{state}</span>
         <span className="dim script-size">
           {count} line{count === 1 ? '' : 's'}
@@ -73,8 +42,6 @@ export function BattleScriptPanel({
       </div>
       {showing && (
         <div className="script-body">
-          {/* Above the code rather than below it: a disarmed script is still the thing being read,
-              and the question a reader opens this with is why it stopped. */}
           {state === 'disarmed' && script.last_failure && (
             <p className="script-failure">
               <span className="mark" aria-hidden="true">
@@ -94,8 +61,7 @@ export function BattleScriptPanel({
           )}
           <ol className="code" aria-label="battle script source">
             {lines.map((tokens, index) => (
-              // The index is the key because the line number *is* the identity here: this is a
-              // rendering of a string, not a list of things that can be reordered.
+              // The line number is the identity: this renders a string, not a reorderable list.
               <li key={index}>
                 {tokens.map((token, at) => (
                   <span key={at} className={token.cls}>
@@ -111,20 +77,12 @@ export function BattleScriptPanel({
   );
 }
 
-/** One coloured run of source. `cls` is `''` for the ordinary text between the interesting parts. */
 interface Token {
   cls: string;
   text: string;
 }
 
-/**
- * Rhai's keywords.
- *
- * ⚠️ **`switch` and `type` are in here as keywords and are *not* the battle API's names**, which is
- * the whole reason `battle.switch_to` and `mv.move_type` are spelled the way they are: both words are
- * reserved by the parser, `switch` even in method position. Highlighting them as keywords in a script
- * that tried to use them is the honest picture — the script does not misbehave, it does not parse.
- */
+/** Rhai's keywords; `switch` and `type` are reserved, hence `battle.switch_to` and `mv.move_type`. */
 const KEYWORDS = new Set([
   'as',
   'break',
@@ -154,34 +112,14 @@ const KEYWORDS = new Set([
   'while',
 ]);
 
-/**
- * The names this sandbox puts in front of the model: the one global it is given, and the functions
- * `battle_script::engine` registers on top of rhai's own.
- *
- * Deliberately short. It is not a symbol table and does not have to be: an unknown name is drawn as
- * ordinary text, which is what a reader wants for the model's own variables anyway.
- */
+/** The sandbox's global and registered functions; any other name is drawn as plain text. */
 const API = new Set(['battle', 'damage', 'effectiveness', 'print', 'debug']);
 
-/**
- * Colour one Rhai script, line by line.
- *
- * A hand-rolled tokeniser rather than a highlighting library, on the same argument the rest of this
- * page is built on: the whole SPA has two dependencies, and the alternative here is tens of
- * kilobytes of grammar to draw one file that is at most six. It is a tokeniser and not a parser —
- * it knows comments, strings, numbers, keywords and whether a name is being called or read, which is
- * all a reader needs to find their way around thirty lines.
- *
- * ⚠️ **Returns lines rather than a flat token list, because a block comment spans them.** The line
- * numbers are drawn by CSS from the `<li>`s, so a token carrying an embedded newline would number
- * the file wrongly from that point on — the split has to happen here, inside the token, rather than
- * on the source before it.
- */
+// Colour a Rhai script with a hand-rolled tokeniser. It returns lines, splitting inside tokens,
+// because CSS numbers the `<li>`s and a block comment spans lines.
 function highlight(source: string): Token[][] {
   const tokens: Token[] = [];
-  // The alternatives are ordered by how greedy they are, longest-lived first: a `//` inside a string
-  // literal is not a comment, and a `"` inside a comment is not a string, so whichever opens first
-  // has to win outright. One pass, one regex, no lookahead needed.
+  // Whichever of a comment or a string opens first wins outright.
   const pattern = /\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|"(?:[^"\\]|\\[\s\S])*"?|'(?:[^'\\]|\\[\s\S])*'?|\b\d[\d_]*(?:\.\d+)?\b|[A-Za-z_][A-Za-z0-9_]*/g;
   let at = 0;
   for (let match = pattern.exec(source); match !== null; match = pattern.exec(source)) {
@@ -199,26 +137,20 @@ function highlight(source: string): Token[][] {
       if (part.length > 0) lines[lines.length - 1].push({ cls: token.cls, text: part });
     });
   }
-  // A file that ends in a newline has a trailing empty line, which is a blank row under the last
-  // statement with a number beside it. Every editor draws that; a code panel that swallowed it would
-  // disagree with what the model wrote by one line.
+  // A trailing newline does not add a numbered blank row.
   if (lines.length > 1 && lines[lines.length - 1].length === 0) lines.pop();
   return lines;
 }
 
-/** Which of the five colours a matched run gets. */
 function classify(source: string, text: string, index: number): string {
   if (text.startsWith('//') || text.startsWith('/*')) return 'com';
   if (text.startsWith('"') || text.startsWith("'")) return 'str';
   if (/^\d/.test(text)) return 'num';
   if (KEYWORDS.has(text)) return 'kw';
-  // A name reached through a dot is a field or a method — `mv.damage`, `battle.fight` — and it is
-  // drawn as one whether or not it is called. That is what makes `battle.fight(mv)` read as one
-  // thing rather than as an object, a dot and a function that happens to share the page with it.
+  // A name after a dot is a field or a method, called or not.
   if (/\.\s*$/.test(source.slice(Math.max(0, index - 8), index))) return 'prop';
   if (API.has(text)) return 'api';
-  // `fn healthiest(party, active)` and every call of it. The declaration and the call want the same
-  // colour: the point of the colour is that the reader can find one from the other.
+  // Declarations and calls share a colour so each can be found from the other.
   if (/^\s*\(/.test(source.slice(index + text.length))) return 'call';
   return '';
 }

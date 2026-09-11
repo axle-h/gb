@@ -180,7 +180,7 @@ impl MenuState {
     }
 
     /// True when the party-mon SWITCH / STATS / CANCEL sub-menu is showing — opened after
-    /// selecting a party member from the battle PKMN list for a *voluntary* switch. (A forced
+    /// selecting a party member from the battle PKMN list for a voluntary switch. (A forced
     /// switch after a faint skips this menu.) `current_item` is 0=SWITCH, 1=STATS, 2=CANCEL.
     pub fn is_switch_stats_cancel_menu(&self) -> bool {
         self.text_box_id == TextBoxId::SwitchStatsCancelMenuTemplate

@@ -1,5 +1,5 @@
-//! The graphics a *map* is drawn from: tileset sheets, overworld sprite sheets, and the game's
-//! own font — all read out of the cartridge the binary already carries.
+//! The graphics a map is drawn from, read out of the cartridge: tileset sheets, overworld sprite
+//! sheets, and the game's own font.
 
 use crate::pokemon::font::FONT_BYTES;
 use crate::pokemon::map_header::TileSetId;
@@ -8,26 +8,19 @@ use crate::pokemon::sprite::{PictureId, SpriteFacing};
 use crate::pokemon::strings::PokemonString;
 use crate::pokemon::symbols::{pokered_symbols, DmgBank, DmgPointer};
 
-/// Pixels along one edge of a tile.
 pub const TILE_PX: usize = 8;
-/// What `LoadTilesetTilePatternData` copies to `vTileset` — pokered's `MAP_TILESET_SIZE`.
+/// What `LoadTilesetTilePatternData` copies to `vTileset`.
 pub const TILESET_TILES: usize = 0x60;
-/// An overworld sprite is 2×2 tiles.
 pub const SPRITE_PX: usize = 16;
-
-// ── The tileset table
-// ────────────────────────────────────────────────────────────────────────────
 
 /// One row of pokered's `Tilesets`.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct TilesetEntry {
-    /// The ROM bank holding both the blockset and the graphics.
     pub bank: u8,
-    /// `<Tileset>_Block` — block id → 16 tile ids.
+    /// `<Tileset>_Block`: block id to 16 tile ids.
     pub blocks: u16,
-    /// `<Tileset>_GFX` — the 2bpp tile sheet.
     pub gfx: u16,
-    /// `<Tileset>_Coll` — the `$FF`-terminated list of walkable tile ids.
+    /// `<Tileset>_Coll`: the `$FF`-terminated list of walkable tile ids.
     pub coll: u16,
     /// Counter / "talk over" tile ids; `0xFF` where unused.
     pub talking_over: [u8; 3],
@@ -37,7 +30,6 @@ pub struct TilesetEntry {
 
 const TILESET_ENTRY_SIZE: u16 = 12;
 
-/// The `Tilesets` row for `tileset`.
 pub fn tileset_entry(tileset: TileSetId) -> TilesetEntry {
     let row = rom_slice(pokered_symbols::Tilesets + tileset as u16 * TILESET_ENTRY_SIZE);
     let le = |i: usize| u16::from_le_bytes([row[i], row[i + 1]]);
@@ -51,14 +43,14 @@ pub fn tileset_entry(tileset: TileSetId) -> TilesetEntry {
     }
 }
 
+/// Clamped to the bank: a sheet can run off its end, because the cartridge copies a fixed count.
 pub fn tileset_sheet(tileset: TileSetId) -> &'static [u8] {
     let entry = tileset_entry(tileset);
     let bytes = rom_slice(DmgPointer { bank: DmgBank::ROM { bank: entry.bank }, address: entry.gfx });
     &bytes[..bytes.len().min(TILESET_TILES * TILE_BYTES)]
 }
 
-/// One tile of `tileset`, as shade indices `0`–`3`. A tile id past the end of the (clamped) sheet
-/// draws blank rather than panicking.
+/// One tile of `tileset` as shade indices, blank past the end of the clamped sheet.
 pub fn tileset_tile(tileset: TileSetId, tile_id: u8) -> [u8; 64] {
     sheet_tile(tileset_sheet(tileset), tile_id as usize)
 }
@@ -69,9 +61,6 @@ fn sheet_tile(sheet: &[u8], index: usize) -> [u8; 64] {
         None => [0; 64],
     }
 }
-
-// ── Overworld sprites
-// ────────────────────────────────────────────────────────────────────────────
 
 /// One NPC standing still, 16×16 shade indices, row-major.
 #[derive(Copy, Clone)]
@@ -91,7 +80,7 @@ pub fn npc_sprite(picture: PictureId, facing: SpriteFacing) -> Option<NpcSprite>
     let sheet = rom_slice(DmgPointer { bank: DmgBank::ROM { bank }, address: gfx });
     let sheet = &sheet[..sheet.len().min(byte_count)];
 
-    // The whole entry falls back, layout included.
+    // An immobile sprite falls back to facing down wholesale, layout included.
     let fits = |frame: &([u8; 4], _)| frame.0.iter().all(|&id| (id as usize + 1) * TILE_BYTES <= sheet.len());
     let frame = facing_frame(facing);
     let (tile_ids, layout) = match fits(&frame) {
@@ -105,7 +94,7 @@ pub fn npc_sprite(picture: PictureId, facing: SpriteFacing) -> Option<NpcSprite>
         let pixels = sheet_tile(sheet, tile_id as usize);
         for y in 0..TILE_PX {
             for x in 0..TILE_PX {
-                // The flip is per tile *and* the layout has already swapped the columns.
+                // The flip is per tile, and the layout has already swapped the columns.
                 let source = match attributes & OAM_XFLIP {
                     0 => pixels[y * TILE_PX + x],
                     _ => pixels[y * TILE_PX + (TILE_PX - 1 - x)],
@@ -117,12 +106,10 @@ pub fn npc_sprite(picture: PictureId, facing: SpriteFacing) -> Option<NpcSprite>
     Some(NpcSprite { shades })
 }
 
-/// Hardware OAM's horizontal-flip bit.
 const OAM_XFLIP: u8 = 0x20;
 
-/// The four tile ids and the `(y, x, attributes)` of each, for one standing frame — read from the
-/// ROM's own table rather than transcribed, so "facing right is facing left, mirrored" is a fact
-/// the cartridge states rather than one this file assumes.
+/// The four tile ids and each one's `(y, x, attributes)` for a standing frame, read from the ROM
+/// rather than mirrored by hand.
 fn facing_frame(facing: SpriteFacing) -> ([u8; 4], [(u8, u8, u8); 4]) {
     let entry = rom_slice(pokered_symbols::SpriteFacingAndAnimationTable + facing as u16 * 4);
     let bank = pokered_symbols::SpriteFacingAndAnimationTable.bank;
@@ -139,37 +126,26 @@ fn facing_frame(facing: SpriteFacing) -> ([u8; 4], [(u8, u8, u8); 4]) {
     (tile_ids, layout)
 }
 
-// ── The game's own font
-// ──────────────────────────────────────────────────────────────────────────
-
-/// The number of glyphs `FontGraphics` holds.
 pub const GLYPHS: usize = FONT_BYTES.len() / TILE_BYTES;
-/// The character code the font sheet starts at — `charmap.asm` puts `"A"` at `$80`, and
-/// `LoadFontTilePatterns` copies the sheet to `vFont` (`$8800`), where the tile index and the
-/// character code are the same number.
+/// Character code `C` is font tile `C - FIRST_GLYPH`.
 const FIRST_GLYPH: u8 = 0x80;
 
-/// The font tile index that draws `c`, or `None` for anything the sheet has no glyph for —
-/// including a space, which is `$7F` and lives in `TextBoxGraphics`, not here. Callers draw those
-/// as a blank cell.
+/// The font tile that draws `c`, or `None` for a blank cell, a space included.
 pub fn glyph_index(c: char) -> Option<u8> {
     let code = *PokemonString::from_string(&c.to_string()).0.first()?;
     code.checked_sub(FIRST_GLYPH)
 }
 
-/// A glyph as a stencil: `true` where there is ink.
 pub fn glyph_mask(index: u8) -> [bool; 64] {
     debug_assert!((index as usize) < GLYPHS, "the font has {GLYPHS} glyphs, not {index}");
     let pixels = sheet_tile(&FONT_BYTES, index as usize);
     std::array::from_fn(|i| pixels[i] != 0)
 }
 
-/// `text` as one entry per character: the glyph to draw, or `None` for a blank cell.
 pub fn glyphs(text: &str) -> Vec<Option<u8>> {
     text.chars().map(glyph_index).collect()
 }
 
-/// How wide `text` renders, in pixels. Every glyph is [`TILE_PX`] wide, blanks included.
 pub fn text_width(text: &str) -> usize {
     text.chars().count() * TILE_PX
 }
@@ -184,10 +160,7 @@ mod tests {
         (0..=23u8).map(|id| TileSetId::from_repr(id).expect("24 tilesets"))
     }
 
-    /// The proof that `gfx` is read from the right two bytes of the row, rather than the
-    /// assertion that it looks plausible: `build.rs` emits a constant for every `::`-exported
-    /// label in the disassembly, so the table this module parses can be checked against the
-    /// linker's own answer for all three pointers of all twenty-four tilesets.
+    /// Every `Tilesets` row's three pointers match the linker's own symbols.
     #[test]
     fn the_tileset_table_agrees_with_the_generated_symbols() {
         let expected: Vec<(TileSetId, DmgPointer, DmgPointer, DmgPointer)> = vec![
@@ -220,7 +193,6 @@ mod tests {
         }
     }
 
-    /// Every tileset draws something.
     #[test]
     fn every_tileset_sheet_is_drawn_art() {
         for tileset in all_tilesets() {
@@ -242,19 +214,16 @@ mod tests {
         }
     }
 
-    /// The `Underground` tileset's graphics are 672 bytes from the end of bank `$1b`, and the
-    /// game copies `$600`.
+    /// `Underground`'s graphics run off the end of their bank, which is clamped.
     #[test]
     fn a_tileset_that_overruns_its_bank_is_clamped_not_panicked() {
         let sheet = tileset_sheet(TileSetId::Underground);
         assert!(sheet.len() < TILESET_TILES * TILE_BYTES,
                 "Underground is the short one — if this stops being true the clamp is untested");
-        // And a tile id past the end is a hole, not a crash.
         assert_eq!(tileset_tile(TileSetId::Underground, 0xFF), [0; 64]);
     }
 
-    /// Each of the four facings is a distinct picture for a walking NPC, and the immobile sprites
-    /// answer with one picture for all four rather than reading someone else's tiles.
+    /// A walking NPC has four distinct facings and an immobile sprite one picture for all four.
     #[test]
     fn every_sprite_sheet_decodes_and_only_people_have_four_facings() {
         use SpriteFacing::*;
@@ -270,8 +239,7 @@ mod tests {
             let distinct = frames.iter().collect::<std::collections::HashSet<_>>().len();
             match distinct {
                 1 => immobile += 1,
-                // Three sets of art — down, up, left — but four distinct *pictures*, because the
-                // mirror that makes right out of left is not a symmetry of any of these sprites.
+                // Right is left mirrored, and no sprite is symmetric.
                 4 => walkers += 1,
                 n => panic!("{picture:?} has {n} distinct facings — expected 1 or 4"),
             }
@@ -279,7 +247,7 @@ mod tests {
         assert!(walkers > 40 && immobile > 5, "{walkers} walkers, {immobile} immobile");
     }
 
-    /// Right is left, mirrored — and the cartridge is what says so.
+    /// Right is left, mirrored, as the cartridge's table says.
     #[test]
     fn right_is_left_mirrored() {
         let left = npc_sprite(PictureId::Oak, SpriteFacing::Left).expect("Oak walks").shades;
@@ -293,7 +261,7 @@ mod tests {
         assert_ne!(left, right, "a symmetric sprite would pass the above vacuously");
     }
 
-    /// The new reverse charmap against the existing forward one.
+    /// The reverse charmap round-trips through the forward one.
     #[test]
     fn the_font_round_trips_through_the_decoder() {
         let mut checked = 0;
@@ -306,13 +274,12 @@ mod tests {
         }
         assert_eq!(checked, 26 + 26 + 10 + 13);
 
-        // A space is $7F and lives in TextBoxGraphics, not FontGraphics — the caller blanks it.
+        // A space lives in `TextBoxGraphics`, so the caller blanks it.
         assert_eq!(glyph_index(' '), None);
         assert_eq!(text_width("AB C"), 4 * TILE_PX);
     }
 
-    /// Two glyphs that are easy to confuse if the sheet were read at the wrong offset: `0` is not
-    /// `O`, and `1` is not `I` or `l`.
+    /// `0` is not `O`, and `1` is not `I` or `l`.
     #[test]
     fn digits_are_not_the_letters_that_look_like_them() {
         let glyph = |c: char| glyph_mask(glyph_index(c).expect("has a glyph"));

@@ -66,7 +66,7 @@ impl PaletteBank {
     }
 
     /// Write one 4-colour palette from eight raw bytes, bypassing the index register. This is how
-    /// the boot-ROM palette is installed (B5).
+    /// the boot-ROM palette is installed.
     pub fn set_palette(&mut self, palette: usize, bytes: [u8; 8]) {
         let base = palette * 8;
         self.data[base..base + 8].copy_from_slice(&bytes);

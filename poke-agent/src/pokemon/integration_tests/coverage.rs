@@ -1,10 +1,8 @@
-
 use std::collections::BTreeMap;
 
 use crate::pokemon::agent::{AgentEvent, OverworldActionAbortedReason};
 
-/// How many times an id may be blocked by the game speaking before the repetition is itself the
-/// finding.
+/// How many times an id may be blocked by the game speaking before the repetition is the finding.
 pub const REPEAT_IS_A_DEFECT: usize = 10;
 
 /// What became of one action id.
@@ -41,15 +39,12 @@ impl Verdict {
 /// One id's row in the table.
 #[derive(Debug, Clone)]
 pub struct Entry {
-    /// `{map}:{x},{y}:{kind}` —
-    /// [`OverworldAction::id`](crate::pokemon::actions::OverworldAction::id).
+    /// `{map}:{x},{y}:{kind}`, as `OverworldAction::id` makes it.
     pub id: String,
     /// How many times the id was chosen.
     pub attempts: usize,
     pub verdict: Verdict,
-    /// Every abort reason this id has produced, and how often. Kept even once the id completes:
-    /// an id that took nine tries and then worked is a different thing from one that worked first
-    /// time.
+    /// Every abort reason this id has produced, and how often, kept after the id completes.
     pub aborts: BTreeMap<String, usize>,
 }
 
@@ -60,8 +55,7 @@ pub struct CoverageLog {
     /// The id whose walk is in flight, if any.
     open: Option<String>,
     pub interleaved: Vec<(String, String)>,
-    /// Every watchdog firing, with the agent state it fired in. Always a defect: in a healthy run
-    /// the agent never goes a whole timeout without reaching a decision point of any kind.
+    /// Every watchdog firing, with the agent state it fired in; always a defect.
     pub watchdog: Vec<String>,
     /// Ids whose verdict became a hard [`Verdict::Defect`] since the last call to
     /// [`Self::take_new_defects`].
@@ -79,7 +73,7 @@ impl CoverageLog {
     pub fn observe(&mut self, event: &AgentEvent) {
         match event {
             AgentEvent::StartedOverworldAction { id, .. } => {
-                // A start while one is open means the previous action ended without saying so.
+                // A start while one is open means the previous action ended silently.
                 if let Some(already) = self.open.clone() {
                     self.interleaved.push((already.clone(), id.clone()));
                     let entry = self.entry(&already);
@@ -97,7 +91,6 @@ impl CoverageLog {
                     self.entry(&id).verdict = Verdict::Completed;
                 }
             }
-            // A pickup that failed is not a defect and not a success.
             AgentEvent::OverworldPickupFailed { .. } => {
                 if let Some(id) = self.open.take() {
                     let message = self.last_blocked.clone();
@@ -108,29 +101,23 @@ impl CoverageLog {
                 let Some(id) = self.open.take() else { return };
                 self.entry(&id).aborts.entry(reason.to_string()).and_modify(|n| *n += 1).or_insert(1);
                 match reason {
-                    // The game asked a different question.
                     OverworldActionAbortedReason::Battle
                     | OverworldActionAbortedReason::NamingScreen => {}
-                    // The pace ran its whole budget and nothing turned up, which is the action
-                    // done rather than the action failed.
+                    // A pace that ran its whole budget with nothing turning up is done, not failed.
                     OverworldActionAbortedReason::NothingAppeared => {
                         self.entry(&id).verdict = Verdict::Completed;
                     }
-                    // A Strength floor that has been wedged is the *world* saying no, not the
-                    // agent failing.
+                    // A wedged Strength floor is the world saying no, not the agent failing.
                     OverworldActionAbortedReason::PuzzleUnsolvable => {
                         let message = Some(reason.to_string());
                         self.block(&id, message);
                     }
-                    // The game spoke.
                     OverworldActionAbortedReason::Textbox | OverworldActionAbortedReason::Script => {
                         let message = self.last_blocked.clone();
                         self.block(&id, message);
-                        // Re-opened so the quote that follows lands on this id — see
-                        // `last_blocked`.
+                        // Re-opened so the quote that follows lands on this id.
                         self.open = Some(id);
                     }
-                    // The menu offered a row the agent could not then execute.
                     other => {
                         self.entry(&id).verdict =
                             Verdict::Defect { reason: other.to_string(), at: *at };
@@ -140,8 +127,7 @@ impl CoverageLog {
             }
             AgentEvent::TextBox { message } => {
                 self.last_blocked = Some(message.clone());
-                // Attach it to whatever is blocked and quoteless, which is the id that was just
-                // stopped.
+                // Attach it to the id that was just stopped and has no quote yet.
                 if let Some(id) = self.open.clone() {
                     if let Some(entry) = self.entries.get_mut(&id) {
                         if let Verdict::Blocked { message: quote @ None, .. } = &mut entry.verdict {
@@ -166,8 +152,7 @@ impl CoverageLog {
         })
     }
 
-    /// Mark an id blocked, keeping the count across repeats and never overwriting a quote with a
-    /// missing one.
+    /// Mark an id blocked, keeping the count and never overwriting a quote with a missing one.
     fn block(&mut self, id: &str, message: Option<String>) {
         let entry = self.entry(id);
         let (times, kept) = match &entry.verdict {
@@ -177,15 +162,13 @@ impl CoverageLog {
         entry.verdict = Verdict::Blocked { times, message: message.or(kept) };
     }
 
-    /// Ids that became a defect since this was last called, and clear the list. Called by the
-    /// fixture after every drain so a failing square can be saved while the emulator is still on
-    /// it.
+    /// Ids that became a defect since the last call, clearing the list, so the fixture can save the
+    /// failing square while the emulator is still on it.
     pub fn take_new_defects(&mut self) -> Vec<String> {
         std::mem::take(&mut self.new_defects)
     }
 
-    /// Note an id the menu offered but nothing chose. A frontier walk calls this for the rows it
-    /// leaves behind, so the table says what was *not* done as well as what was.
+    /// Note an id the menu offered but nothing chose, so the table says what was not done.
     pub fn offered(&mut self, id: &str) {
         self.entry(id);
     }
@@ -206,8 +189,7 @@ impl CoverageLog {
         self.entries.values().filter(|entry| entry.verdict == Verdict::Completed).count()
     }
 
-    /// How many distinct maps the run reached at all. The one figure that says whether a driver
-    /// is exploring or diffusing.
+    /// How many distinct maps the run reached, which says whether a driver explores or diffuses.
     pub fn maps_touched(&self) -> usize {
         self.entries
             .keys()
@@ -216,8 +198,8 @@ impl CoverageLog {
             .len()
     }
 
-    /// Every id the agent could not do what it offered on, as one line each, plus every watchdog
-    /// firing. Not the whole of what makes a run red — see [`Self::failures`].
+    /// Every defect id and every watchdog firing, one line each; silences are in
+    /// [`Self::failures`].
     pub fn defects(&self) -> Vec<String> {
         let mut out: Vec<String> = self
             .entries
@@ -236,13 +218,11 @@ impl CoverageLog {
                 _ => unreachable!("filtered on is_defect"),
             })
             .collect();
-        // Always a defect, and it belongs to no id — the agent reached no decision point at all,
-        // so nothing was in flight to blame.
+        // The watchdog belongs to no id: no decision point was reached, so nothing was in flight.
         out.extend(self.watchdog.iter().map(|where_| format!("the watchdog fired: {where_}")));
         out
     }
 
-    /// The whole table, as the file a coverage run writes whether it passed or failed.
     pub fn report(&self) -> String {
         let mut out = String::new();
         out.push_str("id\tattempts\tverdict\tdetail\n");
@@ -299,7 +279,7 @@ impl CoverageLog {
     }
 
     #[cfg(feature = "slow-tests")]
-    /// The kinds of action that went silent, and how many of each — which is what names the gap.
+    /// The kinds of action that went silent, and how many of each.
     pub fn silent_kinds(&self) -> BTreeMap<String, usize> {
         let mut out = BTreeMap::new();
         for entry in self.entries.values().filter(|entry| entry.verdict == Verdict::Silent) {
@@ -335,9 +315,8 @@ impl CoverageLog {
     }
 
     #[cfg(feature = "slow-tests")]
-    /// Drop the table under `target/test-artifacts/coverage/`, where the rest of the suite puts
-    /// its failure artifacts. Returns the path, or the reason it could not be written — which is
-    /// never worth failing a test over.
+    /// Write the table under `target/test-artifacts/coverage/`, returning the path or why it could
+    /// not be written.
     pub fn write_report(&self, name: &str) -> Result<std::path::PathBuf, String> {
         let dir = std::path::Path::new("target/test-artifacts/coverage");
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -384,7 +363,6 @@ mod tests {
                      shut. If that is deliberate, `before_the_credits` is where the reason goes",
                     start.name,
                 ),
-                // And the exception has to *be* one.
                 Some(why) => assert!(
                     state.hall_of_fame_teams == 0,
                     "the {} start says it is before the credits ({why}), but this save has \
@@ -392,7 +370,6 @@ mod tests {
                     start.name,
                 ),
             }
-            // Keyed on the game as well as the map.
             assert!(
                 maps.insert((state.map.map, start.before_the_credits.is_some())),
                 "two starts stand on {:?} in the same game, so one of them is a wasted sweep",
@@ -416,16 +393,13 @@ mod tests {
         let report = rom_cross_check(mmu, &offered);
 
         assert!(report.contains("1 maps the walk entered"), "{report}");
-        // Red's house and the rival's house are both real doors that this run never saw.
         assert!(report.contains("(5, 6) → RedsHouse1F"), "{report}");
         assert!(report.contains("(13, 6) → BluesHouse"), "{report}");
-        // And the one that *was* offered is not in the list.
         assert!(!report.contains("→ OaksLab"), "the offered door must not be reported: {report}");
 
         assert!(!report.contains("ViridianCity"), "{report}");
 
-        // Nothing was offered anywhere: the scope is empty and the report says so rather than
-        // listing the whole game.
+        // Nothing offered: the scope is empty and the report says so rather than listing the game.
         let nothing = rom_cross_check(mmu, &std::collections::BTreeSet::new());
         assert!(nothing.contains("0 maps the walk entered"), "{nothing}");
         assert!(nothing.contains("nothing to report"), "{nothing}");
@@ -443,12 +417,11 @@ mod tests {
     fn every_abort_reason_lands_on_the_verdict_it_deserves() {
         let mut log = CoverageLog::new();
 
-        // Completed.
         log.observe(&started(TREE));
         log.observe(&AgentEvent::OverworldActionCompleted { destination: MetaTile::Grass });
         assert_eq!(log.get(TREE).unwrap().verdict, Verdict::Completed);
 
-        // A battle is expected and leaves the id retryable rather than judged.
+        // A battle leaves the id retryable rather than judged.
         let id = "Route1:3,3:Grass";
         log.observe(&started(id));
         log.observe(&aborted(OverworldActionAbortedReason::Battle));
@@ -458,7 +431,7 @@ mod tests {
         assert_eq!(log.get(id).unwrap().verdict, Verdict::Completed);
         assert_eq!(log.get(id).unwrap().attempts, 2, "both attempts are counted");
 
-        // A guard is `Blocked`, and what he said is quoted — which arrives *after* the abort.
+        // A guard is `Blocked`, and his quote arrives after the abort.
         log.observe(&started(GATE));
         log.observe(&aborted(OverworldActionAbortedReason::Textbox));
         log.observe(&AgentEvent::TextBox {
@@ -471,8 +444,7 @@ mod tests {
         assert_eq!(message.as_deref(), Some("You don't have the BOULDERBADGE yet!"));
         assert!(!log.get(GATE).unwrap().verdict.is_defect(), "being told something once is not a bug");
 
-        // Every reason that says the agent could not do what the menu offered is a defect
-        // outright.
+        // Every reason the agent could not do what the menu offered is a defect outright.
         for reason in [
             OverworldActionAbortedReason::Unknown,
             OverworldActionAbortedReason::DidNotArrive,
@@ -490,7 +462,7 @@ mod tests {
         }
     }
 
-    /// The repeat is the signal.
+    /// Being stopped by the same thing over and over is itself the defect.
     #[test]
     fn being_stopped_by_the_same_thing_over_and_over_is_the_defect() {
         let mut log = CoverageLog::new();
@@ -509,7 +481,7 @@ mod tests {
     fn a_row_the_agent_never_said_what_became_of_fails_the_walk() {
         let mut log = CoverageLog::new();
         log.observe(&started("Route18:39,13:Grass"));
-        // Nothing closes it: the next decision opens on top of it, which is the whole tell.
+        // Nothing closes it: the next decision opens on top of it.
         log.observe(&started("Route18:39,14:Grass"));
         log.observe(&aborted(OverworldActionAbortedReason::NothingAppeared));
 
@@ -537,7 +509,7 @@ mod tests {
         assert_eq!(log.len(), 0, "a watchdog firing belongs to no id");
     }
 
-    /// The report is a table with a row per id, and the summary counts what is in it.
+    /// The report has a row per id, and the summary counts what is in it.
     #[test]
     fn the_report_says_what_was_touched_and_what_was_not() {
         let mut log = CoverageLog::new();
@@ -562,44 +534,35 @@ pub struct ExploringBrain {
     seen: std::collections::BTreeMap<String, usize>,
     /// How many turns this brain has spent on each map, so leaving prefers somewhere new.
     maps: std::collections::BTreeMap<String, usize>,
-    /// Times a door from one map to another has been taken, keyed `"{here}->{there}"` — the same
-    /// tally as [`Self::seen`] one level up, keyed by where a door goes rather than by which door
-    /// it is.
+    /// Times a door from one map to another has been taken, keyed `"{here}->{there}"`.
     exits: std::collections::BTreeMap<String, usize>,
-    /// Turns since an id was seen for the first time. The fixpoint of (4).
+    /// Turns since an id was first seen; the walk has settled once this reaches the patience.
     pub barren: usize,
     pub turns: usize,
-    /// Set once the walk has played the game to its end, which is a terminus rather than a fault.
-    /// See the note where it is set.
+    /// Set once the walk has played the game to its end, a terminus rather than a fault.
     pub reached_the_end: bool,
-    /// Set the first time a turn is asked on `IndigoPlateauLobby` — the last room before the
-    /// Elite Four, and the square the driver rewinds to. See
-    /// [`Self::carry_on_after_the_credits`].
+    /// Set the first time a turn is asked on `IndigoPlateauLobby`, the square the driver rewinds
+    /// to.
     pub reached_the_lobby: bool,
-    /// How many times the walk has been rewound past the credits. See
-    /// [`Self::carry_on_after_the_credits`].
+    /// How many times the walk has been rewound past the credits.
     pub rewound: usize,
     /// Rows the walk must never choose again, whatever the frontier thinks of them.
     barred: std::collections::BTreeSet<String>,
-    /// The map the last turn was asked on, for the progress heartbeat. Nothing reads it but the
-    /// `[walk]` line, and that line is the only way to tell a slow sweep from a wedged one.
+    /// The map the last turn was asked on, for the `[walk]` heartbeat that tells slow from wedged.
     pub here: String,
     /// PC operations the walk has tried, by map.
     pc_ops_tried: std::collections::BTreeSet<(String, &'static str)>,
     /// Consecutive turns the menu has offered nothing at all, and the flies spent escaping it.
     pub rowless_turns: usize,
-    /// Consecutive turns on which the menu had rows and the brain still chose nothing — every row
-    /// already visited and no exit among them. This, not an empty menu, is what the arithmetic of
-    /// the 48-hour sweep points at: 279 422 turns at `wait(20)` (0.4 s of game time each) is
-    /// almost exactly the 172 800 s the run lasted.
+    /// Consecutive turns on which the menu had rows and the brain chose nothing: every row visited
+    /// and no exit among them.
     pub stalled_turns: usize,
     pub stalled_worst: usize,
     pub boxed_in_at: Vec<String>,
 }
 
 #[cfg(feature = "slow-tests")]
-/// The PC operations the walk exercises, in the order it tries them, as (`move`, `op`, extra
-/// arguments).
+/// The PC operations the walk exercises, in order, as (`move`, `op`, extra arguments).
 const PC_OPS: [(&str, &str, &str); 4] = [
     ("pc_items", "deposit", r#""item":"PokeBall","quantity":1"#),
     ("pc_items", "withdraw", r#""item":"PokeBall","quantity":1"#),
@@ -650,9 +613,7 @@ impl ExploringBrain {
         self.reached_the_end = false;
         self.rewound += 1;
         self.barred.insert(door.to_string());
-        // The rewind puts the player back before the gauntlet, so "nothing new for N turns" has
-        // to start again from there: the barren count at the Hall of Fame is about a world that
-        // no longer exists.
+        // The rewind puts the player back before the gauntlet, so the barren count starts again.
         self.barren = 0;
         self.stalled_turns = 0;
     }
@@ -662,8 +623,7 @@ impl ExploringBrain {
         self.pc_ops_tried.len()
     }
 
-    /// Every id this brain was ever offered, so the run can tell the log about the ones it never
-    /// chose — which is what makes `Unreached` a verdict rather than an absence.
+    /// Every id ever offered, so the log can mark the ones never chosen `Unreached`.
     pub fn offered_ids(&self) -> Vec<String> {
         self.seen.keys().cloned().collect()
     }
@@ -707,9 +667,8 @@ impl ExploringBrain {
         }
     }
 
-    /// Every word in a row's prose that names a map this walk has an id for — the one thing the
-    /// brain is allowed to know about where a door goes, and the same scan [`Self::promise_of`]
-    /// grades.
+    /// Every word in a row's prose that names a map this walk has an id for: all the brain may know
+    /// of where a door goes.
     fn maps_named<'a>(&self, description: &'a str) -> Vec<&'a str> {
         description
             .split(|c: char| !c.is_ascii_alphanumeric())
@@ -717,8 +676,8 @@ impl ExploringBrain {
             .collect()
     }
 
-    /// The key into [`Self::exits`] for a way out of the map the walk is standing on: where it
-    /// goes, as far as its prose says, against where it goes *from*.
+    /// The key into [`Self::exits`] for a way out of the current map: from here to where its prose
+    /// says.
     fn crossing(&self, description: &str) -> Option<String> {
         let there = self.maps_named(description).first().map(|m| m.to_string())?;
         Some(format!("{}->{there}", self.here))
@@ -751,8 +710,7 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
             );
         }
         if !request.has_tool("choose_action") {
-            // A nickname, a mart, a move to forget: answer with the game's own default and carry
-            // on.
+            // A nickname, a mart, a move to forget: answer with the game's default.
             for name in ["set_nickname", "forget_move", "buy_item"] {
                 if request.has_tool(name) {
                     return Reply::call(name, serde_json::json!({}));
@@ -786,26 +744,22 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
             }
         }
 
-        // Reaching the Hall of Fame ends the walk, because it ends the *game*.
+        // Reaching the Hall of Fame ends the walk, because it ends the game.
         if request.location().as_deref() == Some("HallOfFame") {
             self.reached_the_end = true;
         }
-        // The last room before the gauntlet, and the square the driver rewinds to.
         if request.location().as_deref() == Some("IndigoPlateauLobby") {
             self.reached_the_lobby = true;
         }
-        // Barred rows are dropped before anything counts them, so a barred door is not "offered
-        // and never chosen" either: it *was* chosen, once, and the walk was rewound out of where
-        // it led.
+        // Barred rows are dropped before anything counts them: each was chosen once and rewound out
+        // of.
         let rows: Vec<(String, String)> = request.menu_rows().into_iter()
             .filter(|(id, _)| !self.barred.contains(id))
             .collect();
-        // Counted before anything is chosen, so "the menu was empty" is a fact rather than an
-        // inference from the brain having done nothing.
+        // Counted before anything is chosen, so an empty menu is observed rather than inferred.
         if rows.is_empty() {
             self.rowless_turns += 1;
         }
-        // Insert only if absent.
         let mut anything_new = false;
         for (id, _) in &rows {
             if !self.seen.contains_key(id) {
@@ -818,11 +772,11 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
             false => self.barren + 1,
         };
 
-        // (2) the first unvisited row that does not leave the map, so a map is exhausted before
-        // it is left; then (3) the way out that most likely leads somewhere with work left.
+        // Prefer the first unvisited row that stays on the map, so a map is exhausted before it is
+        // left; then the way out most likely to lead to work.
         let unvisited = |id: &String| self.seen.get(id).copied() == Some(0);
 
-        // A row the world puts back, and the walk has to be willing to take again.
+        // A row the world puts back, which the walk must be willing to take again.
         let re_takeable = |id: &String| !matches!(id.rsplit(':').next(), Some("Grass" | "Empty"));
         let chosen = rows
             .iter()
@@ -831,11 +785,10 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
             .cloned()
             .or_else(|| {
                 rows.iter()
-                    // Exits are never `Grass` or `Empty`, so the one test covers both halves:
-                    // every way out, plus every other row the world might have put back.
+                    // Exits are never `Grass` or `Empty`, so this keeps every way out and every row
+                    // that comes back.
                     .filter(|(id, _)| re_takeable(id))
-                    // How often it has already been taken comes *first*, and the promise of where
-                    // it goes second.
+                    // Times already taken first, the promise of where it goes second.
                     .min_by_key(|(id, description)| {
                         let id_times = self.seen.get(id).copied().unwrap_or(0);
                         let exit = is_a_way_out(id);
@@ -845,9 +798,7 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
                                 .unwrap_or(id_times),
                             false => id_times,
                         };
-                        // A row that is not a way out scores *worse* than any exit that ties with
-                        // it, and that is the line that keeps this from being the promise-first
-                        // ordering that lost 20 maps.
+                        // A row that is not a way out scores worse than any exit it ties with.
                         let promise = match exit { true => self.promise_of(description), false => 3 };
                         let new_map_worth_a_try = exit && promise == 0 && id_times < 2;
                         (!new_map_worth_a_try, map_times, promise, id_times)
@@ -855,7 +806,7 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
                     .map(|(id, _)| id.clone())
             });
 
-        // Nothing at all above: take the least-taken row again rather than wait.
+        // Nothing above: take the least-taken row again rather than wait.
         let chosen = chosen.or_else(|| {
             rows.iter()
                 .min_by_key(|(id, _)| self.seen.get(id).copied().unwrap_or(0))
@@ -873,15 +824,14 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
                 {
                     *self.exits.entry(crossing).or_insert(0) += 1;
                 }
-                // `resume_after_battle` everywhere except the two rows that exist to *start* a
-                // battle, and that exception is measured.
+                // `resume_after_battle` everywhere except the two rows that exist to start a
+                // battle.
                 let resume = !matches!(id.rsplit(':').next(), Some("Grass" | "Empty"));
                 Reply::call(
                     "choose_action",
                     serde_json::json!({ "id": id, "resume_after_battle": resume }),
                 )
             }
-            // Boxed in: no row at all.
             None => {
                 self.stalled_turns += 1;
                 self.stalled_worst = self.stalled_worst.max(self.stalled_turns);
@@ -908,15 +858,12 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
 pub struct Start {
     /// What `GB_COVERAGE_START` names it by.
     pub name: &'static str,
-    /// The committed fixture. Never a state the walk writes: exploration is destructive, so a
-    /// start is a file in the tree that a sweep can be re-run against, not a checkpoint.
+    /// The committed fixture, never written by a walk: exploration is destructive.
     pub state: &'static [u8],
     /// Where it stands, asserted by
-    /// [`every_coverage_start_stands_where_it_says_on_a_finished_game`] in the default tier. The
-    /// map is the entire content of a start, so a fixture regenerated onto a different square is
-    /// a regional sweep quietly becoming a duplicate of another one.
+    /// [`every_coverage_start_stands_where_it_says_on_a_finished_game`].
     pub map: crate::pokemon::map::Map,
-    /// Set only for a start taken *before* the credits, with the reason it has to be.
+    /// Set only for a start taken before the credits, with the reason.
     pub before_the_credits: Option<&'static str>,
 }
 
@@ -970,7 +917,7 @@ pub const COVERAGE_STARTS: &[Start] = &[
         map: crate::pokemon::map::Map::CinnabarIsland,
         before_the_credits: None,
     },
-    // The ninth, and the only one that is not a finished game.
+    // The only start that is not a finished game.
     Start {
         name: "ssanne",
         state: include_bytes!("../data/at-vermilion.bin"),
@@ -979,7 +926,7 @@ pub const COVERAGE_STARTS: &[Start] = &[
             "the S.S. Anne has not sailed yet, and `EVENT_SS_ANNE_LEFT` is what makes its ten \
              rooms and VermilionDock unreachable from every finished game"),
     },
-    // The tenth, and the only start whose whole job is to remove a coin flip.
+    // The only start whose job is to remove a coin flip.
     Start {
         name: "ssanneship",
         state: include_bytes!("../data/on-the-ss-anne.bin"),
@@ -990,8 +937,7 @@ pub const COVERAGE_STARTS: &[Start] = &[
     },
 ];
 
-/// What one walk came back with, so a run of several can be summed without keeping eight logs
-/// alive.
+/// What one walk came back with, so several can be summed without keeping their logs.
 #[cfg(feature = "slow-tests")]
 struct WalkOutcome {
     name: &'static str,
@@ -1000,36 +946,32 @@ struct WalkOutcome {
     /// PC operations this walk took.
     pc_ops: usize,
     maps: std::collections::BTreeSet<String>,
-    /// Everything that makes this walk red — [`CoverageLog::failures`], so defects *and*
-    /// silences.
+    /// Everything that makes this walk red: defects and silences.
     failures: Vec<String>,
     turns: usize,
     game_time: std::time::Duration,
     wall: std::time::Duration,
-    /// The line the walk printed about why it stopped, kept so the summary of a multi-region
-    /// sweep can say which regions settled and which were cut off.
+    /// Why the walk stopped, so a multi-region summary says which regions settled.
     stopped: String,
 }
 
 #[test]
 #[cfg(feature = "slow-tests")]
 fn coverage_walk_of_the_finished_game() {
-    // How much game time each walk may spend, in game-minutes, from `GB_COVERAGE_MINUTES`.
+    // Game-minutes per walk, from `GB_COVERAGE_MINUTES`.
     let minutes: u64 = std::env::var("GB_COVERAGE_MINUTES").ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(90);
 
-    // Turns with nothing new before the frontier is called settled.
     let patience: usize = std::env::var("GB_COVERAGE_PATIENCE").ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or((60 * minutes.max(90) / 90) as usize);
 
-    // How long each walk may take in wall clock, as opposed to game time.
     let wall_secs: u64 = std::env::var("GB_COVERAGE_WALL_SECS").ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(60 + minutes * 3);
 
-    // An unknown name is a failure rather than a fallback to the default.
+    // An unknown name fails rather than falling back to the default.
     let wanted = std::env::var("GB_COVERAGE_START").unwrap_or_else(|_| "phase0".to_string());
     let starts: Vec<&Start> = match wanted.as_str() {
         "all" => COVERAGE_STARTS.iter().collect(),
@@ -1057,7 +999,6 @@ fn coverage_walk_of_the_finished_game() {
                 "  {:<10} {:>4} maps {:>5} ids {:>6} turns  {:>5.0}s wall  {}",
                 o.name, o.maps.len(), o.ids.len(), o.turns, o.wall.as_secs_f64(), o.stopped))
             .collect();
-        // How much each region added that no other did.
         let only: Vec<String> = outcomes
             .iter()
             .map(|o| {
@@ -1117,7 +1058,7 @@ fn coverage_walk_of_the_finished_game() {
         }
     }
 
-    // Every region walks before any assertion, and that is deliberate.
+    // Every region walks before any assertion.
     let failures: Vec<String> = outcomes
         .iter()
         .flat_map(|o| o.failures.iter().map(|d| format!("[{}] {d}", o.name)))
@@ -1149,7 +1090,7 @@ fn unreached_report(entered: &std::collections::BTreeSet<&String>) -> String {
         }
     }
     real.sort();
-    // Wrapped rather than one per line: this is a list to scan for a cluster — the S.S.
+    // Wrapped rather than one per line, to scan for a cluster.
     let mut lines: Vec<String> = vec![format!(
         "unreached  ⭐ {} of {reachable} reachable maps, plus {padding} UnusedMap*, \
          {cable} link-cable rooms and {duplicates} unreachable duplicates",
@@ -1186,13 +1127,11 @@ fn classify(map: crate::pokemon::map::Map, name: &str) -> MapBucket {
 }
 
 #[cfg(feature = "slow-tests")]
-/// Game-minutes per walk below which a sweep is a smoke run rather than a measurement, and the
-/// union-wide checks are printed rather than asserted.
+/// Game-minutes per walk below which a sweep is a smoke run and the union checks only print.
 const COVERAGE_BUDGET_MINUTES: u64 = 180;
 
 #[cfg(feature = "slow-tests")]
-/// What an id ends in, which is [`MetaTile::id_kind`] and therefore the one name a family of rows
-/// shares.
+/// What an id ends in: [`MetaTile::id_kind`], the name a family of rows shares.
 pub fn kind_of(id: &str) -> String {
     match id.split(':').count() {
         0 | 1 | 2 => "Sprite".to_string(),
@@ -1208,14 +1147,13 @@ fn kind_cross_check(offered: &std::collections::BTreeSet<&String>, pc_ops: usize
     use crate::pokemon::map::Map;
     use gb::geometry::Point8;
 
-    /// Whether a `MetaTile` is something `MetaTileMap::actions` can put on the menu, and if not,
-    /// why the sweep will never see one.
+    /// Whether `MetaTileMap::actions` can put a `MetaTile` on the menu, and if not, why.
     enum Expect {
-        /// `actions()` mints this, so a sweep of the whole of Kanto has to have been offered one.
+        /// `actions()` mints this, so a sweep of all Kanto must have been offered one.
         Row,
         /// Terrain, not a decision: it classifies a square and is never a row of its own.
         Terrain,
-        /// A row that exists and that this harness is expected not to see, with the argument.
+        /// A row this harness is expected not to see, with the reason.
         Absent(&'static str),
     }
 
@@ -1238,18 +1176,16 @@ fn kind_cross_check(offered: &std::collections::BTreeSet<&String>, pc_ops: usize
         MetaTile::Switch { object: HiddenObject::CellSeparator, ordinal: 1 },
     ];
     let expectation = |tile: &MetaTile| match tile {
-        // Terrain.
         MetaTile::Empty | MetaTile::Obstacle | MetaTile::Counter | MetaTile::Jump(_) => Expect::Terrain,
-        // Water is crossed rather than chosen: the row for it is `ConnectionWater`, or a `Fish`
-        // square at its edge, or a walk whose route happens to mount Surf.
+        // Water is crossed rather than chosen: its rows are `ConnectionWater`, a `Fish` square, or
+        // a walk that mounts Surf.
         MetaTile::Water => Expect::Terrain,
-        // Withheld from the action menu on purpose, and covered the other way.
+        // Withheld from the action menu, and covered by the PC operations.
         MetaTile::Pc => Expect::Absent(
             "withheld from the action menu on purpose (llm::tools); the walk drives it through \
              use_field_move instead, and pc ops are counted separately"),
-        // Bill's cell separator is offered only while pressing it would still do something —
-        // `MetaTileMap::bill_cell_separator` — and every `COVERAGE_STARTS` save is a game that
-        // got past Bill to reach where it starts.
+        // Bill's cell separator is offered only while pressing it does something
+        // (`MetaTileMap::bill_cell_separator`), and every start is past Bill.
         MetaTile::Switch { object: HiddenObject::CellSeparator, .. } => Expect::Absent(
             "only offered before Bill has been turned back into a person, which every coverage \
              start is long past"),
@@ -1286,8 +1222,7 @@ fn kind_cross_check(offered: &std::collections::BTreeSet<&String>, pc_ops: usize
             }
         }
     }
-    // The allow-list entry for `Pc` is only honest while the other way in is being taken, so the
-    // count it points at is checked rather than described.
+    // The `Pc` allow-list entry holds only while the PC operations run, so their count is checked.
     if pc_ops == 0 {
         failures.push("no PC operation was taken anywhere in the sweep, and `MetaTile::Pc` is \
                        allow-listed on the grounds that the walk covers it that way instead".into());
@@ -1310,7 +1245,6 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
 
     let budget = Duration::from_mins(minutes);
 
-    /// A handle on the brain, since the endpoint owns it.
     #[derive(Clone)]
     struct Shared(Arc<Mutex<ExploringBrain>>);
 
@@ -1326,12 +1260,11 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
     let brain = Shared(Arc::new(Mutex::new(ExploringBrain::new())));
     let mut run = LlmRun::builder(start.state)
         .named("coverage-walk")
-        // Twice `BUDGET`, so the walk always stops on its own bound rather than on the fixture's
-        // panic.
+        // Twice the budget, so the walk stops on its own bound rather than the fixture's panic.
         .game_time(budget * 2)
         .with_coverage()
         .start(Box::new(brain.clone()));
-    // The bag is what makes the *overworld* fully offered.
+    // The bag is what makes the overworld fully offered.
     run.with_cheats(Cheats::default().with_key_items(999_999));
 
     /// Wall-clock seconds between progress lines.
@@ -1339,10 +1272,8 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
 
     let started = std::time::Instant::now();
     let mut spent_the_budget = false;
-    /// The door out of the Indigo Plateau lobby and into Lorelei's room, which is the one row a
-    /// rewound walk must never take again.
+    /// The door into Lorelei's room, which a rewound walk must never take again.
     const ELITE_FOUR_DOOR: &str = "IndigoPlateauLobby:8,0:Warp";
-    /// A walk is rewound past the credits once.
     const MAX_REWINDS: usize = 1;
     let mut checkpointed = false;
     let mut beat = started;
@@ -1359,9 +1290,7 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
             };
             let game = run.fixture().total_cycles.to_duration();
             let wall = started.elapsed();
-            // `turns/min` is the number that spots a livelock, not the id counts: a walk wedged
-            // on one action still discovers rows every time the menu is rebuilt, and still burns
-            // game time.
+            // `turns/min` spots a livelock: a wedged walk still discovers rows and burns game time.
             let per_min = (turns - beat_turns) as u64 * 60 / BEAT_SECS;
             let warn = if turns - beat_turns <= 2 { "  ⚠️ NOT MOVING" } else { "" };
             println!("[walk:{name}] {wall:>5.0}s wall {game:>6.0}s game ({rate:>4.1}x) | {turns} turns \
@@ -1399,9 +1328,7 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
         let brain = brain.0.lock().expect("not poisoned");
         (brain.discovered(), brain.visited(), brain.maps(), brain.turns, brain.pc_ops())
     };
-    // Everything the menu offered and the walk never chose is `Unreached` rather than absent.
     let offered = brain.0.lock().expect("not poisoned").offered_ids();
-    // Where the turns actually went.
     let (stalled_worst, rowless, boxed_at) = {
         let brain = brain.0.lock().expect("not poisoned");
         (brain.stalled_worst, brain.rowless_turns, brain.boxed_in_at.clone())
@@ -1415,11 +1342,10 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
         by_turns.iter().map(|(m, n)| format!("{m}:{n}")).collect::<Vec<_>>().join(" ")
     };
     let game_time = run.fixture().total_cycles.to_duration();
-    // The one cheat that can silently fail, said out loud.
+    // The one cheat that can silently fail.
     let refused: Vec<String> = run.cheats.as_ref()
         .map(|c| c.bag_was_full.iter().map(|i| format!("{i:?}")).collect())
         .unwrap_or_default();
-    // And what it took out to make them fit.
     let shed: Vec<String> = run.cheats.as_ref()
         .map(|c| c.bag_was_shed.iter().map(|id| match crate::pokemon::item::ItemId::from_repr(*id) {
             Some(named) => format!("{named:?}"),
@@ -1440,11 +1366,10 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
         }
     }
     let log = run.coverage().expect("coverage was asked for");
-    // The report is named after the start, so a regional sweep does not overwrite itself eight
-    // times.
+    // Named after the start, so regional sweeps do not overwrite each other.
     let written = log.write_report(&format!("walk-{name}"));
 
-    // Three ways to stop and they are not interchangeable.
+    // Three ways to stop, and they are not interchangeable.
     let stopped = match (settled, spent_the_budget) {
         _ if brain.0.lock().expect("not poisoned").reached_the_end => format!(
             "⭐ the walk played the game to the **Hall of Fame** and stopped there, which is a \
@@ -1488,8 +1413,7 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
         bag = bag,
     );
 
-    // Both taken as owned values here, so the borrow of the run's log ends before the cross-check
-    // below reaches back into the same run for its MMU.
+    // Owned, so the borrow of the run's log ends before the cross-check borrows its MMU.
     let ids: std::collections::BTreeSet<String> =
         log.entries().map(|entry| entry.id.clone()).collect();
     let unreached: std::collections::BTreeSet<String> = log.entries()
@@ -1500,8 +1424,7 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
 
     println!("{}", rom_cross_check(run.fixture().gb.core().mmu(), &ids));
 
-    // Maps come off the ids rather than off the brain's own tally, so that the union across
-    // regions is the same arithmetic as `CoverageLog::maps_touched` and the two can be compared.
+    // Maps come off the ids, so the union is the same arithmetic as `CoverageLog::maps_touched`.
     let maps = ids.iter().filter_map(|id| id.split(':').next().map(str::to_string)).collect();
     WalkOutcome {
         name,
@@ -1544,16 +1467,15 @@ pub fn rom_cross_check(
         let map = *map;
         let metadata = match cache.read_map(mmu, map) {
             Ok(metadata) => metadata,
-            // A handful of maps are drawn from RAM rather than from the ROM's block list
-            // (`map_uses_runtime_blocks`).
+            // A handful of maps are drawn from RAM rather than the ROM (`map_uses_runtime_blocks`).
             Err(why) => { unreadable.push(format!("{map}: {why}")); continue }
         };
         let dims = metadata.dimensions();
         let was_offered = |id: &str| offered.contains(id);
         let mut said: Vec<String> = Vec::new();
 
-        // Where a warp *would* be minted: the ROM's square, shifted by this map's connection
-        // strips, exactly as `meta_tiles_base` places it.
+        // Where a warp would be minted: the ROM's square shifted by connection strips, as
+        // `meta_tiles_base` places it.
         let square = |warp: &crate::pokemon::tile::WarpEvent| {
             (warp.position.x as usize + dims.west_extra, warp.position.y as usize + dims.north_extra)
         };
@@ -1562,8 +1484,8 @@ pub fn rom_cross_check(
             let (mx, my) = square(warp);
             if was_offered(&format!("{map}:{mx},{my}:Warp")) { continue }
             warps_missing += 1;
-            // The destination is what `actions()` dedupes on, so a sibling that leads to the same
-            // place and *was* offered is the reason this one is not a row.
+            // `actions()` dedupes on destination, so an offered sibling to the same place explains
+            // this one.
             let sibling = metadata.warp_events.iter()
                 .filter(|other| other.destination_map == warp.destination_map
                              && other.destination_position == warp.destination_position)
@@ -1591,21 +1513,19 @@ pub fn rom_cross_check(
             let id = format!("{map}:{}", MetaTile::Sprite(sprite.name).id_kind());
             if was_offered(&id) { continue }
             match sprite.hidden_object_id {
-                // A toggleable object: an item ball already in the bag, or something a script has
-                // not put on the map yet.
+                // A toggleable object: an item ball already taken, or something a script has not
+                // placed yet.
                 Some(_) => gated_missing += 1,
-                // A boulder is a sprite and does get a talk row — `VictoryRoad1F:Boulder1` is
-                // one, minted by `actions()`'s sprite scan like any other — so it belongs in this
-                // check rather than out of it.
+                // A boulder is a sprite and gets a talk row (`VictoryRoad1F:Boulder1`), so it
+                // belongs in this check.
                 None if sprite.name.starts_with("Boulder") => boulders_missing += 1,
                 None => { npcs_missing += 1;
                     said.push(format!("{:?}: ⚠️ **a person on this map who was never a row**", sprite.name)) }
             }
         }
 
-        // Connections are counted rather than matched: a `Connection` id names the crossing tile
-        // and not the map it leads to, so which neighbour a row was for cannot be recovered from
-        // the id alone.
+        // Connections are counted rather than matched: a `Connection` id names the crossing tile,
+        // not the neighbour.
         let neighbours = [&metadata.map_header.north_connection, &metadata.map_header.south_connection,
                           &metadata.map_header.east_connection,  &metadata.map_header.west_connection]
             .iter().filter(|c| c.is_some()).count();

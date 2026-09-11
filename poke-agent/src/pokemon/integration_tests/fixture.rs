@@ -1,7 +1,5 @@
-//! The shared harness every test in this module drives: a `GameBoy` restored from a snapshot,
-//! wired to a `PokemonAgent` running a `DeterministicPolicy`, plus the stall/budget guards that
-//! turn a wedged agent into a fast failure with a screenshot instead of a test that runs to the
-//! cycle cap.
+//! The shared harness: a snapshot restored into a `GameBoy` driven by a `PokemonAgent`, with stall
+//! and budget guards that fail a wedged agent fast, with a screenshot.
 
 use super::*;
 
@@ -21,17 +19,13 @@ pub struct TestFixture {
     pub agent: PokemonAgent,
     pub total_cycles: MachineCycles,
     pub max_cycles: MachineCycles,
-    /// Cycles since the policy queue length last changed (stall detection).
+    /// Cycles since the policy queue length last changed.
     stall_cycles: MachineCycles,
     last_steps_remaining: Option<usize>,
-    /// How long without queue progress before we declare a stall.
     stall_threshold: MachineCycles,
     /// False until the first [`Self::step`], so the load-time write is not reported as a drift.
     options_reapplied: bool,
-    /// J3 — how many times the game has restored its own `wOptions` over the harness's, i.e. how
-    /// many save/reload boundaries this run has crossed. `> 0` is the evidence that re-applying
-    /// every tick is load-bearing rather than belt-and-braces; see
-    /// `options_survive_the_hall_of_fame_reset`.
+    /// Times the game restored its own `wOptions` over the harness's, one per save/reload.
     pub options_drifts: u32,
     /// The options this fixture holds the game to.
     options: GameOptions,
@@ -40,8 +34,7 @@ pub struct TestFixture {
     pub coverage: Option<super::coverage::CoverageLog>,
 }
 
-/// Whether this run may overwrite the fixtures it snapshots. Off by default: a test run must
-/// leave the working tree clean, or every run silently changes the next run's inputs.
+/// Whether this run may overwrite the fixtures it snapshots; off, so a run leaves the tree clean.
 pub fn regenerating_fixtures() -> bool {
     std::env::var_os("GB_REGEN_FIXTURES").is_some_and(|v| v != "0" && v != "")
 }
@@ -51,28 +44,20 @@ impl TestFixture {
         Self::with_policy(save_state, max_game_time, Box::new(DeterministicPolicy::new(42, policy_steps)))
     }
 
-    /// [`Self::new`] with the policy supplied rather than built. Everything else — the options
-    /// pin, the stall detector, the cycle budget — is identical, so a test that needs to observe
-    /// what the agent asks its policy gets the whole harness rather than hand-rolling a `GameBoy`
-    /// beside it.
+    /// [`Self::new`] with the policy supplied rather than built.
     pub fn with_policy(save_state: &[u8], max_game_time: Duration, policy: Box<dyn crate::pokemon::policy::Policy>) -> Self {
-        // `GB_TEST_MODEL=cgb` runs the same fixture on a Game Boy Color, which for this DMG-only
-        // cartridge means compatibility mode.
+        // `GB_TEST_MODEL=cgb` runs the fixture on a Game Boy Color, in compatibility mode.
         let cgb = matches!(std::env::var("GB_TEST_MODEL").as_deref(), Ok("cgb"));
         let mut gb = if cgb { GameBoy::cgb(roms::POKERED) } else { GameBoy::dmg(roms::POKERED) };
         gb.load_state(save_state).expect("failed to load save state");
         if cgb {
-            // The load is the part that could quietly undo the switch: a fixture carries a `cart`
-            // section and a `cgb` section written by a DMG machine, so this asserts the machine
-            // is still the one that was asked for rather than trusting it.
+            // Fixture sections come from a DMG machine, so check the load kept the switch.
             assert_eq!(gb.core().mmu().color_mode(), gb::model::ColorMode::CgbCompat,
                 "GB_TEST_MODEL=cgb, so the loaded state must still be a CGB in compatibility mode");
         }
 
-        // The agent builds its world graph incrementally as it traverses.
         let steps_at_start = policy.steps_remaining();
 
-        // Workstream J2.
         let options = crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS;
         PokemonApi::new(&mut gb).debug_set_options(&options);
 
@@ -88,7 +73,6 @@ impl TestFixture {
             max_cycles: MachineCycles::from_duration(max_game_time),
             stall_cycles: MachineCycles::ZERO,
             last_steps_remaining: None,
-            // 10 minutes of game time without a queue step change → stall
             stall_threshold: MachineCycles::from_duration(Duration::from_secs(10 * 60)),
             options_reapplied: false,
             options_drifts: 0,
@@ -102,13 +86,12 @@ impl TestFixture {
         self
     }
 
-    /// J, opt-out — hold this fixture to the options the suite used *before* workstream J, i.e.
-    /// with battle animations on.
     pub fn with_stall_tolerance(mut self, tolerance: Duration) -> Self {
         self.stall_threshold = MachineCycles::from_duration(tolerance);
         self
     }
 
+    /// Hold this fixture to battle animations on.
     pub fn with_original_battle_timing(mut self) -> Self {
         self.options = GameOptions { battle_animations_on: true,
                                      ..crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS };
@@ -129,7 +112,7 @@ impl TestFixture {
         let cycles = self.gb.run(AGENT_RESOLUTION);
 
         let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
-        // Workstream J3.
+        // Re-applied every tick, because a save/reload restores the cartridge's own options.
         if api.debug_set_options(&self.options) && self.options_reapplied {
             self.options_drifts += 1;
             println!("[fixture] wOptions drifted (a save/reload restored the cartridge's) — re-applied");
@@ -140,8 +123,7 @@ impl TestFixture {
 
         self.total_cycles += cycles;
 
-        // Stall detection: GrindUntilLevel and CatchPokemon legitimately sit on the same step for
-        // long stretches — exempt them regardless of queue length.
+        // GrindUntilLevel and CatchPokemon sit on one step for long stretches.
         const BATTLE_STALL_FACTOR: u64 = 8;
         let steps = self.agent.policy_steps_remaining();
         let long_running = self.agent.policy_current_step_is_long_running();
@@ -179,8 +161,7 @@ impl TestFixture {
         }
     }
 
-    /// Fold this tick's events into the [`CoverageLog`](super::coverage::CoverageLog), and drop a
-    /// save state wherever one of them was a defect.
+    /// Fold this tick's events into the coverage log, saving a state wherever one was a defect.
     fn observe_coverage(&mut self) {
         let Some(log) = self.coverage.as_mut() else { return };
         for event in self.agent.drain_events() {
@@ -199,13 +180,11 @@ impl TestFixture {
         }
     }
 
-    /// Dropped under `target/` rather than the repo root: a failing run must not leave untracked
-    /// junk in the working tree next to the fixtures it is being compared against.
+    /// Under `target/`, so a failing run leaves no untracked files beside the fixtures.
     fn save_failure_artifacts(&self, name: &str) {
         let dir = std::path::Path::new("target/test-artifacts");
         let state = dir.join(format!("{name}_state.bin"));
         let shot = dir.join(format!("{name}_screenshot.png"));
-        // The file's parent, not the artifacts root.
         for path in [&state, &shot] {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).ok();
@@ -216,8 +195,7 @@ impl TestFixture {
         println!("saved failure artifacts: {}, {}", state.display(), shot.display());
     }
 
-    /// One iteration of a host loop that is `min_cycles` behind the clock, rather than one agent
-    /// tick.
+    /// One iteration of a host loop `min_cycles` behind the clock, rather than one agent tick.
     pub fn step_coarse(&mut self, min_cycles: MachineCycles) {
         PokemonApi::with_cache(&mut self.gb, &mut self.map_cache).debug_set_options(&self.options);
         let (ran, _) = self.agent.run(&mut self.gb, &mut self.map_cache, min_cycles);
@@ -242,7 +220,7 @@ impl TestFixture {
                 api.game_state()
             };
             if let Ok(state) = state {
-                // Map changes only — a position trace would be one line per tile walked.
+                // Map changes only; a position trace would be a line per tile.
                 if last_map != Some(state.map.map) {
                     last_map = Some(state.map.map);
                     println!("  → {} @ {}", state.map.map, state.map.player_position);
@@ -253,8 +231,7 @@ impl TestFixture {
         }
     }
 
-    /// [`Self::run_until`] without the panic: `None` means the run stalled or ran out of budget
-    /// before `done` was satisfied, and the reason has already been printed.
+    /// [`Self::run_until`] without the panic: `None` is a stall or a spent budget, already printed.
     pub fn try_run_until(&mut self, done: impl Fn(&GameState) -> bool) -> Option<GameState> {
         let mut last_map = None;
         loop {
@@ -305,9 +282,7 @@ impl TestFixture {
         self.api().game_state().unwrap()
     }
 
-    /// As [`Self::game_state`], for a caller sweeping *every* committed fixture — some are
-    /// captured mid-transition or in a battle, where `game_state` legitimately has no map to
-    /// report.
+    /// As [`Self::game_state`], for fixtures cut mid-transition or in battle.
     pub fn try_game_state(&mut self) -> Result<GameState, String> {
         self.api().game_state()
     }
@@ -324,8 +299,7 @@ impl TestFixture {
     }
 }
 
-/// Diagnostic, not a test: print where each committed fixture stands — map, badges, money, party
-/// and bag.
+/// Diagnostic: print each committed fixture's map, badges, money, party and bag.
 #[test]
 #[cfg(feature = "slow-tests")]
 #[ignore = "diagnostic, not a test; run with --ignored --nocapture"]
@@ -376,12 +350,7 @@ fn dump_fixture_states() {
     }
 }
 
-/// Micro-benchmark, not a test: raw emulation throughput vs. the full agent step, from a mid-game
-/// fixture.
-/// ```text
-/// cargo test --release --features slow-tests --lib -- \
-///   pokemon::integration_tests::fixture::bench_emulation_throughput --exact --ignored --nocapture
-/// ```
+/// Micro-benchmark: raw emulation throughput against the full agent step, from a mid-game fixture.
 #[test]
 #[cfg(feature = "slow-tests")]
 #[ignore = "benchmark, not a test; run with --ignored --nocapture"]
@@ -403,7 +372,7 @@ fn bench_emulation_throughput() {
         let wall = start.elapsed().as_secs_f64();
         println!("[raw run only]     {game_secs}s game in {wall:.3}s → {:.1}x realtime", game_secs / wall);
     }
-    // (b) Full agent step (observe + policy + input synthesis) — the real playthrough cost.
+    // (b) Full agent step: observe, policy, input synthesis.
     {
         let n = 3000u32;
         let before = fixture.total_cycles;

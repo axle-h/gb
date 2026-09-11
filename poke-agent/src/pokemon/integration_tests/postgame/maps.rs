@@ -1,4 +1,3 @@
-
 use super::super::*;
 use crate::pokemon::postgame::maps;
 
@@ -15,8 +14,7 @@ fn tour(hub: Map, budget: Duration) -> (Vec<Map>, Vec<Map>) {
     let mut fixture = TestFixture::new(AIDES, budget, PolicyStep::tour_hub_steps(hub, TOUR_DEPTH));
 
     let mut entered: Vec<Map> = Vec::new();
-    // Per-room health, taken as the best reading over every tick spent in the room rather than
-    // the first.
+    // Per-room health, the best reading over every tick in the room.
     let mut health: HashMap<Map, (usize, bool)> = HashMap::new();
     while !fixture.agent.policy_exhausted() {
         fixture.step();
@@ -63,7 +61,7 @@ fn assert_toured(hub: Map, budget: Duration) {
          reason — that list IS L4's deliverable.", unexpected.len());
 }
 
-/// Task L2a — Pallet Town, Viridian and Pewter.
+/// Pallet Town, Viridian and Pewter.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_tour_the_southern_hubs() {
@@ -72,7 +70,7 @@ fn can_tour_the_southern_hubs() {
     }
 }
 
-/// Task L2b — Cerulean, Lavender and Vermilion.
+/// Cerulean, Lavender and Vermilion.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_tour_the_central_hubs() {
@@ -81,7 +79,7 @@ fn can_tour_the_central_hubs() {
     }
 }
 
-/// Task L2c — Celadon and Saffron, the two with department stores and Silph Co behind them.
+/// Celadon and Saffron, with the department stores and Silph Co.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_tour_the_western_hubs() {
@@ -90,7 +88,7 @@ fn can_tour_the_western_hubs() {
     }
 }
 
-/// Task L2d — Fuchsia, Cinnabar and Indigo Plateau.
+/// Fuchsia, Cinnabar and Indigo Plateau.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_tour_the_southern_islands() {

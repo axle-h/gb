@@ -1,4 +1,3 @@
-
 use std::sync::OnceLock;
 
 use super::*;
@@ -33,8 +32,7 @@ impl Capture {
 fn capture(name: &'static str, state: &[u8], seed: u64) -> Capture {
     let mut gb = GameBoy::dmg(roms::POKERED);
     gb.load_state(state).expect("fixture should load");
-    // Exactly what `EmulatorHost::tune_audio` does, and for the same reason: a state carries
-    // neither.
+    // Exactly what the host's `tune_audio` does, and for the same reason: a state carries neither.
     gb.core_mut().mmu_mut().audio_mut().set_output_sample_rate(SAMPLE_RATE);
     gb.core_mut().mmu_mut().audio_mut().set_emulation_speed(1.0);
 

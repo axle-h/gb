@@ -1,4 +1,3 @@
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -30,26 +29,20 @@ const MAX_CATCHUP: Duration = Duration::from_millis(250);
 const EMULATOR_STACK: usize = 8 * 1024 * 1024;
 
 pub struct HostConfig {
-    /// Emulation speed as a multiple of real time. 1.0 for a livestream; the tests use a large
-    /// number so a bounded run covers real game time in a fraction of the wall clock.
+    /// Emulation speed as a multiple of real time: 1.0 for a livestream, large in tests.
     pub target_speed: f64,
     /// The Opus stream's target, in bits per second, or `None` for no audio at all.
     pub audio_bitrate: Option<i32>,
-    /// Wall-clock spacing of video messages, independent of the emulated frame rate so that
-    /// running fast does not multiply bandwidth.
+    /// Wall-clock spacing of video messages, so running fast does not multiply bandwidth.
     pub video_interval: Duration,
-    /// How often the game state is sampled. Every sample costs a `game_state()` read, which is
-    /// not free, and the sample rate is also the ceiling on how promptly a change can be
-    /// reported.
+    /// How often the game state is sampled; each sample costs a `game_state()` read.
     pub status_interval: Duration,
     /// How long a heartbeat may be suppressed for saying nothing new before one is sent anyway.
     pub status_keepalive: Duration,
-    /// Where to checkpoint, and how often. `None` is a host that keeps nothing, which is what
-    /// every test wants and what `gb serve` never is.
+    /// Where to checkpoint, and how often. `None` keeps nothing, which is what every test wants.
     pub run: Option<Arc<CurrentRun>>,
     pub checkpoint_interval: Duration,
-    /// The admin endpoints' mailbox. `None` — the default, and every test — means they have
-    /// nothing to talk to and the emulator never checks.
+    /// The admin endpoints' mailbox. `None` means the emulator never checks.
     pub control: Option<Arc<ControlRequests>>,
     /// Which Game Boy the cartridge runs on, from `GB_HARDWARE`. [`Model::Dmg`] by default.
     pub model: Model,
@@ -60,11 +53,9 @@ pub struct HostConfig {
 /// What the HTTP layer is allowed to ask the emulator thread for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlRequest {
-    /// `POST /api/new-run` and `/reset-game`: checkpoint this run and start the game again in a
-    /// directory of its own.
+    /// `POST /api/new-run` and `/reset-game`: checkpoint this run and start again in a new directory.
     NewRun,
-    /// `POST /api/clear`: keep the game exactly where it is and throw the *model's* memory of it
-    /// away — the conversation and the plan.
+    /// `POST /api/clear`: keep the game and throw away the model's conversation and plan.
     ClearConversation,
 }
 
@@ -81,8 +72,7 @@ impl ControlRequest {
 /// Where the answer goes: the run id the emulator acted on, or why it could not.
 type Answer = tokio::sync::oneshot::Sender<Result<String, String>>;
 
-/// The one channel from the HTTP layer back into the emulator thread, and deliberately the
-/// narrowest one that will do the job.
+/// The one channel from the HTTP layer back into the emulator thread.
 #[derive(Default)]
 pub struct ControlRequests {
     pending: std::sync::Mutex<Option<(ControlRequest, Answer)>>,
@@ -110,22 +100,18 @@ impl ControlRequests {
     }
 }
 
-// Nothing may stop this loop while the game is being played.
-
 impl Default for HostConfig {
     fn default() -> Self {
         Self {
             target_speed: 1.0,
             audio_bitrate: Some(crate::web::audio::DEFAULT_BITRATE),
             video_interval: Duration::from_nanos(1_000_000_000 / 30),
-            // 2 Hz.
             status_interval: Duration::from_millis(500),
             status_keepalive: Duration::from_secs(2),
             run: None,
             checkpoint_interval: Duration::from_secs(60),
             control: None,
-            // Every test loads a fixture of a game already in progress, so the default is the one
-            // that leaves the trainer's name alone.
+            // Every test loads a game in progress, so the default leaves the trainer's name alone.
             fresh_game: false,
             // The DMG is the default and the tests depend on it.
             model: Model::Dmg,
@@ -148,8 +134,7 @@ pub struct EmulatorHost {
     encoder: VideoEncoder,
     /// `None` when `HostConfig::audio_bitrate` is, which is the whole of "audio is off".
     audio: Option<AudioEncoder>,
-    /// One read's worth of PCM, sized past the 100 ms the blip buffer holds so a single read
-    /// always empties it.
+    /// One read's worth of PCM, sized past the blip buffer's 100 ms so one read empties it.
     audio_scratch: Vec<f32>,
     /// Reused so a packet costs one `Arc` and not a `Vec` as well.
     audio_packets: Vec<Arc<[u8]>>,
@@ -160,15 +145,12 @@ pub struct EmulatorHost {
     cycle_duration: Duration,
     last_iteration: Instant,
     since_last_update: Duration,
-    /// Emulated time the catch-up clamp has thrown away on this run — the sum of every
-    /// iteration's overrun past [`MAX_CATCHUP`].
+    /// Emulated time the catch-up clamp has thrown away on this run.
     dropped: Duration,
-    /// The last tick on which the run was found parked, and the total wall clock it has spent
-    /// that way.
+    /// The last tick the run was found parked, and the total wall clock it has spent parked.
     paused_since: Option<Instant>,
     paused_total: Duration,
-    /// Cycles `gb.run` has already delivered beyond what was asked for, spent down before any
-    /// more are requested.
+    /// Cycles `gb.run` delivered beyond what was asked, spent down before more are requested.
     ahead_by_cycles: MachineCycles,
     emulated: MachineCycles,
     next_video: Instant,
@@ -177,21 +159,17 @@ pub struct EmulatorHost {
     /// The last heartbeat *sent*, and when.
     last_status: Option<StatusSnapshot>,
     last_status_at: Instant,
-    /// Whether the first cycle has been emulated — see the `RunStatus::Playing` transition in
-    /// [`Self::tick`].
+    /// Whether the first cycle has been emulated; see [`Self::tick`].
     booted: bool,
 
-    // ── What this process has contributed to the run
-    // ───────────────────────────────────────────── When the current run started being played
-    // here.
+    /// When the current run started being played here.
     run_started: Instant,
     /// [`Published::turns`] as of the moment this run became current.
     turns_at_run_start: u64,
     /// [`AgentEvent::WatchdogFired`]s seen this run.
     watchdog_firings: u64,
     completed: Option<(AgentEvent, u64)>,
-    /// Whether the run was already waiting on the model at the previous tick, so the transition
-    /// *into* waiting can be spotted.
+    /// Whether the run was waiting on the model at the previous tick, to spot the transition.
     awaiting_llm: bool,
     /// The last `agent.update` failure that was published.
     last_agent_failure: Option<String>,
@@ -212,9 +190,8 @@ impl EmulatorHost {
         let now = Instant::now();
         let cycle_duration = REALTIME_CYCLE_DURATION.div_f64(config.target_speed.max(f64::MIN_POSITIVE));
         let first_checkpoint = now + config.checkpoint_interval;
-        // Zero in every caller today, since `Published` is built beside the host — read rather
-        // than assumed so that a future one that shares a buffer does not silently credit this
-        // run with someone else's turns.
+        // Read rather than assumed zero, so a shared `Published` cannot credit this run with
+        // another's turns.
         let turns_at_run_start = published.turns();
         let mut host = Self {
             gb,
@@ -223,8 +200,6 @@ impl EmulatorHost {
             published,
             encoder: VideoEncoder::default(),
             audio: config.audio_bitrate.map(AudioEncoder::new),
-            // 125 ms of stereo, the sizing `render.rs:61` arrived at: comfortably more than the
-            // 100 ms `BUFFER_MS` the blip buffer holds, so one read always empties it.
             audio_scratch: vec![0.0; audio::SAMPLE_RATE as usize / 8 * 2],
             audio_packets: Vec::new(),
             audio_listeners: false,
@@ -239,9 +214,8 @@ impl EmulatorHost {
             emulated: MachineCycles::ZERO,
             next_video: now,
             next_status: now,
-            // Deliberately one interval out rather than `now`: the state that has just been
-            // loaded is the state that was just checkpointed, and rewriting it at startup would
-            // mean a process that crash-loops rewrites its own save every few seconds.
+            // One interval out: the state just loaded was just checkpointed, and rewriting it at
+            // startup would have a crash-looping process rewrite its save every few seconds.
             next_checkpoint: first_checkpoint,
             awaiting_llm: false,
             last_status: None,
@@ -347,8 +321,7 @@ impl EmulatorHost {
         }
     }
 
-    /// What the current run had already been played for before this process opened it — all
-    /// zeroes for a fresh run, and for a host with no run directory at all.
+    /// What the current run had been played for before this process opened it; zero if fresh.
     fn run_baseline(&self) -> RunProgress {
         self.config.run.as_ref().map(|current| current.get().baseline()).unwrap_or_default()
     }
@@ -383,11 +356,9 @@ impl EmulatorHost {
             Err(failure) => return self.complain(format!("could not save the winning state: {failure}")),
         };
 
-        // Read before the archive, because `game_state()` needs the emulator and the archive does
-        // not.
+        // Read here: `game_state()` needs the emulator, and the archive job does not have it.
         let (badges, pokedex_owned, pokedex_seen, money, party, playtime_maxed) = self.final_state();
-        // After the checkpoint above, which is what folds this process's figures onto the run's
-        // baseline.
+        // After the checkpoint above, which folds this process's figures onto the run's baseline.
         let meta = run.meta();
         let usage = self.published.usage();
         let job = poke_agent::run::hall_of_fame::ArchiveJob {
@@ -404,9 +375,7 @@ impl EmulatorHost {
                 started_at: meta.started_at.clone(),
                 app_version: crate::cli::VERSION.to_string(),
                 policy: self.agent.policy_name().to_string(),
-                // `RunMeta::model` is the *policy's* name under every policy but the LLM —
-                // `"random"`, `"scripted"` — so it is asked of the policy rather than matched
-                // against a list of strings to keep out.
+                // `RunMeta::model` is the policy's name under every policy but the LLM.
                 model: (self.agent.policy_name() == LLM_POLICY_NAME)
                     .then(|| meta.model.clone()),
                 playtime_seconds: *playtime_seconds,
@@ -433,8 +402,7 @@ impl EmulatorHost {
 
         let archived = match poke_agent::run::hall_of_fame::archive(&job) {
             Ok(name) => name,
-            // Names the directory, because this is not retried and filing it by hand is then a
-            // `cp`.
+            // Names the directory: this is not retried, so filing it by hand is a `cp`.
             Err(failure) => {
                 return self.complain(format!(
                     "could not file the finished run: {failure}. {} won the game and is complete on \
@@ -444,8 +412,7 @@ impl EmulatorHost {
             }
         };
         if let Err(failure) = run.record_completion(poke_agent::run::hall_of_fame::recorded(*teams, archived.clone())) {
-            // The archive is written and the ledger row is appended; only the idempotence stamp
-            // failed.
+            // The archive and the ledger row are written; only the idempotence stamp failed.
             self.complain(format!("could not stamp the finished run's meta.json: {failure}"));
         }
 
@@ -496,8 +463,7 @@ impl EmulatorHost {
         self.published.publish_event(UiEventBody::Notice { level: "error", message });
     }
 
-    /// Abandon the current run and start the game again in a fresh run directory, without
-    /// stopping.
+    /// Abandon the current run and start the game again in a fresh run directory.
     fn start_new_run(&mut self) -> Result<String, String> {
         let Some(current) = self.config.run.clone() else {
             return Err("this host has no run directory, so there is no new run to start".to_string());
@@ -513,13 +479,11 @@ impl EmulatorHost {
             .map_err(|e| format!("could not load the start-of-game state: {e}"))?;
         self.map_cache = MapMetadataCache::default();
         self.agent.restart(Some(run.path()));
-        // A new run is a new game, so the trainer is named again — the policy may well have
-        // changed under a process that has been up for days.
+        // A new game names its trainer again, since the policy may have changed.
         self.name_the_player();
 
         self.encoder.restart();
-        // The reload above dropped both APU settings, exactly as it dropped the video encoder's
-        // palette.
+        // The reload above dropped both APU settings.
         tune_audio(&mut self.gb, self.config.target_speed);
         if let Some(audio) = self.audio.as_mut() {
             audio.restart();
@@ -569,8 +533,7 @@ impl EmulatorHost {
         Ok(run_id)
     }
 
-    /// One iteration of the loop. Returns whether any emulation happened, which is the loop's cue
-    /// that it is behind and should come straight back rather than sleep.
+    /// One iteration. Returns whether anything was emulated, the loop's cue not to sleep.
     pub fn tick(&mut self) -> bool {
         // The reset seam.
         if let Some((what, sender)) = self.config.control.as_ref().and_then(|mailbox| mailbox.take()) {
@@ -580,9 +543,8 @@ impl EmulatorHost {
             };
             let _ = sender.send(answer);
         }
-        // The end of the game, answered here for the reason above and not where the event is
-        // found: filing a run swaps the run directory out from under the transcript thread, and
-        // the middle of a tick is not where that should happen.
+        // The end of the game, answered here rather than where the event is found: filing a run
+        // swaps the run directory under the transcript thread, which must not happen mid-tick.
         if let Some((event, seq)) = self.completed.take() {
             self.file_completed_run(&event, seq);
         }
@@ -597,7 +559,7 @@ impl EmulatorHost {
             self.since_last_update = Duration::ZERO;
         } else {
             let gap = now.saturating_duration_since(self.last_iteration);
-            // What the clamp throws away, kept rather than merely discarded.
+            // Counted, for the heartbeat's `dropped_ms`.
             self.dropped += gap.saturating_sub(MAX_CATCHUP);
             self.since_last_update += gap.min(MAX_CATCHUP);
             self.last_iteration = now;
@@ -658,8 +620,7 @@ impl EmulatorHost {
                 });
                 match event {
                     AgentEvent::WatchdogFired { .. } => self.watchdog_firings += 1,
-                    // Parked rather than acted on: the run directory is about to be swapped, and
-                    // the top of the next tick is the place for that.
+                    // Filed at the top of the next tick, where swapping the run directory is safe.
                     event @ AgentEvent::HallOfFame { .. } => {
                         self.completed.get_or_insert((event, seq));
                     }
@@ -733,9 +694,7 @@ impl EmulatorHost {
             if frames == 0 {
                 break;
             }
-            // Split across two statements rather than one chained call: the encoder and the
-            // scratch are both fields, and the borrow checker will not have them at once through
-            // `self`.
+            // Two statements: the borrow checker will not lend both fields at once through `self`.
             let (audio, scratch) = (self.audio.as_mut(), &self.audio_scratch[..frames * 2]);
             let Some(audio) = audio else { break };
             let silenced_before = audio.silenced();
@@ -759,8 +718,7 @@ impl EmulatorHost {
     }
 
     fn publish_video(&mut self) {
-        // Copied out before encoding: the encoder borrows `self` mutably and the LCD borrows the
-        // `GameBoy` inside it.
+        // Copied out: the encoder borrows `self` mutably and the LCD lives inside the `GameBoy`.
         let frame: Box<Frame> = Box::new(*self.gb.core().mmu().ppu().lcd());
         let Some(delta) = self.encoder.encode(&frame) else {
             return; // nothing moved on screen, so nothing goes on the wire
@@ -770,8 +728,7 @@ impl EmulatorHost {
         self.published.publish_video(keyframe, delta);
     }
 
-    /// Sample the game state and publish it — if it says anything the last one did not, or if the
-    /// keepalive is due.
+    /// Sample the game state and publish it if it says something new or the keepalive is due.
     fn publish_status(&mut self, now: Instant) {
         // `game_state` reads a lot of RAM and can legitimately fail mid-transition.
         let api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
@@ -783,15 +740,12 @@ impl EmulatorHost {
                 .saturating_sub(self.paused_total)
                 .as_millis() as u64,
             emulated_ms: self.emulated.to_duration().as_millis() as u64,
-            // The run's clock rather than this process's, and it is read from the run directory
-            // on every heartbeat rather than remembered here.
+            // The run's clock, read from the run directory on every heartbeat.
             run_emulated_ms: self.run_baseline().emulated_ms
                 + self.emulated.to_duration().as_millis() as u64,
             dropped_ms: self.dropped.as_millis() as u64,
             target_speed: self.config.target_speed,
-            // Asked of the decider itself rather than configured alongside it: two places naming
-            // the same thing is two places to disagree, and this one is a wire contract the page
-            // renders.
+            // Asked of the decider rather than configured beside it, so the two cannot disagree.
             policy: self.agent.policy_name(),
             // Who is playing, for the page's title and header.
             model: (self.agent.policy_name() == LLM_POLICY_NAME)
@@ -837,12 +791,10 @@ fn event_kind(event: &AgentEvent) -> &'static str {
         AgentEvent::StartedOverworldAction { .. } => "started_overworld_action",
         AgentEvent::OverworldActionAborted { .. } => "overworld_action_aborted",
         AgentEvent::OverworldActionCompleted { .. } => "overworld_action_completed",
-        // The page keys off this to *not* draw a row (`useEventStream`'s `fold`), so it is
-        // load-bearing rather than decorative: folded back into the line above, every
-        // conversation in the run would reappear in the log as a "✓" the dialogue underneath
-        // already said.
+        // The page keys off this to not draw a row (`useEventStream`'s `fold`); merged into the
+        // line above, every conversation would reappear in the log.
         AgentEvent::OverworldInteractionCompleted { .. } => "overworld_interaction_completed",
-        // Deliberately *not* in `useEventStream`'s `UNLOGGED` set beside the line above.
+        // Not in `useEventStream`'s `UNLOGGED` set, unlike the line above.
         AgentEvent::OverworldPickupFailed { .. } => "overworld_pickup_failed",
         AgentEvent::BattleStarted => "battle_started",
         AgentEvent::BattleActionStarted { .. } => "battle_action_started",
@@ -875,8 +827,7 @@ mod tests {
         tweak: impl FnOnce(&mut HostConfig),
     ) -> EmulatorHost {
         let mut config = HostConfig {
-            // Fast enough that a fraction of a second of wall clock is seconds of game time, so
-            // the test is not at the mercy of how quickly the scheduler comes back to it.
+            // Fast enough that a fraction of a second of wall clock is seconds of game time.
             target_speed: 40.0,
             video_interval: Duration::from_millis(5),
             status_interval: Duration::from_millis(5),
@@ -893,8 +844,7 @@ mod tests {
         let mut events = published.subscribe_events();
         let mut host = host(Arc::clone(&published));
 
-        // A safety net rather than a measurement: the loop leaves the moment forty heartbeats
-        // have arrived.
+        // A safety net: the loop leaves once forty heartbeats have arrived.
         let deadline = Instant::now() + Duration::from_secs(120);
         let mut statuses: Vec<StatusSnapshot> = Vec::new();
         while statuses.len() < 40 && Instant::now() < deadline {
@@ -911,8 +861,7 @@ mod tests {
         assert!(statuses.iter().all(|s| s.game.is_some()), "a heartbeat could not read the game state");
         assert!(statuses.last().unwrap().emulated_ms > 0, "no emulated time was published");
 
-        // The agent under `RandomPolicy` walks Red around his bedroom, so *something* has to
-        // move.
+        // `RandomPolicy` walks Red around his bedroom, so something has to move.
         let positions: std::collections::HashSet<_> =
             statuses.iter().filter_map(|s| s.game.as_ref()).map(|g| (g.position.x, g.position.y)).collect();
         assert!(positions.len() > 1, "the player never moved: {positions:?}");
@@ -923,8 +872,7 @@ mod tests {
     fn a_parked_run_stops_the_game_but_keeps_the_page_fed() {
         let published = Published::new();
         let mut events = published.subscribe_events();
-        // The keepalive is the only thing that speaks while a run is parked, and that is the
-        // point.
+        // The keepalive is the only thing that speaks while a run is parked.
         let mut host = host_with(Arc::clone(&published), |config| {
             config.status_keepalive = Duration::from_millis(20);
         });
@@ -998,8 +946,7 @@ mod tests {
         while Instant::now() < aged {
             host.tick();
         }
-        // Cleared first, for the same reason the second publish below clears it, and this line is
-        // why that one is not paranoia.
+        // Cleared so the heartbeat cannot be suppressed as unchanged.
         host.last_status = None;
         host.publish_status(Instant::now());
         let before = host.last_status.clone().expect("the first heartbeat is never suppressed");
@@ -1019,8 +966,7 @@ mod tests {
         assert_eq!(after.dropped_ms, 0, "and it starts owing nothing");
     }
 
-    /// The panel's "played" is the *run's* total, so it has to survive the process that is
-    /// serving it.
+    /// The panel's "played" is the run's total, so it survives the process serving it.
     #[test]
     fn a_resumed_run_reports_the_play_that_came_before_it() {
         use poke_agent::run::RunDir;
@@ -1042,8 +988,7 @@ mod tests {
         assert!(played > 0, "the first process emulated nothing at all");
         drop(host);
 
-        // The second process, resuming the same directory — which is the newest one under the
-        // root.
+        // The second process, resuming the same directory, the newest under the root.
         let (run, origin, state) = RunDir::open(&scratch.0, false, "random", &validate).expect("the resume");
         assert_eq!(origin, poke_agent::run::Origin::Resumed);
         let second = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
@@ -1070,8 +1015,7 @@ mod tests {
             "the heartbeat reported this process's share as the run's total",
         );
 
-        // And a new run owes nothing: the baseline is the *current* directory's, so the swap
-        // moves it without anything here having to remember to.
+        // A new run owes nothing: the baseline is the current directory's.
         host.start_new_run().expect("a host built with a run directory can start another");
         host.last_status = None;
         host.publish_status(Instant::now());
@@ -1109,8 +1053,7 @@ mod tests {
                 "a heartbeat repeated what the one before it said, with no keepalive due:\n{previous:?}\n{next:?}",
             );
         }
-        // …and the sampling really was faster than the sending, or the assertion above is
-        // vacuous.
+        // …and the sampling was faster than the sending, or the assertion above is vacuous.
         let span = sent.last().unwrap().wall_ms - sent[0].wall_ms;
         assert!(span > 0, "every heartbeat landed in the same millisecond");
     }
@@ -1120,8 +1063,7 @@ mod tests {
     fn an_idle_run_still_sends_a_keepalive() {
         let published = Published::new();
         let mut events = published.subscribe_events();
-        // Speed 0.001× — the emulator advances so slowly that nothing observable changes, which
-        // is the closest thing to a frozen game a real host can be.
+        // At 0.001× nothing observable changes: the closest a real host gets to a frozen game.
         let mut host = host_with(Arc::clone(&published), |config| {
             config.target_speed = 0.001;
             config.status_interval = Duration::from_millis(1);
@@ -1146,8 +1088,7 @@ mod tests {
         );
     }
 
-    /// The video pipeline end to end from the host's side: what it publishes decodes back to the
-    /// emulator's own frame buffer.
+    /// What the host publishes decodes back to the emulator's own frame buffer.
     #[test]
     fn the_host_publishes_decodable_video() {
         let published = Published::new();
@@ -1168,11 +1109,7 @@ mod tests {
         assert_eq!(decoder.pixels(), snapshot.pixels.as_ref());
     }
 
-    // ── Audio
-    // ────────────────────────────────────────────────────────────────────────────────────
-
-    /// A parked run goes quiet, not dead: no packets while the emulator is stopped, and the sound
-    /// picks up again from live when the quota reopens.
+    /// A parked run publishes no audio, and the sound picks up again from live on release.
     #[test]
     fn a_parked_run_stops_the_sound_and_picks_it_up_again_from_live() {
         let published = Published::new();
@@ -1219,8 +1156,7 @@ mod tests {
         assert!(after >= 5, "the sound never came back after the park; only {after} packets");
     }
 
-    /// Nobody listening means the APU does not synthesise, which is 10% of the emulator on a
-    /// deployment where the speaker is off nearly all the time.
+    /// Nobody listening means the APU does not synthesise.
     #[test]
     fn nothing_is_synthesised_while_nobody_is_listening() {
         let published = Published::new();
@@ -1243,8 +1179,7 @@ mod tests {
         );
     }
 
-    /// The twin of [`the_host_publishes_decodable_video`]: what reaches a listener is real Opus
-    /// that a real decoder turns back into real sound.
+    /// What reaches a listener is Opus that a real decoder turns back into sound.
     #[test]
     fn the_host_publishes_decodable_audio() {
         let published = Published::new();
@@ -1322,7 +1257,6 @@ mod tests {
         assert!(host.audio.as_ref().expect("audio on").packets() > 0, "a listener got nothing");
     }
 
-    /// `GB_AUDIO_BITRATE=0` is byte-for-byte the behaviour this host had before `/api/audio`.
     #[test]
     fn audio_off_builds_no_encoder_and_drains_nothing() {
         let published = Published::new();
@@ -1368,8 +1302,7 @@ mod tests {
         }
         assert!(host.emulated.to_duration() > Duration::from_secs(3), "the first host barely ran");
         assert!(run.path().join("state.gbst").is_file(), "the periodic checkpoint never fired");
-        // …and then the shutdown checkpoint, which is what makes the comparison below exact: a
-        // periodic one is however many ticks old, and the agent has been walking in the meantime.
+        // …then the shutdown checkpoint, so the comparison below is exact.
         host.checkpoint();
         let before = {
             let api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
@@ -1420,8 +1353,7 @@ mod tests {
         let mut host = host_with(Arc::clone(&published), |config| {
             config.run = Some(Arc::clone(&current));
             config.control = Some(Arc::clone(&control));
-            // Longer than this test runs, so no *periodic* checkpoint can fire and the state file
-            // below can only have been written by the swap.
+            // Longer than the test, so only the swap can write the state file below.
             config.checkpoint_interval = Duration::from_secs(3600);
         });
 
@@ -1461,9 +1393,7 @@ mod tests {
         assert_eq!(restarted.map.player_position, start.map.player_position,
                    "the emulator kept playing the old game — it was {:?} before the reset",
                    played.map.player_position);
-        // Restarted, not merely carried on: the counter is zeroed by the swap and then the *rest
-        // of that same tick* emulates into it, so this is "back near zero" rather than exactly
-        // it.
+        // Near zero, not zero: the swap zeroes the counter and the rest of that tick emulates.
         assert!(host.emulated.to_duration() < Duration::from_secs(1),
                 "emulated time measures *this* game, but reads {:?}", host.emulated.to_duration());
 
@@ -1473,8 +1403,7 @@ mod tests {
                 "the video encoder was not restarted");
     }
 
-    /// The whole ending, in one test: the win is noticed, the run is filed, and the next one
-    /// starts — with the emulator, a real run directory and the transcript thread all in play.
+    /// The win is noticed, the run filed and the next one started, with the transcript thread live.
     #[test]
     #[cfg_attr(not(feature = "slow-tests"), ignore = "drives a cutscene; run with --features slow-tests")]
     fn a_finished_run_is_filed_and_the_next_one_starts() {
@@ -1488,8 +1417,7 @@ mod tests {
         let current = Arc::new(CurrentRun::new(scratch.0.clone(), "gpt-test".to_string(), run));
         let finished = current.get();
         let finished_id = finished.run_id();
-        // The transcript thread is running, because the archive follows the file it writes — the
-        // one ordering hazard in the whole path, and the thing this test exists to exercise.
+        // The archive follows the file the transcript thread writes: the path's ordering hazard.
         let stop = Arc::new(AtomicBool::new(false));
         let transcript = poke_agent::run::transcript::spawn(
             Arc::clone(&current),
@@ -1503,8 +1431,7 @@ mod tests {
             Arc::clone(&published),
             |config| {
                 config.run = Some(Arc::clone(&current));
-                // Longer than this test runs, so nothing periodic can write and every file below
-                // can only have been written by the completion path.
+                // Longer than the test, so only the completion path can write the files below.
                 config.checkpoint_interval = Duration::from_secs(3_600);
             },
         );
@@ -1525,7 +1452,6 @@ mod tests {
         assert_eq!(row.run_id, finished_id);
         assert_eq!(row.teams, 1);
         assert_eq!(row.policy, "random", "the decider names itself");
-        // `None`, and that is the rule rather than a gap.
         assert_eq!(row.model, None, "only an LLM run names a model");
         assert_eq!(row.app_version, crate::cli::VERSION);
         assert_eq!(row.badges, 8, "the winning tally is read at the moment of victory");
@@ -1546,19 +1472,16 @@ mod tests {
         assert!(story.contains("hall_of_fame"),
                 "the archived transcript stops short of the event it is a record of");
 
-        // The outgoing directory is complete and stamped, so a resume of it never files this
-        // twice.
+        // The outgoing directory is complete and stamped, so a resume never files it twice.
         assert!(finished.path().join(files::STATE).is_file(), "the outgoing run was checkpointed");
         assert_eq!(finished.meta().completed.len(), 1);
         assert!(finished.already_archived(1));
 
-        // And the archive is invisible to the resume scan — otherwise the next `gb serve` would
-        // continue a game that has already been won and filed.
+        // The archive is invisible to the resume scan, or the next start would continue a won game.
         let (resumed, _, _) = RunDir::open(&scratch.0, false, "gpt-test", &validate).expect("a resume");
         assert_ne!(resumed.run_id(), row.archive, "hall-of-fame/ must not be resumable");
 
-        // The writer is a `blocking_recv` loop, so it only notices `stop` when something wakes it
-        // — the same reason `web::run` publishes a parting notice before joining.
+        // The writer is a `blocking_recv` loop, so it only notices `stop` when something wakes it.
         published.publish_event(UiEventBody::Notice { level: "info", message: "done".into() });
         let _ = transcript.join();
     }
@@ -1607,8 +1530,7 @@ mod tests {
             let api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
             api.game_state().expect("a readable state")
         };
-        // The trainer ID rather than the map: a restart mints a new one, and the random walk this
-        // host is running can perfectly well have taken the stairs in the tick that answered.
+        // The trainer ID, not the map: a restart mints a new one, and the walk may take the stairs.
         assert_eq!(after.player_id, played.player_id, "the game was restarted rather than left alone");
         // …and the emulator is still running, on the same clock rather than one zeroed by a swap.
         let emulated = host.emulated;
@@ -1616,8 +1538,7 @@ mod tests {
         assert!(host.emulated >= emulated, "the clock went backwards, so something reset it");
     }
 
-    /// The mailbox refuses a second request only while someone is still listening for the first —
-    /// otherwise a handler that gave up would wedge the endpoint for the life of the process.
+    /// A second request is refused only while someone still waits on the first.
     #[test]
     fn the_control_mailbox_refuses_a_concurrent_request_but_not_an_abandoned_one() {
         let mailbox = ControlRequests::default();
@@ -1628,8 +1549,7 @@ mod tests {
         assert!(refusal.contains("new run"), "the refusal names the wrong command: {refusal}");
 
         drop(receiver);
-        // Bound rather than `is_ok()`: a `Receiver` dropped on the spot is an abandoned request,
-        // which is exactly the case the line above proves does *not* hold the mailbox.
+        // Bound: a `Receiver` dropped on the spot would itself be an abandoned request.
         let receiver = mailbox
             .request(ControlRequest::ClearConversation)
             .expect("an abandoned request must not block the next one");

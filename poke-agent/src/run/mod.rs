@@ -1,15 +1,4 @@
-//! The run directory: where a playthrough lives between processes.
-//! ```text
-//! $GB_RUN_DIR/<run-id>/
-//!     meta.json           run id, model, when it started, when it was last checkpointed
-//!     state.gbst          GameBoy::save_state() — what a resume actually loads
-//!     sram.bin            dump_sram(), as an ordinary .sav for anything else that reads one
-//!     transcript.jsonl    one JSON object per UiEvent, append-only (see `transcript.rs`)
-//!     memories/<slug>.md  legacy; nothing writes one, the archiver still copies them
-//!     todo.json           the plan, the one thing the model writes that outlives a compaction
-//!     history.json        the live conversation, rewritten each turn: what a restart resumes on
-//!     conversation.jsonl  every message ever sent to the model, append-only (see `llm::history`)
-//! ```
+//! The run directory: where a playthrough lives between processes. `files` names what is in it.
 
 pub mod hall_of_fame;
 pub mod transcript;
@@ -21,38 +10,29 @@ use std::time::SystemTime;
 /// Where runs live when `GB_RUN_DIR` is unset.
 pub const DEFAULT_ROOT: &str = "runs";
 
-/// File names inside a run directory. Constants because the resume path, the checkpoint path and
-/// the tests all have to agree on them.
+/// File names inside a run directory.
 pub mod files {
     pub const META: &str = "meta.json";
     pub const STATE: &str = "state.gbst";
     pub const SRAM: &str = "sram.bin";
     pub const TRANSCRIPT: &str = "transcript.jsonl";
-    /// Legacy, and only ever read by the archiver now.
+    /// Legacy: nothing writes it, and only the archiver reads it.
     pub const MEMORIES: &str = "memories";
-    /// The model's plan: what outlives a compaction, which is the one thing that still empties
-    /// the conversation now that [`HISTORY`] carries it across a restart.
+    /// The model's plan: what outlives a compaction.
     pub const TODO: &str = "todo.json";
-    /// The model's battle script and whether it is armed: what lets a whole battle be fought
-    /// without a single request. See [`crate::llm::battle_script`].
+    /// The model's battle script and whether it is armed. See [`crate::llm::battle_script`].
     pub const BATTLE_SCRIPT: &str = "battle-script.json";
-    /// The live conversation, rewritten whole once a turn: what a restarted process resumes on.
-    /// See [`crate::llm::history`].
+    /// The live conversation, rewritten each turn: what a restart resumes on. See [`crate::llm::history`].
     pub const HISTORY: &str = "history.json";
-    /// Every message ever appended to the conversation, one JSON object per line, plus a marker
-    /// line for each compaction. Append-only, and read by nothing in this program: it is the
-    /// record of what a compaction destroyed, for whoever reads the run afterwards.
+    /// Every message ever appended, plus a marker line per compaction. Append-only, and read by
+    /// nothing in this program.
     pub const CONVERSATION: &str = "conversation.jsonl";
-    /// One subdirectory per use of the `press_buttons` escape hatch — see
-    /// [`crate::llm::incident`]. A debugging artefact rather than part of the run: nothing reads
-    /// it back, and a run directory without one is complete.
+    /// One subdirectory per `press_buttons` escape hatch; nothing reads it back. See [`crate::llm::incident`].
     pub const PRESS_BUTTONS: &str = "press-buttons";
 
-    /// One directory per `report_issue` call: the model's own account of something the agent gets
-    /// wrong, with the screen and a save state beside it. See [`crate::llm::incident`].
+    /// One directory per `report_issue` call, with the screen and a save state. See [`crate::llm::incident`].
     pub const ISSUES: &str = "issues";
-    /// Where finished runs are filed, one level below the root — see [`super::hall_of_fame`],
-    /// whose module docs explain why that level of nesting is load-bearing rather than tidiness.
+    /// Where finished runs are filed, one level below the root, where `resumable` does not look.
     pub const HALL_OF_FAME: &str = "hall-of-fame";
     /// The leaderboard itself, inside `HALL_OF_FAME`.
     pub const LEDGER: &str = "ledger.jsonl";
@@ -62,19 +42,15 @@ pub mod files {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RunProgress {
     pub emulated_ms: u64,
-    /// Wall clock spent playing, which is not `now - started_at`: a run resumed nightly for a
-    /// week spans a week and was played for six hours.
+    /// Wall clock spent playing, not `now - started_at`: a run resumed nightly spans days.
     pub wall_ms: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
-    /// Completions billed. More than the number of turns — a turn that reads before it decides
-    /// costs several.
+    /// Completions billed; a turn that reads before it decides costs several.
     pub completions: u64,
-    /// Decisions that landed. Not turn *ids*: a turn id is `llm::worker`'s cancellation
-    /// generation, which counts abandoned turns as well and restarts at 1 in every process.
+    /// Decisions that landed, not turn ids: a turn id is `llm::worker`'s cancellation generation.
     pub turns: u64,
-    /// Times the stuck-run watchdog fired. In a healthy run this stays at zero, which is what
-    /// makes it worth keeping in a finished run's record.
+    /// Times the stuck-run watchdog fired; zero in a healthy run.
     pub watchdog_firings: u64,
 }
 
@@ -82,15 +58,13 @@ pub struct RunProgress {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArchivedCompletion {
     pub at: String,
-    /// `wNumHoFTeams` after the increment: `1` is a first championship, `2` a second in the same
-    /// save.
+    /// `wNumHoFTeams` after the increment: `2` is a second championship in the same save.
     pub teams: u8,
     /// The archive directory's name, relative to `<root>/hall-of-fame/`.
     pub archive: String,
 }
 
-/// What `meta.json` holds. Everything in it is for a person reading the directory later — nothing
-/// here is load bearing for a resume, which needs only `state.gbst`.
+/// What `meta.json` holds, for a person reading the directory; a resume needs only `state.gbst`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RunMeta {
     pub run_id: String,
@@ -98,12 +72,10 @@ pub struct RunMeta {
     pub model: String,
     pub started_at: String,
     pub last_checkpoint_at: Option<String>,
-    /// Emulated milliseconds over the run's whole life, across every process that has played it.
-    /// The one number that says whether a resume actually picked up where it left off.
+    /// Emulated milliseconds across every process that has played the run.
     #[serde(default)]
     pub emulated_ms: u64,
-    /// Wall clock spent playing, ditto. See [`RunProgress::wall_ms`] for why this is not simply
-    /// the distance between `started_at` and now.
+    /// Wall clock spent playing, ditto. See [`RunProgress::wall_ms`].
     #[serde(default)]
     pub wall_ms: u64,
     #[serde(default)]
@@ -118,8 +90,7 @@ pub struct RunMeta {
     pub watchdog_firings: u64,
     #[serde(default)]
     pub checkpoints: u64,
-    /// Runs before this one that it continues from, oldest first. A run resumed five times has
-    /// five entries, which is how a directory listing stops looking like five unrelated attempts.
+    /// When each resume happened, oldest first.
     #[serde(default)]
     pub resumed_from: Vec<String>,
     /// Championships this run has had filed. Empty for every run that has not finished the game.
@@ -148,8 +119,7 @@ impl RunMeta {
         }
     }
 
-    /// The totals as they stood when this was read — the baseline the next checkpoint rebases
-    /// onto.
+    /// The totals as read: the baseline the next checkpoint rebases onto.
     fn progress(&self) -> RunProgress {
         RunProgress {
             emulated_ms: self.emulated_ms,
@@ -241,12 +211,10 @@ impl RunDir {
                 let mut meta = read_meta(&candidate).unwrap_or_else(|| {
                     RunMeta::new(directory_name(&candidate), model.to_string())
                 });
-                // The model can legitimately change between runs, and the current one is the
-                // useful one to see in the directory.
+                // The model can change between processes; the current one is the one to record.
                 meta.model = model.to_string();
                 meta.resumed_from.push(iso8601(SystemTime::now()));
-                // Read *before* the first checkpoint overwrites it: this is what makes a resumed
-                // run's totals the run's rather than this process's.
+                // Read before the first checkpoint overwrites it, so the totals stay the run's.
                 let baseline = meta.progress();
                 let run = Self { path: candidate, meta: Mutex::new(meta), baseline };
                 run.write_meta()?;
@@ -279,14 +247,12 @@ impl RunDir {
         self.meta.lock().expect("run meta lock poisoned").run_id.clone()
     }
 
-    /// `meta.json` as it stands, for anything that wants to read a run's figures without owning
-    /// it — which today is [`hall_of_fame`], filing a finished run.
+    /// `meta.json` as it stands.
     pub fn meta(&self) -> RunMeta {
         self.meta.lock().expect("run meta lock poisoned").clone()
     }
 
-    /// What the run had already been played for when this process opened it — zero for a fresh
-    /// one.
+    /// What the run had been played for when this process opened it; zero for a fresh one.
     pub fn baseline(&self) -> RunProgress {
         self.baseline
     }
@@ -350,10 +316,8 @@ impl CurrentRun {
         &self.root
     }
 
-    /// What is playing: `GB_MODEL`, or the literal `"random"` under `--policy random`. It is a
-    /// property of the *process* rather than of the run directory — a resumed run is replayed by
-    /// whatever this build was told to use, which is why the model is written into `meta.json`
-    /// again on every open.
+    /// What is playing: a property of the process, not the run, so it is rewritten into
+    /// `meta.json` on every open.
     pub fn model(&self) -> &str {
         &self.model
     }
@@ -397,8 +361,8 @@ pub(crate) fn directory_name(path: &Path) -> String {
     path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| "run".into())
 }
 
-/// Write, then rename. See the module note: a half-written `state.gbst` is a failure that only
-/// shows up on the next start, by which time the good copy is gone.
+/// Write, then rename: a half-written `state.gbst` only shows on the next start, when the good
+/// copy is gone.
 pub fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let temporary = path.with_extension("tmp");
     std::fs::write(&temporary, bytes)
@@ -423,16 +387,12 @@ pub(crate) fn unique_dir(root: &Path, base: &str) -> String {
         .expect("the range is unbounded")
 }
 
-// ── Time, without a dependency
-// ───────────────────────────────────────────────────────────────────
-
 pub fn iso8601(time: SystemTime) -> String {
     let (year, month, day, hour, minute, second) = civil(time);
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
-/// The same instant as a directory name: `20260810-143205`. Sorts chronologically as a string,
-/// which is the only property the listing needs.
+/// The same instant as a directory name, `20260810-143205`, which sorts chronologically.
 pub fn compact_timestamp(time: SystemTime) -> String {
     let (year, month, day, hour, minute, second) = civil(time);
     format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
@@ -490,8 +450,7 @@ pub(crate) mod tests {
         std::time::UNIX_EPOCH + Duration::from_secs(seconds)
     }
 
-    /// The date arithmetic, against dates whose answers are known independently — including a
-    /// leap day and a century that is not a leap year.
+    /// The date arithmetic against known dates, including a leap day and a non-leap century.
     #[test]
     fn the_clock_agrees_with_a_calendar() {
         assert_eq!(iso8601(epoch(0)), "1970-01-01T00:00:00Z");
@@ -549,16 +508,14 @@ pub(crate) mod tests {
         assert_eq!(meta.prompt_tokens, 3_000);
         assert_eq!(meta.turns, 10);
 
-        // And a *second* checkpoint in the same process must not add the same figures twice —
-        // this is a rebase onto the baseline, not an accumulation.
+        // A second checkpoint in the same process rebases rather than adds.
         resumed.checkpoint(b"three", b"", RunProgress {
             emulated_ms: 30_000, wall_ms: 40_000, prompt_tokens: 1_000, turns: 3, ..Default::default()
         }).expect("checkpoint");
         assert_eq!(resumed.meta().emulated_ms, 91_000, "a checkpoint is a rebase, not an addition");
     }
 
-    /// Every total is `#[serde(default)]`, so a `meta.json` written before they existed still
-    /// opens.
+    /// Every total is `#[serde(default)]`, so an older `meta.json` still opens.
     #[test]
     fn a_meta_json_from_before_the_totals_still_parses() {
         let scratch = Scratch::new("runoldmeta");
@@ -584,8 +541,7 @@ pub(crate) mod tests {
         assert_eq!(run.meta().emulated_ms, 6_000, "and the old figure is continued, not replaced");
     }
 
-    /// The idempotence stamp: the guard against filing the same victory twice when a process is
-    /// restarted from a checkpoint taken a moment before `wNumHoFTeams` moved.
+    /// A restart from a checkpoint just before `wNumHoFTeams` moved does not file the victory twice.
     #[test]
     fn a_championship_is_only_recorded_once() {
         let scratch = Scratch::new("runhof");
@@ -641,7 +597,6 @@ pub(crate) mod tests {
         assert_eq!(resumed.run_id(), run.run_id());
     }
 
-    /// The rename.
     #[test]
     fn a_checkpoint_is_written_by_rename() {
         let scratch = Scratch::new("runatomic");
@@ -653,7 +608,6 @@ pub(crate) mod tests {
         assert!(!scratch.0.join("state.tmp").exists(), "the temporary file is consumed by the rename");
     }
 
-    /// Two runs created in the same second must not collide.
     #[test]
     fn run_ids_do_not_collide_within_a_second() {
         let scratch = Scratch::new("runids");

@@ -30,7 +30,7 @@ struct Abandoned {
     started_on: u32,
     asked: Question,
     replaced_by: Question,
-    /// How far into its latency the turn got before the question changed, in agent ticks.
+    /// How far into its latency the turn got before the question changed, in ticks.
     after_ticks: u32,
     /// Where the player was standing when the abandoned turn started.
     at: String,
@@ -41,8 +41,7 @@ struct Log {
     /// Every turn started, in order: the agent tick it started on, and where the player was.
     started: Vec<(u32, Question, String)>,
     abandoned: Vec<Abandoned>,
-    /// Advanced by the harness once per [`TestFixture::step`], so everything recorded here can be
-    /// lined up against the agent's own events on the same clock.
+    /// Advanced by the harness once per [`TestFixture::step`], on the agent's own clock.
     tick: u32,
 }
 
@@ -63,7 +62,7 @@ struct Pending {
 /// An ordinary policy with an LLM's latency bolted on.
 struct SlowPolicy {
     inner: Box<dyn Policy>,
-    /// Agent ticks of 20 ms one turn takes to answer.
+    /// Agent ticks one turn takes to answer.
     latency: u32,
     pending: Option<Pending>,
     log: Arc<Mutex<Log>>,
@@ -85,8 +84,7 @@ impl SlowPolicy {
                 }
                 true
             }
-            // The agent is asking something else, so whatever was in flight is now answering a
-            // dead question and is dropped.
+            // The agent is asking something else, so the turn in flight is dropped.
             Some(pending) => {
                 self.log.lock().expect("the log is never poisoned").abandoned.push(Abandoned {
                     started_on: pending.started_on,
@@ -135,8 +133,8 @@ impl Policy for SlowPolicy {
     }
 
     fn pick_nickname(&mut self, species: PokemonSpecies) -> Option<Option<String>> {
-        // The three menu prompts are handed no `GameState`, exactly as `LlmPolicy` is not, so the
-        // square recorded is the one the last state-carrying poll saw.
+        // The menu prompts get no `GameState`, as `LlmPolicy` does not, so the square is the last
+        // poll's.
         match self.advance(Question::Nickname, "a naming screen".to_string()) {
             true => self.inner.pick_nickname(species),
             false => None,
@@ -159,9 +157,8 @@ impl Policy for SlowPolicy {
         }
     }
 
-    /// Not a decision point, for the reason `LlmPolicy::pick_field_move` is not one: it runs on
-    /// every idle overworld tick immediately before `pick_overworld_action`, so keying it would
-    /// cancel the overworld turn fifty times a second and nothing would ever be answered.
+    /// Not a decision point, as in `LlmPolicy`: it runs before every idle `pick_overworld_action`,
+    /// so keying it would cancel every overworld turn.
     fn pick_field_move(&mut self, state: &GameState) -> Option<FieldMove> {
         self.inner.pick_field_move(state)
     }
@@ -176,20 +173,18 @@ impl Policy for SlowPolicy {
 struct Run {
     latency: u32,
     log: Arc<Mutex<Log>>,
-    /// The events the agent emitted, as prose, so a failure says what the run actually did.
+    /// The events the agent emitted, as prose.
     story: Vec<String>,
     reached_battle: bool,
     ticks: u32,
 }
 
-/// Walk out of Oak's lab with the starter, holding every answer back by `latency` agent ticks,
-/// and stop once the rival's battle has put its first question to the policy.
+/// Walk out of Oak's lab with every answer held back `latency` ticks, until the rival's battle asks
+/// its first question.
 fn walk_out_of_the_lab(latency: u32) -> Run {
-    // The policy's own seed is deliberately fixed.
     let scripted = DeterministicPolicy::new(42, vec![PolicyStep::goto(Map::PalletTown)]);
     let (policy, log) = SlowPolicy::new(Box::new(scripted), latency);
-    // Enough game time for the walk plus a handful of turns at this latency: a turn costs
-    // `latency` ticks of 20 ms, and getting out of the lab takes a few of them.
+    // The walk plus a handful of turns at this latency.
     let budget = Duration::from_secs(90 + (latency as u64 * 20 * 8) / 1000);
     let mut fixture = TestFixture::with_policy(OAKS_LAB, budget, Box::new(policy));
 
@@ -213,10 +208,10 @@ fn walk_out_of_the_lab(latency: u32) -> Run {
     Run { latency, log, story, reached_battle, ticks: tick }
 }
 
-/// The question this module was written to answer.
+/// Leaving Oak's lab strands no turn in the rival's script, at any latency.
 #[test]
 fn leaving_oaks_lab_does_not_strand_a_turn_in_the_rivals_script() {
-    // 20 ms per tick: an instant answer, five seconds, and a minute.
+    // An instant answer, five seconds, and a minute.
     const LATENCIES: [u32; 3] = [1, 250, 3000];
 
     let mut findings: Vec<String> = Vec::new();
@@ -251,7 +246,7 @@ fn leaving_oaks_lab_does_not_strand_a_turn_in_the_rivals_script() {
             "a turn was stranded by the rival's script:\n  {}", findings.join("\n  "));
 }
 
-/// The detector has to be shown firing, or every negative result above means nothing.
+/// The detector fires, or every negative result above means nothing.
 #[test]
 fn the_detector_notices_a_question_being_replaced() {
     struct Silent;
@@ -263,7 +258,6 @@ fn the_detector_notices_a_question_being_replaced() {
 
     let (mut policy, log) = SlowPolicy::new(Box::new(Silent), 10);
 
-    // Tick 1 opens an overworld turn; ticks 2 and 3 advance it without answering it.
     for tick in 1..=3 {
         log.lock().expect("the log is never poisoned").tick = tick;
         assert!(!policy.advance(Question::Overworld, "OaksLab (5, 6)".to_string()),
@@ -272,7 +266,7 @@ fn the_detector_notices_a_question_being_replaced() {
     assert!(log.lock().expect("the log is never poisoned").abandoned.is_empty(),
             "polls of the same question advance a turn, they do not replace it");
 
-    // Tick 4 asks something else, which is the event under test.
+    // Tick 4 asks something else.
     log.lock().expect("the log is never poisoned").tick = 4;
     policy.advance(Question::Battle, "OaksLab (5, 6)".to_string());
 
@@ -282,8 +276,7 @@ fn the_detector_notices_a_question_being_replaced() {
     assert_eq!(abandoned.asked, Question::Overworld);
     assert_eq!(abandoned.replaced_by, Question::Battle);
     assert_eq!(abandoned.started_on, 1, "it started on the tick that opened it");
-    // Two, not three: the first poll *opens* the turn and spends none of its budget, exactly as
-    // `LlmPolicy::advance` sends the request and returns `None` on the tick it is first asked.
+    // Two, not three: the first poll opens the turn, as `LlmPolicy::advance` returns `None` on it.
     assert_eq!(abandoned.after_ticks, 2, "two polls advanced it before the question changed");
     assert_eq!(log.started.len(), 2, "the replacement is a turn of its own");
 }

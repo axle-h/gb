@@ -2,19 +2,11 @@ import { useEffect, useReducer, useRef, useState } from 'react';
 import type { Connection } from '../api';
 import { HEIGHT, VideoDecoder, WIDTH, subscribeVideo } from '../video';
 
-/**
- * The game screen: a 160×144 canvas, CSS-scaled, fed by `/api/video`.
- *
- * Nothing here goes through React state — at 30 fps a `setState` per message would re-render the
- * page thirty times a second to change pixels React does not own. The decoder writes into a buffer
- * the `ImageData` is a view onto, so a frame costs one `putImageData` and no copy.
- */
+/** The 160x144 canvas fed by `/api/video`, kept out of React state: a frame is one `putImageData`. */
 export function Screen({ pausedUntil }: { pausedUntil: number | null }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [connection, setConnection] = useState<Connection>('connecting');
-  // A decode error means our palette or our pixels are suspect, and the server only volunteers a
-  // keyframe on a palette reset. Reconnecting is what gets one: `/api/video` opens every connection
-  // with the current keyframe (§5.2).
+  // A decode error makes the palette suspect; reconnecting brings a fresh keyframe.
   const [generation, resync] = useReducer((n: number) => n + 1, 0);
 
   useEffect(() => {
@@ -51,13 +43,7 @@ export function Screen({ pausedUntil }: { pausedUntil: number | null }) {
   );
 }
 
-/**
- * A remaining wait, as a viewer would say it. Exported because the header says the same thing, and
- * two roundings of one number is a way for the page to contradict itself.
- *
- * Coarse on purpose: a park is minutes to hours, and a countdown that ticks every second draws the
- * eye to a number nobody is waiting on second by second.
- */
+/** A remaining wait, coarse on purpose; shared with the header so the two never disagree. */
 export function describeRemaining(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
   const [hours, minutes] = [Math.floor(seconds / 3600), Math.floor((seconds % 3600) / 60)];
@@ -66,16 +52,7 @@ export function describeRemaining(ms: number): string {
   return `${seconds}s`;
 }
 
-/**
- * What a viewer sees while the run is parked on an endpoint that will not answer: the last frame dimmed under a PAUSED
- * plate and a live countdown.
- *
- * ⚠️ **The countdown is the one thing on this page driven by a local timer**, and it has to be: the
- * server publishes the deadline once and says nothing more, precisely so that an hours-long wait
- * costs no traffic. The trade is that it is the *viewer's* clock counting down to the server's
- * instant, so a badly-set clock shows a wrong figure; over a wait measured in hours and rendered to
- * the minute, that is not worth a second event stream to fix.
- */
+/** The parked screen: the last frame dimmed under a PAUSED plate, counted down on the viewer's clock. */
 function PausedOverlay({ until }: { until: number }) {
   const [remaining, setRemaining] = useState(() => until - Date.now());
 
@@ -89,8 +66,6 @@ function PausedOverlay({ until }: { until: number }) {
     <div className="screen-paused">
       <div className="plate">
         <span className="word">PAUSED</span>
-        {/* The reason, because a paused game with no explanation reads as a fault. It is the run
-            that is waiting, not the page, and nothing is lost while it does. */}
         <span className="why">the model's endpoint is refusing requests</span>
         <span className="eta">
           {remaining > 0 ? `resumes in ${describeRemaining(remaining)}` : 'resuming…'}

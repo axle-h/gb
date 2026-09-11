@@ -1,4 +1,4 @@
-//! Workstream E — Safari Zone proper.
+//! The Safari Zone: the step budget, the odds, and the hunt.
 
 use gb::geometry::Point8;
 use gb::mmu::MMU;
@@ -14,30 +14,19 @@ use crate::pokemon::world_graph::WorldGraph;
 use crate::pokemon::GameState;
 use gb::ram::ROM;
 
-// ── E1: the step budget
-// ──────────────────────────────────────────────────────────────────────────
-
-/// The live state of a Safari trip — `None` in [`GameState::safari`] when the player is not on
-/// the clock, which is every map in the game bar the five Safari ones (and the gate, after
-/// ejection).
+/// A Safari trip, `None` in [`GameState::safari`] whenever the player is not on the clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SafariState {
-    /// `wSafariSteps`, a big-endian word (`ld a, HIGH(502)` into the low address).
+    /// `wSafariSteps`, a big-endian word.
     pub steps_left: u16,
-    /// `wNumSafariBalls`.
     pub balls_left: u8,
-    /// `EVENT_SAFARI_GAME_OVER` — set by `SafariZoneGameOver` the instant the budget runs out,
-    /// and consumed by the gate's `CheckAndResetEvent` on arrival.
+    /// `EVENT_SAFARI_GAME_OVER`: set the instant the budget runs out, cleared by the gate on arrival.
     pub game_over: bool,
 }
 
-/// `wEventFlags` byte holding both Safari events: `EVENT_SAFARI_GAME_OVER` is $24E and
-/// `EVENT_IN_SAFARI_ZONE` is $24F (`constants/event_constants.asm:151`, counting from the
-/// `const_next $238` that opens the Fuchsia block), so both live in byte $24F / 8 = 73.
+/// `wEventFlags` byte holding `EVENT_SAFARI_GAME_OVER` ($24E) and `EVENT_IN_SAFARI_ZONE` ($24F).
 const SAFARI_EVENT_BYTE: u16 = 73;
-/// $24F % 8 = 7.
 const IN_SAFARI_ZONE: u8 = 1 << 7;
-/// $24E % 8 = 6.
 const SAFARI_GAME_OVER: u8 = 1 << 6;
 
 /// Read [`SafariState`], or `None` when `EVENT_IN_SAFARI_ZONE` is clear.
@@ -53,19 +42,15 @@ pub fn read_state(mmu: &MMU) -> Option<SafariState> {
     })
 }
 
-// ── E2: the odds, and why BAIT and ROCK are never thrown
-// ─────────────────────────────────────────
+// BAIT and ROCK are never thrown: `bait_and_rock_are_never_worth_throwing`.
 
-/// Rejection-sampling ceiling on `Rand1` for a Safari Ball — it shares the Ultra Ball's range
-/// (`engine/items/item_effects.asm:200-208`), so the first check passes with probability
-/// `(catch_rate + 1) / 151` rather than `/ 256`.
+/// `Rand1` ceiling for a Safari Ball, the Ultra Ball's, so the first roll passes with probability
+/// `(catch_rate + 1) / 151`.
 const SAFARI_BALL_RAND1_MAX: u16 = 150;
 
-/// `BallFactor` for every ball but the Great Ball (`item_effects.asm:238-244`).
+/// `BallFactor` for every ball but the Great Ball.
 const SAFARI_BALL_FACTOR: u32 = 12;
 
-/// Probability that one Safari Ball catches a target with `catch_rate`, at `current_hp` of
-/// `max_hp`.
 pub fn ball_catch_chance(catch_rate: u8, max_hp: u16, current_hp: u16) -> f64 {
     let first = (catch_rate as u16 + 1).min(SAFARI_BALL_RAND1_MAX + 1) as f64 / (SAFARI_BALL_RAND1_MAX + 1) as f64;
     let hp_term = (current_hp / 4).max(1) as u32;
@@ -76,7 +61,7 @@ pub fn ball_catch_chance(catch_rate: u8, max_hp: u16, current_hp: u16) -> f64 {
     first * (x + 1) as f64 / 256.0
 }
 
-/// Probability that the target flees at the end of a turn, given its live Speed *stat*.
+/// Probability that the target flees at the end of a turn, given its live Speed stat.
 pub fn flee_chance(enemy_speed: u16, bait_active: bool, rock_active: bool) -> f64 {
     let low = (enemy_speed & 0xFF) as u16;
     if low > 127 {
@@ -92,15 +77,13 @@ pub fn flee_chance(enemy_speed: u16, bait_active: bool, rock_active: bool) -> f6
     b as f64 / 256.0
 }
 
-/// Chance of eventually catching a target that is thrown at every turn until it is caught or
-/// flees: `p / (p + (1 - p) · f)`.
+/// Chance of catching a target thrown at every turn until caught or fled: `p / (p + (1 - p) · f)`.
 pub fn encounter_catch_chance(per_ball: f64, per_turn_flee: f64) -> f64 {
     let denominator = per_ball + (1.0 - per_ball) * per_turn_flee;
     if denominator <= 0.0 { 0.0 } else { per_ball / denominator }
 }
 
-/// The battle half of a [`PolicyStep::SafariHunt`]: throw a ball at anything still wanted, run
-/// from everything else.
+/// The battle half of a [`PolicyStep::SafariHunt`]: a ball at anything still wanted, else run.
 pub fn pick_battle_action(state: &GameState, targets: &[PokemonSpecies], actions: &[BattleAction])
     -> Option<BattleAction>
 {
@@ -128,16 +111,11 @@ pub fn pick_battle_action(state: &GameState, targets: &[PokemonSpecies], actions
     actions.iter().find(|a| matches!(a, BattleAction::SafariBall)).cloned().or(run)
 }
 
-// ── E3: the hunt
-// ─────────────────────────────────────────────────────────────────────────────────
-
 /// What [`pick`] wants the policy to do this tick.
 pub enum Hunt {
-    /// Issue this overworld action (a walk toward the zone, or a pace through grass).
     Walk(OverworldAction),
-    /// Nothing to do this tick — a script is running, or the tile grid has not settled yet.
+    /// A script is running, or the tile grid has not settled.
     Wait,
-    /// The step is over; the policy pops it.
     Done,
 }
 
@@ -146,9 +124,7 @@ pub enum Hunt {
 pub struct HuntProgress {
     /// Paid entries so far, including the one in progress.
     pub trips: u32,
-    /// Whether `EVENT_IN_SAFARI_ZONE` was set last time [`pick`] ran.
     was_inside: bool,
-    /// Consecutive ticks with no route to the hunting ground — see [`ROUTE_PATIENCE`].
     route_stuck: u32,
 }
 
@@ -158,17 +134,17 @@ impl HuntProgress {
     }
 }
 
-/// The ¥500 the gate charges per trip (`SafariZoneGate.asm:159-163`).
+/// What the gate charges per trip.
 pub const ENTRY_FEE: u32 = 500;
 
 const MONS_PER_BOX: usize = 20;
 
-/// Species in `targets` that are not owned yet — the only reason to still be in the zone.
+/// Species in `targets` not owned yet.
 pub fn wanted(state: &GameState, targets: &[PokemonSpecies]) -> Vec<PokemonSpecies> {
     targets.iter().copied().filter(|s| !state.pokedex_owned.contains(s)).collect()
 }
 
-/// The overworld half of a [`PolicyStep::SafariHunt`] — pay, pace, get ejected, pay again.
+/// The overworld half of a [`PolicyStep::SafariHunt`]: pay, pace, get ejected, pay again.
 pub fn pick(
     progress: &mut HuntProgress,
     state: &GameState,
@@ -178,7 +154,7 @@ pub fn pick(
     map: Map,
     max_trips: u32,
 ) -> Hunt {
-    // Ejection is not instantaneous, and the gap is a trap.
+    // Between the budget running out and the gate, the cartridge is walking the player out.
     let ejected = state.safari.is_some_and(|s| s.game_over);
     if ejected {
         return Hunt::Wait;
@@ -197,17 +173,14 @@ pub fn pick(
         println!("[safari] every target owned after {} trip(s) — done", progress.trips);
         return Hunt::Done;
     }
-    // Room for the next catch. A full party *and* a full open box makes `ItemUseBall` refuse with
-    // a text box, which from the policy's side is indistinguishable from a miss — it would throw
-    // the rest of the trip's balls at nothing.
+    // A full party and a full box make `ItemUseBall` refuse with a text box, which reads as a miss
+    // and would spend the trip's balls on nothing.
     if state.pokemon.len() >= 6 && state.boxed_pokemon.len() >= MONS_PER_BOX {
         println!("[safari] party and box {} are both full — no room for a catch, stopping",
             state.current_box + 1);
         return Hunt::Done;
     }
     if !inside {
-        // Between trips (or before the first one): the budget and the wallet decide whether there
-        // is another.
         if progress.trips >= max_trips {
             println!("[safari] {max_trips} trip(s) spent, still wanting {outstanding:?} — stopping");
             return Hunt::Done;
@@ -219,10 +192,8 @@ pub fn pick(
     }
 
     if state.map.map != map {
-        // Walk (back) in.
         return match step_toward(world_graph, &state.map, actions, map) {
             Some(action) => { progress.route_stuck = 0; Hunt::Walk(action) }
-            // Not a failure yet.
             None if progress.route_stuck < ROUTE_PATIENCE => {
                 progress.route_stuck += 1;
                 Hunt::Wait
@@ -237,7 +208,7 @@ pub fn pick(
 
     match actions.iter().find(|a| a.tile == MetaTile::Grass) {
         Some(action) => { progress.route_stuck = 0; Hunt::Walk(action.clone()) }
-        // A wait with no grass has to be bounded, and for a reason that is easy to miss.
+        // Bounded, or a hunt on a map with no reachable grass never ends.
         None if progress.route_stuck < ROUTE_PATIENCE => {
             progress.route_stuck += 1;
             Hunt::Wait
@@ -250,28 +221,25 @@ pub fn pick(
     }
 }
 
-/// Ticks (20 ms each, so ~8 s of game time) a hunt waits for a route to the hunting ground before
-/// concluding there is not one.
+/// Ticks a hunt waits for a route to the hunting ground before concluding there is none.
 const ROUTE_PATIENCE: u32 = 400;
 
-/// The best area to hunt each of the twelve species the zone adds to this save's dex, with its
-/// encounter-slot share there.
+/// The best area to hunt each species the zone adds to this save's dex, by encounter-slot share.
 pub mod grounds {
     use super::*;
 
-    /// Centre — Rhyhorn 19.9 %, Exeggcute 9.8+9.8 %, Nidorino 9.8 %, Nidorina 5.1 %, Parasect 5.1
-    /// %, Scyther 4.3 % (1.2 % in the east, its only other home).
+    /// Scyther 4.3 % here against 1.2 % in the east, its only other home.
     pub const CENTRE: &[PokemonSpecies] = &[
         PokemonSpecies::Rhyhorn, PokemonSpecies::Exeggcute, PokemonSpecies::Nidorino,
         PokemonSpecies::Nidorina, PokemonSpecies::Parasect, PokemonSpecies::Scyther,
     ];
-    /// East — Doduo 19.9 %, Kangaskhan 4.3 % (1.2 % in the west).
+    /// Kangaskhan 4.3 % here against 1.2 % in the west.
     pub const EAST: &[PokemonSpecies] = &[PokemonSpecies::Doduo, PokemonSpecies::Kangaskhan];
-    /// North — Paras 15.2 %, Venomoth 5.1 %, Chansey 4.3 % (1.2 % in the centre).
+    /// Chansey 4.3 % here against 1.2 % in the centre.
     pub const NORTH: &[PokemonSpecies] = &[
         PokemonSpecies::Paras, PokemonSpecies::Venomoth, PokemonSpecies::Chansey,
     ];
-    /// West — Tauros 4.3 % (1.2 % in the north).
+    /// Tauros 4.3 % here against 1.2 % in the north.
     pub const WEST: &[PokemonSpecies] = &[PokemonSpecies::Tauros];
 }
 
@@ -284,7 +252,6 @@ const LAND_CHAIN: [Map; 5] = [
 /// North → West has four warps in two pairs, and which one a leg wants depends on what it is for.
 const WEST_LANDING: Point8 = Point8 { x: 26, y: 0 };
 
-/// One hop toward `map` from wherever the player is standing.
 fn step_toward(world_graph: &WorldGraph, map: &MetaTileMap, actions: &[OverworldAction], to: Map)
     -> Option<OverworldAction>
 {
@@ -295,8 +262,7 @@ fn step_toward(world_graph: &WorldGraph, map: &MetaTileMap, actions: &[Overworld
             MetaTile::Connection { to_map, .. } => to_map == target && landing.is_none(),
             _ => false,
         };
-        // The pinned landing first, then any crossing to the same map — a hunt that cannot reach
-        // the preferred warp should still get *somewhere* rather than stand still.
+        // The pinned landing first, then any crossing to the same map rather than standing still.
         actions.iter().find(matches_landing).or_else(|| actions.iter().find(|a| match a.tile {
             MetaTile::Warp { to_map, .. } | MetaTile::Connection { to_map, .. } => to_map == target,
             _ => false,
@@ -313,8 +279,7 @@ fn step_toward(world_graph: &WorldGraph, map: &MetaTileMap, actions: &[Overworld
         .or_else(|| DeterministicPolicy::route_toward(world_graph, map, actions, to))
 }
 
-/// The overworld half of [`PolicyStep::SafariExit`] — walk out of the zone from wherever a hunt
-/// left us, and pop once we are standing on the gate mat.
+/// The overworld half of [`PolicyStep::SafariExit`]: walk out, and pop on the gate mat.
 pub fn exit(progress: &mut HuntProgress, state: &GameState, world_graph: &WorldGraph,
             actions: &[OverworldAction]) -> Hunt
 {
@@ -332,7 +297,7 @@ pub fn exit(progress: &mut HuntProgress, state: &GameState, world_graph: &WorldG
 }
 
 impl PolicyStep {
-    /// E3/E4 — hunt `targets` in `SafariZoneCenter`, then walk out through the gate.
+    /// Hunt `targets` in `SafariZoneCenter`, then walk out through the gate.
     pub fn safari_hunt_steps(targets: &'static [PokemonSpecies], max_trips: u32) -> Vec<Self> {
         let mut steps = vec![
             Self::Fly { to: Map::FuchsiaCity },
@@ -344,8 +309,7 @@ impl PolicyStep {
         steps
     }
 
-    /// E3 — sweep all four areas, hunting each species where its encounter slot is fattest (see
-    /// [`grounds`]).
+    /// Sweep all four areas, hunting each species where its encounter slot is fattest.
     pub fn safari_sweep_steps(max_trips: u32) -> Vec<Self> {
         let mut steps = vec![
             Self::Fly { to: Map::FuchsiaCity },
@@ -358,17 +322,15 @@ impl PolicyStep {
             (Map::SafariZoneNorth, grounds::NORTH),
             (Map::SafariZoneWest,  grounds::WEST),
         ] {
-            // No `enter` steps between hunts: the hunt walks itself in along [`LAND_CHAIN`],
-            // which is the *only* thing that works from both places a hunt can end — deep inside
-            // the previous area, or standing on the gate mat after an ejection.
+            // No `enter` between hunts: walking `LAND_CHAIN` is the one thing that works both from
+            // deep in the previous area and from the gate mat after an ejection.
             steps.push(Self::SafariHunt { targets, map: area, max_trips });
         }
         steps.extend(Self::safari_exit_steps());
         steps
     }
 
-    /// Out of the zone and back onto an outdoor Fuchsia tile, from wherever the last hunt ended —
-    /// deep in an area, or standing on the gate mat after an ejection.
+    /// Out of the zone and onto an outdoor Fuchsia tile, wherever the last hunt ended.
     fn safari_exit_steps() -> Vec<Self> {
         vec![Self::SafariExit, Self::enter(Map::FuchsiaCity)]
     }
@@ -378,25 +340,18 @@ impl PolicyStep {
 mod tests {
     use super::*;
 
-    /// The Safari Ball's own constants, pinned: the `[0,150]` rejection range and BallFactor 12
-    /// are what make a full-HP throw a flat 33.6 % on its second roll, and getting either wrong
-    /// would silently change every number this module prints.
+    /// The `[0,150]` rejection range and BallFactor 12 make a full-HP throw's second roll 86/256.
     #[test]
     fn a_full_hp_throw_collapses_to_the_ball_range() {
-        // Second roll at full HP: X = ((MaxHP*255)/12) / (MaxHP/4) = 85 → 86/256.
         let second = 86.0 / 256.0;
-        // Chansey, catch rate 30 (`data/pokemon/base_stats/chansey.asm`).
         assert!((ball_catch_chance(30, 200, 200) - (31.0 / 151.0) * second).abs() < 1e-6);
-        // Exeggcute, catch rate 90 — the same second roll, a much better first.
         assert!((ball_catch_chance(90, 200, 200) - (91.0 / 151.0) * second).abs() < 1e-6);
-        // A catch rate above the rejection ceiling cannot fail the *first* roll at all.
+        // A catch rate above the rejection ceiling cannot fail the first roll at all.
         assert!((ball_catch_chance(255, 200, 200) - second).abs() < 1e-6);
-        // Weakening does move the second roll — it is just never available in the Safari.
         assert!(ball_catch_chance(30, 200, 20) > ball_catch_chance(30, 200, 200));
     }
 
-    /// `add a` on the speed byte is a *carry*, not a wrap: over 127 and the target is gone
-    /// whatever else happens.
+    /// `add a` on the speed byte carries rather than wraps: over 127 the target always flees.
     #[test]
     fn a_fast_enough_target_always_flees() {
         assert_eq!(flee_chance(128, false, false), 1.0);
@@ -410,8 +365,7 @@ mod tests {
     #[derive(Clone, Copy, PartialEq, Debug)]
     enum Opening { Balls, BaitFirst, RockFirst }
 
-    /// Exact probability of catching a full-HP target under `opening`, over a `turns`-turn
-    /// horizon.
+    /// Exact probability of catching a full-HP target under `opening` within `turns` turns.
     fn catch_probability(opening: Opening, base_rate: u8, max_hp: u16, speed: u16, turns: u32) -> f64 {
         fn go(opening: Opening, base: u8, max_hp: u16, speed: u16, turns: u32,
               rate: u8, bait: u8, escape: u8, turn: u32) -> f64
@@ -428,8 +382,8 @@ mod tests {
             match throwable {
                 Opening::Balls => {
                     let p = ball_catch_chance(rate, max_hp, max_hp);
-                    // `PrintSafariZoneBattleText` on a turn with no fresh throw: decay whichever
-                    // counter is live, restoring the base rate when the escape counter expires.
+                    // A turn with no fresh throw decays the live counter; an expired escape counter
+                    // restores the base rate.
                     let (rate, bait, escape) = if bait > 0 {
                         (rate, bait - 1, escape)
                     } else if escape > 0 {
@@ -458,7 +412,7 @@ mod tests {
         go(opening, base_rate, max_hp, speed, turns, base_rate, 0, 0, 0)
     }
 
-    /// Why [`pick_battle_action`] only ever throws balls.
+    /// Balls alone beat opening with BAIT or ROCK on Chansey, which is why only balls are thrown.
     #[test]
     fn bait_and_rock_are_never_worth_throwing() {
         const HP: u16 = 200;
@@ -470,17 +424,14 @@ mod tests {
 
         assert!(balls > bait, "balls {balls:.3} should beat bait-first {bait:.3}");
         assert!(balls > rock, "balls {balls:.3} should beat rock-first {rock:.3}");
-        // The closed form the driver's log line prints agrees with the 30-turn expansion, which
-        // is what licenses `encounter_catch_chance` as the number to reason with.
+        // `encounter_catch_chance` agrees with the 30-turn expansion.
         let closed_form = encounter_catch_chance(
             ball_catch_chance(30, HP, HP), flee_chance(SPEED, false, false));
         assert!((balls - closed_form).abs() < 0.005,
             "30 balls is effectively the limit: {balls:.3} vs {closed_form:.3}");
     }
 
-    /// The same comparison for a target ROCK should suit best — Exeggcute is slow (speed stat
-    /// ~27) and already catchable (rate 90), so doubling it saturates the ball's first roll
-    /// outright.
+    /// Balls still beat ROCK on slow, catchable Exeggcute, where a doubled rate saturates roll one.
     #[test]
     fn rock_loses_even_where_it_looks_strongest() {
         let balls = catch_probability(Opening::Balls, 90, 200, 27, 30);
@@ -489,8 +440,7 @@ mod tests {
         assert!(balls > rock, "balls {balls:.3} should beat rock-first {rock:.3}");
     }
 
-    /// The two event bits share a byte and are one apart, so an off-by-one here would read "in
-    /// the zone" as "game over" — and the ejection test would pass for the wrong reason.
+    /// The Safari event bits share a byte one apart: an off-by-one reads "in the zone" as "game over".
     #[test]
     fn the_safari_event_bits_are_adjacent() {
         assert_eq!(SAFARI_EVENT_BYTE, 0x24F / 8);

@@ -1,17 +1,15 @@
-
 use super::super::*;
 
 use crate::pokemon::postgame::trades::trade_for;
 
 const NAME_RATER: &[u8] = include_bytes!("../../data/postgame-name-rater.bin");
 
-/// The three party members every leg keeps: Venusaur leads for Cut, Articuno carries Fly (which
-/// every leg starts with) and Vaporeon carries Surf.
+/// The members every leg keeps: Venusaur leads for Cut, Articuno carries Fly, Vaporeon Surf.
 const KEEP: usize = 3;
-/// Slots 3, 4 and 5 — Slowpoke, Aerodactyl, Hitmonlee on the entry fixture.
+/// Slots 3, 4 and 5: Slowpoke, Aerodactyl and Hitmonlee on the entry fixture.
 const BANK: &[u8] = &[3, 4, 5];
 
-/// Task G5 — the trade driver, proved on Abra → Mr. Mime at `Route2TradeHouse`.
+/// The trade driver, on Abra for Mr. Mime at `Route2TradeHouse`.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_trade_an_abra_for_a_mr_mime() {
@@ -40,11 +38,11 @@ fn can_trade_an_abra_for_a_mr_mime() {
     fixture.save_state_named("src/pokemon/data/postgame-mr-mime.bin").unwrap();
 }
 
-/// G5's output: Route 2 (outdoors, so the next leg can Fly), party Venusaur / Articuno / Vaporeon
-/// / Mr. Mime, dex 13, 8 Great Balls, five mons banked in box 1.
+/// `can_trade_an_abra_for_a_mr_mime`'s output: Route 2 outdoors, Mr. Mime in the party, five mons
+/// in box 1.
 const MR_MIME: &[u8] = include_bytes!("../../data/postgame-mr-mime.bin");
 
-/// Task G6a — Spearow → Farfetch'd at `VermilionTradeHouse`.
+/// Spearow for Farfetch'd at `VermilionTradeHouse`.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_trade_a_spearow_for_a_farfetchd() {
@@ -68,10 +66,10 @@ fn can_trade_a_spearow_for_a_farfetchd() {
     fixture.save_state_named("src/pokemon/data/postgame-farfetchd.bin").unwrap();
 }
 
-/// G6a's output: Vermilion City, party Venusaur / Articuno / Vaporeon / Farfetch'd, dex 15.
+/// `can_trade_a_spearow_for_a_farfetchd`'s output: Vermilion City, Farfetch'd in the party.
 const FARFETCHD: &[u8] = include_bytes!("../../data/postgame-farfetchd.bin");
 
-/// Task G6b — Nidoran♂ → Nidoran♀ at `UndergroundPathRoute5`, and the third trade.
+/// Nidoran♂ for Nidoran♀ at `UndergroundPathRoute5`.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_trade_a_nidoran_underground() {
@@ -94,10 +92,10 @@ fn can_trade_a_nidoran_underground() {
     fixture.save_state_named("src/pokemon/data/postgame-trades.bin").unwrap();
 }
 
-/// G6b's output: Route 5, party Venusaur / Articuno / Vaporeon / Nidoran♀, dex 17.
+/// `can_trade_a_nidoran_underground`'s output: Route 5, Nidoran♀ in the party.
 const NIDORAN: &[u8] = include_bytes!("../../data/postgame-trades.bin");
 
-/// Task G6c — Venonat → Tangela at `CinnabarLabTradeRoom`, the third of G6's three.
+/// Venonat for Tangela at `CinnabarLabTradeRoom`.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_trade_a_venonat_for_a_tangela() {
@@ -122,13 +120,13 @@ fn can_trade_a_venonat_for_a_tangela() {
 
 const AIDES: &[u8] = include_bytes!("../../data/postgame-aides.bin");
 
-/// Task K1 — a sixth in-game trade: Ponyta → Seel in `CinnabarLabFossilRoom`.
+/// Ponyta for Seel in `CinnabarLabFossilRoom`, from a boxed Ponyta.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_trade_a_boxed_ponyta_for_a_seel() {
-    /// Where H5 left the Ponyta in the open box (box 3, which is what `wCurrentBoxNum` reads).
+    /// Where the sweeps left the Ponyta in the open box.
     const PONYTA_BOX_SLOT: u8 = 2;
-    /// Rhyhorn — a lv25 with one move, the most expendable member of a full party of six.
+    /// Rhyhorn, lv25 with one move, the most expendable of six.
     const BANK_SLOT: u8 = 5;
 
     let trade = trade_for(PokemonSpecies::Ponyta);
@@ -141,7 +139,7 @@ fn can_trade_a_boxed_ponyta_for_a_seel() {
     assert_eq!(before.boxed_pokemon[PONYTA_BOX_SLOT as usize].species, trade.give,
         "box slot {PONYTA_BOX_SLOT} of the open box should be the Ponyta H5 caught");
 
-    // The withdraw first — it is the half `trade_steps` normally spends a catch on.
+    // The withdraw first, the half `trade_steps` usually spends a catch on.
     let withdrawn = fixture.run_until(|s| s.pokemon.iter().any(|p| p.species == trade.give));
     println!("Ponyta out of box {} and in the party at {:?}", withdrawn.current_box + 1, withdrawn.map.map);
 
@@ -157,8 +155,7 @@ fn can_trade_a_boxed_ponyta_for_a_seel() {
 
 const FLY_BIKE: &[u8] = include_bytes!("../../data/postgame-fly-bike.bin");
 
-/// All nine in-game trades, each with the give-species deliberately *not* the party lead, and
-/// each answered by the agent rather than by a `PartyScript`.
+/// All nine in-game trades, the give-species never the lead, each answered by the agent.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn every_in_game_trade_can_be_made_by_talking_to_the_trader() {
@@ -170,8 +167,8 @@ fn every_in_game_trade_can_be_made_by_talking_to_the_trader() {
         let mut fixture = TestFixture::new(FLY_BIKE, Duration::from_mins(30),
             PolicyStep::walk_up_and_trade_steps(trade));
 
-        // Seed before the first tick, exactly as `branch_points` does: the policy sees it only
-        // through an ordinary `GameState`.
+        // Seed before the first tick, as `branch_points` does, so the policy sees it only through
+        // `GameState`.
         let before = fixture.game_state();
         assert!(!before.pokemon.iter().any(|mon| mon.species == trade.give),
             "the snapshot already carries a {:?}; the seed below would be untestable", trade.give);
@@ -192,7 +189,7 @@ fn every_in_game_trade_can_be_made_by_talking_to_the_trader() {
 
         assert!(!state.pokemon.iter().any(|mon| mon.species == trade.give),
             "the {:?} was not handed over; a trade swaps rather than adds", trade.give);
-        // Waited for rather than sampled beside the party.
+        // Waited for rather than sampled.
         assert!(fixture.try_run_until(|s| s.pokedex_owned.contains(&trade.get)).is_some(),
             "{:?} never reached the Pokédex", trade.get);
         assert_eq!(state.map.map, trade.at, "the leg ends where the trader is");

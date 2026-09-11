@@ -1,4 +1,3 @@
-
 use super::super::*;
 
 use crate::pokemon::postgame::fishing::{FishGoal, Rod};
@@ -13,8 +12,7 @@ fn can_get_the_old_rod() {
     assert!(!fixture.game_state().bag.iter().any(|i| i.id == ItemId::OldRod), "entry fixture already has a rod");
 
     let state = fixture.run_leg(|s| s.bag.iter().any(|i| i.id == ItemId::OldRod));
-    // Outdoors, not in the guru's house: the leg's last step walks back out so the next leg's
-    // `Fly` is not refused for being indoors.
+    // Outdoors: the leg walks back out so the next leg's `Fly` is not refused.
     assert_eq!(state.map.map, Map::VermilionCity);
     println!("old rod in the bag — bag now {} entries", state.bag.len());
 
@@ -34,7 +32,7 @@ fn can_fish_a_wild_battle_out_of_the_water() {
     let battles = std::cell::Cell::new(0u32);
     let in_battle = std::cell::Cell::new(false);
     fixture.run_until(|s| {
-        // Count battle *entries*, not ticks.
+        // Count battle entries, not ticks.
         let now = s.battle.is_some();
         if now && !in_battle.get() {
             battles.set(battles.get() + 1);
@@ -69,14 +67,14 @@ fn can_catch_a_magikarp_on_the_old_rod() {
     assert!(state.pokedex_owned.contains(&PokemonSpecies::Magikarp));
     assert_eq!(state.pokemon[4].species, PokemonSpecies::Magikarp);
 
-    // And let the battle finish unwinding before snapshotting.
+    // Let the battle finish unwinding before snapshotting.
     fixture.run_until(|s| s.battle.is_none() && s.map.map == Map::PalletTown);
     fixture.save_state_named("src/pokemon/data/postgame-magikarp.bin").unwrap();
 }
 
 const MAGIKARP: &[u8] = include_bytes!("../../data/postgame-magikarp.bin");
 
-/// Task C4 — the Good Rod, then proof that it opens a different table.
+/// The Good Rod, and proof that it opens a different table.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_the_good_rod_and_catch_a_goldeen() {
@@ -99,16 +97,17 @@ fn can_get_the_good_rod_and_catch_a_goldeen() {
     fixture.save_state_named("src/pokemon/data/postgame-good-rod.bin").unwrap();
 }
 
-/// C4's output: Pallet Town, both rods in the bag, party of six ending Magikarp / Goldeen.
+/// `can_get_the_good_rod_and_catch_a_goldeen`'s output: Pallet Town, both rods, the party ending
+/// Magikarp and Goldeen.
 const GOOD_ROD: &[u8] = include_bytes!("../../data/postgame-good-rod.bin");
 
-/// Task C5 — the Super Rod, and the map-specific table it opens.
+/// The Super Rod, and the map-specific table it opens.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_the_super_rod_and_catch_a_tentacool() {
     let goal = FishGoal::Catch { species: PokemonSpecies::Tentacool, max_casts: 60 };
     let mut steps = PolicyStep::super_rod_steps();
-    // Bank the Magikarp and the Goldeen, back to front so the first deposit does not renumber the
+    // Bank the Magikarp and the Goldeen back to front, so the first deposit does not renumber the
     // second.
     steps.push(PolicyStep::Fly { to: Map::ViridianCity });
     steps.push(PolicyStep::enter(Map::ViridianPokecenter));
@@ -141,8 +140,7 @@ fn can_get_the_super_rod_and_catch_a_tentacool() {
     fixture.save_state_named("src/pokemon/data/postgame-fishing.bin").unwrap();
 }
 
-/// The fishing row in the action menu — water within reach plus a rod in the bag, taken by a
-/// policy that knows nothing about fishing beyond picking the row.
+/// The action menu offers a cast with water in reach and a rod in the bag, and picking it fishes.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn the_action_menu_offers_a_cast_when_a_rod_is_in_the_bag() {
@@ -174,8 +172,7 @@ fn the_action_menu_offers_a_cast_when_a_rod_is_in_the_bag() {
     let mut fixture = TestFixture::with_policy(FISHING, Duration::from_mins(30),
         Box::new(FishTheRow { casts: 0 }));
 
-    // The row is there before anything is driven, and it names the best rod rather than the
-    // first.
+    // The row is there before anything is driven, and names the best rod.
     let offered = fixture.game_state().map.actions().into_iter()
         .find(|a| matches!(a.tile, MetaTile::Fish { .. }))
         .expect("Pallet's beach with three rods in the bag should offer a cast");
@@ -183,7 +180,7 @@ fn the_action_menu_offers_a_cast_when_a_rod_is_in_the_bag() {
         "the row should carry the best rod in the bag");
     assert_eq!(offered.to_string(), "Fish with the Super Rod");
 
-    // ── The LLM path, which is the only reason this row exists ──
+    // ── The LLM path ──
     let id = crate::llm::tools::overworld_id(&fixture.game_state(), &offered);
     let menu = crate::llm::tools::overworld_menu(&fixture.game_state(), None);
     let row = menu.iter().find(|item| item.id == id)
@@ -193,8 +190,7 @@ fn the_action_menu_offers_a_cast_when_a_rod_is_in_the_bag() {
     assert_eq!(crate::llm::tools::resolve_overworld(&fixture.game_state(), &id).as_ref(), Some(&offered),
         "the id the model would quote back should re-resolve to the same action");
 
-    // Casting is the only thing this policy does, so any wild battle at all came out of the
-    // water.
+    // Casting is all this policy does, so any wild battle came out of the water.
     let bites = std::cell::Cell::new(0u32);
     let in_battle = std::cell::Cell::new(false);
     let seen = std::cell::RefCell::new(Vec::new());
@@ -213,7 +209,7 @@ fn the_action_menu_offers_a_cast_when_a_rod_is_in_the_bag() {
     assert!(bites.get() >= 2, "the row should keep producing wild battles");
     assert_eq!(fixture.game_state().map.map, Map::PalletTown, "fishing does not move the player");
 
-    // Every cast has to say what it did, and for a long time none of them did.
+    // Every cast says what it did.
     let mut outcomes = 0;
     for event in fixture.agent.drain_events() {
         match event {

@@ -1,17 +1,5 @@
-//! Phase 0, tasks 0.5 / 0.6 — item PC storage: deposit and withdraw.
-//! ```text
-//! overworld            walk below the PC, face UP, press A     (pc.asm ActivatePC)
-//!   → "<PLAYER> turned on the PC."                             mash A
-//!   → PC parent menu                                           cursor → 1, A
-//!         BILL's PC / <PLAYER>'s PC / PROF.OAK's PC / <PKMN>LEAGUE / LOG OFF
-//!   → "Accessed my PC. Accessed Item Storage System."          mash A
-//!   → player's PC menu                                         cursor → 0 or 1, A
-//!         WITHDRAW ITEM / DEPOSIT ITEM / TOSS ITEM / LOG OFF
-//!   → "What do you want to deposit?" + item list               cursor → the item's row, A
-//!   → "How many?"                                              cursor → qty, A
-//!   → "<ITEM> was stored via PC."                              mash A → back to the item list
-//!   → B until the overworld returns
-//! ```
+//! Item PC storage, deposit and withdraw: face the PC and press A, pick `<PLAYER>'s PC`, the
+//! operation, the item and the quantity, then B until the overworld returns.
 
 use gb::geometry::Point8;
 use gb::joypad::JoypadButton;
@@ -25,20 +13,17 @@ use crate::pokemon::{PokemonApi, PokemonApiTrait};
 /// Which way an item is moving between the bag and PC item storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PcItemOp {
-    /// Bag → PC storage (`wNumBagItems` → `wNumBoxItems`).
     Deposit,
-    /// PC storage → bag.
     Withdraw,
 }
 
 impl PcItemOp {
-    /// Index of this operation in the player's PC menu: `WITHDRAW ITEM` 0, `DEPOSIT ITEM` 1,
-    /// `TOSS ITEM` 2, `LOG OFF` 3 (`engine/menus/players_pc.asm:243`).
+    /// Row in the player's PC menu (`engine/menus/players_pc.asm`).
     fn menu_index(self) -> u8 {
         match self { Self::Withdraw => 0, Self::Deposit => 1 }
     }
 
-    /// Where the item comes *from* — the inventory the on-screen list is showing.
+    /// Held in the inventory the on-screen list shows.
     fn source_quantity(self, api: &PokemonApi<'_>, item: ItemId) -> u8 {
         match self {
             Self::Deposit => api.bag_item_quantity(item),
@@ -62,31 +47,26 @@ pub struct ItemPcState {
     pub qty: u8,
     /// Coordinate of the PC hidden object, from `MetaTileMap::pc_locations`.
     pub pc: Point8,
-    /// Quantity held in the source inventory when the operation began — the baseline completion
-    /// is measured against, so a partial move (`qty` < stack) is detected as precisely as a whole
-    /// one.
+    /// Held in the source inventory at the start, the baseline a partial move is measured against.
     pub start_qty: u8,
     /// Press/release alternation, so every input is a fresh rising edge.
     pub press: bool,
-    /// Set once the PC menu has been opened, i.e. we have left the overworld at least once.
+    /// Set once the driver has left the overworld.
     pub entered_menu: bool,
 }
 
 impl ItemPcState {
-    /// `qty` is clamped to `start_qty`, and that is not tidiness — it is the difference between
-    /// working and hanging.
+    /// `qty` is clamped to `start_qty`, or the completion test waits for more than exists.
     pub fn new(op: PcItemOp, item: ItemId, qty: u8, pc: Point8, start_qty: u8) -> Self {
         Self { op, item, qty: qty.min(start_qty), pc, start_qty, press: true, entered_menu: false }
     }
 }
 
-/// One agent tick of the deposit/withdraw driver.
 pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: ItemPcState) -> Result<(), String> {
     let game_mode = api.game_mode().unwrap_or(GameMode::Overworld);
     let moved = s.start_qty.saturating_sub(s.op.source_quantity(api, s.item));
 
-    // ── Done: the requested quantity has left the source inventory
-    // ──────────────────────────────
+    // Done: the requested quantity has left the source inventory.
     if s.entered_menu && moved >= s.qty {
         if game_mode != GameMode::Overworld {
             // Gen 1 drops back to the item list after each transfer, so back out with B.
@@ -103,21 +83,17 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: ItemPcState) 
         return Ok(());
     }
 
-    // ── Back in the overworld with nothing moved — the attempt fizzled (e.g. "You have nothing
-    // to deposit.").
+    // Back in the overworld with nothing moved: the attempt fizzled.
     if s.entered_menu && game_mode == GameMode::Overworld {
         api.release_all_buttons();
         agent.set_state(AgentState::Idle);
         return Ok(());
     }
 
-    // ── Still outside: walk to the tile below the PC and face up, then press A
-    // ───────────────────
     if game_mode == GameMode::Overworld {
         let gs = agent.observe_state(api)?;
         match gs.map.route_to_face_dir(s.pc, Some(PlayerFacingDirection::Up)).as_deref() {
             Some([]) => {
-                // In position and facing the PC — mash A to turn it on.
                 api.release_all_buttons();
                 if s.press { api.press_button(JoypadButton::A); }
                 agent.set_state(AgentState::UsingItemPc(ItemPcState { press: !s.press, ..s }));
@@ -136,8 +112,6 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: ItemPcState) 
         return Ok(());
     }
 
-    // ── Inside the menus
-    // ────────────────────────────────────────────────────────────────────────
     let s = ItemPcState { entered_menu: true, ..s };
     if !s.press {
         api.release_all_buttons();
@@ -163,7 +137,6 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: ItemPcState) 
         else if shown > want { JoypadButton::Down }
         else { JoypadButton::A }
     } else if tbid == Some(TextBoxId::ListMenuBox) {
-        // The item list — the bag when depositing, PC storage when withdrawing.
         match s.op.source_position(api, s.item) {
             Some(target) => nav(current + scroll, target),
             None => JoypadButton::B,

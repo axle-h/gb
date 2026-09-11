@@ -154,8 +154,8 @@ mod tests {
         assert_eq!(for_cartridge(&rom).combination, 0);
     }
 
-    /// Every combination must address four colours that exist, including the four that
-    /// deliberately start mid-palette.
+    /// Every combination must address four colours that exist, including the four that start
+    /// mid-palette.
     #[test]
     fn every_combination_is_in_range() {
         for (i, combination) in COMBINATIONS.iter().enumerate() {

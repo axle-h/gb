@@ -9,9 +9,7 @@ use crate::published::{Published, UiEvent, UiEventBody};
 
 pub(crate) const MAX_BYTES: u64 = 256 * 1024 * 1024;
 
-/// The most events `/api/history` will return, however far back `since` reaches. The SPA keeps
-/// 500 entries, so this is already more than it can show; the cap exists so a month-old run
-/// cannot make a page load allocate a hundred megabytes.
+/// The most events `/api/history` returns, so an old run cannot make a page load allocate the file.
 pub const MAX_BACKLOG: usize = 2_000;
 
 /// Write every event to `path` until `stop` is set or the process ends.
@@ -347,8 +345,7 @@ mod tests {
         assert_eq!(got, vec!["".to_string(), "only".to_string()]);
     }
 
-    /// The deployed failure: a transcript far larger than anything the backlog returns is served
-    /// without being read whole.
+    /// A transcript far larger than the backlog is served without being read whole.
     #[test]
     fn a_huge_transcript_is_not_read_whole() {
         let scratch = Scratch::new("transcript-huge");
@@ -362,10 +359,8 @@ mod tests {
                     .unwrap();
             }
         }
-        // The cap is honoured, and the values prove the loop *stopped* rather than read on and
-        // threw the rest away: `read_since` pushes every line it parses and has no discard path,
-        // so a result holding exactly the last `MAX_BACKLOG` seqs is a result that broke at the
-        // cap.
+        // `read_since` has no discard path, so exactly the last `MAX_BACKLOG` seqs means it
+        // stopped at the cap.
         let events = read_since(&path, 0);
         assert_eq!(events.len(), MAX_BACKLOG);
         assert_eq!(events[0]["seq"], total - MAX_BACKLOG as u64);
@@ -377,8 +372,7 @@ mod tests {
         assert_eq!(tail[0]["seq"], total - 10);
         assert_eq!(last_seq(&path), Some(total - 1));
 
-        // The other half of the name — *not read whole* — is about the reader underneath, and it
-        // is measured rather than timed.
+        // Not read whole: measured by the reader's position rather than timed.
         let length = std::fs::metadata(&path).unwrap().len();
         let mut lines = RevLines::new(std::fs::File::open(&path).unwrap());
         for _ in 0..MAX_BACKLOG {

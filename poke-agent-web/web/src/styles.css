@@ -29,9 +29,7 @@ body {
   height: 100vh;
 }
 
-/* `flex-wrap` because this row is six-plus items and one of them is an error message that can run to
-   40 characters: without it the connection pill is pushed off the right-hand edge on a laptop, and
-   the pill is the one thing here that says whether the page is live at all. */
+/* `flex-wrap`, so a long run status cannot push the connection pill off the edge. */
 header {
   display: flex;
   flex-wrap: wrap;
@@ -42,9 +40,7 @@ header {
   background: var(--panel);
 }
 
-/* Who is playing, as one unit: it wraps and truncates together rather than the model name being
-   orphaned onto a line of its own. A model id can be `qwen/qwen3-coder-30b-a3b-instruct`, so it is
-   the part that gives way — the ellipsis is on the name and the full string is on its `title`. */
+/* Who is playing wraps and truncates as one unit; the ellipsis falls on the model name. */
 header .who {
   display: flex;
   align-items: baseline;
@@ -94,21 +90,15 @@ main {
   flex: 1;
   min-height: 0;
   display: grid;
-  /* 640px is 160×4, so the canvas lands on an exact 4× multiple of the Game Boy's pixels wherever
-     there is room for it. */
+  /* 640px is 160×4, an exact multiple of the Game Boy's pixels. */
   grid-template-columns: minmax(320px, 640px) 1fr;
-  /* ⚠️ `minmax(0, 1fr)`, not the implicit `auto`. An auto row is sized by its content, so both
-     columns would grow past the viewport and the page would scroll as a whole — which is only
-     invisible while the columns happen to fit. Both of them scroll inside themselves instead. */
+  /* `minmax(0, 1fr)`, not `auto`, so each column scrolls inside itself rather than the page. */
   grid-template-rows: minmax(0, 1fr);
   gap: 16px;
   padding: 16px;
 }
 
-/* ⚠️ `overflow-y` and `min-height: 0`, or the party list is silently cut off. The canvas is 576px
-   tall at the 640px column width, and a six-Pokémon party under it exceeds the viewport on any
-   laptop — a flex item's default `min-height: auto` refuses to shrink, so the overflow lands
-   outside the box rather than scrolling inside it. */
+/* `min-height: 0` lets this flex item shrink, so the party scrolls rather than being cut off. */
 .left {
   display: flex;
   flex-direction: column;
@@ -137,16 +127,12 @@ main {
   width: 100%;
   height: auto;
   background: #000;
-  /* An `outline` rather than a `border`: a border is inside the box under `border-box`, which would
-     leave the canvas 638px wide in a 640px column — 3.99 device pixels per Game Boy pixel, and a
-     couple of visibly narrow rows. */
+  /* An `outline`, not a border, which under `border-box` would take the canvas off an exact multiple. */
   outline: 1px solid var(--line);
   border-radius: 4px;
 }
 
-/* The game is stopped on a spent quota. The frame stays visible under the plate rather than being
-   blanked: it is the screen the run will carry on from, and a black rectangle would read as a fault
-   where a dimmed picture reads as a wait. */
+/* A parked run keeps its last frame, dimmed, under the plate. */
 .screen canvas.paused {
   filter: brightness(45%) saturate(60%);
 }
@@ -156,8 +142,6 @@ main {
   inset: 0;
   display: grid;
   place-items: center;
-  /* Pointer events pass through: there is nothing to click here, and swallowing them would break a
-     right-click-save of the frame underneath. */
   pointer-events: none;
 }
 
@@ -166,10 +150,7 @@ main {
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  /* ⚠️ Not inherited, and its absence is not subtle: `.screen` sets `line-height: 0` to keep the
-     canvas from sitting on a text baseline, so a stack of spans inside it collapses to zero-height
-     line boxes and draws all three lines on top of one another. `.screen-overlay` restores it for
-     the same reason. */
+  /* `.screen` sets `line-height: 0`, so it has to be restored here. */
   line-height: 1.4;
   padding: 10px 18px;
   border: 1px solid var(--line);
@@ -179,7 +160,6 @@ main {
 }
 
 .screen-paused .word {
-  /* Wide tracking so six characters read as a plate rather than as a word in a sentence. */
   letter-spacing: 0.25em;
   /* The indent that centres a tracked word: the trailing letter-space is part of the last glyph. */
   text-indent: 0.25em;
@@ -218,16 +198,12 @@ main {
   gap: 10px;
 }
 
-/* The trainer's name and the map read as one pair of headings — who is playing and where they are
-   — so they share a size rather than one outranking the other. */
 .trainer,
 .place {
   font-size: 15px;
   font-weight: 600;
 }
 
-/* The ID is a fixed five digits beside a name of any width; tabular figures stop the digits
-   shuffling as the panel re-renders several times a second. */
 .trainer + .dim {
   font-variant-numeric: tabular-nums;
 }
@@ -242,16 +218,12 @@ main {
   margin: 6px 0 2px;
 }
 
-/* One 128×16 sheet of eight badges, decoded from the ROM by /api/badges.png and drawn at 2×. The
-   art is line-work on a transparent background, so an unearned badge is the same sprite turned
-   down rather than a second sprite. */
+/* One 128×16 sheet of eight badges drawn at 2×; an unearned badge is the same sprite dimmed. */
 .badge {
   width: 32px;
   height: 32px;
   background-image: url('/api/badges.png');
-  /* The sheet is eight 16×16 badges in a row, drawn at 2×; `--slot` is which one, set by the
-     component. Size, stride and offset are three views of the same number and are kept together, so
-     the phone block below can halve all three by restating them. */
+  /* Size, stride and offset all derive from `--slot`, so the phone block restates all three. */
   background-size: 256px 32px;
   background-position: calc(var(--slot) * -32px) 0;
   background-repeat: no-repeat;
@@ -268,8 +240,7 @@ main {
   color: var(--accent);
 }
 
-/* Two columns of three rather than one of six: a card is ~60px tall, so a full party stacked would
-   be 360px under a 576px canvas. `auto-fill` puts it back to one column when the panel is narrow. */
+/* `auto-fill` drops to one column when the panel is narrow. */
 .party {
   list-style: none;
   margin: 10px 0 0;
@@ -279,9 +250,7 @@ main {
   gap: 6px 12px;
 }
 
-/* The sprite spans both rows; name and level sit above the health bar. Every cell is placed
-   explicitly, because the status chip is conditional and auto-placement would reflow the whole card
-   the moment a Pokémon fell asleep. */
+/* Every cell is placed explicitly, so the conditional status chip cannot reflow the card. */
 .party li {
   display: grid;
   grid-template-columns: 56px minmax(0, 1fr) auto;
@@ -297,8 +266,7 @@ main {
   image-rendering: pixelated;
   width: 56px;
   height: 56px;
-  /* A sprite that has not arrived must not reflow the row. `alt` is empty for a related reason: the
-     name is right beside it, and a screen reader gains nothing from hearing it twice. */
+  /* Sized up front so a sprite that has not arrived does not reflow the row. */
   object-fit: contain;
 }
 
@@ -383,10 +351,7 @@ main {
 
 /* ── Conversation ───────────────────────────────────────────────────────────────────────────── */
 
-/* A column of a fixed-height bar over a scrolling list. The list used to be `position: absolute;
-   inset: 0`, which is not an option now that something sits above it — so the height has to be
-   bounded the ordinary way, and `min-height: 0` is what stops a flex item refusing to shrink below
-   its content. */
+/* `min-height: 0` bounds the list, so it scrolls under the bar rather than growing. */
 .conversation {
   position: relative;
   flex: 1;
@@ -436,10 +401,7 @@ main {
   padding: 1px 0;
 }
 
-/* The clock. `tabular-nums` is not decoration: without it the column's own digits shift by a pixel
-   or two between rows on any font that has proportional figures, and a column of times that does not
-   line up is worse than no column. It is dimmer than the gutter beside it because it is the least
-   important thing on the row — you read it when you are asking *when*, and never otherwise. */
+/* `tabular-nums`, so the times line up between rows. */
 .entry .at {
   color: var(--dim);
   opacity: 0.65;
@@ -460,8 +422,7 @@ main {
   overflow-wrap: anywhere;
 }
 
-/* The line itself is the control that reveals the JSON behind it — a button rather than a div so
-   it is reachable by keyboard, but styled as the text it already was. */
+/* A button for keyboard reach, styled as plain text. */
 .entry .body .line {
   display: inline;
   padding: 0;
@@ -512,9 +473,7 @@ main {
   color: var(--bad);
 }
 
-/* W9. The one agent event that is a bug report rather than a narration, so it is the one that does
-   not get to look like the rest of the log — a run that quietly rescues itself for an hour should be
-   obvious at a glance from the number of these. */
+/* A bug report rather than narration, so it stands out from the log. */
 .entry.watchdog .chip,
 .entry.watchdog .body {
   color: var(--bad);
@@ -534,25 +493,14 @@ main {
   cursor: pointer;
 }
 
-/* The phone's pane tabs. A desk has room for all three panes at once, so the bar only exists below
-   the 640px breakpoint — the phone block at the bottom of this file is where it is switched on and
-   where the tab-* classes on <main> mean anything. */
+/* The phone's pane tabs, switched on only in the 640px block. */
 .pane-tabs {
   display: none;
 }
 
-/* ── Narrow screens ─────────────────────────────────────────────────────────────────────────────
-   Two breakpoints, and they answer different questions. At 900px the two columns stop fitting side
-   by side and become two rows. At 640px — a phone — the question is no longer layout but *budget*:
-   there are about 700 usable pixels of height, the Game Boy screen alone wants 373 of them at full
-   width, and what is left over is the thing the page is actually for. So below 640 everything that
-   is not the screen or the log gives up height: the canvas is capped, the party halves, the header's
-   figures fold away and the operator's lines go. */
+/* ── Narrow screens: 900px stacks the columns, 640px spends the height on the screen and the log ── */
 
-/* One column: the screen and the panels above, the log below. Everything here follows from that
-   stacking rather than from the width — which is why the canvas cap lives at this breakpoint and not
-   only at the phone one. Side by side the picture is bounded by its column; stacked it is bounded by
-   nothing, and 744px of tablet width is a 670px-tall picture with a 240px log under it. */
+/* Stacked, the canvas is bounded by nothing, so the height cap lives at this breakpoint too. */
 @media (width < 900px) {
   main {
     grid-template-columns: 1fr;
@@ -572,8 +520,7 @@ main {
   }
 }
 
-
-/* ── The model's side of the conversation (W4) ───────────────────────────────────────────────── */
+/* ── The model's side of the conversation ───────────────────────────────────────────────────── */
 
 header .context {
   color: var(--dim);
@@ -582,7 +529,6 @@ header .context {
   gap: 6px;
 }
 
-/* The gauge is the only thing on the page that says "this run has a lifetime". */
 header .gauge {
   width: 56px;
   height: 6px;
@@ -597,8 +543,7 @@ header .gauge .fill {
   background: var(--accent);
 }
 
-/* What the run is doing right now (W6). `playing` is the quiet state and is styled as such: the
-   others are the ones a viewer might want to notice. */
+/* `playing` is the quiet state; the others are worth noticing. */
 header .run {
   color: var(--dim);
 }
@@ -628,7 +573,6 @@ header .run.error {
   font-style: italic;
 }
 
-/* A turn header is the log's paragraph break: the only entry with space above it. */
 .entry.turn {
   margin-top: 10px;
   border-top: 1px solid var(--line);
@@ -647,23 +591,18 @@ header .run.error {
   color: var(--warn);
 }
 
-/* The model's prose is the thing a viewer is actually here to read. */
 .entry.assistant .body {
   color: var(--text);
 }
 
-/* The model's thinking. Dimmer and italic than everything else on purpose: it is the one thing in
-   the log that is not an account of what happened, and while it is live it can be several hundred
-   words arriving at reading speed. Once it is over it collapses to a single line — see
-   `Conversation.tsx`, where "live" means "still the last row". */
+/* The model's thinking, dimmed; it collapses once another model row follows it. */
 .entry.reasoning .chip,
 .entry.reasoning .body {
   color: var(--dim);
   font-style: italic;
 }
 
-/* A live thought is capped rather than allowed to fill the pane, and scrolls within its own box so
-   the rows above it stay where the viewer left them. */
+/* A live thought is capped and scrolls in its own box. */
 .entry.reasoning.live .body {
   display: block;
   max-height: 9em;
@@ -674,7 +613,6 @@ header .run.error {
   content: '';
 }
 
-/* Three dots that only exist while the model is actually thinking. */
 .entry.reasoning.live .chip::after {
   content: '…';
   animation: thinking 1.2s steps(4, end) infinite;
@@ -703,34 +641,26 @@ header .run.error {
   color: #7fa8d4;
 }
 
-/* A call the turn layer refused. It still happened and still cost a round trip, so it is a row
-   rather than a silence — but it answered nothing, so it does not read like a call that did. */
 .entry.tool.refused .chip,
 .entry.tool.refused .body {
   color: var(--warn);
 }
 
-/* `report_issue`: the model saying the agent itself is wrong. Not a failure — the turn carries on
-   and it still has to decide — but the one row in the log a person is actually being asked to read,
-   so it is the only tool row that is not the calm blue above. */
+/* `report_issue` is written for a person, so it is the one tool row not in the calm blue. */
 .entry.tool.issue .chip,
 .entry.tool.issue .body {
   color: var(--warn);
   font-weight: 600;
 }
 
-/* The ▸/▾ beside a tool line: there is something under this row, and there is not under the others. */
 .entry .disclose {
   margin-left: 6px;
   opacity: 0.55;
-  /* Bigger than the text it sits beside rather than smaller: it is the only thing on the row that
-     is a control, and at 0.85em it read as punctuation. `line-height: 1` keeps the taller glyph
-     from growing the line box and shuffling every row in the log. */
+  /* `line-height: 1` keeps the larger glyph from growing the line box. */
   font-size: 1.2em;
   line-height: 1;
 }
 
-/* What a tool call reveals: what was asked, what came back, and the picture if there was one. */
 .tool-detail {
   display: block;
   margin: 2px 0 8px;
@@ -751,9 +681,7 @@ header .run.error {
   letter-spacing: 0;
 }
 
-/* ⚠️ A tool answer is prose and JSON both, and some of it is long — `read_party` is six Pokémon.
-   It wraps rather than scrolling sideways (unlike `.raw`, which is a wire message and is read as
-   lines), and the height is capped so one map answer cannot push the whole log off the screen. */
+/* Wraps, unlike `.raw`, and is height-capped so one answer cannot push the log away. */
 .tool-detail .raw {
   max-height: 320px;
   overflow-y: auto;
@@ -761,9 +689,7 @@ header .run.error {
   word-break: break-word;
 }
 
-/* The map the model was looking at. Full width of the log column and never taller than about half
-   the pane, so opening one is a look rather than a scroll. `image-rendering` because it is Game Boy
-   tile art scaled by whatever the column happens to be: smoothing it is a different picture. */
+/* Game Boy tile art at an arbitrary scale; smoothing it changes the picture. */
 .tool-image {
   display: block;
   max-width: 100%;
@@ -787,14 +713,7 @@ header .run.error {
   font-style: italic;
 }
 
-/* There is deliberately no "new run" control here any more. Starting the game over is `/reset-game`,
-   a URL somebody types: the browser collects `GB_ADMIN_TOKEN` in its own password dialog, so this
-   page holds no token, no `prompt()` and no error states — and nothing links to it, because a GET
-   that resets the game must not be reachable by a prefetch or a middle-click. */
-
-/* ── The Hall of Fame (the leaderboard) ─────────────────────────────────────────────────────────
-   An overlay rather than a panel: the left column is the screen and the party, the right is the
-   log, and neither has room for a table a viewer looks at once an hour. */
+/* ── The Hall of Fame ─────────────────────────────────────────────────────────────────────────── */
 
 .entry.hall_of_fame .chip,
 .entry.hall_of_fame .body {
@@ -817,7 +736,6 @@ header .trophy:hover {
   border-color: var(--accent);
 }
 
-/* The repo and its author: two round marks at the same height as the trophy, quiet until hovered. */
 .links {
   display: inline-flex;
   align-items: center;
@@ -866,9 +784,7 @@ header .trophy:hover {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  /* `max-height` plus the scroller below, rather than letting the panel grow: a hundred rows would
-     otherwise push the header off the top of the viewport, and the header holds the only close
-     button. */
+  /* Capped so a long board cannot push the header, which holds the only close button, off screen. */
   max-width: 720px;
   max-height: 80vh;
   width: 100%;
@@ -905,8 +821,7 @@ header .trophy:hover {
   margin: 4px 0;
 }
 
-/* ⚠️ `min-height: 0` on a flex child, or the scroller grows to fit its content and the panel's
-   `max-height` never takes effect — the same hazard the conversation pane carries. */
+/* `min-height: 0` on a flex child, or the panel's `max-height` never takes effect. */
 .leaderboard .scroller {
   min-height: 0;
   overflow: auto;
@@ -933,13 +848,7 @@ header .trophy:hover {
   padding: 3px 10px 3px 0;
 }
 
-/* Numbers line up on the right so two runs' times can be compared by eye, which is the whole
-   purpose of putting them in a table.
-
-   ⚠️ Not `.right`: that is the *page's* right-hand column, and it is `display: flex`. A `<td>` given
-   it becomes a flex container, its text becomes an anonymous flex item at `flex-start`, and
-   `text-align` stops doing anything at all — which is what the four numeric columns here used to do,
-   quietly, for as long as they existed. */
+/* Not `.right`, which is the page's flex column and would stop `text-align` working in a cell. */
 .leaderboard .num {
   padding-right: 16px;
   text-align: right;
@@ -949,11 +858,7 @@ header .trophy:hover {
   background: var(--bg);
 }
 
-/* On a phone the agent is wider than the panel — `anthropic/claude-sonnet-5 (258 turns, 9.6k tokens)`
-   is 50 characters — and a table that scrolls sideways hides it behind the very edge of the screen,
-   which is the one column a viewer opens this for. So a row stops being a row: the rank, the date
-   and the time keep their line, and the agent wraps underneath them. Nothing is dropped, because a
-   four-column board has nothing spare to drop. */
+/* On a phone the agent wraps under the rest of the row instead of scrolling sideways. */
 @media (width < 640px) {
   .leaderboard thead {
     display: none;
@@ -984,8 +889,7 @@ header .trophy:hover {
     padding-right: 0;
   }
 
-  /* Second line of the card, and the only cell allowed to wrap — a long model id would otherwise
-     widen the grid and put the sideways scrollbar back. */
+  /* The only cell allowed to wrap, or a long model id widens the grid. */
   .leaderboard .agent {
     grid-column: 1 / -1;
     padding: 2px 0 0;
@@ -994,10 +898,8 @@ header .trophy:hover {
   }
 }
 
-/* ── W6b: the model's plan ────────────────────────────────────────────────────────────────────── */
+/* ── The model's plan ─────────────────────────────────────────────────────────────────────────── */
 
-/* Same panel chrome as the status block above it: it is another thing about the run rather than
-   another kind of thing, and a second border style would say otherwise. */
 .plan {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -1032,9 +934,7 @@ header .trophy:hover {
   padding: 0;
 }
 
-/* An item is a sentence, not a label — the model is told to say the *reason* as well as the intent,
-   so these wrap rather than truncate. The tick is a fixed gutter so the wrapped lines stay aligned
-   under the first word instead of under the mark. */
+/* Items wrap; the fixed tick gutter keeps wrapped lines under the first word. */
 .plan-items li {
   display: grid;
   grid-template-columns: 12px 1fr;
@@ -1063,8 +963,6 @@ header .trophy:hover {
 
 /* ── The battle script ────────────────────────────────────────────────────────────────────────── */
 
-/* Same chrome as the plan above it, for the reason the plan shares it with the status block: these
-   are three things about the run rather than three kinds of thing. */
 .battle-script {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -1084,8 +982,6 @@ header .trophy:hover {
   letter-spacing: 0.02em;
 }
 
-/* The one live fact on a panel that is otherwise a frozen copy of a file: whether the battles going
-   past are being decided here or one paid request at a time. So it is a chip rather than a word. */
 .script-state {
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -1099,8 +995,6 @@ header .trophy:hover {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
 }
 
-/* The run that has not written a script yet: a fact rather than a fault, so it is neither the
-   accent the armed chip earns nor the warning colour a failure gets. */
 .script-state.default {
   color: var(--dim);
 }
@@ -1121,8 +1015,7 @@ header .trophy:hover {
   padding: 0 4px;
   color: var(--dim);
   font: inherit;
-  /* After the `font` shorthand, which resets size. Bigger than the head it sits in: it is the one
-     thing in that row you are meant to click. */
+  /* After the `font` shorthand, which resets size. */
   font-size: 17px;
   line-height: 1;
   cursor: pointer;
@@ -1136,7 +1029,6 @@ header .trophy:hover {
   margin-top: 8px;
 }
 
-/* Why it stopped, above the code, because that is what a reader opens a disarmed script to find. */
 .script-failure {
   margin: 0 0 8px;
   font-size: 12px;
@@ -1152,11 +1044,7 @@ header .trophy:hover {
   color: var(--bad);
 }
 
-/* ⚠️ **The scroll is on the box and the wrapping is off.** A script is code: a line broken at the
-   panel's width to avoid a horizontal scrollbar puts the second half of a condition under a line
-   number that does not own it, which is exactly the confusion the numbers are there to remove. So
-   long lines scroll sideways, and the height is capped so a 200-line script cannot push the log off
-   a laptop screen. */
+/* Code does not wrap: a long line scrolls sideways and stays under its own line number. */
 .code {
   max-height: 40vh;
   overflow: auto;
@@ -1169,12 +1057,7 @@ header .trophy:hover {
   tab-size: 2;
 }
 
-/* ⚠️ **`max-content`, and without it the numbers scroll away.** A line is a flex container, so by
-   default its *box* is the width of the panel and only its contents overflow — which means at
-   `scrollLeft: 400` the box itself has left the scrollport entirely, taking the sticky gutter with
-   it, because sticky is clamped to its containing block and that block is no longer on screen. The
-   line has to be as wide as the line, and `min-width: 100%` is what keeps a short one filling the
-   panel rather than ending where its text does. */
+/* `max-content`, or the line's box scrolls away and takes the sticky gutter with it. */
 .code li {
   counter-increment: line;
   display: flex;
@@ -1183,14 +1066,8 @@ header .trophy:hover {
   white-space: pre;
 }
 
-/* The number is drawn rather than in the markup, so selecting the code and copying it gets the code
-   and not a column of numbers down the left of it.
-
-   ⚠️ **The 12px is padding rather than a margin, and that is the same bug as `max-content` above one
-   step on.** A stuck element overlays what scrolls under it, and a margin is outside the background:
-   the code slid up against the digits with nothing between them. Padding puts the gap inside the
-   thing that is painted. `content-box` because `* { box-sizing: border-box }` would otherwise take
-   the padding out of the 3ch and leave the numbers no room. */
+/* Numbers are drawn by CSS, so copying the code does not copy them. The gap is padding, not margin,
+   so the sticky gutter paints it, and `content-box` keeps it out of the 3ch. */
 .code li::before {
   content: counter(line);
   position: sticky;
@@ -1205,10 +1082,7 @@ header .trophy:hover {
   user-select: none;
 }
 
-/* Five colours and no more. The page has one font and a palette of four, so the highlighting is
-   built out of that palette rather than a syntax theme borrowed from an editor: comments recede,
-   strings and numbers are the accent, keywords and the sandbox's own names are the two that a reader
-   scans for. */
+/* Five colours, all from the page's own palette. */
 .code .com {
   color: color-mix(in srgb, var(--dim) 85%, transparent);
   font-style: italic;
@@ -1223,7 +1097,6 @@ header .trophy:hover {
   color: var(--warn);
 }
 
-/* `battle`, `damage`, `effectiveness`, `print` — the handful of names the sandbox provides. */
 .code .api {
   color: #7fb2e5;
 }
@@ -1235,7 +1108,7 @@ header .trophy:hover {
 
 @media (width < 640px) {
   :root {
-    /* The log is a wall of monospace read at arm's length on a handset. 13px is a desk size. */
+    /* 13px is a desk size; on a phone the log is read at arm's length. */
     font-size: 14px;
     line-height: 1.5;
   }
@@ -1245,16 +1118,12 @@ header .trophy:hover {
     padding: 8px 10px;
   }
 
-  /* The header's job on a phone is: who is playing, what are they doing, is this thing live. The
-     context gauge and the links are a desk's questions and they are most of what makes this row feel
-     like noise, so they move to the foot of the Trainer tab (`.about`). The trophy stays: one glyph,
-     and the only way to the Hall of Fame. */
+  /* The gauge and links move to the Trainer tab's foot (`.about`); the trophy stays. */
   header .context,
   header .links {
     display: none;
   }
 
-  /* …and where they went: a footer to the Trainer tab, shown with it. */
   .about {
     display: flex;
     align-items: center;
@@ -1267,9 +1136,7 @@ header .trophy:hover {
     flex: 1;
   }
 
-  /* Without this the pill is pushed onto a line of its own by a flex spacer with nothing to space:
-     three short chips fit beside each other on a second line, and the header is two lines rather
-     than three. */
+  /* Without this the pill takes a line of its own. */
   header .spacer {
     display: none;
   }
@@ -1288,27 +1155,19 @@ header .trophy:hover {
   main {
     gap: 8px;
     padding: 8px;
-    /* The screen and the panels take what they need; the log takes everything else and is never
-       squeezed below 38% of the viewport. */
+    /* The log takes whatever the screen and panels leave, and never less than 38vh. */
     grid-template-rows: minmax(0, auto) minmax(38vh, 1fr);
   }
 
-  /* The 52vh ceiling the stacked layout needed (a six-Pokémon party under the screen quietly
-     halved the log) went with the stacking: under the tabs below, the column is the screen and the
-     tab bar on the log tab, and the whole viewport on the others. `none` because the 900px block
-     above also matches a phone and would otherwise reimpose its 58vh. */
+  /* `none`, or the 900px block, which also matches a phone, reimposes its cap. */
   .left {
     max-height: none;
     gap: 8px;
   }
 
   /* ── The pane tabs ──
-     Three panes used to share what height the screen left, each scrolling in a box of its own: the
-     party inside .left, the plan capped at 22vh, the log squeezed under both — three nested
-     scrollbars in ~700px. Tabs instead: the screen and the bar stay put, and exactly one of
-     log / trainer / plan gets the rest of the height and is the only thing that scrolls. The panes
-     are hidden, never unmounted, so the log keeps its scroll position and open rows while another
-     tab is showing. */
+     One pane gets the height under the screen and is the only thing that scrolls. Panes are hidden,
+     never unmounted, so the log keeps its scroll position and open rows. */
   .pane-tabs {
     display: flex;
     gap: 6px;
@@ -1351,10 +1210,7 @@ header .trophy:hover {
     display: none;
   }
 
-  /* With the log hidden the grid's second row would be an empty 38vh floor, so these tabs collapse
-     the grid to one row and let the left column take the whole height. `overflow: hidden` on the
-     column plus `flex: 1` on the pane is what keeps the screen and the tab bar fixed while the
-     pane's own `overflow-y` does all the scrolling. */
+  /* These tabs collapse the grid to one row; `overflow: hidden` on the column keeps the screen fixed. */
   main.tab-status,
   main.tab-plan,
   main.tab-script {
@@ -1375,12 +1231,8 @@ header .trophy:hover {
     overflow-y: auto;
   }
 
-  /* ⚠️ **The canvas is capped by height, and the cap has to be expressed as a width.** At 100% of a
-     414px viewport the picture is 373px tall — more than half the usable height on a phone, before
-     the party or a single line of log. But `max-height` on a replaced element whose width is already
-     100% squashes the aspect ratio rather than shrinking it, and `width: auto` drops it to the
-     intrinsic 160px. The Game Boy is 10:9, so the height cap *is* `28vh × 10/9` of width, and the
-     ordinary `height: auto` then keeps the picture square-pixelled. */
+  /* The canvas height cap is written as a width, since `max-height` on a replaced element squashes it;
+     the Game Boy is 10:9, so the cap is `28vh × 10/9` of width. */
   .screen canvas {
     width: min(100%, calc(28vh * 10 / 9));
   }
@@ -1394,8 +1246,6 @@ header .trophy:hover {
     font-size: 14px;
   }
 
-  /* Eight badges at 32px is 270px of a 414px screen and 32 of its pixels tall. At 24 the strip says
-     the same thing in three quarters of the room. */
   .badges {
     margin: 4px 0 0;
   }
@@ -1407,9 +1257,6 @@ header .trophy:hover {
     background-position: calc(var(--slot) * -24px) 0;
   }
 
-  /* Two columns of three, with the sprite at 32px rather than 56. A six-Pokémon party goes from
-     ~360px of a phone's height to ~120 — which is the single biggest thing on this page that was
-     spending height on something a viewer glances at. */
   .party {
     margin-top: 8px;
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
@@ -1442,15 +1289,12 @@ header .trophy:hover {
     display: none;
   }
 
-  /* No height cap any more: on a phone the plan is a tab of its own (above), so the tab rules give
-     it the column and the scrollbar, and a dozen items push nothing off the page. */
+  /* No height cap: on a phone the plan is its own tab. */
   .plan {
     padding: 8px 10px;
   }
 
-  /* On a phone the script is a tab of its own, so the pane gives it the height and the scrollbar and
-     a second capped, scrolling box inside it would be one nested scroll too many — the shape the
-     tabs were introduced to get rid of. The sideways scroll stays: long lines are still long. */
+  /* On a phone the script is its own tab, so it drops the inner height cap. */
   .battle-script {
     padding: 8px 10px;
   }
@@ -1461,9 +1305,7 @@ header .trophy:hover {
     overflow-y: visible;
   }
 
-  /* ⚠️ **The log stops being a grid.** Three columns of 8ch + 10ch + the rest leaves under half the
-     width for the words, so the time and the gutter become an inline prefix and the line wraps back
-     to the left margin under them — the shape every phone chat log has, for this reason. */
+  /* The log stops being a grid: the time and gutter become an inline prefix the line wraps under. */
   .conversation-list {
     padding: 8px 10px;
   }
@@ -1500,11 +1342,7 @@ header .trophy:hover {
   }
 }
 
-/* The speaker, beside the trophy. It began as an overlay in the corner of the screen and was
-   moved: at that size, over four shades of Game Boy, it was a grey glyph on whatever the game was
-   drawing — and it had to be dimmed further still to avoid sitting on top of the picture, which is
-   the opposite of what a control the viewer is looking for should do. Here it borrows the trophy's
-   box exactly, so the row reads as one set of controls rather than as a button someone added. */
+/* The speaker borrows the trophy's box, so the row reads as one set of controls. */
 header .sound {
   padding: 2px 8px;
   border: 1px solid var(--line);
@@ -1521,8 +1359,7 @@ header .sound:focus-visible {
   border-color: var(--accent);
 }
 
-/* On, and saying so the way `.pill.live` does — the accent is what the rest of the page uses for
-   "this is happening", and the glyph alone is a poor signal at a glance. */
+/* On, marked with the accent as `.pill.live` is. */
 header .sound.on {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
 }

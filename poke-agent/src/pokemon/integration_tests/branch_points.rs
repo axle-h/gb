@@ -1,4 +1,3 @@
-
 use super::*;
 
 use crate::pokemon::integration_tests::godmode::{Intent, ScriptedBrain};
@@ -8,29 +7,24 @@ use crate::pokemon::party::PokemonParty;
 use crate::pokemon::pokemon::Pokemon;
 use std::sync::{Arc, Mutex};
 
-// ── The snapshots
-// ────────────────────────────────────────────────────────────────────────────────
+// ── The snapshots ──
 
-/// Oak's lab with his speech over and the three Poké Balls still on the table: the starter
-/// branch, cut one decision before it.
+/// Oak's lab after his speech, the three Poké Balls on the table: one decision before the starter.
 const OAKS_LAB: &[u8] = include_bytes!("../data/branch-oaks-lab.bin");
 
-/// Mt Moon B2F standing at the mouth of the fossil chamber, both fossils still on the floor and
-/// the Super Nerd still guarding them.
+/// Mt Moon B2F at the fossil chamber, both fossils on the floor and the Super Nerd guarding them.
 const MT_MOON: &[u8] = include_bytes!("../data/branch-mt-moon-fossils.bin");
 
-/// The Fighting Dojo with the Karate Master beaten, both prize balls still there and a party slot
-/// free so either lands in the party rather than the box.
+/// The Fighting Dojo, Karate Master beaten, both prize balls there and a party slot free.
 const DOJO: &[u8] = include_bytes!("../data/branch-dojo-prize.bin");
 
 /// Inside the Cerulean Bike Shop holding the Bike Voucher, one decision from the clerk.
 const BIKE_SHOP: &[u8] = include_bytes!("../data/branch-bike-shop.bin");
 
-/// How long an arm will wait on the wall clock before giving up and asserting.
+/// How long an arm waits on the wall clock before asserting.
 const PATIENCE: Duration = Duration::from_secs(180);
 
-// ── Driving an arm
-// ───────────────────────────────────────────────────────────────────────────────
+// ── Driving an arm ──
 
 /// Start `fixture` with a brain that carries out `intents` and nothing else.
 fn arm(fixture: &'static [u8], name: &'static str, intents: Vec<Intent>) -> (LlmRun, Stuck) {
@@ -38,9 +32,9 @@ fn arm(fixture: &'static [u8], name: &'static str, intents: Vec<Intent>) -> (Llm
     let stuck = Arc::clone(&brain.stuck);
     let run = LlmRun::builder(fixture)
         .named(name)
-        // Six game-hours for a decision that takes seconds, and the margin is not slack.
+        // Six game-hours for a decision that takes seconds.
         .game_time(Duration::from_secs(6 * 3600))
-        // The watchdog is armed, and every arm asserts it never fired.
+        // Armed, and every arm asserts it never fired.
         .stuck_timeout(Duration::from_secs(60))
         .start(Box::new(brain));
     (run, stuck)
@@ -58,8 +52,7 @@ fn was_stuck(run: &LlmRun) -> bool {
     run.endpoint.requests().iter().any(|request| request.is_stuck())
 }
 
-/// `stuck`'s message, or a note that the arm simply ran out of game time with the list
-/// unfinished.
+/// `stuck`'s message, or a note that the arm ran out of game time with the list unfinished.
 fn why(stuck: &Stuck) -> String {
     stuck.lock().expect("not poisoned").clone()
         .unwrap_or_else(|| "the intent list resolved but the game never got there".to_string())
@@ -86,10 +79,9 @@ fn last_menu(run: &LlmRun) -> Vec<String> {
         .unwrap_or_default()
 }
 
-// ── 1.
+// ── The starter ──
 
-/// The lab's table, as the branch: the row, what taking it puts in the party, and what the rival
-/// then takes.
+/// The lab's table: the row, what taking it puts in the party, and what the rival then takes.
 const STARTERS: [(&str, PokemonSpecies, PokemonSpecies); 3] = [
     ("BulbasaurPokeBall", PokemonSpecies::Bulbasaur, PokemonSpecies::Charmander),
     ("CharmanderPokeBall", PokemonSpecies::Charmander, PokemonSpecies::Squirtle),
@@ -108,17 +100,14 @@ fn assert_owned(run: &mut LlmRun, species: PokemonSpecies) {
 fn starter_arm(name: &'static str, ball: &'static str) {
     let (_, mine, rivals) = STARTERS.iter().copied().find(|(row, _, _)| *row == ball)
         .expect("a row in the table above");
-    // The rival's battle is a *coordinate* trigger on the lab door, and neither waiting for it
-    // nor talking to him reaches it.
+    // The rival's battle is a coordinate trigger on the lab door, reached by neither wait nor talk.
     let (mut run, stuck) = arm(OAKS_LAB, name,
         vec![Intent::Row(ball), Intent::Enter("PalletTown")]);
 
-    // `try_game_state`, not `game_state`.
     let chosen = run.tick_until(PATIENCE, |run| {
         run.fixture().try_game_state().is_ok_and(|state| state.pokemon.len() == 1)
     });
 
-    // All three at once, before anything is asserted about the one that was taken.
     let menu = first_menu(&run);
     for (row, _, _) in STARTERS {
         assert!(
@@ -133,7 +122,7 @@ fn starter_arm(name: &'static str, ball: &'static str) {
         "the `{ball}` row put a {:?} in the party", state.pokemon[0].species);
     assert_owned(&mut run, mine);
 
-    // And the other half of the branch, which is the half that lasts.
+    // The rival's pick, the half of the branch that lasts.
     let fought = run.tick_until(PATIENCE, |run| {
         run.fixture().try_game_state().is_ok_and(|state| state.battle.is_some())
     });
@@ -145,7 +134,7 @@ fn starter_arm(name: &'static str, ball: &'static str) {
     println!("[{name}] took {mine:?}, the rival took {rivals:?}");
 }
 
-/// The Bulbasaur arm, which no test in this suite had ever taken.
+/// The Bulbasaur arm.
 #[test]
 fn the_starter_branch_can_be_taken_to_bulbasaur() {
     starter_arm("branch-starter-bulbasaur", "BulbasaurPokeBall");
@@ -157,15 +146,13 @@ fn the_starter_branch_can_be_taken_to_charmander() {
     starter_arm("branch-starter-charmander", "CharmanderPokeBall");
 }
 
-/// The Squirtle arm — the one the scripted route takes, and the reason the other two are worth
-/// having: everything downstream of `at-cerulean.bin` is a Squirtle save, so this arm is the only
-/// one the fixture chain can speak for.
+/// The Squirtle arm, the scripted route's and the only one the fixture chain can speak for.
 #[test]
 fn the_starter_branch_can_be_taken_to_squirtle() {
     starter_arm("branch-starter-squirtle", "SquirtlePokeBall");
 }
 
-// ── 2.
+// ── The fossil ──
 
 /// Mt Moon B2F's two fossils: the row, and what taking it puts in the bag.
 const FOSSILS: [(&str, ItemId, &str); 2] = [
@@ -179,7 +166,7 @@ fn fossil_arm(name: &'static str, row: &'static str) {
         .expect("a row in the table above");
     let (_, other_item, _) = FOSSILS.iter().copied().find(|(id, _, _)| *id == other)
         .expect("the other row in the table above");
-    // The row is asked for twice, because the Super Nerd interrupts the first attempt.
+    // Asked twice, because the Super Nerd interrupts the first attempt.
     let (mut run, stuck) = arm(MT_MOON, name, vec![Intent::Row(row), Intent::Row(row)]);
 
     let taken = run.tick_until(PATIENCE, |run| {
@@ -193,9 +180,7 @@ fn fossil_arm(name: &'static str, row: &'static str) {
     }
     assert!(taken, "the `{row}` row never put a {item:?} in the bag.\n  {}", why(&stuck));
 
-    // The other fossil has to be gone from the menu, and it is the whole branch. The cartridge
-    // hides it the moment this one is taken, so a menu that still offered it would be promising a
-    // second fossil this save can never have.
+    // The cartridge hides the other fossil the moment this one is taken, so the menu must drop it.
     let cleared = run.tick_until(PATIENCE, |run| !last_menu(run).iter().any(|id| id.ends_with(other)));
     let menu = last_menu(&run);
     assert!(cleared, "`{other}` is still a row after `{row}` was taken.\n  menu: {menu:?}");
@@ -204,23 +189,21 @@ fn fossil_arm(name: &'static str, row: &'static str) {
     println!("[{name}] took {item:?}; {other} is gone");
 }
 
-/// The Dome Fossil arm — Kabuto's half of the branch, and the half no save in this repo has.
+/// The Dome Fossil arm.
 #[test]
 fn the_fossil_branch_can_be_taken_to_the_dome_fossil() {
     fossil_arm("branch-fossil-dome", "DomeFossil");
 }
 
-/// The Helix Fossil arm, which is the one the scripted route takes and every committed fixture
-/// downstream of Mt Moon carries.
+/// The Helix Fossil arm, the scripted route's.
 #[test]
 fn the_fossil_branch_can_be_taken_to_the_helix_fossil() {
     fossil_arm("branch-fossil-helix", "HelixFossil");
 }
 
-// ── 3.
+// ── The dojo prize ──
 
-/// The Fighting Dojo's two prize balls: the row, what taking it puts in the party, and the other
-/// row — which, unlike Mt Moon's, is *still there* afterwards and answers a refusal.
+/// The dojo's two prize balls: the row, what it puts in the party, and the other row, which stays.
 const DOJO_PRIZE: [(&str, PokemonSpecies, &str); 2] = [
     ("HitmonleePokeBall", PokemonSpecies::Hitmonlee, "HitmonchanPokeBall"),
     ("HitmonchanPokeBall", PokemonSpecies::Hitmonchan, "HitmonleePokeBall"),
@@ -249,7 +232,7 @@ fn dojo_arm(name: &'static str, row: &'static str) {
     }
     assert!(got, "the `{row}` row never put a {species:?} in the party.\n  {}", why(&stuck));
 
-    // And now the other ball, which is where this branch is different from the other three.
+    // The other ball, which unlike Mt Moon's is still there.
     let refused = run.tick_until(PATIENCE, |run| told(run, GREEDY));
 
     let state = run.fixture().game_state();
@@ -268,9 +251,7 @@ fn dojo_arm(name: &'static str, row: &'static str) {
     println!("[{name}] took {species:?}; the {other} answered \"Better not get greedy...\"");
 }
 
-/// The Hitmonlee arm, which `postgame::gifts::can_beat_the_karate_master_and_take_a_hitmonlee`
-/// takes as part of the postgame chain — repeated here because a branch is only a branch with
-/// both arms beside it, and because that test never went back for the second ball.
+/// The Hitmonlee arm, with the second ball refused.
 #[test]
 fn the_dojo_branch_can_be_taken_to_hitmonlee() {
     dojo_arm("branch-dojo-hitmonlee", "HitmonleePokeBall");
@@ -282,9 +263,9 @@ fn the_dojo_branch_can_be_taken_to_hitmonchan() {
     dojo_arm("branch-dojo-hitmonchan", "HitmonchanPokeBall");
 }
 
-// ── 4.
+// ── The bike ──
 
-/// The voucher arm — the Cerulean clerk hands the Bicycle over as a gift.
+/// The voucher arm: the Cerulean clerk hands the Bicycle over as a gift.
 #[test]
 fn the_bike_branch_can_be_taken_with_the_voucher() {
     let (mut run, stuck) = arm(BIKE_SHOP, "branch-bike-voucher", vec![Intent::Row("Clerk")]);
@@ -298,20 +279,18 @@ fn the_bike_branch_can_be_taken_with_the_voucher() {
     let state = run.fixture().game_state();
     assert!(!state.bag.iter().any(|entry| entry.id == ItemId::BikeVoucher),
         "the voucher is what pays for it and should have gone");
-    // And no menu at all.
     assert!(!told(&run, "1000000"), "the voucher arm was quoted a price; it is a gift, not a sale");
     assert!(!was_stuck(&run), "the watchdog fired on the voucher arm");
     println!("[branch-bike-voucher] Bicycle received, voucher spent, no shop opened");
 }
 
-/// The no-voucher arm — the same clerk, the same row, and a shop at ¥1,000,000.
+/// The no-voucher arm: the same clerk and row, and a shop at ¥1,000,000.
 #[test]
 fn the_bike_branch_can_be_taken_without_the_voucher() {
     let (mut run, stuck) = arm(BIKE_SHOP, "branch-bike-shop", vec![Intent::Row("Clerk")]);
     run.fixture().api().debug_take_item(ItemId::BikeVoucher).expect("the snapshot carries one");
     let money = run.fixture().game_state().money;
 
-    // The cartridge's own sentence for a purchase it will not make, quoted into a turn.
     let refused = run.tick_until(PATIENCE, |run| told(run, "Sorry! You can"));
     assert!(refused,
         "the model was never told the shop refused. `BikeShopCantAffordText` is the cartridge's own \
@@ -324,7 +303,6 @@ fn the_bike_branch_can_be_taken_without_the_voucher() {
     assert!(!state.bag.iter().any(|entry| entry.id == ItemId::Bicycle),
         "¥{money} bought a ¥1,000,000 bicycle");
     assert_eq!(state.money, money, "nothing should have been spent");
-    // And the run is still playing.
     assert!(!was_stuck(&run), "the watchdog fired: the no-voucher shop wedged the agent");
     assert!(!run.endpoint.requests().iter().any(|request| request.has_tool("buy_item")),
         "this arm is a text box rather than a mart; a `buy_item` turn here means the agent's mart \
@@ -332,7 +310,7 @@ fn the_bike_branch_can_be_taken_without_the_voucher() {
     println!("[branch-bike-shop] the shop asked ¥1,000,000 of ¥{money} and refused, in one text box");
 }
 
-// ── 5.
+// ── The trade ──
 
 /// Put `species` in party slot `at`, keeping whatever is already there around it.
 fn party_with(run: &mut LlmRun, species: PokemonSpecies, moves: [PokemonMoveName; 4], at: usize) {
@@ -354,11 +332,10 @@ const SWAP_MOVES: [PokemonMoveName; 4] = [
     PokemonMoveName::Psychic, PokemonMoveName::Blizzard,
 ];
 
-/// The three sentences a trader has for a Pokémon that is not the one it asked for —
-/// `_WrongMon1Text`, `_WrongMon2Text`, `_WrongMon3Text`, one per text-pointer set.
+/// A trader's three sentences for the wrong Pokémon, `_WrongMon1Text` to `_WrongMon3Text`.
 const WRONG_MON: [&str; 3] = ["What? That's not", "Hmmm? This isn", "...This is no"];
 
-/// An in-game trade through the deployed stack — Poliwhirl → Jynx at `CeruleanTradeHouse`.
+/// An in-game trade through the deployed stack: Poliwhirl for Jynx at `CeruleanTradeHouse`.
 #[test]
 fn an_in_game_trade_can_be_reached_through_the_llm_path() {
     let trade = crate::pokemon::postgame::trades::trade_for(PokemonSpecies::Poliwhirl);
@@ -394,7 +371,7 @@ fn a_trade_finds_the_give_species_wherever_it_is_in_the_party() {
         Intent::Enter("CeruleanTradeHouse"),
         Intent::Row("Gambler"),
     ]);
-    // Three slots back, and that is the entire difference from the test above.
+    // Three slots back, the only difference from the test above.
     party_with(&mut run, trade.give, SWAP_MOVES, 3);
 
     let traded = run.tick_until(PATIENCE, |run| {
@@ -434,7 +411,7 @@ fn a_trade_with_nothing_to_give_backs_out_and_says_so() {
     assert!(!before.pokemon.iter().any(|mon| mon.species == trade.give),
         "this test is about a party with no {:?} in it", trade.give);
 
-    // Read out of the *turn*, not out of the event stream.
+    // Read out of the turn, not the event stream.
     let spoke = run.tick_until(PATIENCE, |run| told(run, "there is none in the party"));
 
     let state = run.fixture().game_state();
@@ -449,8 +426,7 @@ fn a_trade_with_nothing_to_give_backs_out_and_says_so() {
         trade.give);
 }
 
-// ── The snapshots, cut
-// ───────────────────────────────────────────────────────────────────────────
+// ── The snapshots, cut ──
 
 /// Cut Oak's lab one A press before the starter branch.
 #[test]
@@ -463,16 +439,13 @@ fn regen_oaks_lab_fixture() {
         vec![
             PolicyStep::enter(Map::RedsHouse1F),
             PolicyStep::enter(Map::PalletTown),
-            // Oak stops you on the way to Route 1 and marches you into the lab.
             PolicyStep::soft_goto(Map::Route1),
         ],
     );
     fixture.step_until_exhausted();
-    // Oak stops the player in the grass and marches them into the lab; the walk that triggers it
-    // is still in flight when the queue empties, so the arrival is waited for rather than
-    // assumed.
+    // Oak's escort is still walking when the queue empties, so wait for the lab.
     fixture.run_until(|s| s.map.map == Map::OaksLab);
-    // And then his speech, which the agent advances by itself.
+    // Then his speech, which the agent advances.
     for _ in 0..3000 { fixture.step(); }
     let s = fixture.game_state();
     println!("ended {} @ {} — party {:?}", s.map.map, s.map.player_position,
@@ -498,10 +471,8 @@ fn regen_mt_moon_fossils_fixture() {
             PolicyStep::enter_at(Map::MtMoonB2F, 21, 17),
         ]
         .into_iter()
-        // These two walks are what make the snapshot restorable, and neither is the branch. The
-        // Super Nerd is a *coordinate* trigger, so walking at him starts no battle — but it
-        // carries the player off the B2F landing and up to the chamber, and that route crosses
-        // `ROCKET1`'s line of sight.
+        // These walks make the snapshot restorable: the Super Nerd is a coordinate trigger, and the
+        // route to him crosses `ROCKET1`'s line of sight.
         .chain(std::iter::repeat_n(
             PolicyStep::InteractIfReachable(MapSprite::MTMOONB2F_SUPER_NERD), 4))
         .chain(std::iter::repeat_n(
@@ -510,7 +481,7 @@ fn regen_mt_moon_fossils_fixture() {
     );
     fixture.pimp_pokemon();
     fixture.step_until_exhausted();
-    // Out of whatever fight the last interact left running, and then a second of quiet.
+    // Out of whatever fight the last interact left running, then a second of quiet.
     fixture.run_until(|s| s.battle.is_none());
     for _ in 0..500 { fixture.step(); }
     let s = fixture.game_state();
@@ -535,8 +506,7 @@ fn regen_mt_moon_fossils_fixture() {
 #[cfg(feature = "slow-tests")]
 #[ignore = "tool: recuts the dojo-prize fixture; needs GB_REGEN_FIXTURES=1"]
 fn regen_dojo_prize_fixture() {
-    /// Omanyte, which `postgame-lapras.bin` carries in slot 4 — dex-registered, so banking it is
-    /// free.
+    /// Omanyte, slot 4 in `postgame-lapras.bin` and dex-registered, so banking it is free.
     const BANK_SLOT: u8 = 4;
     let mut steps = PolicyStep::hitmonlee_steps(BANK_SLOT);
     steps.truncate(steps.len() - 2);

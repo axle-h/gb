@@ -261,7 +261,7 @@ impl Map {
     }
 
     /// Returns `true` if this map is a Pokémon Center. A town or a numbered route — the part of
-    /// Kanto you can simply *walk* across.
+    /// Kanto you can simply walk across.
     pub fn is_overworld(self) -> bool {
         (self as u8) <= Map::Route25 as u8
     }

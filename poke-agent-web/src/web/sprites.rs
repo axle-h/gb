@@ -17,8 +17,7 @@ pub const SPECIES_COUNT: usize = 151;
 /// The favicon is drawn at 2× so it stays crisp on a hidpi tab strip; 16 px doubled is 32.
 const FAVICON_SCALE: usize = 2;
 
-/// The Game Boy's own four shades, as RGBA: 0 is the white a body is filled with, 3 the black it
-/// is outlined in.
+/// The Game Boy's four shades as RGBA: 0 is a body's white fill, 3 its outline.
 const INK: [[u8; 4]; 4] = [
     [0xF2, 0xF5, 0xF9, 0xFF],
     [0xB4, 0xBC, 0xC8, 0xFF],
@@ -28,9 +27,7 @@ const INK: [[u8; 4]; 4] = [
 
 const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
 
-/// The Poké Ball, whose only difference from [`INK`] is that shade 0 is its background rather
-/// than part of it — an overworld sprite is drawn with a transparent colour 0, so there is
-/// nothing to flood-fill.
+/// The Poké Ball's ramp: shade 0 is transparent, as on any overworld sprite.
 const BALL_INK: [[u8; 4]; 4] = [
     TRANSPARENT,
     [0xF2, 0xF5, 0xF9, 0xFF],
@@ -38,11 +35,8 @@ const BALL_INK: [[u8; 4]; 4] = [
     [0x11, 0x13, 0x18, 0xFF],
 ];
 
-// ── The party sprites
-// ────────────────────────────────────────────────────────────────────────────
-
-/// `GET /api/pokemon/{dex}/front.png` — one 56×56 sprite, keyed on the National Pokédex number
-/// because that is the id a viewer recognises and the one the status heartbeat carries.
+/// `GET /api/pokemon/{dex}/front.png`: one 56×56 sprite, keyed on the Pokédex number the
+/// heartbeat carries.
 pub async fn front_pic(Path(dex): Path<u16>) -> Response {
     match sprites().get(dex.wrapping_sub(1) as usize) {
         Some(png) => png_response(png).into_response(),
@@ -112,11 +106,7 @@ fn background_mask(shades: &[u8; PIC_PX * PIC_PX]) -> Vec<bool> {
     background
 }
 
-// ── The favicon
-// ──────────────────────────────────────────────────────────────────────────────────
-
-/// `GET /favicon.png` and `GET /favicon.ico` — the overworld Poké Ball, the sprite an item lying
-/// on the floor is drawn with.
+/// `GET /favicon.png` and `/favicon.ico`: the overworld Poké Ball.
 pub async fn favicon() -> Response {
     png_response(icon()).into_response()
 }
@@ -137,17 +127,13 @@ fn icon() -> &'static [u8] {
     })
 }
 
-// ── Shared
-// ───────────────────────────────────────────────────────────────────────────────────────
-
 fn encode(image: &image::RgbaImage) -> Vec<u8> {
     let mut png = std::io::Cursor::new(Vec::new());
     image.write_to(&mut png, image::ImageFormat::Png).expect("a small image encodes to PNG in memory");
     png.into_inner()
 }
 
-/// Immutable: every one of these is a function of the cartridge, so a viewer may cache it for as
-/// long as it likes.
+/// Immutable: each is a function of the cartridge.
 fn png_response(png: &'static [u8]) -> impl IntoResponse {
     (
         [
@@ -186,8 +172,7 @@ mod tests {
         }
     }
 
-    /// The whole point of flood-filling from the border rather than simply calling shade 0
-    /// transparent: a Pokémon with a white belly must have a belly, not a hole.
+    /// Filling from the border keeps a white belly opaque rather than a hole.
     #[test]
     fn the_flood_fill_keeps_every_bodys_own_white_opaque() {
         for species in PokemonSpecies::iter() {
@@ -206,12 +191,9 @@ mod tests {
             .map(|png| decoded(png).pixels().filter(|p| p.0[3] == 0).count())
             .min()
             .expect("151 sprites");
-        // The emptiest of them (Slowbro, which fills its box) leaves 579 of 3136 pixels behind
-        // it.
         assert!(smallest > 400, "the emptiest sprite has only {smallest} transparent pixels of {}", PIC_PX * PIC_PX);
     }
 
-    /// The direction of the ramp, pinned.
     #[test]
     fn the_ramp_is_not_inverted() {
         let luminance = |c: [u8; 4]| c[0] as u32 * 2 + c[1] as u32 * 3 + c[2] as u32;
@@ -232,8 +214,7 @@ mod tests {
         assert_eq!(image.dimensions(), (32, 32));
         assert_eq!(image.get_pixel(0, 0).0[3], 0, "the corners are outside the ball");
         assert!(image.pixels().any(|p| p.0[3] == 0xFF), "the ball is entirely transparent");
-        // Both ends of the ramp are present, which is what lets it read on a light *and* a dark
-        // tab strip.
+        // Both ends of the ramp, so it reads on a light and a dark tab strip.
         assert!(image.pixels().any(|p| p.0 == BALL_INK[1]), "no white fill");
         assert!(image.pixels().any(|p| p.0 == BALL_INK[3]), "no dark outline");
     }

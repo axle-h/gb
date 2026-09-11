@@ -65,7 +65,6 @@ pub struct MMU {
     data: Vec<u8>,
     header: CartHeader,
     ram_banks: Vec<[u8; RAM_BANK_SIZE]>,
-    /// D2.
     mapper: Mapper,
     ram_enabled: bool,
     rom_bank_register: usize,
@@ -112,7 +111,7 @@ pub struct MMU {
 }
 
 /// Contents of the `cart` save-state section: everything that describes the cartridge and its
-/// mapper state. The ROM image itself is deliberately absent — it is supplied by the loader.
+/// mapper state. The ROM image itself is absent; the loader supplies it.
 #[derive(Debug, Clone, Decode, Encode)]
 pub struct CartSection {
     pub header: CartHeader,
@@ -122,8 +121,8 @@ pub struct CartSection {
     pub ram_bank_register: usize,
 }
 
-/// Contents of the `irq` save-state section. Carries the pre-C7 five-boolean shape — see
-/// [`InterruptFlagsSnapshot`] — so changing `InterruptFlags` to a bitmask cost no fixture churn.
+/// Contents of the `irq` save-state section, in [`InterruptFlagsSnapshot`]'s five-boolean shape so
+/// `InterruptFlags` can be a bitmask without fixture churn.
 #[derive(Debug, Clone, Decode, Encode)]
 pub struct IrqSection {
     pub interrupt_enable: InterruptFlagsSnapshot,
@@ -161,16 +160,16 @@ pub struct CgbSection {
 }
 
 pub const CART_SECTION_VERSION: u16 = 1;
-/// Bumped to 2 by B2, which appended work-RAM banks 2-7. Field 1 keeps its v1 shape — banks 0 and
-/// 1, all a DMG has — so states written before CGB support still decode untouched.
+/// Version 2 appended work-RAM banks 2-7. Field 1 keeps its v1 shape, banks 0 and 1, all a DMG
+/// has, so DMG-only states still decode untouched.
 pub const WRAM_SECTION_VERSION: u16 = 2;
 pub const HRAM_SECTION_VERSION: u16 = 1;
 pub const IRQ_SECTION_VERSION: u16 = 2;
 pub const TIMER_SECTION_VERSION: u16 = 1;
 pub const JOYP_SECTION_VERSION: u16 = 1;
 pub const SCHED_SECTION_VERSION: u16 = 1;
-/// New in D2. Absent from every state written before it, in which case the mapper is rebuilt from
-/// the effective bank numbers in the `cart` section — see `MMU::read_sections`.
+/// Absent from older states, in which case the mapper is rebuilt from the effective bank numbers
+/// in the `cart` section; see `MMU::read_sections`.
 pub const MBC_SECTION_VERSION: u16 = 1;
 
 impl MMU {
@@ -182,7 +181,6 @@ impl MMU {
             rom_bank_register: self.rom_bank_register,
             ram_bank_register: self.ram_bank_register,
         })?;
-        // D2.
         writer.write(labels::MBC, MBC_SECTION_VERSION, &self.mapper)?;
         let mut window = [0u8; WRAM_WINDOW];
         window.copy_from_slice(&self.work_ram[..WRAM_WINDOW]);
@@ -232,7 +230,6 @@ impl MMU {
             self.rom_bank_register = section.rom_bank_register;
             self.ram_bank_register = section.ram_bank_register;
         }
-        // D2.
         match reader.read::<Mapper>(labels::MBC)? {
             Some((_version, mapper)) => self.mapper = mapper,
             None => self.mapper.restore_effective(
@@ -311,7 +308,7 @@ impl MMU {
     pub fn new(data: &[u8], model: Model) -> Result<Self, LoadError> {
         let header = CartHeader::parse(data)?;
 
-        // D8: advisory, never fatal — `gb` runs no boot ROM, and plenty of homebrew and test ROMs
+        // Advisory, never fatal: `gb` runs no boot ROM, and plenty of homebrew and test ROMs
         // ship a wrong checksum and run fine on hardware with a flash cart.
         if !CartHeader::checksum_valid(data) {
             eprintln!("warning: header checksum mismatch in {:?}", header.title());
@@ -325,7 +322,6 @@ impl MMU {
         } else {
             header.ram_banks()
         };
-        // B11.
         let ram_banks = Vec::from_iter((0..ram_bank_count).map(|_| [0xFF; RAM_BANK_SIZE]));
         let data = pad_rom(data);
         let mapper = Mapper::new(header.cart_type(), BankCounts {
@@ -375,7 +371,6 @@ impl MMU {
 
     /// The state the boot ROM leaves behind.
     fn apply_boot_state(&mut self) {
-        // B11.
         self.ppu.lcd_control_mut().set(0x91);
         self.ppu.palette_mut().background_mut().set_from_byte(0xFC);
         // The object palettes are genuinely *uninitialised* on hardware — the boot ROM never
@@ -440,7 +435,7 @@ impl MMU {
         self.audio = Audio::default();
         // The clock restarts with the machine.
         self.now = 0;
-        // `data`, `header` and `ram_banks` are deliberately untouched: the cartridge does not
+        // `data`, `header` and `ram_banks` are untouched: the cartridge does not
         // leave the slot, and its RAM is battery-backed.
         self.apply_boot_state();
     }
@@ -477,7 +472,7 @@ impl MMU {
         if self.ram_is_nibble_wide { offset & 0x1FF } else { offset }
     }
 
-    /// The cartridge's real-time clock, if it has one (D5). `None` for Pokémon Red, whose MBC3
+    /// The cartridge's real-time clock, if it has one. `None` for Pokémon Red, whose MBC3
     /// declares no timer.
     pub fn rtc(&self) -> Option<&Rtc> {
         self.mapper.rtc()
@@ -541,8 +536,7 @@ impl MMU {
             let offset = (address - 0x8000) as usize;
             let vram = self.ppu.vram();
             if let Some(length) = length.into() {
-                // The base address is range-checked above, but the *end* was not — a long read
-                // near 0x9FFF sliced past the array and panicked.
+                // The end is range-checked too, or a long read near 0x9FFF slices past the array.
                 vram.get(offset..(offset + length))
                     .ok_or_else(|| format!("VRAM read of {length} bytes at {address:04X} runs past the end of VRAM"))
             } else {
@@ -846,7 +840,7 @@ impl MMU {
         if self.joypad_register.is_activation_pending() {
             sched.set(Ev::Interrupt, self.now);
         }
-        // [`Ev::OamDma`] is deliberately absent.
+        // `Ev::OamDma` is left out on purpose.
         sched
     }
 
@@ -871,7 +865,6 @@ impl MMU {
 }
 
 impl ROM for MMU {
-    /// C6.
     #[inline(always)]
     fn read(&self, address: u16) -> u8 {
         match address {
@@ -904,7 +897,7 @@ impl MMU {
             }
             // Vram
             0x8000..=0x9FFF => self.ppu.read_vram(address - 0x8000),
-            // External RAM — or, on an MBC3 with a timer, the clock registers in its place (D5).
+            // External RAM — or, on an MBC3 with a timer, the clock registers in its place.
             0xA000..=0xBFFF => match self.ram_target {
                 RamTarget::Bank(bank) => {
                     let value = self.ram_banks[bank][self.cart_ram_offset(address)];
@@ -925,7 +918,7 @@ impl MMU {
                 if self.model.is_cgb() { self.unusable[unusable_offset(address)] } else { 0x00 }
             }
             0xFF00 => 0xC0 | self.joypad_register.get(), // joypad register — bits 6-7 unused, read 1
-            // D9: mid-transfer, `SB` shows the bits already shifted out.
+            // Mid-transfer, `SB` shows the bits already shifted out.
             0xFF01 => self.serial.data_at(self.now, self.serial_fast),
             // SC: bits 1-6 read 1 on DMG.
             0xFF02 => {
@@ -987,7 +980,6 @@ impl MMU {
     #[inline(never)]
     fn write_uncommon(&mut self, address: u16, value: u8) {
         match address {
-            // D2.
             0x0000..=0x7FFF => {
                 self.mapper.rom_write(address, value);
                 self.refresh_bank_cache();
@@ -1190,7 +1182,7 @@ mod tests {
         assert_eq!(mmu.read(0x0100), full[0x0100]);
     }
 
-    /// D1: an out-of-range bank wraps, it does not saturate.
+    /// An out-of-range bank wraps, it does not saturate.
     #[test]
     fn an_out_of_range_rom_bank_wraps() {
         // MBC1, 64 KB, four banks — blargg's combined audio suite.
@@ -1211,7 +1203,7 @@ mod tests {
         assert_eq!(mmu.rom_bank_register, 1);
     }
 
-    /// D1/D2: the register width comes from the mapper.
+    /// The register width comes from the mapper.
     #[test]
     fn the_rom_bank_register_width_is_per_mapper() {
         let mut mmu = MMU::from_rom(crate::test_fixtures::POKERED).unwrap();
@@ -1233,7 +1225,7 @@ mod tests {
         assert_eq!(mmu.rom_bank_register, 1);
     }
 
-    /// D1: MBC5 is the exception — bank 0 is a legal selection there and is not remapped.
+    /// MBC5 is the exception — bank 0 is a legal selection there and is not remapped.
     #[test]
     fn mbc5_does_not_remap_bank_zero() {
         let mut rom = crate::test_fixtures::POKERED.to_vec();
@@ -1246,7 +1238,7 @@ mod tests {
         assert_eq!(mmu.read(0x4000), mmu.read(0x0000), "...so the two halves show the same bank");
     }
 
-    /// D5 end to end: on an MBC3 with a timer, `0x08..=0x0C` swaps the clock registers into the
+    /// On an MBC3 with a timer, `0x08..=0x0C` swaps the clock registers into the
     /// cartridge-RAM window in place of a bank.
     #[test]
     fn an_mbc3_timer_maps_its_clock_over_cartridge_ram() {
@@ -1280,7 +1272,7 @@ mod tests {
         assert!(mmu.rtc().is_none());
     }
 
-    /// D1/D2: the RAM-bank register wraps too.
+    /// The RAM-bank register wraps too.
     #[test]
     fn an_out_of_range_ram_bank_wraps() {
         let mut mmu = MMU::from_rom(crate::roms::blargg_dmg_sound::ROM).unwrap();
@@ -1315,7 +1307,6 @@ mod tests {
             assert_eq!(MMU::new(crate::roms::cgb_acid::ROM, Model::Dmg).unwrap().color_mode(), ColorMode::Dmg);
         }
 
-        /// B2.
         #[test]
         fn svbk_bank_zero_selects_bank_one() {
             let mut mmu = cgb();
@@ -1363,7 +1354,6 @@ mod tests {
             assert_eq!(mmu.read_wram_slice(0xD000, 1).unwrap(), &[0x11]);
         }
 
-        /// B2.
         #[test]
         fn vram_banks_are_independent() {
             let mut mmu = cgb();
@@ -1384,7 +1374,6 @@ mod tests {
             assert_eq!(mmu.ppu().vram_banked(1)[0], 0x22);
         }
 
-        /// B3.
         #[test]
         fn palette_ram_round_trips_through_the_registers() {
             let mut mmu = cgb();
@@ -1425,7 +1414,7 @@ mod tests {
             }
         }
 
-        /// B5's other half: in compatibility mode the cartridge cannot reach palette RAM, but the
+        /// In compatibility mode the cartridge cannot reach palette RAM, but the
         /// boot ROM has already filled it, and that is what colours the screen.
         #[test]
         fn compatibility_mode_gets_the_boot_palette_it_cannot_write() {
@@ -1470,7 +1459,6 @@ mod tests {
             assert_eq!(mmu.ppu().cgb_background_palettes(), &crate::cgb_palette::PaletteBank::default());
         }
 
-        /// B7.
         #[test]
         fn key1_switches_speed_on_stop() {
             let mut mmu = cgb();
@@ -1532,7 +1520,6 @@ mod tests {
             assert_ne!(single_div, double_div, "...so twice the CPU cycles is twice the DIV");
         }
 
-        /// B8.
         #[test]
         fn general_purpose_dma_copies_immediately() {
             let mut mmu = cgb();
@@ -1553,7 +1540,6 @@ mod tests {
             }
         }
 
-        /// B8.
         #[test]
         fn hblank_dma_copies_one_block_per_scanline() {
             let mut mmu = cgb();
@@ -1605,7 +1591,6 @@ mod tests {
             }
         }
 
-        /// B9.
         #[test]
         fn the_unusable_region_is_mirrored_ram_on_cgb() {
             let mut mmu = cgb();
@@ -1625,7 +1610,6 @@ mod tests {
             assert_eq!(dmg.read(0xFEA0), 0x00);
         }
 
-        /// B9.
         #[test]
         fn undocumented_registers_hold_what_is_written() {
             let mut mmu = cgb();
@@ -1646,7 +1630,6 @@ mod tests {
             }
         }
 
-        /// B9.
         #[test]
         fn serial_runs_32x_faster_when_asked() {
             fn transfer_cycles(mut mmu: MMU, control: u8) -> u64 {

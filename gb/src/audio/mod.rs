@@ -43,7 +43,7 @@ pub struct Audio {
     output: BlipStereo,
     /// Length in M-cycles of the instruction the CPU is executing.
     access_machine_cycles: u8,
-    /// The mixer's current output level (C4).
+    /// The mixer's current output level.
     mixed: AudioSample,
     /// The packed channel levels [`Audio::mixed`] was computed from.
     levels: u32,
@@ -152,8 +152,8 @@ impl Audio {
     }
 
     /// Log every amplitude transition handed to the synth, run-length merged by
-    /// [`Self::take_output_transitions`]. The instrument the C6 test compares two machines with:
-    /// it is upstream of the samples and says *when* a level moved, which is the whole property
+    /// [`Self::take_output_transitions`]. What the batching test compares two machines with:
+    /// it is upstream of the samples and says *when* a level moved, which is the property
     /// batching has to preserve.
     #[cfg(test)]
     pub fn capture_output_transitions(&mut self) {
@@ -201,7 +201,7 @@ impl Audio {
 
         let events = self.frame_sequencer.update(div_clocks);
 
-        // C5: the four channels are advanced to a deadline rather than once per instruction.
+        // The four channels are advanced to a deadline rather than once per instruction.
         let lead = self.pending;
         self.pending += delta.m_cycles();
         if events.is_empty() && self.pending < self.channel_deadline {
@@ -269,9 +269,6 @@ impl Audio {
     /// its own output, or `None` if none of them is clocking at all.
     #[inline]
     fn soonest_channel_event(&self) -> Option<u64> {
-        // `perf` blames `flatten.rs` for 1.3% of the whole emulator here, and folding the four
-        // `Option`s by hand to get rid of it measured no change at all — the compiler was already
-        // doing it, and the samples are attribution rather than work.
         [
             self.channel1.next_event(),
             self.channel2.next_event(),

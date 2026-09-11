@@ -1,18 +1,8 @@
-//! The turn loop, on a plain blocking `std::thread`.
-//! ```text
-//! recv TurnRequest (blocking)
-//!   ├─ append a user message: the situation, the menu, the events since the last turn
-//!   ├─ loop up to GB_MAX_TOOL_STEPS:
-//!   │     ├─ stream a completion  →  UiEventBody::AssistantDelta…       [cancel point]
-//!   │     ├─ no tool calls?  →  nudge once, then force `wait`
-//!   │     ├─ non-terminal calls → send ToolBatch, block on recv         [cancel point]
-//!   │     │     ├─ Answered   → append tool result messages, continue
-//!   │     │     └─ Cancelled  → drop the last assistant message, abandon the turn
-//!   │     └─ terminal tool call  →  break
-//!   ├─ budget exhausted without a terminal call → force `wait`
-//!   ├─ send TurnOutcome
-//!   └─ over GB_COMPACT_ABOVE of the context? → compact
-//! ```
+//! The turn loop, on a plain blocking thread. A `TurnRequest` appends the situation and streams
+//! up to `GB_MAX_TOOL_STEPS` completions: reads go to the policy as a `ToolBatch`, a reply with no
+//! call is nudged once, and a terminal call ends the turn, while running out forces a `wait`. The
+//! generation is checked while streaming and while a batch is out, and a stale one abandons the
+//! turn. Compaction runs after the outcome is sent.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -41,22 +31,19 @@ use crate::published::{Published, RunStatus, TodoView, UiEventBody, now_ms};
 /// One question, from the policy to the worker.
 #[derive(Debug, Clone)]
 pub struct TurnRequest {
-    /// The generation this turn belongs to. It is stale the moment [`TurnHandles::generation`]
-    /// moves past it.
+    /// Stale the moment [`TurnHandles::generation`] moves past it.
     pub id: u64,
     pub kind: DecisionKind,
     /// The rendered user message — see [`prompt::situation`].
     pub situation: String,
-    /// A one-line description for the UI, so a viewer sees what is being decided without the
-    /// thousand tokens that were sent to decide it.
+    /// One line for the UI, naming what is being decided.
     pub headline: String,
     /// The ids this turn's situation offered, in the order it offered them.
     pub menu: Vec<String>,
 }
 
-/// The answer. Always a [`Terminal`]: a turn that could not produce one is turned into a `wait`
-/// *here*, with a `UiEvent` marking it, so a model that cannot hold the contract shows up as a
-/// visible rate rather than a mysteriously idle game.
+/// Always a [`Terminal`]: a turn that could not produce one becomes a `wait` here, with a
+/// `UiEvent` marking it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnOutcome {
     pub id: u64,
@@ -100,21 +87,18 @@ pub struct TurnHandles {
     pub outcomes: Receiver<TurnOutcome>,
     pub tool_calls: Receiver<ToolBatch>,
     pub tool_results: Sender<ToolBatchResult>,
-    /// Bumped by the policy when the decision kind changes; read by the worker at its two cancel
-    /// points. The policy owns the writes, which is why there is no lock.
+    /// Bumped only by the policy, when the decision kind changes; read at the cancel points.
     pub generation: Arc<AtomicU64>,
     /// `POST /api/new-run` and `POST /api/clear` — a pending "start again" notice. See [`Reset`].
     pub reset: Resets,
-    /// The armed battle script, which the policy runs on its own thread rather than asking for.
-    /// See [`crate::llm::battle_script::Live`].
+    /// The armed battle script, run on the policy's thread: [`crate::llm::battle_script::Live`].
     pub live_script: Arc<battle_script::Live>,
 }
 
-/// The conversation has to start again, and there are exactly two reasons it ever does.
+/// The conversation has to start again.
 #[derive(Debug, Clone)]
 pub struct Reset {
-    /// The run directory the conversation now belongs to: the new one after a restart, and the
-    /// same one after a clear. `None` keeps everything in memory, as the tests do.
+    /// The new run directory after a restart, the same one after a clear; `None` stays in memory.
     pub run_dir: Option<PathBuf>,
     pub kind: ResetKind,
 }
@@ -123,7 +107,7 @@ pub struct Reset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResetKind {
     NewGame,
-    /// `POST /api/clear`: the same game, played by a model that no longer remembers any of it.
+    /// `POST /api/clear`: the same game, played by a model that remembers none of it.
     Cleared,
 }
 
@@ -141,24 +125,20 @@ impl TurnHandles {
     }
 }
 
-/// After a failure that is not the model's fault — the endpoint is down, the key is wrong — the
-/// turn resolves to a wait of this many agent ticks (two seconds of game time) rather than one.
+/// The wait, in agent ticks, that a turn the endpoint failed resolves to.
 const FAILURE_WAIT_TICKS: u16 = 100;
 
-/// The longest [`Worker::park_until`] will stop the run for, however far off the endpoint says
-/// its quota reopens.
+/// The longest [`Worker::park_until`] stops the run for, whatever the endpoint says.
 const MAX_PARK: Duration = Duration::from_secs(25 * 60 * 60);
 
 /// How finely the park is chopped.
 const PARK_SLICE: Duration = Duration::from_millis(200);
 
-/// When a run that the endpoint keeps refusing outright is parked, and for how long. A refusal is
-/// an [`LlmError::Http`] that [`LlmError::is_retryable`] rejects: a spent credit, a revoked key,
-/// none of which carries a time to come back at.
+/// Parking a run the endpoint keeps refusing. Only an [`LlmError::Http`] that
+/// [`LlmError::is_retryable`] rejects is a refusal; a timeout or spent 5xx retries is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefusalPark {
-    /// Refusals in a row that are only failed turns. Each of those re-sends a different
-    /// conversation, and a request the conversation made unacceptable can be cured between them.
+    /// Refusals in a row that only fail the turn, since a changed conversation may cure one.
     pub after: u32,
     /// The first park, doubled for every refusal after it up to `max`.
     pub first: Duration,
@@ -215,19 +195,19 @@ fn describe_wait(ms: u64) -> String {
 /// How much of a tool's answer the page and the transcript keep.
 const MAX_TOOL_RESULT: usize = 2_000;
 
-/// Where [`Worker::trim_history`] drops back to.
+/// Where [`Worker::trim_history`] drops back to, as a fraction of the window.
 const TRIM_TO: f64 = 0.50;
 
 /// How many overworld turns an unchanged plan may sit at before a fresh copy is appended.
 pub const PLAN_REFRESH_TURNS: u32 = 10;
 
-/// What a turn found the conversation looking like when it started, so a turn that fails outright
-/// can put it back exactly.
+/// Where a turn started, so a failed turn is rolled back to a length rather than by one `pop`: it
+/// can fail on its second tool step, with an assistant message and results already appended.
 #[derive(Debug, Clone, Copy, Default)]
 struct TurnOpen {
     /// `history.len()` before the plan or the situation was appended.
     at: usize,
-    /// [`Worker::turns_since_plan`] as it stood then.
+    /// Restored too, or a run whose every request fails appends a plan every tenth attempt.
     turns_since_plan: u32,
 }
 
@@ -248,24 +228,18 @@ pub struct Worker {
 
     /// The conversation, and the two files it is kept in — see [`crate::llm::history`].
     history: History,
-    /// The model's plan.
     todo: TodoList,
     /// The model's battle script, and the cell the policy reads it through.
     battle_script: BattleScript,
     live_script: Arc<battle_script::Live>,
-    /// What the page was last told the plan is, so [`Self::publish_todo`] can be called from
-    /// every moment it might have changed without publishing the same list twice.
+    /// What the page was last told the plan is, so [`Self::publish_todo`] never repeats itself.
     published_plan: Option<Vec<TodoView>>,
-    /// Plan calls this turn that the list refused, so an identical one is answered rather than
-    /// run again.
+    /// Plan calls the list refused this turn, so an identical one is answered without running.
     refused_todo: Vec<crate::llm::todo::TodoCall>,
     /// The same, for the battle script: `(source, armed, last_failure)` as the page last saw it.
-    /// `is_default` is not in here because it is a pure function of the source.
     published_script: Option<(Option<String>, bool, Option<String>)>,
-    /// Turns since the plan message was last (re)placed at the tail of the history — see
-    /// [`Self::sync_plan`] and [`PLAN_REFRESH_TURNS`].
+    /// Turns since the plan was last placed at the tail; see [`Self::sync_plan`].
     turns_since_plan: u32,
-    /// Where the turn in flight started, so a turn that fails outright can be rolled back whole.
     turn_open: TurnOpen,
     /// Tokens reported, tokens spent, and how far our own estimate is from the endpoint's.
     accounting: Accounting,
@@ -275,8 +249,7 @@ pub struct Worker {
     run: Option<Arc<CurrentRun>>,
 }
 
-/// Build the worker and its counterpart handles. The thread is started by [`Worker::spawn`]; this
-/// is separate so a test can drive [`Worker::run_one`] on its own thread and control the timing.
+/// The worker and its handles, apart from [`Worker::spawn`] so a test can drive `run_one`.
 pub fn channels(
     endpoint: Box<dyn ChatEndpoint>,
     config: LlmConfig,
@@ -341,14 +314,12 @@ pub fn channels(
 }
 
 impl Worker {
-    /// Point the `press_buttons` records at a run directory. Without it nothing is recorded,
-    /// which is what every test wants and what `gb serve` never does.
+    /// Point the incident records at a run directory; without it nothing is recorded.
     pub fn with_run(mut self, run: Arc<CurrentRun>) -> Self {
         self.run = Some(run);
         self
     }
 
-    /// Replace the retry policy.
     pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
         self
@@ -359,8 +330,7 @@ impl Worker {
         self
     }
 
-    /// File a report: the screen, the run's state, a save state and the last few turns of
-    /// conversation.
+    /// File a report: the screen, the status, a save state and the last few turns.
     fn record_report(
         &self,
         turn: u64,
@@ -394,8 +364,7 @@ impl Worker {
             .to_string()
     }
 
-    /// Run the loop on a new thread. It ends when the policy is dropped, which closes the
-    /// channel.
+    /// Run the loop on a new thread, until the policy drops its end of the channel.
     pub fn spawn(self) -> Result<std::thread::JoinHandle<()>, String> {
         std::thread::Builder::new()
             .name("llm-worker".to_string())
@@ -409,8 +378,7 @@ impl Worker {
         }
     }
 
-    /// Start the conversation again — about the game that is playing now, or about the same game
-    /// this model can no longer remember.
+    /// Start the conversation again, for a new game or for a model made to forget this one.
     fn apply_reset(&mut self, reset: Reset) {
         let dir = reset.run_dir.as_deref();
         self.todo = match reset.kind {
@@ -424,14 +392,12 @@ impl Worker {
             self.live_script.arm(self.battle_script.live_source(), self.battle_script.state(), self.battle_script.standing());
             self.publish_battle_script();
         }
-        // `fresh`/`cleared`, never `open`.
+        // `fresh`/`cleared`, never `open`, or the old conversation comes back.
         self.history = match reset.kind {
             ResetKind::NewGame => History::fresh(dir),
             ResetKind::Cleared => History::cleared(dir),
         };
-        // The history the counter was measured against is gone, and `sync_plan` finds no plan in
-        // the fresh one, so it appends immediately — leaving a stale count would make the *next*
-        // refresh fall due at the wrong time.
+        // `sync_plan` finds no plan in the fresh history and appends one, so the count restarts.
         self.turns_since_plan = 0;
         self.accounting = Accounting::new(self.config.context_limit);
         self.published.publish_event(UiEventBody::Notice {
@@ -457,14 +423,13 @@ impl Worker {
                 message: format!("the battle script was disarmed: {why}"),
             });
         }
-        // Written back for the same reason the failure above is: the counter lives on the
-        // emulator thread and only this one may touch the file.
+        // The counter lives on the emulator thread, and only this one may write the file.
         self.battle_script.record_decided(self.live_script.standing().decided);
 
         let TurnRequest { id, kind, situation, headline, menu } = request;
         self.published.publish_event(UiEventBody::TurnStarted { turn: id, kind: kind.label(), headline });
 
-        // Before `sync_plan`, not after.
+        // Before `sync_plan`, so a rollback takes the plan message too.
         self.turn_open = TurnOpen { at: self.history.len(), turns_since_plan: self.turns_since_plan };
         let carried = self.sync_plan(kind);
         self.publish_todo();
@@ -475,7 +440,7 @@ impl Worker {
             false => format!("{situation}\n{}\n", prompt::PLAN_UNCHANGED),
         }));
         let outcome = self.decide(id, kind, &menu);
-        // Before the outcome is sent, not at the end of the turn.
+        // Before the outcome is sent: a winning action has the archiver copy the run next tick.
         self.history.checkpoint(id, self.accounting.calibration(), self.turns_since_plan);
         match outcome {
             Some((decision, narration)) => {
@@ -499,9 +464,7 @@ impl Worker {
         if !matches!(self.published.run_status(), RunStatus::Error { .. }) {
             self.published.set_status(RunStatus::Playing);
         }
-        // The log is flushed above, before this runs, and that ordering is what makes the
-        // watermark sound: everything a compaction is about to destroy has already been written
-        // down.
+        // The log was flushed above, so everything a compaction destroys is already written down.
         if let Some(note) = self.compact_if_needed() {
             self.history.note_compaction(id, &note);
             self.history.checkpoint(id, self.accounting.calibration(), self.turns_since_plan);
@@ -591,8 +554,7 @@ impl Worker {
         }
         self.published_script = Some(current.clone());
         let (source, armed, last_failure) = current;
-        // Derived from the source rather than carried in the dedupe tuple above, which it would
-        // only duplicate: it is a pure function of what is installed.
+        // A pure function of the source, so not in the dedupe tuple.
         let is_default = self.battle_script.is_default();
         self.published.publish_event(UiEventBody::BattleScript { source, armed, is_default, last_failure });
     }
@@ -600,7 +562,7 @@ impl Worker {
     /// Stop the run until `until_ms`, and stop the emulator with it.
     fn park_until(&mut self, id: u64, until_ms: u64, park: Park, message: &str) -> bool {
         let now = now_ms();
-        // Clamped, because the wait is driven by a number the *endpoint* chose.
+        // Clamped, because the wait is driven by a number the endpoint chose.
         let until_ms = until_ms.min(now.saturating_add(MAX_PARK.as_millis() as u64));
         if until_ms <= now {
             return true;
@@ -615,8 +577,7 @@ impl Worker {
             ),
         });
         self.published.set_status(RunStatus::Throttled { until_ms, message: message.to_string() });
-        // Last, after the status: the emulator thread reads this one every tick, and a page that
-        // sees the screen stop before it is told why has nothing to draw its overlay from.
+        // After the status, so the page knows why before the screen stops.
         self.published.set_throttled_until(until_ms);
 
         let mut cancelled = false;
@@ -663,7 +624,7 @@ impl Worker {
                     stream: true,
                     stream_options: StreamOptions { include_usage: true },
                 };
-                // A loop, so a parked turn asks the *same* question when the quota reopens.
+                // A loop, so a parked turn asks the same question when the quota reopens.
                 let result = loop {
                     let published = Arc::clone(&self.published);
                     let generation = Arc::clone(&self.generation);
@@ -701,17 +662,15 @@ impl Worker {
                         },
                     );
                     match result {
-                        // The quota is spent and the endpoint dated its reopening: stop asking,
-                        // stop the game with it, and put the same question again when it opens.
+                        // A dated 429 parks the game, then asks the same question again.
                         Err(LlmError::RateLimited { resets_at_ms: Some(until_ms), message }) => {
                             if !self.park_until(id, until_ms, Park::Quota, &message) {
                                 break Err(LlmError::Cancelled);
                             }
-                            // Back to `AwaitingLlm` *before* asking again.
+                            // Back to `AwaitingLlm` before asking again.
                             self.published.set_status(RunStatus::AwaitingLlm { kind: kind.label() });
                         }
-                        // Refused outright, and not for the first time: stop the game rather
-                        // than ask again every two seconds of it, for longer each time.
+                        // Refused again: park rather than ask every two seconds, longer each time.
                         Err(refusal @ LlmError::Http { .. }) if !refusal.is_retryable() => {
                             self.refused_in_a_row += 1;
                             let Some(window) = self.refusal_park.window(self.refused_in_a_row) else {
@@ -725,6 +684,7 @@ impl Worker {
                             self.published.set_status(RunStatus::AwaitingLlm { kind: kind.label() });
                         }
                         settled => {
+                            // Any other answer ends the streak; a cancellation says nothing.
                             if !matches!(settled, Err(LlmError::Cancelled)) {
                                 self.refused_in_a_row = 0;
                             }
@@ -741,8 +701,7 @@ impl Worker {
                             level: "error",
                             message: format!("the turn could not be completed: {failure}"),
                         });
-                        // Nothing this turn appended was ever answered, so none of it belongs in
-                        // the conversation.
+                        // Nothing this turn appended was answered, so all of it goes.
                         self.roll_back_failed_turn();
                         return Some((Terminal::Wait { ticks: FAILURE_WAIT_TICKS }, None));
                     }
@@ -771,9 +730,7 @@ impl Worker {
             let classified: Vec<CallKind> =
                 completion.tool_calls.iter().map(|call| tools::classify(kind, call, menu)).collect();
 
-            // Published *after* classification, not before, so each call arrives at the page
-            // already labelled — a rejected call reads as rejected rather than as one that never
-            // answered.
+            // Published after classification, so a rejected call arrives labelled as one.
             for (call, classification) in completion.tool_calls.iter().zip(&classified) {
                 self.published.publish_event(UiEventBody::ToolCall {
                     turn: id,
@@ -784,15 +741,11 @@ impl Worker {
                 });
             }
 
-            // A message that mixes reads with a terminal call ends the turn: the model has
-            // already committed, so running the reads would be answering a question it stopped
-            // asking.
+            // A terminal call ends the turn, and reads beside it answer a question already settled.
             if let Some(position) = classified.iter().position(|c| matches!(c, CallKind::Terminal(_))) {
                 let CallKind::Terminal(decision) = &classified[position] else { unreachable!() };
                 let decision = decision.clone();
-                // Read off the call rather than carried through `CallKind`: it is prose for the
-                // page and for the model's own memory, and nothing between here and the emulator
-                // has any use for it.
+                // Read off the call: the emulator has no use for the summary.
                 let summary = tools::call_summary(&completion.tool_calls[position]);
                 let ended_with = completion.tool_calls[position].function.name.clone();
                 for (index, call) in completion.tool_calls.iter().enumerate() {
@@ -803,12 +756,11 @@ impl Worker {
                                 .to_string()
                         }
                         CallKind::Todo(call) => self.apply_todo(call.clone()),
-                        // Filed, not dropped — the same exception TODO calls get, for the same
-                        // reason.
+                        // Filed, not dropped, like a TODO call.
                         CallKind::Issue(message) => {
                             self.file_issue(id, kind, message, summary.as_deref())
                         }
-                        // The same exception a third time.
+                        // Likewise.
                         CallKind::BattleScript(call) => self.apply_battle_script(call.clone()),
                         CallKind::Rejected(complaint) => complaint.clone(),
                         _ => format!("Not run — the turn ended with `{ended_with}` in the same message."),
@@ -818,9 +770,7 @@ impl Worker {
                 }
                 // After the tool results are appended, not before.
                 if let Terminal::PressButtons { buttons } = &decision {
-                    // `why` is enforced by `tools::classify` for the one kind that offers the
-                    // tool, so the `unwrap_or_default` is unreachable rather than a tolerated
-                    // absence.
+                    // `tools::classify` enforces `why`, so the default is unreachable.
                     let why = tools::call_reason(&completion.tool_calls[position]).unwrap_or_default();
                     let report = incident::Report::Press { buttons, why: &why };
                     self.record_report(id, kind, report, summary.as_deref());
@@ -850,12 +800,10 @@ impl Worker {
             };
             let mut answers = answers.into_iter();
 
-            // Pictures cannot ride on a `tool` message (see `Message::user_with_image`), so they
-            // are collected and appended *after* every tool result.
+            // Pictures cannot ride on a `tool` message, so they follow every tool result.
             let mut pictures: Vec<Message> = Vec::new();
             for (call, classification) in completion.tool_calls.iter().zip(&classified) {
-                // The encoded picture, when this call answered with one, so the page can be
-                // offered the same image the model was — see `publish_tool_result`.
+                // The picture this call answered with, for the page too.
                 let mut png: Option<Vec<u8>> = None;
                 let content = match classification {
                     CallKind::Read => {
@@ -863,9 +811,7 @@ impl Worker {
                             "{\"error\": \"the agent returned no result for this call\"}"));
                         match answer.map {
                             None => answer.json,
-                            // Same shape as `screenshot` below, and for the same reason: the tool
-                            // result is text saying a picture follows, and the picture is a
-                            // `user` message appended after every result.
+                            // As `screenshot` below: the result says a picture follows.
                             Some(map) => match map_image::render(&map) {
                                 // The ASCII grid is the safety net, not dead code.
                                 None => format!(
@@ -878,17 +824,14 @@ impl Worker {
                                     }
                                     let (width, height) = canvas.dimensions();
                                     let caption = map_image::caption(&map, answer.is_dark);
-                                    // Encoded once and used twice: the model's message and the
-                                    // page's ring.
+                                    // Encoded once, for the model's message and the page.
                                     let encoded = map_image::encode(&canvas);
                                     let url = screenshot::png_data_url(&encoded);
                                     png = Some(encoded);
                                     pictures.push(Message::user_with_image_detail(
                                         caption.clone(),
                                         url,
-                                        // `high`: a map is up to 1600 px on a side, and one
-                                        // 512x512 tile would turn forty squares of terrain to
-                                        // mush.
+                                        // `high`: one 512 px tile turns a 1600 px map to mush.
                                         ImageDetail::High,
                                         protocol::image_tokens(ImageDetail::High, width, height),
                                     ));
@@ -926,8 +869,7 @@ impl Worker {
         Some((self.give_up(id, "the model used its whole tool budget without deciding"), None))
     }
 
-    /// Say on the page what one tool call answered, and park its picture where the page can fetch
-    /// it.
+    /// Say on the page what one tool call answered, and hold its picture for the page to fetch.
     fn publish_tool_result(
         &self,
         turn: u64,
@@ -962,7 +904,7 @@ impl Worker {
         // Nothing may stop the emulator between here and the answer.
         self.published.set_status(RunStatus::RunningTool { name: names(&calls) });
         let answers = self.tool_calls.send(ToolBatch { turn: id, calls }).ok().and_then(|()| {
-            // Blocking, and that is the point: this thread is *supposed* to wait.
+            // Blocking: this thread is supposed to wait.
             match self.tool_results.recv() {
                 Ok(ToolBatchResult::Answered(answers)) => Some(answers),
                 Ok(ToolBatchResult::Cancelled) | Err(_) => None,
@@ -985,7 +927,6 @@ impl Worker {
         self.generation.load(Ordering::SeqCst) != id
     }
 
-    /// Fold one response into [`Accounting`].
     fn account_for(&mut self, completion: &Completion) {
         let usage = completion.usage.unwrap_or_else(|| Usage::estimate(&self.history, completion));
         self.accounting.record(usage, &self.history);
@@ -1038,9 +979,7 @@ impl Worker {
             before,
             after,
             images_evicted,
-            // What the history *lost*, which is not `was - len()`: `apply_summary` adds the
-            // summary back, so the two added messages would understate the drop by exactly that
-            // much.
+            // Net of the summary message `apply_summary` adds back.
             dropped: was.saturating_sub(self.history.len()),
             summary,
         })
@@ -1054,8 +993,7 @@ impl Worker {
             self.retry,
             self.endpoint.as_ref(),
             &request,
-            // Not published as an `AssistantDelta`: the summary is bookkeeping, and a thousand
-            // words of it in the conversation pane would read as the model talking to itself.
+            // Not published: the summary is bookkeeping, not the model talking.
             &mut |_| {},
             &|| false,
             &mut |retry| {
@@ -1091,8 +1029,7 @@ impl Worker {
         }
     }
 
-    /// The last resort described at [`TRIM_TO`]: drop whole turns from the front until the
-    /// history is back under half the window.
+    /// The last resort: drop whole turns from the front until the history is under [`TRIM_TO`].
     fn trim_history(&mut self) {
         let target = (self.accounting.limit() as f64 * TRIM_TO) as u64;
         // Index 0 is the system prompt; index 1 is the summary, if a stage 2 has ever run.
@@ -1169,8 +1106,7 @@ fn names(calls: &[ToolCall]) -> String {
 
 fn describe(decision: &Terminal) -> String {
     match decision {
-        // The chain is on the line the page shows, because a decision that carries three actions
-        // and reads as one is a decision nobody watching can account for afterwards.
+        // The chain is on the line the page shows, or three actions read as one.
         Terminal::ChooseAction { id, then, resume_after_battle } => {
             let mut line = format!("choose_action {id}");
             if !then.is_empty() {
@@ -1181,9 +1117,7 @@ fn describe(decision: &Terminal) -> String {
             }
             line
         }
-        // On the line for the same reason the chain is: a turn that also stops the run's battle
-        // script deciding the rest of this fight is not the same decision as one that does not,
-        // and a scripted battle is otherwise invisible from outside.
+        // So is a take-over, since a scripted battle is otherwise invisible from outside.
         Terminal::ChooseBattleAction { id, take_over } => match take_over {
             true => format!("choose_battle_action {id} (taking over this battle)"),
             false => format!("choose_battle_action {id}"),

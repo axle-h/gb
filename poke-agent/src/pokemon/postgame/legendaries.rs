@@ -1,10 +1,5 @@
-//! Workstream D — Legendaries: Zapdos, Moltres, Mewtwo.
-//! ```text
-//! Rand1 ∈ [0,255] Poké Ball / [0,200] Great Ball / [0,150] Ultra Ball
-//! Status subtracts 12 (burn/paralysis/poison) or 25 (freeze/sleep) from Rand1; if that underflows,
-//!   the Pokémon is caught outright.
-//! Otherwise Rand1 - Status > catch rate ⇒ the ball fails, whatever the target's HP is.
-//! ```
+//! The legendaries: Zapdos, Moltres, Mewtwo. A ball fails whenever `Rand1` less the status bonus
+//! exceeds the catch rate, whatever the HP, so against catch rate 3 a status is the only lever.
 
 use gb::geometry::Point8;
 use crate::pokemon::bag::BagItem;
@@ -17,9 +12,7 @@ use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::status::PokemonStatus;
 use crate::pokemon::GameState;
 
-/// The species this module treats as "throw, never fight": every legendary bird plus Mewtwo, all
-/// of which have `db 3 ; catch rate` in their base stats. Articuno is listed for completeness —
-/// the main playthrough Master-Balls it, so it never reaches [`pre_catch_action`] in practice.
+/// The species with catch rate 3, which are thrown at and never fought.
 pub const CATCH_RATE_3: [PokemonSpecies; 4] = [
     PokemonSpecies::Articuno,
     PokemonSpecies::Zapdos,
@@ -27,14 +20,13 @@ pub const CATCH_RATE_3: [PokemonSpecies; 4] = [
     PokemonSpecies::Mewtwo,
 ];
 
-/// The party slot Thunder Wave is taught to: Slowpoke, the only compatible member (see the module
-/// doc). It is slot 3 in every fixture from `postgame-fly-bike.bin` onward.
+/// Slowpoke's slot, the one member that can learn Thunder Wave, in every fixture from
+/// `postgame-fly-bike.bin` on.
 pub const PARALYSER_SLOT: u8 = 3;
 
-/// Where Moltres sits once caught — it is appended after the four the fixture starts with.
+/// Where Moltres lands once caught, after the fixture's four.
 const MOLTRES_SLOT: u8 = 4;
 
-/// How much HP each healing item restores.
 fn heal_amount(item: ItemId) -> u16 {
     match item {
         ItemId::Potion => 20,
@@ -57,8 +49,7 @@ fn heal_action(actions: &[BattleAction], missing: u16) -> Option<&BattleAction> 
         .or_else(|| offered().max_by_key(|a| amount(a)))
 }
 
-/// What to do on a battle turn against a catch-rate-3 target, or `None` to let the generic catch
-/// policy in `pick_battle_action` have it.
+/// A battle turn against a catch-rate-3 target, or `None` for the generic catch policy.
 pub fn pre_catch_action(
     state: &GameState,
     target: PokemonSpecies,
@@ -72,8 +63,7 @@ pub fn pre_catch_action(
     if battle.battle_type != BattleType::Wild || battle.enemy.species != target {
         return None;
     }
-    // A Master Ball is an unconditional capture — `ItemUseBall` jumps straight to `.captured`
-    // before it rolls anything — so skip the whole paralyse-and-nurse routine.
+    // A Master Ball captures before `ItemUseBall` rolls anything.
     if matches!(throw_ball, Some(BattleAction::UseItem { item, .. }) if item.id == ItemId::MasterBall) {
         println!("[legendaries] Master Ball in the bag — throwing it at {target} immediately");
         return throw_ball.cloned();
@@ -91,7 +81,6 @@ pub fn pre_catch_action(
         .map(|(i, _)| i as u8);
 
     if !statused {
-        // Never run.
         let held = battle.player.available_battle_moves().into_iter()
             .find(|a| matches!(a, BattleAction::Fight { battle_move, .. }
                 if battle_move.name == PokemonMoveName::ThunderWave));
@@ -105,9 +94,7 @@ pub fn pre_catch_action(
                 return Some(switch);
             }
         }
-        // No paralyser available (never taught, fainted, or out of PP).
     } else {
-        // 2.
         let healthiest = state.pokemon.iter().enumerate()
             .max_by_key(|(_, p)| p.current_hp).map(|(i, p)| (i as u8, p.current_hp));
         if let Some((slot, hp)) = healthiest {
@@ -121,7 +108,6 @@ pub fn pre_catch_action(
         }
     }
 
-    // 3.
     if battle.player.remaining_hp() < 0.35 {
         let missing = battle.player.stats.hp.saturating_sub(battle.player.current_hp);
         if let Some(heal) = heal_action(actions, missing) {
@@ -135,8 +121,7 @@ pub fn pre_catch_action(
 }
 
 impl PolicyStep {
-    /// D1a — the toolkit all three catches share: a stack of balls, plus TM45 Thunder Wave picked
-    /// up on Route 24 and taught to Slowpoke.
+    /// The toolkit all three catches share: balls, potions, and TM45 Thunder Wave taught to Slowpoke.
     pub fn arm_for_legendaries_steps() -> Vec<Self> {
         vec![
             Self::Fly { to: Map::CeruleanCity },
@@ -152,16 +137,14 @@ impl PolicyStep {
             Self::enter(Map::CinnabarIsland), // back outside, or the town map will not open
             Self::Fly { to: Map::CeruleanCity },
             Self::BuyFromMart { item: BagItem::new(ItemId::PokeBall, 40), map: Map::CeruleanMart },
-            // Finish outdoors.
             Self::enter(Map::CeruleanCity),
         ]
     }
 
-    /// D1b — Moltres, on Victory Road 2F at (11,5).
+    /// Moltres, on Victory Road 2F at (11,5).
     pub fn moltres_steps() -> Vec<Self> {
         let mut steps = vec![
             Self::Fly { to: Map::ViridianCity },
-            // Victory Road is nine trainers and no Pokémon Center.
             Self::enter(Map::ViridianPokecenter),
             Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
             Self::enter(Map::ViridianCity),
@@ -170,16 +153,14 @@ impl PolicyStep {
             Self::Interact(MapSprite::ROUTE22GATE_GUARD), // badge check, and it flips the dynamic warp
             Self::enter(Map::Route23),
             Self::goto(Map::VictoryRoad1F),
-            // VR1F: a boulder onto the (17,13) switch opens the (1,1) ladder up to 2F.
             Self::UseStrength { target: PartyRef::Slot(PARALYSER_SLOT) },
             Self::SolveBoulders { switch: Point8 { x: 17, y: 13 }, boulder: None },
             Self::enter(Map::VictoryRoad2F),
-            // VR2F west: the (1,16) switch opens the corridor east to the (23,7) stairs.
             Self::UseStrength { target: PartyRef::Slot(PARALYSER_SLOT) },
             Self::SolveBoulders { switch: Point8 { x: 1, y: 16 }, boulder: None },
             Self::enter(Map::VictoryRoad3F),
         ];
-        // …then down through VR3F's (2,0) warp into 2F's north strip, and walk into Moltres.
+        // Down through 3F's (2,0) warp into 2F's north strip, where Moltres is.
         steps.extend([
             Self::enter_at(Map::VictoryRoad2F, 1, 1),
             Self::CatchPokemon { species: PokemonSpecies::Moltres, on_map: Map::VictoryRoad2F,
@@ -188,7 +169,7 @@ impl PolicyStep {
         steps
     }
 
-    /// D2 + D3 — reach the Power Plant and catch Zapdos at (4,9).
+    /// Reach the Power Plant and catch Zapdos at (4,9).
     pub fn zapdos_steps() -> Vec<Self> {
         vec![
             Self::Dig { target: PartyRef::Slot(PARALYSER_SLOT) },
@@ -204,26 +185,22 @@ impl PolicyStep {
         ]
     }
 
-    /// D5 + D6 — Cerulean Cave and Mewtwo at B1F (27,13).
+    /// Cerulean Cave and Mewtwo at B1F (27,13).
     pub fn mewtwo_steps() -> Vec<Self> {
         let mut steps = vec![
             Self::enter(Map::Route10),
             Self::Fly { to: Map::CeruleanCity },
             Self::enter(Map::CeruleanPokecenter),
             Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
-            // Bank Moltres while we are standing at the PC.
             Self::deposit_pokemon(MOLTRES_SLOT, Map::CeruleanPokecenter),
             Self::enter(Map::CeruleanCity),
         ];
-        // The cave door is on the far side of Cerulean.
         steps.extend([
             Self::enter(Map::Route24),
             Self::enter_at(Map::CeruleanCity, 14, 0),
             Self::enter(Map::CeruleanCave1F),
-            // 1F's B1F ladder at (0,6) is not reachable from the entrance: the strip in front of
-            // it is raw tile 32 and the room below is tile 5, and `(32, 5)` is one of the Cavern
-            // tileset's `TilePairCollisions` — an elevation boundary the player cannot step
-            // across.
+            // 1F's B1F ladder at (0,6) is behind a Cavern `TilePairCollisions` elevation boundary, so
+            // it is reached by way of 2F.
             Self::enter_at(Map::CeruleanCave2F, 3, 11),
             Self::enter_at(Map::CeruleanCave1F, 1, 3),
             Self::enter(Map::CeruleanCaveB1F),

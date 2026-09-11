@@ -1,33 +1,24 @@
-// The client half of `/api/audio`: raw Opus packets in, sound out.
-//
-// The stream is `src/web/audio.rs`'s — a twelve-byte header, then one bare Opus packet per 20 ms,
-// length-prefixed by `src/web/mod.rs` and **not** compressed. Decoding is WebCodecs' `AudioDecoder`
-// and playback is one `AudioBufferSourceNode` per frame, scheduled on the `AudioContext` clock.
-//
-// ⚠️ **No `description` is ever passed to `configure()`.** The W3C WebCodecs Opus registration says
-// supplying one means the bitstream is Ogg-encapsulated, so handing it an `OpusHead` — the obvious
-// "we have a header, let us make it the standard one" — puts the decoder in the wrong mode for the
-// bare packets it is about to receive. Our header is for `sampleRate` and `numberOfChannels` and is
-// never given to the decoder.
+// The client half of `/api/audio`: a twelve-byte header, then one bare Opus packet per frame,
+// decoded by WebCodecs and scheduled on the `AudioContext` clock. Never pass a `description` to
+// `configure()`: WebCodecs reads one as Ogg encapsulation.
 
 import type { Connection } from './api';
 import { subscribeFramed, type Fatal } from './stream';
 
-/** How far ahead of the context clock audio is kept scheduled. The whole latency of the feature. */
+/** How far ahead of the context clock audio is scheduled: the feature's whole latency. */
 const TARGET_LEAD_S = 0.18;
-/** Below this the next frame cannot be scheduled at all — a source cannot be started in the past. */
+/** Below this the next frame cannot be scheduled, since a source cannot start in the past. */
 const UNDERRUN_S = 0.005;
 /** Above this we are not streaming, we are replaying. */
 const MAX_LEAD_S = 0.6;
-/** Ceiling on the playback-rate trim. 0.5% is about nine cents of pitch. */
+/** Ceiling on the playback-rate trim, about nine cents of pitch. */
 const MAX_TRIM = 0.005;
-/** The lead error at which the trim saturates. */
 const TRIM_FULL_SCALE_S = 0.15;
-/** Every fade here. Long enough to kill a click, short enough not to be heard as a swell. */
+/** Long enough to kill a click, short enough not to be heard as a swell. */
 const FADE_S = 0.008;
-/** Backpressure: a decoder this far behind is not going to catch up, and queueing builds latency. */
+/** A decoder this far behind will not catch up, and queueing only builds latency. */
 const MAX_DECODE_QUEUE = 20;
-/** How long to give `AudioContext.resume()` before deciding the browser wants a gesture first. */
+/** How long `AudioContext.resume()` gets before the browser is assumed to want a gesture. */
 const RESUME_GRACE_MS = 1000;
 
 const MAGIC = 0x31414247; // "GBA1", little-endian
@@ -61,38 +52,15 @@ export type Action = 'anchor' | 'resync' | 'play';
 
 export interface Scheduled {
   action: Action;
-  /** When this frame should start, on the `AudioContext` clock. */
   startAt: number;
-  /** What to set `playbackRate` to. */
   rate: number;
   /** Where the *next* frame should start, given this one's duration. */
   nextAt: number;
 }
 
-/**
- * What to do with one decoded frame. **Pure**, and deliberately so: the whole drift algorithm is
- * one function that can be read, reasoned about and exercised without an `AudioContext`, in the
- * spirit of `video.ts`'s DOM-free decoder.
- *
- * Three cases, and each is a different failure:
- *
- * - **anchor** — nothing is scheduled, or what was scheduled has already run out. The gap has
- *   happened; all this can do is re-seat the buffer. It is also, unchanged, the path a run parked on
- *   a spent quota takes: no packets for hours, then one.
- * - **resync** — we are further behind live than `MAX_LEAD_S`. A lagged subscriber handed a burst
- *   out of the server's ring, a tab that was frozen, a decoder that stalled and caught up. Dropping
- *   one frame per excess would be gentler per event but leaves a discontinuity each time and fires
- *   dozens of times per burst; one bounded cut is a single artifact instead of fifty.
- * - **play** — the steady state, with a rate trim of at most ±`MAX_TRIM`.
- *
- * ⚠️ **The trim is the part that earns its place, and it is not a refinement.** `CLAUDE.md` records
- * that the host's wall/emulated ratio has a *ceiling* of 1.0007×, so the emulator's clock and the
- * `AudioContext`'s separate by around 2.5 s an hour in a perfectly healthy run — and a sound card is
- * independently off the system clock by up to 0.1% again. Without the trim that drift alone crosses
- * `MAX_LEAD_S` and forces an audible cut every ten minutes or so, for no reason. ±0.5% corrects far
- * faster than either accumulates (it closes a 100 ms error in 20 s) and is inaudible on chiptune, so
- * drift is absorbed silently and the cut is kept for things that really are discontinuities.
- */
+// What to do with one decoded frame, kept pure. `anchor` re-seats after an underrun, `resync` makes
+// one bounded cut when too far behind, and `play` trims the rate by at most `MAX_TRIM`, which absorbs
+// the clock drift that would otherwise force a cut every few minutes.
 export function schedule(nextAt: number | null, now: number, duration: number): Scheduled {
   const lead = nextAt === null ? Number.NEGATIVE_INFINITY : nextAt - now;
 
@@ -111,7 +79,6 @@ export function schedule(nextAt: number | null, now: number, duration: number): 
 
 // ── The player ───────────────────────────────────────────────────────────────────────────────────
 
-/** Whether this browser can play the stream at all. */
 export async function audioIsSupported(): Promise<boolean> {
   if (typeof AudioDecoder === 'undefined') return false;
   try {
@@ -126,20 +93,13 @@ export async function audioIsSupported(): Promise<boolean> {
   }
 }
 
-/**
- * One listening session: a context, a decoder and the connection that feeds them.
- *
- * ⚠️ **Nothing is constructed until the viewer asks.** An `AudioContext` starts suspended under
- * every browser's autoplay policy, and a `/api/audio` fetch opened against a suspended context is
- * 24 kbit/s being decoded into nothing — so the stream is opened *after* `resume()` succeeds, which
- * is also what makes sound free for every viewer who never turns it on.
- */
+/** One listening session; nothing is fetched until `resume()` succeeds. */
 export class AudioPlayer {
   private context: AudioContext | null = null;
   private master: GainNode | null = null;
   private decoder: AudioDecoder | null = null;
   private format: AudioFormat | null = null;
-  /** What `this.decoder` was actually configured with, which survives `format` being forgotten. */
+  /** What the decoder was configured with, which outlives `format` being forgotten. */
   private format0: { sampleRate: number; numberOfChannels: number } | null = null;
   private unsubscribe: (() => void) | null = null;
   private live = new Set<AudioBufferSourceNode>();
@@ -154,23 +114,17 @@ export class AudioPlayer {
     private readonly onFatal: (why: Fatal) => void,
   ) {}
 
-  /** Returns whether sound actually started; `false` means the browser refused to resume. */
+  /** Returns whether sound actually started; `false` means the browser would not resume. */
   async start(): Promise<boolean> {
     if (this.context) return true;
     let context: AudioContext;
     try {
-      // Matching the stream's rate removes a resample per buffer and makes the drift arithmetic
-      // exact. Not every device will take the hint, hence the fallback.
+      // Matching the stream's rate avoids a resample; not every device accepts it.
       context = new AudioContext({ sampleRate: 48000, latencyHint: 'playback' });
     } catch {
       context = new AudioContext();
     }
-    // ⚠️ **`resume()` must be raced, because without user activation it never settles at all.**
-    // Not "rejects" — the promise simply stays pending for the life of the page, which is a shape
-    // `await` has no answer to. It matters because the stored-preference path calls this at mount,
-    // where there has been no gesture yet: awaiting it there hangs `start` for ever, leaves the
-    // caller holding a half-built player, and the viewer's *real* click then short-circuits on it
-    // and connects nothing. A second of grace is far more than a permitted resume needs.
+    // Raced: without user activation `resume()` never settles, and `start` would hang at mount.
     await Promise.race([
       context.resume().catch(() => {}),
       new Promise((settle) => setTimeout(settle, RESUME_GRACE_MS)),
@@ -184,8 +138,7 @@ export class AudioPlayer {
     this.master = context.createGain();
     this.master.gain.value = 0;
     this.master.connect(context.destination);
-    // ⚠️ Safari parks a context in `'interrupted'` after a call or a lock screen, and an OS sleep
-    // does the same elsewhere. Re-anchoring is what stops it resuming into deadlines set hours ago.
+    // Safari parks a context in `'interrupted'`; re-anchor so it does not resume into stale deadlines.
     context.addEventListener('statechange', this.onStateChange);
 
     this.unsubscribe = subscribeFramed(this.url, this.onMessage, this.connectionChanged, {
@@ -221,22 +174,8 @@ export class AudioPlayer {
     this.timestamp = 0;
   }
 
-  /**
-   * ⚠️ **Every connection re-sends the header, so the format has to be forgotten on each one.**
-   * The first message of a stream is twelve bytes of `GBA1` and the rest are bare Opus packets, told
-   * apart by position and nothing else — so a reconnect that kept the format it already had would
-   * fall straight through to the decoder and feed it the header as if it were audio. It is not
-   * rejected either: `G` is `0x47`, which reads as a TOC byte claiming a stereo stream and a
-   * frame-count code of 3.
-   *
-   * `'live'` is the moment for it — `subscribeFramed` reports it after the fetch has succeeded and
-   * before the first message, so this lands in the gap rather than racing the header.
-   *
-   * ⚠️ **`nextAt` is deliberately *not* reset here.** A reconnect is not automatically a
-   * discontinuity: a blip that is repaired inside the jitter buffer should stay inaudible, and a gap
-   * long enough to matter drains `nextAt` past `UNDERRUN_S` on its own and anchors. Forcing an
-   * anchor would instead schedule the new audio on top of sources that are still playing out.
-   */
+  // Each connection re-sends the header, so the format is forgotten on `'live'`, before the first
+  // message. `nextAt` is kept: a reconnect is not a discontinuity.
   private connectionChanged = (connection: Connection) => {
     if (connection === 'live') this.format = null;
     this.onConnection(connection);
@@ -263,22 +202,14 @@ export class AudioPlayer {
         this.format0?.sampleRate !== format.sampleRate ||
         this.format0?.numberOfChannels !== format.channels;
       this.format = format;
-      // ⚠️ **A reconnect keeps the decoder it already had**, and with it the timestamp counter that
-      // has to stay monotonic across the gap. Rebuilding on every reconnect would either restart
-      // that counter — which WebCodecs rejects — or leak a decoder per attempt. Only a format that
-      // has genuinely moved under a deploy is worth a new one.
+      // A reconnect keeps its decoder, whose timestamp counter must stay monotonic.
       if (!this.decoder || this.decoder.state !== 'configured' || changed) this.buildDecoder();
       return;
     }
     const decoder = this.decoder;
     if (!decoder || decoder.state !== 'configured') return;
-    // ⚠️ A decoder this far behind will not catch up, and every queued packet is latency the
-    // scheduler then has to tear down with an audible cut. Dropping is the cheaper answer.
     if (decoder.decodeQueueSize > MAX_DECODE_QUEUE) return;
-    // ⚠️ **Every Opus packet is a key chunk.** Opus has no delta frames, and WebCodecs rejects a
-    // stream whose first chunk is not one. The timestamp is a local counter, monotonic because the
-    // spec requires it — it is deliberately *not* used for scheduling, since there is no shared
-    // clock with the server and the emulated one legitimately gaps.
+    // Every Opus packet is a key chunk. The timestamp is a local monotonic counter, never used for scheduling.
     decoder.decode(
       new EncodedAudioChunk({
         type: 'key',
@@ -293,17 +224,13 @@ export class AudioPlayer {
   private buildDecoder() {
     const format = this.format;
     if (!format) return;
-    // ⚠️ Closed rather than dropped: an `AudioDecoder` left configured holds its own resources, and
-    // this is reached again on a decode error as well as on a format change.
+    // Closed, not dropped: a configured decoder holds resources.
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
     this.timestamp = 0;
     this.format0 = { sampleRate: format.sampleRate, numberOfChannels: format.channels };
     this.decoder = new AudioDecoder({
       output: this.onFrame,
-      // ⚠️ **Rebuild and keep the connection, which is the opposite of what `Screen` does.** A video
-      // decode error means the palette and the pixels are both suspect and only a fresh keyframe
-      // repairs them, so reconnecting is the fix. The next Opus packet repairs itself, so
-      // reconnecting here would throw away the jitter buffer to fix nothing.
+      // Rebuild and keep the connection: the next Opus packet repairs itself, unlike a video frame.
       error: (failure) => {
         console.error('audio decoder failed, rebuilding', failure);
         if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
@@ -325,9 +252,7 @@ export class AudioPlayer {
       data.close();
       return;
     }
-    // ⚠️ **Never assume the output rate matches what we configured.** Chrome decodes Opus at 48 kHz
-    // whatever `sampleRate` said, so `data.sampleRate` is the authority for both the buffer and the
-    // duration.
+    // `data.sampleRate` is the authority: Chrome decodes Opus at 48 kHz whatever was configured.
     const frames = data.numberOfFrames;
     const rate = data.sampleRate;
     const channels = data.numberOfChannels;
@@ -365,9 +290,7 @@ export class AudioPlayer {
     this.live.add(source);
     this.nextAt = plan.nextAt;
 
-    // Arm the fade-out for the moment this frame runs out. Every subsequent frame cancels and
-    // re-arms it, so it only ever fires when the stream has genuinely stopped — which is what turns
-    // a park, a network gap and a `MAX_CATCHUP` drop into a fade rather than a click.
+    // Armed on every frame and re-armed by the next, so it fires only when the stream really stops.
     clearTimeout(this.tail);
     const fadeIn = (plan.nextAt - FADE_S - now) * 1000;
     this.tail = setTimeout(
@@ -378,11 +301,7 @@ export class AudioPlayer {
     );
   };
 
-  /**
-   * ⚠️ **Never `cancelScheduledValues` on its own**, which drops the gain to whatever was last set
-   * and clicks. Pinning the current value first and ramping from it is what makes every transition
-   * here inaudible.
-   */
+  /** Pins the current value before ramping, since `cancelScheduledValues` alone clicks. */
   private rampTo(value: number, at: number) {
     const gain = this.master?.gain;
     if (!gain) return;

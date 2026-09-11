@@ -1,4 +1,4 @@
-//! Phase 0, task 0.7 — the debug tier: the one place RAM writes are allowed.
+//! The debug tier: the one place RAM writes are allowed, and no play-path source may call it.
 
 use crate::pokemon::item::ItemId;
 use crate::pokemon::party::PokemonParty;
@@ -22,7 +22,7 @@ fn to_bcd(mut value: u32, bytes: usize) -> Vec<u8> {
         .collect()
 }
 
-/// Workstream J — the options every test fixture is loaded with.
+/// The options every test fixture is loaded with.
 pub const FAST_FIXTURE_OPTIONS: crate::pokemon::options::GameOptions = crate::pokemon::options::GameOptions {
     battle_animations_on: false,
     battle_style: crate::pokemon::options::BattleStyle::Set,
@@ -97,8 +97,7 @@ impl<'a> PokemonApi<'a> {
             self.mmu_mut().write(base + i as u16 * 2, *id);
             self.mmu_mut().write(base + i as u16 * 2 + 1, *qty);
         }
-        // The list is 0xFF-terminated after the last pair, exactly as `debug_give_item_id` leaves
-        // it.
+        // The list is 0xFF-terminated after the last pair.
         self.mmu_mut().write(base + kept.len() as u16 * 2, 0xFF);
         self.mmu_mut().write(pokered_symbols::wNumBagItems.address, kept.len() as u8);
         dropped.into_iter().map(|(id, _)| id).collect()
@@ -114,8 +113,7 @@ impl<'a> PokemonApi<'a> {
     pub fn debug_faint_party(&mut self) {
         let base = pokered_symbols::wPartyMons.address;
         for index in 0..crate::pokemon::encoding::PokemonBlockAddresses::PARTY_MAX {
-            // Offset 1 of the party struct is the big-endian current HP — see
-            // `PokemonEncoding::read_pokemon`, which reads it from exactly here.
+            // Offset 1 of the party struct is the big-endian current HP.
             let hp = base + index * crate::pokemon::encoding::PokemonBlockAddresses::POKEMON_BLOCK_SIZE + 1;
             self.mmu_mut().write(hp, 0);
             self.mmu_mut().write(hp + 1, 0);
@@ -190,11 +188,10 @@ impl<'a> PokemonApi<'a> {
         self.mmu_mut().write_player_pokemon_party(&party)
     }
 
-    /// Workstream J1 — force the OPTION menu's settings by writing `wOptions` directly.
+    /// Force the OPTION menu's settings by writing `wOptions`, answering whether they had drifted.
     pub fn debug_set_options(&mut self, options: &crate::pokemon::options::GameOptions) -> bool {
         use crate::pokemon::options::{GameOptionsReader, GameOptionsWriter};
-        // An unreadable byte (a text speed the reader has no name for, which is what a fresh boot
-        // leaves) counts as drifted — the point is to end up at `options` either way.
+        // An unreadable byte, which a fresh boot leaves, counts as drifted.
         let drifted = self.mmu().read_game_options().map_or(true, |live| live != *options);
         if drifted {
             self.mmu_mut().write_game_options(options).ok();
@@ -203,7 +200,7 @@ impl<'a> PokemonApi<'a> {
     }
 }
 
-/// The boundary guard for task 0.7.
+/// No play-path source names a `debug_` helper outside a comment.
 #[cfg(test)]
 #[test]
 fn play_path_contains_no_debug_ram_writes() {
@@ -211,8 +208,7 @@ fn play_path_contains_no_debug_ram_writes() {
         "src/pokemon/policy.rs".into(),
         "src/pokemon/agent.rs".into(),
     ];
-    // Scanned from disk, not a hard-coded list, so a workstream added later cannot quietly opt
-    // out.
+    // Scanned from disk so a module added later cannot opt out.
     let postgame = std::path::Path::new("src/pokemon/postgame");
     for entry in std::fs::read_dir(postgame).expect("postgame module directory should exist") {
         let path = entry.expect("readable dir entry").path();

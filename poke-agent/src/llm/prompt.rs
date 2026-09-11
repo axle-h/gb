@@ -1,12 +1,10 @@
-
 use crate::llm::battle_script::ScriptState;
 use crate::llm::tools::{DecisionKind, MenuItem, terminal_names};
 use crate::pokemon::battle::is_ghost_battle;
 use crate::pokemon::GameState;
 use crate::pokemon::agent::AgentEvent;
 
-/// Index 0 of the history, and — since the notes came out of it — byte-identical for the whole
-/// run.
+/// Index 0 of the history, byte-identical for the whole run because a prompt cache keys on it.
 pub fn system_message() -> crate::llm::protocol::Message {
     crate::llm::protocol::Message::system(SYSTEM_PROMPT)
 }
@@ -16,16 +14,14 @@ pub fn plan_message(todo: &crate::llm::todo::TodoList) -> crate::llm::protocol::
     crate::llm::protocol::Message::user(todo.render())
 }
 
-/// What a turn says when the plan is not being re-sent with it — appended to the situation by
-/// [`Worker::run_one`](crate::llm::worker::Worker).
+/// Appended to the situation when the plan is not re-sent with it.
 pub const PLAN_UNCHANGED: &str =
     "Your plan is unchanged since the last `## Your plan` message in this conversation — the one \
      nearest the end — and that copy is still the current one. Read it back before you decide; if it \
      no longer describes what you are doing, fix it with `todo_set` or `todo_complete` in this same \
      turn.";
 
-/// Appended once, by [`History::open`](crate::llm::history::History::open), to a conversation
-/// that has just come back off disk.
+/// Appended once by [`History::open`](crate::llm::history::History::open) to a restored history.
 pub const RESUMED_NOTE: &str =
     "The program was restarted and this conversation was restored from disk. The game itself \
      resumed from its last save point, which may be up to a minute behind the last thing said \
@@ -239,8 +235,7 @@ Playing it well, and the clock you are playing against:
   something you did not intend.
 ";
 
-/// The line that ends every turn request, and the reason the loop can rely on exactly one
-/// terminal call per turn.
+/// What a turn says about an armed battle script.
 fn script_standing_line(standing: &crate::llm::battle_script::ScriptStanding) -> String {
     let mut out = String::from(
         "Your battle script is armed and is deciding your battle turns, so the battles going \
@@ -251,7 +246,7 @@ fn script_standing_line(standing: &crate::llm::battle_script::ScriptStanding) ->
          `set_battle_script` replaces it.",
     );
 
-    // Quoted, and in the model's own words.
+    // Quoted, in the model's own words.
     if let Some(purpose) = standing.purpose.as_deref() {
         out.push_str(&format!(" You installed it for: \"{purpose}\"."));
     }
@@ -273,8 +268,7 @@ fn overworld_script_line(
     state: ScriptState,
     standing: &crate::llm::battle_script::ScriptStanding,
 ) -> String {
-    // Named once and shared, because the three tools being *on this turn* is the entire point of
-    // saying any of this here.
+    // Each state has to say the three tools are on this turn.
     const HERE: &str = "Those three tools are offered on an overworld turn and on no other kind, \
                         so this is a turn that can fix it.";
     match state {
@@ -291,20 +285,19 @@ fn overworld_script_line(
              thing to edit: `read_battle_script` shows it, `get_battle_script_docs` is the API it \
              is written against, and `set_battle_script` arms a corrected one. {HERE}\n\n",
             match standing.failure.as_deref() {
-                // Quoted rather than paraphrased, for `script_standing_line`'s reason one state
-                // along.
+                // Quoted rather than paraphrased.
                 Some(why) => match why.trim_end() {
                     cut if cut.ends_with('…') => format!(" It stopped because: {cut}"),
                     said => format!(" It stopped because: {}.", said.trim_end_matches('.')),
                 },
-                // A run resumed across the change that added the field, or one disarmed before it
-                // existed.
+                // A disarm recorded without a reason.
                 None => String::new(),
             },
         ),
     }
 }
 
+/// The line that ends every turn request, which is why the loop can rely on one terminal call.
 pub fn contract(kind: DecisionKind) -> String {
     format!(
         "End this turn by calling exactly one of: {}. Every one of them takes a `summary`: one or \
@@ -320,17 +313,14 @@ pub fn contract(kind: DecisionKind) -> String {
 /// The parts of the situation that need a `PokemonApi` rather than a `GameState`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ApiSnapshot {
-    /// `None` in the overworld, and that is correct rather than a failure — no dialogue font is
-    /// loaded there, so there is nothing in video memory to decode.
+    /// `None` in the overworld, where no dialogue font is loaded to decode.
     pub screen_text: Option<String>,
     /// `HH:MM:SS` of in-game play time.
     pub playtime: String,
-    /// What the mart the player is standing in front of sells, with each item's price. Read from
-    /// `wCurMart`, so it is empty everywhere except inside a shop; a `MartPurchase` turn's whole
-    /// menu comes from here, and nothing else can supply it — the stock is not in `GameState`.
+    /// The mart's stock and prices, from `wCurMart`: a `MartPurchase` turn's whole menu, which
+    /// `GameState` does not carry.
     pub mart_stock: Vec<(crate::pokemon::item::ItemId, Option<u32>)>,
-    /// Where the player entered the current map, and from where — `WorldGraph::arrival`, which
-    /// only the agent knows. `None` until the first map change this process sees.
+    /// `WorldGraph::arrival`, known only to the agent; `None` until this process sees a map change.
     pub arrival: Option<crate::pokemon::world_graph::Arrival>,
 }
 
@@ -349,7 +339,7 @@ impl ApiSnapshot {
 /// How many `AgentEvent`s one turn request carries.
 const MAX_EVENTS: usize = 20;
 
-/// The user message that opens a turn. One [`AgentEvent`] as the model will read it.
+/// One [`AgentEvent`] as the model will read it.
 pub fn describe_event(event: &AgentEvent) -> String {
     match event {
         AgentEvent::TextBox { message } => format!("Text: {}", message.trim()),
@@ -357,8 +347,7 @@ pub fn describe_event(event: &AgentEvent) -> String {
     }
 }
 
-/// The part of a question that is not in the [`GameState`] — because the agent passed it as an
-/// argument to the `pick_*` that asked.
+/// The part of a question the agent passed to `pick_*` rather than left in the [`GameState`].
 #[derive(Debug, Clone, Copy, Default)]
 pub enum TurnContext<'a> {
     #[default]
@@ -372,9 +361,7 @@ pub enum TurnContext<'a> {
     },
     /// The watchdog's turn: what the agent believes it is doing, and for how long.
     Stuck { agent_state: &'a str, stuck_for: std::time::Duration },
-    /// The two standing facts an overworld turn carries: whether a battle script is deciding
-    /// battles the model is never asked about, and whether the walkthrough chapter has moved on
-    /// since it last read one.
+    /// Whether a battle script is deciding battles, and whether the walkthrough chapter has moved.
     Overworld {
         script: ScriptState,
         standing: &'a crate::llm::battle_script::ScriptStanding,
@@ -384,6 +371,7 @@ pub enum TurnContext<'a> {
     Battle { script: ScriptState },
 }
 
+/// The user message that opens a turn.
 pub fn situation(
     kind: DecisionKind,
     state: &GameState,
@@ -407,12 +395,10 @@ pub fn situation(
 
     match context {
         TurnContext::None => {}
-        // At the top of the turn, above the situation, on the same evidence that put
-        // `read_guide`'s nudge there (7d521e6).
+        // At the top of the turn, above the situation, where a nudge is read.
         TurnContext::Overworld { script, standing, guide } => {
             out.push_str(&overworld_script_line(script, standing));
-            // Only the stale case is worth a line — see `GuideStatus::Current`'s for why a run
-            // that has never read one is silent here rather than nagged.
+            // Only the stale case: a run that has never read the guide is not nagged.
             if let crate::llm::guide::GuideStatus::Stale { index } = guide {
                 out.push_str(&format!(
                     "⚠️ You have won a badge since you last read the walkthrough, and `read_guide` \
@@ -425,8 +411,7 @@ pub fn situation(
             }
         }
         TurnContext::Nickname(species) => out.push_str(&format!(
-            // No article: a species name is one, and "a Eevee" / "a Omanyte" is what picking one
-            // blind gets you in a sentence printed on every naming screen of the run.
+            // No article, or it reads "a Eevee".
             "The naming screen is open for {species}. It has just been caught, hatched or given \
              to you.\n\n\
              Name it. Not the species again — a name that says what you make of *this* one: how you \
@@ -461,8 +446,7 @@ pub fn situation(
                 );
             }
         }
-        // At the top rather than as a footnote under `### Battle`, on the one piece of evidence
-        // this repo has about where a nudge lands.
+        // At the top rather than under `### Battle`, where a nudge is read.
         TurnContext::Battle { script } => out.push_str(match script {
             ScriptState::Unedited => {
                 "⚠️ Your battle script is still the default one, which decides nothing and hands \
@@ -475,8 +459,7 @@ pub fn situation(
                  one is costing you a request again. Your next overworld turn carries the reason \
                  it stopped and the tools to fix it.\n\n"
             }
-            // Armed, consulted or not, and it did not answer — a Safari battle, which is never
-            // scripted, or a turn the model itself asked to `wait` through.
+            // Armed but silent: a Safari battle, or a turn the model asked to `wait` through.
             ScriptState::Armed => {
                 "Your battle script is armed and deciding your battle turns, but it did not decide \
                  this one.\n\n"
@@ -505,12 +488,11 @@ pub fn situation(
             None => format!("Entered this map at ({}, {})\n", arrival.at.x, arrival.at.y),
         });
     }
-    // What the player is facing is the precondition for half of `use_field_move` — `cut` works on
-    // the tile in front and nothing else — and it is one line against a whole `read_map`.
+    // Half of `use_field_move` acts on the tile in front.
     if let Some((at, tile)) = state.map.tile_in_front() {
         out.push_str(&format!("Facing: {tile} at ({}, {})\n", at.x, at.y));
     }
-    // What the menu no longer offers still has to be explainable.
+    // What the menu does not offer still has to be explainable.
     if kind == DecisionKind::Overworld {
         use crate::pokemon::badge::Badge;
         use crate::pokemon::item::ItemId;
@@ -531,8 +513,7 @@ pub fn situation(
                 point_list(&trees),
             ));
         }
-        // Water was the second entry here and is deliberately gone — it named an obstacle that
-        // was almost never the obstacle.
+        // Only what would clear a cuttable tree: naming water fired on every coast.
         let obstacles: [(bool, fn(&MetaTile) -> bool, &str, ItemId, &str, Badge); 1] = [
             (!state.can_use_cut, |tile| matches!(tile, MetaTile::CutTree), "Cuttable trees",
              ItemId::Hm01Cut, "Cut", Badge::CascadeBadge),
@@ -568,7 +549,7 @@ pub fn situation(
             ));
         }
 
-        // Boulders, said every turn there are any, whether or not anything can be done with them.
+        // Boulders, said every turn there are any, whether or not they can be moved.
         let boulders = state.map.boulders();
         if !boulders.is_empty() {
             out.push_str(&format!("Boulders on this map: {}.", point_list(&boulders)));
@@ -576,8 +557,7 @@ pub fn situation(
                 out.push_str(&format!(" Boulder switches (push a boulder onto one to open the \
                     barrier it controls): {}.", point_list(&state.map.strength_switches)));
             }
-            // The third kind of target, and without it this line is misleading on the one map
-            // where it is the whole puzzle.
+            // The third kind of target, and the whole puzzle on the map that has them.
             if !state.map.holes.is_empty() {
                 out.push_str(&format!(" Holes a boulder can be pushed into, dropping it to the \
                     floor below: {}. You fall through one yourself if you step on it.",
@@ -586,14 +566,13 @@ pub fn situation(
             let known = state.pokemon.iter()
                 .any(|mon| mon.moves.iter().flatten().any(|m| m.name == crate::pokemon::move_name::PokemonMoveName::Strength));
             let badged = state.badges.contains(Badge::RainbowBadge);
-            // There were two more sentences here and both were inferences the data does not
-            // support.
+            // Counted off `actions()`, never `boulder_pushes()`: a floor can have legal shoves
+            // left and still offer no goal.
             let boulder_goals = state.map.actions().iter()
                 .filter(|action| matches!(action.tile,
                     crate::pokemon::tile::MetaTile::BoulderGoal { .. })).count();
             out.push_str(&match (known, badged) {
-                // Zero rows is not "every legal shove is below", and the difference cost an issue
-                // report.
+                // Zero rows is not "every legal shove is below".
                 (true, true) if boulder_goals == 0 => " There are no boulder rows in the menu below. \
                     A boulder row is a whole job rather than a shove, and one is offered only when \
                     the pushes that finish it can be worked out from where the boulders are \
@@ -655,8 +634,6 @@ pub fn situation(
                 state.map.warp_targets.len(),
             ));
         }
-
-        // There was a `Fenced in:` line here, and it is gone on purpose.
     }
     let badges: Vec<String> = state.badges.iter_names().map(|(name, _)| name.to_string()).collect();
     out.push_str(&format!(
@@ -716,9 +693,7 @@ pub fn situation(
                           Corner in Celadon). Running always works. Nothing is broken.\n");
         }
         if battle.enemy_trapping {
-            // The menu still opens and every option still looks available, but any *move* chosen
-            // is replaced with "cannot move" — a decider that does not know this loops until the
-            // wrap ends.
+            // Every option still looks available, but a move chosen is replaced with "cannot move".
             out.push_str("⚠️ You are trapped (Wrap/Bind/Fire Spin): a move will not execute this \
                           turn, but items, switching and running still work.\n");
         }
@@ -780,7 +755,7 @@ pub fn situation(
     out
 }
 
-/// A status worth mentioning, or nothing at all.
+/// The nickname, and the species too when they differ.
 fn named(mon: &crate::pokemon::pokemon::Pokemon) -> String {
     let nickname = mon.nickname.to_default_string();
     let species = mon.species.to_string();
@@ -792,8 +767,7 @@ fn named(mon: &crate::pokemon::pokemon::Pokemon) -> String {
 
 /// A list of squares as `(x, y), (x, y)`, bounded.
 fn point_list(points: &[gb::geometry::Point8]) -> String {
-    /// Enough for every Strength puzzle in the game (Victory Road 2F's three boulders, Seafoam
-    /// B3F's six) and for the trees on a route.
+    /// Enough for every Strength puzzle in the game and the trees on a route.
     const MAX: usize = 8;
     let shown: Vec<String> = points.iter().take(MAX)
         .map(|point| format!("({}, {})", point.x, point.y)).collect();
@@ -803,15 +777,14 @@ fn point_list(points: &[gb::geometry::Point8]) -> String {
     }
 }
 
-/// A party member's types, deduplicated — the game stores a single-type mon's one type in both
-/// slots, so an undeduplicated `Normal/Normal` is the derive showing through.
+/// A party member's types, deduplicated: a single type is stored in both slots.
 fn types_of(mon: &crate::pokemon::pokemon::Pokemon) -> String {
     let mut types: Vec<String> = mon.types.iter().map(|t| t.to_string()).collect();
     types.dedup();
     types.join("/")
 }
 
-/// And cost six characters per member of every turn for the privilege.
+/// A status worth mentioning, or nothing at all.
 fn ailment(status: crate::pokemon::status::PokemonStatus) -> String {
     match status {
         crate::pokemon::status::PokemonStatus::None => String::new(),
@@ -845,8 +818,7 @@ pub fn nudge(kind: DecisionKind) -> String {
     )
 }
 
-/// [`nudge`] for the case the reply was *cut off* rather than finished — `GB_MAX_TOKENS` was
-/// reached.
+/// [`nudge`] for a reply cut off at `GB_MAX_TOKENS` rather than finished.
 pub fn truncated_nudge(kind: DecisionKind) -> String {
     format!(
         "That reply was cut off before it finished: it hit the maximum length, so it carried no \
@@ -862,8 +834,7 @@ mod tests {
     use crate::pokemon::agent::{AgentEvent, OverworldActionAbortedReason};
     use crate::pokemon::tile::MetaTile;
 
-    /// Every decision kind's first request, written out whole, so a person can read what the
-    /// model is actually sent.
+    /// Every decision kind's first request, written out whole for a person to read.
     #[cfg(feature = "slow-tests")]
     fn probe_reports(kind: DecisionKind) -> Vec<String> {
         use crate::llm::battle_report::BattleReport;
@@ -927,8 +898,7 @@ mod tests {
         let out = std::path::Path::new("target/turn-requests");
         std::fs::create_dir_all(out).expect("a writable target directory");
 
-        // A mid-game overworld save: eight badges' worth of bag, a full party, and a town with
-        // enough on it that the action menu is a realistic length rather than a doorway.
+        // A mid-game save: a full bag and party, and a town whose menu is a realistic length.
         let overworld = include_bytes!("../pokemon/data/at-celadon.bin");
         let battle = include_bytes!("../pokemon/data/battle-state.bin");
 
@@ -950,9 +920,7 @@ mod tests {
         .map(describe_event)
         .collect();
 
-        // A plan with something in it, because an empty one is not what a run looks like after
-        // the first ten minutes — and because it is a message of its own in every request after
-        // it changes (see `worker::sync_plan`).
+        // A plan with something in it, as a message of its own (see `worker::sync_plan`).
         let mut todo = crate::llm::todo::TodoList::open(None);
         for item in [
             "beat Erika for the Rainbow Badge; the gym is the one behind the trees, cut them",
@@ -1014,12 +982,9 @@ mod tests {
                     agent_state: "text→ReadingTextBox",
                     stuck_for: Duration::from_secs(300),
                 },
-                // The deployed shape rather than the flattering one: every run so far has reached
-                // its battle turns with no script at all, and this is the turn the probe is read
-                // to find out what that costs.
+                // The default script, which is what a battle turn costs without one.
                 DecisionKind::Battle => TurnContext::Battle { script: ScriptState::Unedited },
-                // Both overworld notes on at once, which is the dearest this turn gets rather
-                // than the likeliest.
+                // Both overworld notes at once: the dearest this turn gets.
                 DecisionKind::Overworld => TurnContext::Overworld {
                     script: ScriptState::Armed,
                     standing: &standing,
@@ -1037,13 +1002,11 @@ mod tests {
                 DecisionKind::Nickname | DecisionKind::Stuck => Vec::new(),
             };
 
-            // The message list a first turn goes out with, in the order `worker::run_one` appends
-            // them: the constant system message, the plan, then the situation.
+            // In the order `worker::run_one` appends them: system message, plan, situation.
             let messages = vec![
                 system_message(),
                 plan_message(&todo),
-                // A battle report on the battle turn, because that is where the probe is worth
-                // reading: it is the one block whose prose nothing else prints.
+                // A battle report on the battle turn, the one block nothing else prints.
                 Message::user(situation(kind, &state, &snapshot, &events, &menu, context, &probe_reports(kind))),
             ];
             let request = ChatRequest {
@@ -1072,8 +1035,7 @@ mod tests {
         }
     }
 
-    /// The request as something to read: the messages with their newlines intact, then one block
-    /// per tool.
+    /// The request as something to read: messages with newlines intact, then one block per tool.
     #[cfg(feature = "slow-tests")]
     fn readable(request: &crate::llm::protocol::ChatRequest) -> String {
         let mut out = String::new();
@@ -1098,9 +1060,7 @@ mod tests {
         out
     }
 
-    /// The knobs the probe needs off an [`LlmConfig`](crate::llm::LlmConfig) without reading the
-    /// environment — a probe that failed because `GB_MODEL` was unset would be reporting on the
-    /// shell rather than on the prompt.
+    /// An [`LlmConfig`](crate::llm::LlmConfig) that does not read the environment.
     #[cfg(feature = "slow-tests")]
     struct LlmConfigForProbe {
         model: String,
@@ -1144,9 +1104,7 @@ mod tests {
 
         let plan = plan_message(&todo);
         assert!(plan.text().expect("prose").contains("beat Brock"), "{plan:?}");
-        // The history can hold several of these, because `sync_plan` appends rather than moving —
-        // so the message has to say which one wins, and chronology is the only answer a
-        // conversation implies on its own.
+        // `sync_plan` appends rather than moves, so the message says which copy wins.
         assert!(plan.text().expect("prose").contains("replaces any earlier"), "{plan:?}");
         assert!(is_plan(&plan), "the worker finds the newest copy with this");
         assert!(!crate::llm::compaction::is_turn_start(&plan),
@@ -1155,8 +1113,7 @@ mod tests {
                 "an ordinary turn is not a plan");
     }
 
-    /// Every script state is said on the overworld turn, because that is the only kind of turn
-    /// carrying the three tools that change one.
+    /// Every script state is said on the overworld turn, the only one carrying the tools.
     #[test]
     fn every_battle_script_state_is_said_on_the_turn_that_can_do_something_about_it() {
         let mut gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
@@ -1176,7 +1133,7 @@ mod tests {
         // It has to say that a bad battle is the script's doing rather than the game's.
         assert!(armed.contains("that is the script doing it"), "{armed}");
 
-        // The other two are said here too, and each has to claim the tools are on *this* turn.
+        // The other two are said here too, and each has to claim the tools are on this turn.
         for faulted in [ScriptState::Unedited, ScriptState::Disarmed] {
             let other = overworld(faulted);
             assert!(other.contains("battle script"), "{faulted:?} is silent here: {other}");
@@ -1200,8 +1157,7 @@ mod tests {
             &[],
         );
         assert!(with_reason.contains(reason), "{with_reason}");
-        // And a run resumed from before the field existed says the fact without inventing a
-        // reason, rather than rendering an empty "It stopped because: ".
+        // A disarm with no recorded reason invents none.
         let without = overworld(ScriptState::Disarmed);
         assert!(!without.contains("stopped because"), "no reason, no clause: {without}");
         assert!(without.contains("read_battle_script"), "and the tool that has it is still named: {without}");
@@ -1267,8 +1223,7 @@ mod tests {
         assert!(turn.contains("moves the first switch"), "the eliminations go back in the pool: {turn}");
         assert!(turn.contains("`then`"), "and what a sweep can cost instead: {turn}");
 
-        // The property that keeps this honest, and it is the whole reason it is a test rather
-        // than a comment.
+        // The turn reads `hidden_objects_for` alone, so the puzzle's hidden state cannot move it.
         let mut solved = state.clone();
         solved.trash_cans = Some(crate::pokemon::TrashCanPuzzle {
             first_target: gb::geometry::Point8 { x: 1, y: 7 },
@@ -1299,8 +1254,7 @@ mod tests {
             TurnContext::Overworld { script: ScriptState::Unedited, standing: &Default::default(), guide }, &[],
         );
 
-        // Read while the player still had no badges, now holding at least the first: the chapter
-        // the model is working from is one it has already finished.
+        // Read before the first badge: a chapter the model has already finished.
         let stale = status(state.badges, Some(0));
         assert!(matches!(stale, GuideStatus::Stale { .. }), "the fixture is past chapter 0: {stale:?}");
         let rendered = overworld(stale);
@@ -1312,8 +1266,7 @@ mod tests {
             "{rendered}",
         );
 
-        // Silent while the chapter is the one it read, or the line is on every turn of the run
-        // and is the thing a model learns to skip.
+        // Silent while current, or it is a line on every turn that a model learns to skip.
         for quiet in [status(state.badges, Some(crate::llm::guide::chapter_index(state.badges))), status(state.badges, None)] {
             let other = overworld(quiet);
             assert!(!other.contains("walkthrough"), "{quiet:?}: {other}");
@@ -1361,8 +1314,7 @@ mod tests {
             assert!(!other.contains("Blocked here"), "{elsewhere:?} has no action menu: {other}");
         }
 
-        // Which half is missing is the *point* of the line, and getting it wrong sends the model
-        // at the half that is not.
+        // Which half is missing is the point: getting it wrong sends the model after the other.
         assert!(blocked.contains("not the HM"), "the badge is held; the HM is the errand: {blocked}");
 
         let mut hopeless = state.clone();
@@ -1376,14 +1328,13 @@ mod tests {
         assert!(none.contains("nothing in your party is in its learnset"),
                 "it has to name the party rather than the HM it is already holding: {none}");
 
-        // …and with a Pokémon that *can* take it, the line becomes the tool call to make.
+        // …and with a Pokémon that can take it, the line becomes the tool call to make.
         let mut ready = hopeless.clone();
         ready.pokemon.get_mut(0).expect("one member").species = crate::pokemon::species::PokemonSpecies::Venusaur;
         let teachable = rendered(DecisionKind::Overworld, &ready);
         assert!(teachable.contains("`use_field_move` with `teach`"), "{teachable}");
 
-        // And it stops the moment it stops being true, or it is a line on every turn of the rest
-        // of the game telling the model about a thing it can already do.
+        // And it stops once it stops being true.
         state.can_use_cut = true;
         let cleared = rendered(DecisionKind::Overworld, &state);
         assert!(!cleared.contains("Blocked here: Cuttable trees"), "{cleared}");
@@ -1396,8 +1347,7 @@ mod tests {
                 "and where they are: {cleared}");
     }
 
-    /// A Strength puzzle is said out loud every turn it is in the room, and the "but" clause is
-    /// why it is unconditional.
+    /// A Strength puzzle is named every turn it is in the room, whatever can be done about it.
     #[test]
     fn a_strength_puzzle_names_its_boulders_whether_or_not_they_can_be_pushed() {
         use crate::pokemon::badge::Badge;
@@ -1414,13 +1364,12 @@ mod tests {
         assert!(armed.contains("Boulder switches"), "{armed}");
         assert!(armed.contains("(17, 13)"), "the switch VictoryRoad1F's puzzle is about: {armed}");
         assert!(armed.contains("is a row in the menu below, one row per target"), "{armed}");
-        // A row is a goal now, so the line promises a target rather than a shove.
+        // A row is a goal, so the line promises a target rather than a shove.
         assert!(armed.contains("the row names the boulder it will use"), "{armed}");
         // The half that keeps a wedged floor from reading as a broken game.
         assert!(armed.contains("back where it started"), "{armed}");
 
-        // Neither half of Strength: the boulders are still named, and so is the reason there is
-        // nothing in the menu about them.
+        // Neither half of Strength: the boulders are still named, and so is the reason.
         let mut helpless = state.clone();
         helpless.badges.remove(Badge::RainbowBadge);
         for index in 0..helpless.pokemon.len() {
@@ -1441,7 +1390,7 @@ mod tests {
         assert!(rendered(&unbadged).contains("before the game will let it be used outside battle"),
                 "{}", rendered(&unbadged));
 
-        // A floor nobody can solve any more says so, and says the one thing that undoes it.
+        // An unsolvable floor says so, and says the one thing that undoes it.
         assert!(!armed.contains("cannot be solved"), "{armed}");
         let untouched = state_from(include_bytes!("../pokemon/data/vr1f-stuck-push.bin"));
         assert!(!rendered(&untouched).contains("cannot be solved"), "{}", rendered(&untouched));
@@ -1451,9 +1400,8 @@ mod tests {
         none_left.map.sprites.retain(|sprite| !sprite.name.starts_with("Boulder")
             || sprite.position == gb::geometry::Point8 { x: 14, y: 2 });
         assert!(none_left.map.boulder_pushes().is_empty(), "(14, 2) is walled in on its own square");
-        // The branch is chosen on goal rows, not on `boulder_pushes()` — the two agree here and
-        // part company on a floor with legal shoves and no reachable target, which is the case
-        // that would print the promise of rows the model cannot find.
+        // Chosen on goal rows, not `boulder_pushes()`: the two part company on a floor with legal
+        // shoves and no reachable target.
         assert!(!none_left.map.actions().iter().any(|action| matches!(action.tile,
             crate::pokemon::tile::MetaTile::BoulderGoal { .. })), "and so has no goal row");
         let quiet = rendered(&none_left);
@@ -1469,25 +1417,19 @@ mod tests {
     fn the_system_prompt_says_the_things_the_deployed_runs_needed_it_to_say() {
         for phrase in [
             "The game is not broken",
-            // The Viridian Gym door: a locked door the run had no badges for, reported as an
-            // abandoned walk, answered with a `report_issue` asking a developer to check the
-            // agent's warp targeting.
+            // A locked gym door is the game's rule, not a malfunction to report.
             "Being stopped is not a malfunction",
             "Doing the same thing again is not a plan",
             "not the one you remember",
             "Read what people say to you",
             "put it on the plan straight away",
-            // A tool nothing tells the model to reach for is a tool nothing reaches for, and this
-            // one is worth nothing unread: `then` and `resume_after_battle` are pure saving, so a
-            // run that never uses them is exactly as expensive as one without them.
+            // `then` and `resume_after_battle` save only when used, so the prompt points at them.
             "One decision can be several actions",
         ] {
             assert!(SYSTEM_PROMPT.contains(phrase), "the system prompt no longer says {phrase:?}");
         }
 
-        // The plan bullet's claim narrowed when the conversation started surviving a restart
-        // (`llm::history`), and the narrower claim is the true one: a compaction still empties
-        // the history, so the plan is still what survives *that*.
+        // A restart keeps the conversation, but a compaction empties it and the plan survives.
         assert!(
             SYSTEM_PROMPT.contains("is what survives that. It is the only thing that does"),
             "the plan bullet no longer says what the plan is for",
@@ -1502,24 +1444,20 @@ mod tests {
     #[test]
     fn the_system_prompt_says_how_to_play_the_game_well() {
         for phrase in [
-            // Ranked on `wPlayTime`, which is on every turn: finishing is the goal, not
-            // wandering.
+            // Ranked on `wPlayTime`: finishing is the goal, not wandering.
             "You are being timed",
             "Keep the party healthy",
-            // Both halves: the penalty, and *which* Centre you wake up in.
+            // Both halves: the penalty, and which Centre you wake up in.
             "faints you black out",
             "accepted a heal",
             "Keep stocked up",
             "Catch Pokémon",
             "Look round a town before you leave it",
-            // A cartridge fact, not advice, and the run that forced it damaged a Pidgey twice and
-            // then tried to flee.
+            // A cartridge fact, not advice.
             "Experience is only paid out for a knockout",
             // The walkthrough is only worth carrying if the prompt says when to reach for it.
             "There is a walkthrough for this game",
-            // The three tools exist and are described in the catalogue, but nothing there says a
-            // battle turn is *worth avoiding* — that argument only fits in prose, and a model
-            // that never installs a script pays for every battle it ever has.
+            // Only prose can argue that a battle turn is worth avoiding.
             "Write your battles down",
             "battle.ask()",
             "Everything below is instruction rather than background",
@@ -1548,9 +1486,7 @@ mod tests {
         assert!(party.contains(&mon.species.to_string()),
                 "the species is on the line whatever the nickname is: {party}");
         assert!(party.contains(&mon.types[0].to_string()), "and so are its types: {party}");
-        // A single-type mon stores its one type in both slots, so an undeduplicated line reads
-        // `Normal/Normal` — the derive showing through, which is the bug class this file keeps
-        // catching.
+        // A single type is stored in both slots, so an undeduplicated line reads `Normal/Normal`.
         assert!(!party.contains("Normal/Normal") && !party.contains("Water/Water"),
                 "the duplicate type slot is folded: {party}");
     }
@@ -1587,8 +1523,7 @@ mod tests {
             "Text: OAK: Goodbye!",
         ]);
 
-        // …and the cap keeps the most recent, because the recent ones are the ones that explain
-        // now.
+        // The cap keeps the most recent, which explain now.
         let many: Vec<String> = (0..40)
             .map(|i| describe_event(&AgentEvent::TextBox { message: format!("line {i}") }))
             .collect();
@@ -1597,8 +1532,7 @@ mod tests {
         assert_eq!(lines.last().unwrap(), "Text: line 39");
     }
 
-    /// An abort reason is the single most useful thing the agent can tell a model — it is what
-    /// stops it re-picking a route that cannot be walked — so it must survive into the turn.
+    /// An abort reason stops the model re-picking a route that cannot be walked.
     #[test]
     fn an_abort_reason_reaches_the_turn() {
         let events = [describe_event(&AgentEvent::OverworldActionAborted {

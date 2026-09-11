@@ -30,11 +30,10 @@ const BLOCK_PIXELS: usize = BLOCK * BLOCK;
 pub const VERSION: u8 = 2;
 const FLAG_KEYFRAME: u8 = 0x01;
 const FLAG_BITMAP: u8 = 0x02;
-/// One bit per block, so a message that touches most of the screen names them all in 45 bytes
-/// instead of 720.
+/// One bit per block: 45 bytes rather than 720 for a message that touches most of the screen.
 const BITMAP_BYTES: usize = BLOCK_COUNT.div_ceil(8);
 const BITMAP_WORTH_IT: usize = (BITMAP_BYTES - 2) / 2 + 1;
-/// 255, not 256, and the `u8` index is not the reason.
+/// 255, not 256: the palette length on the wire is a `u8`.
 const MAX_PALETTE: usize = 255;
 
 /// How wide an index into a palette of `entries` has to be.
@@ -67,19 +66,14 @@ fn pack(indices: &[u8; BLOCK_PIXELS], bits: u8, out: &mut Vec<u8>) {
     }
 }
 
-// ── Encoder
-// ──────────────────────────────────────────────────────────────────────────────────────
-
 pub struct VideoEncoder {
     palette: Vec<LcdColor>,
     index: HashMap<LcdColor, u8>,
-    /// What the decoder holds after everything emitted so far, as palette indices — see the
-    /// module docs.
+    /// What the decoder holds after everything emitted so far, as palette indices.
     last_sent: Box<[u8; PIXELS]>,
     sent_anything: bool,
     seq: u64,
-    /// Scratch for one message's block payloads, kept across calls so a 30 fps stream allocates
-    /// nothing per frame.
+    /// Scratch for one message's block payloads, reused across calls.
     staged: Vec<(u16, [u8; BLOCK_PIXELS])>,
 }
 
@@ -102,8 +96,7 @@ impl VideoEncoder {
         self.seq
     }
 
-    /// Forget everything the decoder is believed to hold, so the next [`Self::encode`] is a full
-    /// keyframe with a fresh palette.
+    /// Forget what the decoder holds, so the next [`Self::encode`] is a keyframe with a fresh palette.
     pub fn restart(&mut self) {
         self.palette.clear();
         self.index.clear();
@@ -123,8 +116,7 @@ impl VideoEncoder {
             return None;
         }
 
-        // The safety valve, not a normal path: rather than run out of palette part-way through a
-        // frame, spend one keyframe on a fresh one.
+        // The safety valve: rather than run out of palette mid-frame, spend a keyframe on a fresh one.
         if !keyframe && self.should_reset_palette(frame, &blocks) {
             keyframe = true;
             blocks = (0..BLOCK_COUNT as u16).collect();
@@ -134,9 +126,8 @@ impl VideoEncoder {
             self.index.clear();
         }
 
-        // Two passes, and the split is forced: `bits_per_pixel` covers the palette *including*
-        // the entries these blocks are about to introduce, so nothing can be written until they
-        // have all been interned.
+        // Two passes: `bits_per_pixel` covers the entries these blocks introduce, so nothing is
+        // written until all of them are interned.
         let palette_base = self.palette.len();
         self.staged.clear();
         for &block in &blocks {
@@ -253,8 +244,7 @@ impl VideoEncoder {
         for (slot, p) in block_pixels(block as usize).enumerate() {
             let index = self.intern(frame[p]);
             indices[slot] = index;
-            // Record what the decoder will hold, which is the frame itself except on the lossy
-            // path.
+            // What the decoder will hold: the frame itself, except on the lossy path.
             changed |= self.last_sent[p] != index;
             self.last_sent[p] = index;
         }
@@ -273,8 +263,7 @@ impl VideoEncoder {
             self.index.insert(colour, index);
             return index;
         }
-        // Unreachable for Pokémon Red — a full frame never carries 256 distinct colours, and
-        // `should_reset_palette` spends a keyframe before it gets close.
+        // The lossy path; `should_reset_palette` spends a keyframe before Pokémon Red gets here.
         nearest(&self.palette, colour)
     }
 }
@@ -295,12 +284,8 @@ fn nearest(palette: &[LcdColor], colour: LcdColor) -> u8 {
     palette.iter().enumerate().min_by_key(|(_, c)| distance(c)).map(|(i, _)| i as u8).unwrap_or(0)
 }
 
-// ── Decoder
-// ──────────────────────────────────────────────────────────────────────────────────────
-
-/// The reference decoder: the regression net for the wire format, and the thing the TypeScript
-/// decoder in the SPA is a direct port of. Every rule in the module docs is enforced here, so a
-/// change to the format that forgets one fails a test rather than showing up as a corrupt canvas.
+/// The reference decoder, which the SPA's TypeScript decoder ports. It enforces every rule of the
+/// wire format, so a change that forgets one fails a test rather than corrupting the canvas.
 pub struct VideoDecoder {
     palette: Vec<LcdColor>,
     pixels: Box<Frame>,
@@ -412,8 +397,7 @@ impl Reader<'_> {
         Ok(u16::from_le_bytes([self.u8()?, self.u8()?]))
     }
 
-    /// Read without advancing — the packed payload is addressed by pixel, not consumed byte by
-    /// byte.
+    /// Read without advancing: the packed payload is addressed by pixel, not consumed bytewise.
     fn peek(&self, offset: usize) -> Result<u8, String> {
         self.bytes.get(self.at + offset).copied().ok_or_else(|| "video message ended early".into())
     }

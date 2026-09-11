@@ -2,11 +2,11 @@
 
 use super::*;
 
-/// From the main Cerulean terrace (post-Thunder), cross to Lavender Town.
+/// From the main Cerulean terrace after the Thunder Badge, cross to Lavender Town.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_reach_lavender() {
-    // Pinned to the pre-J battle timing.
+    // Animations on: `TestFixture::with_original_battle_timing`.
     let mut fixture = TestFixture::new(
         include_bytes!("../data/back-in-cerulean.bin"),
         Duration::from_mins(60),
@@ -20,8 +20,7 @@ fn can_reach_lavender() {
     fixture.save_state_named("src/pokemon/data/at-lavender.bin").unwrap();
 }
 
-/// Lavender Town → Celadon City via the Route 7–8 Underground Path (bypassing the drink-gated
-/// Saffron gates).
+/// Lavender to Celadon by the Route 7-8 Underground Path, bypassing the drink-gated Saffron gates.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_reach_celadon() {
@@ -52,8 +51,7 @@ fn can_get_rainbow_badge() {
     fixture.save_state_named("src/pokemon/data/post-rainbow-badge.bin").unwrap();
 }
 
-/// From Celadon City, reach the Rocket Hideout: heal, walk to the Game Corner, flip the poster
-/// switch (`FlipSwitch` + the `found_rocket_hideout` event), and descend to B1F.
+/// From Celadon: heal, flip the Game Corner poster switch, and descend to Rocket Hideout B1F.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_reach_rocket_hideout() {
@@ -69,9 +67,7 @@ fn can_reach_rocket_hideout() {
     fixture.save_state_named("src/pokemon/data/at-rocket-hideout.bin").unwrap();
 }
 
-/// The full Silph Scope leg — from inside the hideout (B1F), get the Lift Key, take the elevator
-/// (entered from B2F, whose warp is not gated by the Rocket-5 door) to Giovanni's split B4F room,
-/// beat the two Rockets to drop the door wall, beat Giovanni, and grab the Silph Scope.
+/// From Hideout B1F: the Lift Key, the elevator to Giovanni's B4F room, and the Silph Scope.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_silph_scope() {
@@ -86,7 +82,7 @@ fn can_get_silph_scope() {
     fixture.save_state_named("src/pokemon/data/post-silph-scope.bin").unwrap();
 }
 
-/// "There is no route" about a route four pets are standing on is a claim about the wrong thing.
+/// A route four wandering pets stand on is waited out, not called routeless.
 #[test]
 fn a_route_a_wandering_pet_is_standing_on_is_waited_out_rather_than_disputed() {
     use gb::geometry::Point8;
@@ -109,8 +105,7 @@ fn a_route_a_wandering_pet_is_standing_on_is_waited_out_rather_than_disputed() {
     assert_eq!(end.map.map, Map::CeladonMansion2F);
 }
 
-/// A corridor with a person in it needs longer than a wanderer's pause, and 5 s was the wrong
-/// bound.
+/// A room whose corridors are both blocked by people is waited out, not called routeless.
 #[test]
 fn a_room_whose_corridors_are_both_blocked_is_waited_out_rather_than_called_routeless() {
     use gb::geometry::Point8;
@@ -131,8 +126,7 @@ fn a_room_whose_corridors_are_both_blocked_is_waited_out_rather_than_called_rout
          or it proves nothing: {rows:?}",
     );
 
-    // Both of the rows the walk disputed are missing *because of the two people*, and come back
-    // the moment they are lifted.
+    // Both disputed rows are missing because of the two people, and come back when they are lifted.
     assert!(start.map.row_blocked_by_people(MetaTile::Sprite("Sailor")),
         "the Sailor is unreachable because the Rocket and the Chief are standing in the two \
          corridors, and lifting them has to bring the row back");

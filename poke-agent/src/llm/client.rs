@@ -12,7 +12,6 @@ use crate::published::now_ms;
 
 /// One streamed chat completion.
 pub trait ChatEndpoint: Send {
-    /// Stream one completion.
     fn stream_completion(
         &self,
         request: &ChatRequest,
@@ -21,7 +20,7 @@ pub trait ChatEndpoint: Send {
     ) -> Result<Completion, LlmError>;
 }
 
-/// How long to wait for the endpoint to *start* answering.
+/// How long to wait for the endpoint to start answering.
 const TIMEOUT_CONNECT: Duration = Duration::from_secs(30);
 
 pub struct OpenAiClient {
@@ -33,13 +32,10 @@ pub struct OpenAiClient {
 impl OpenAiClient {
     pub fn new(config: &LlmConfig) -> Self {
         let agent: ureq::Agent = ureq::Agent::config_builder()
-            // Off, deliberately.
+            // A non-2xx is read below, for its body and its rate-limit headers.
             .http_status_as_error(false)
             .timeout_connect(Some(TIMEOUT_CONNECT))
-            // Both deadlines are the same number and both are `GB_REQUEST_TIMEOUT_SECS`: one is
-            // how long the endpoint may take to *start* answering, the other the gap it may leave
-            // mid-answer, and an operator who has to lengthen one always means "be more patient
-            // with this endpoint" rather than one half of it.
+            // Both are `GB_REQUEST_TIMEOUT_SECS`: the wait to start answering, and any gap after.
             .timeout_recv_response(Some(config.request_timeout))
             .timeout_recv_body(Some(config.request_timeout))
             .user_agent("gb-pokemon-agent/0.1")
@@ -69,15 +65,11 @@ impl ChatEndpoint for OpenAiClient {
             .header("Authorization", &self.authorization)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
-            // Identity, though `ureq` would decompress transparently: a compressed SSE body only
-            // reaches us in whole decoder blocks, which turns a token-by-token stream into a
-            // sputtering one for no bandwidth worth having on a link carrying a video feed
-            // anyway.
+            // A compressed SSE body arrives in whole decoder blocks rather than token by token.
             .header("Accept-Encoding", "identity")
             .send(body)
             .map_err(|e| match e {
-                // The request is on the wire and the endpoint is sitting on it — not the same
-                // thing as never having reached it.
+                // The endpoint has the request and is sitting on it, unlike never reaching it.
                 ureq::Error::Timeout(_) => {
                     LlmError::Timeout(format!("POST {} was not answered: {e}", self.url))
                 }
@@ -107,15 +99,12 @@ impl ChatEndpoint for OpenAiClient {
     }
 }
 
-// ── Retries
-// ──────────────────────────────────────────────────────────────────────────────────────
+// ── Retries ──────────────────────────────────────────────────────────────────────────────────────
 
-/// How finely the backoff sleep is chopped, so cancelling a turn during one is felt promptly
-/// rather than up to half a minute later.
+/// How finely the backoff sleep is chopped, so a cancelled turn is felt promptly.
 const SLEEP_SLICE: Duration = Duration::from_millis(50);
 
-/// Exponential backoff, capped. Deterministic — no jitter — because there is exactly one client
-/// in this process and jitter exists to de-correlate a fleet.
+/// Exponential backoff, capped, with no jitter: there is one client in this process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// Attempts, not retries: `1` would mean never retrying.
@@ -139,21 +128,17 @@ impl RetryPolicy {
     }
 }
 
-/// What happened between two attempts, for the UI. A rate limit that resolves itself in eight
-/// seconds should still be *visible*: an invisible one looks like the model thinking slowly, and
-/// the two want completely different responses from whoever is watching.
+/// What happened between two attempts, so the UI can tell a rate limit from a slow model.
 pub struct Retry<'a> {
     pub attempt: u32,
     pub of: u32,
     pub waiting: Duration,
     pub failure: &'a LlmError,
-    /// Whether the failed attempt had already streamed prose into the UI, so the replacement's
-    /// text will read as a repetition unless the UI says a restart happened.
+    /// The failed attempt had streamed prose, so the retry's text would read as a repeat.
     pub already_spoke: bool,
 }
 
-/// [`ChatEndpoint::stream_completion`] with exponential backoff on the transient failures — 429,
-/// 5xx, and a connection that broke.
+/// [`ChatEndpoint::stream_completion`] with backoff on the transient failures.
 pub fn stream_with_retries(
     policy: RetryPolicy,
     endpoint: &dyn ChatEndpoint,
@@ -180,10 +165,8 @@ pub fn stream_with_retries(
         if attempt == policy.attempts || !failure.is_retryable() || cancelled() {
             return Err(failure);
         }
-        // A dated rate limit is handed straight up rather than retried, whenever the reset is
-        // further away than the backoff could ever reach. Retrying it is not merely useless, it
-        // is the failure making itself worse: every attempt is another request counted against
-        // the quota that has already run out, and on a daily cap all of them fail.
+        // A rate limit dated beyond the backoff's reach goes straight up: each retry would be
+        // another request against a quota that has run out.
         if let LlmError::RateLimited { resets_at_ms: Some(at), .. } = &failure {
             if *at > now_ms().saturating_add(policy.max.as_millis() as u64) {
                 return Err(failure);
@@ -268,7 +251,7 @@ mod tests {
         Completion { content: content.into(), ..Completion::default() }
     }
 
-    /// Zero base: the tests assert on the *plan* the UI is shown, never on a wall clock.
+    /// Zero base: the tests assert on the plan the UI is shown, never on a wall clock.
     fn instant() -> RetryPolicy {
         RetryPolicy { base: Duration::ZERO, ..RetryPolicy::default() }
     }
@@ -282,7 +265,6 @@ mod tests {
         assert_eq!(policy.backoff_for(30), policy.max, "no overflow, and no unbounded wait");
     }
 
-    /// 429 then 200.
     #[test]
     fn a_rate_limit_is_retried_and_reported() {
         let endpoint = scripted("thinking…", vec![
@@ -310,7 +292,6 @@ mod tests {
         assert!(retries[0].3.contains("429"), "{}", retries[0].3);
     }
 
-    /// The distinction the whole `RateLimited` variant exists for.
     #[test]
     fn a_rate_limit_dated_beyond_the_backoff_is_not_retried_at_all() {
         let hour_away = now_ms() + 60 * 60 * 1000;
@@ -332,8 +313,6 @@ mod tests {
         }
     }
 
-    /// The other half of the same rule: a limit that clears within the backoff, or one the
-    /// endpoint did not date at all, is the ordinary transient case and is still retried.
     #[test]
     fn a_rate_limit_within_reach_of_the_backoff_is_still_retried() {
         for resets_at_ms in [None, Some(now_ms() + 2_000)] {
@@ -349,7 +328,6 @@ mod tests {
         }
     }
 
-    /// A 400 is the request being wrong.
     #[test]
     fn a_client_error_is_not_retried() {
         let endpoint = scripted("", vec![Err(LlmError::Http { status: 400, message: "bad tool schema".into() })]);
@@ -359,8 +337,6 @@ mod tests {
         assert_eq!(endpoint.attempts.get(), 1);
     }
 
-    /// Cancellation beats retrying: the question is already stale, so waiting to ask it again is
-    /// pure delay.
     #[test]
     fn cancellation_stops_the_retry_loop_rather_than_backing_off() {
         let endpoint = scripted("", vec![Err(LlmError::Transport("connection reset".into()))]);
@@ -371,7 +347,6 @@ mod tests {
         assert_eq!(endpoint.attempts.get(), 1, "no second attempt was made");
     }
 
-    /// The budget is finite.
     #[test]
     fn a_persistent_fault_gives_up_after_the_last_attempt() {
         let outcomes = (0..5).map(|_| Err(LlmError::Http { status: 503, message: "down".into() })).collect();

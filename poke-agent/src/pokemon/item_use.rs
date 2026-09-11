@@ -5,11 +5,10 @@ use crate::pokemon::item::ItemId;
 use crate::pokemon::rom_gfx::rom_slice;
 use crate::pokemon::symbols::pokered_symbols;
 
-/// The last item id `ItemUsePtrTable` has a row for: `MAX_ELIXER`, `$53`.
+/// The last item id `ItemUsePtrTable` has a row for.
 const LAST_TABLED_ITEM: u8 = ItemId::MaxElixer as u8;
 
-/// The address of the effect routine `UseItem_` would `jp` to for `item`, or `None` for an id the
-/// table does not cover.
+/// The effect routine `UseItem_` would `jp` to for `item`, or `None` outside the table.
 pub fn use_effect(item: ItemId) -> Option<u16> {
     let id = item as u8;
     if id == 0 || id > LAST_TABLED_ITEM {
@@ -25,15 +24,13 @@ pub fn never_usable(item: ItemId) -> bool {
     use_effect(item) == Some(pokered_symbols::UnusableItem.address)
 }
 
-/// Whether `item` is one of the four Poké Balls, which `ItemUseBall` refuses outside a battle
-/// (`ld a, [wIsInBattle] / and a / jp z, ItemUseNotTime`) by the same `ItemUseNotTime` that
-/// answers an unusable one, and so wedges the same driver in the same way.
+/// `ItemUseBall` refuses outside a battle with the same `ItemUseNotTime` as an unusable item, and
+/// wedges the driver the same way.
 pub fn is_ball(item: ItemId) -> bool {
     matches!(item, ItemId::MasterBall | ItemId::UltraBall | ItemId::GreatBall | ItemId::PokeBall | ItemId::SafariBall)
 }
 
-/// What to say when `use_field_move`'s `use_item` is aimed at something the game will not use, or
-/// `None` when the use is worth attempting.
+/// What to say when `use_item` is aimed at something the game will not use.
 pub fn field_use_refusal(item: ItemId) -> Option<String> {
     if item.is_hm() || is_machine(item) {
         return Some(format!(
@@ -59,7 +56,7 @@ pub fn field_use_refusal(item: ItemId) -> Option<String> {
     None
 }
 
-/// TM01-TM50 (`$C9`-`$FA`).
+/// TM01-TM50.
 fn is_machine(item: ItemId) -> bool {
     (item as u8) >= 0xC9
 }
@@ -84,14 +81,10 @@ mod tests {
         assert!(never_usable(ItemId::ExpAll));
         assert!(never_usable(ItemId::ThunderBadge), "the badge ids that are only badges");
         assert!(never_usable(ItemId::EarthBadge));
-        // The two exceptions, and the reason this is a ROM read: item ids `$15` and `$16` are the
-        // Safari Zone's BAIT and ROCK as well as the first two badges, so those two rows are
-        // `ItemUseBait`/`ItemUseRock` rather than `UnusableItem`.
+        // Ids `$15` and `$16` are also the Safari Zone's BAIT and ROCK.
         assert!(!never_usable(ItemId::BoulderBadge), "$15 is also SAFARI_BAIT");
         assert!(!never_usable(ItemId::CascadeBadge), "$16 is also SAFARI_ROCK");
 
-        // The half that makes this a ROM read rather than a list: these look exactly like the
-        // ones above and are perfectly usable.
         assert!(!never_usable(ItemId::CardKey), "ItemUseCardKey");
         assert!(!never_usable(ItemId::PokeFlute), "ItemUsePokeFlute");
         assert!(!never_usable(ItemId::CoinCase), "ItemUseCoinCase");
@@ -104,8 +97,7 @@ mod tests {
         assert!(!never_usable(ItemId::MoonStone));
     }
 
-    /// The machines are dispatched before the table, so a lookup that indexed it with one would
-    /// read past the end of the rows and answer from whatever follows.
+    /// A machine is dispatched before the table and never indexes past its rows.
     #[test]
     fn a_machine_never_reaches_the_table() {
         assert_eq!(use_effect(ItemId::Hm01Cut), None);
@@ -114,9 +106,7 @@ mod tests {
         assert!(use_effect(ItemId::MaxElixer).is_some(), "the last row the table has");
     }
 
-    /// The refusals are the whole point of the gate, so they are checked as prose: each has to
-    /// name what to do instead, and none may carry an em dash (`CLAUDE.md`) or the continuation
-    /// whitespace a `\`-broken literal grows when the backslash is lost.
+    /// Each refusal names the alternative, with no em dash and no whitespace run from a lost `\`.
     #[test]
     fn every_refusal_names_the_alternative() {
         let fossil = field_use_refusal(ItemId::HelixFossil).expect("refused");

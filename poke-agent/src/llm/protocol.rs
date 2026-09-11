@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::LlmError;
 
-// ── Messages
-// ─────────────────────────────────────────────────────────────────────────────────────
+// ── Messages ─────────────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -35,8 +34,7 @@ pub enum ContentPart {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageUrl {
-    /// A `data:image/png;base64,…` URL. Nothing is hosted: the run has no public address, and a
-    /// screenshot that outlived the turn would be a privacy question nobody asked for.
+    /// A `data:image/png;base64,…` URL: nothing is hosted, as the run has no public address.
     pub url: String,
     /// `"low"` or `"high"`.
     pub detail: String,
@@ -83,7 +81,7 @@ pub struct Message {
     pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<Content>,
-    /// Assistant messages only, and the reason the whole turn loop exists.
+    /// Assistant messages only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     /// Tool messages only: which call this is the result of.
@@ -100,8 +98,7 @@ impl Message {
         Self::plain(Role::User, content)
     }
 
-    /// The assistant turn that carries tool calls. `content` is kept even when empty-ish because
-    /// several endpoints echo their own reasoning there and dropping it loses the thread.
+    /// The assistant turn; `content` is kept because several endpoints echo their reasoning there.
     pub fn assistant(content: String, tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: Role::Assistant,
@@ -126,8 +123,7 @@ impl Message {
         Self::user_with_image_detail(caption, data_url, ImageDetail::Low, IMAGE_TOKENS)
     }
 
-    /// As [`Self::user_with_image`], for a picture whose size makes the flat `"low"` price a lie
-    /// — see [`image_tokens`].
+    /// For a picture whose size makes the flat `"low"` price wrong; see [`image_tokens`].
     pub fn user_with_image_detail(
         caption: impl Into<String>, data_url: String, detail: ImageDetail, tokens: u64,
     ) -> Self {
@@ -153,8 +149,7 @@ impl Message {
         }
     }
 
-    /// The message's prose, for anything that wants to read rather than send it. `None` for a
-    /// message that is only a picture.
+    /// The message's prose; `None` for a message that is only a picture.
     pub fn text(&self) -> Option<&str> {
         match self.content.as_ref()? {
             Content::Text(text) => Some(text),
@@ -165,7 +160,6 @@ impl Message {
         }
     }
 
-    /// Whether this message carries a picture.
     pub fn has_image(&self) -> bool {
         matches!(self.content.as_ref(), Some(Content::Parts(parts))
             if parts.iter().any(|part| matches!(part, ContentPart::ImageUrl { .. })))
@@ -175,7 +169,7 @@ impl Message {
     pub fn approximate_tokens(&self) -> u64 {
         let text = self.text().unwrap_or("").len()
             + self.tool_calls.iter().map(|c| c.function.name.len() + c.function.arguments.len()).sum::<usize>();
-        // Each picture is charged what *it* costs, not a flat rate.
+        // Each picture is charged what it costs, not a flat rate.
         let images: u64 = match self.content.as_ref() {
             Some(Content::Parts(parts)) => parts.iter().map(|part| match part {
                 ContentPart::ImageUrl { image_url } => image_url.tokens,
@@ -187,8 +181,7 @@ impl Message {
     }
 }
 
-/// What one `detail: "low"` image costs. OpenAI's published figure, and the right order of
-/// magnitude everywhere else; only ever used when the endpoint reports no `usage` of its own.
+/// What one `detail: "low"` image costs, by OpenAI's published figure.
 pub const IMAGE_TOKENS: u64 = 85;
 
 /// English through a byte-pair tokeniser runs about this many characters per token.
@@ -197,8 +190,7 @@ const CHARS_PER_TOKEN: f64 = 3.7;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
-    /// Always `"function"`. Sent back verbatim because the endpoint requires the field, not
-    /// because there is a second kind.
+    /// Always `"function"`, which the endpoint requires sent back.
     #[serde(rename = "type")]
     pub kind: String,
     pub function: FunctionCall,
@@ -207,13 +199,12 @@ pub struct ToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FunctionCall {
     pub name: String,
-    /// A JSON *string*, not an object — that is how the API sends it, and it arrives in
-    /// fragments.
+    /// A JSON string, not an object, and it arrives in fragments.
     pub arguments: String,
 }
 
-/// Tool calls as they can safely be put in the history, with anything that is not a JSON object
-/// replaced by `{}`.
+/// Tool calls fit for the history: a call whose arguments are not a JSON object gets `{}` in
+/// place, because the assistant message is replayed on every request after.
 pub(crate) fn history_safe(tool_calls: Vec<ToolCall>) -> Vec<ToolCall> {
     tool_calls
         .into_iter()
@@ -221,9 +212,7 @@ pub(crate) fn history_safe(tool_calls: Vec<ToolCall>) -> Vec<ToolCall> {
             let raw = call.function.arguments.trim();
             let object = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw);
             if object.is_err() {
-                // The model still learns what went wrong: an unparseable call is rejected by
-                // `ToolCall::arguments`, whose message quotes the raw text, and that rejection is
-                // the `tool_result` sitting right beside this in the history.
+                // The `tool_result` beside it rejects the call and quotes the raw text.
                 call.function.arguments = "{}".to_string();
             }
             call
@@ -232,8 +221,7 @@ pub(crate) fn history_safe(tool_calls: Vec<ToolCall>) -> Vec<ToolCall> {
 }
 
 impl ToolCall {
-    /// The call's arguments as JSON. An empty string means "no arguments", which several
-    /// endpoints send for a zero-parameter tool and which `serde_json` would otherwise reject.
+    /// An empty string means no arguments, as several endpoints send for a zero-parameter tool.
     pub fn arguments(&self) -> Result<serde_json::Value, LlmError> {
         let raw = self.arguments.trim();
         if raw.is_empty() {
@@ -252,8 +240,7 @@ impl std::ops::Deref for ToolCall {
     }
 }
 
-// ── Requests
-// ─────────────────────────────────────────────────────────────────────────────────────
+// ── Requests ─────────────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolSpec {
@@ -266,9 +253,7 @@ pub struct ToolSpec {
 pub struct FunctionSpec {
     pub name: &'static str,
     pub description: String,
-    /// A JSON Schema object. `serde_json::Value` rather than a typed builder: these are written
-    /// once, read by a model rather than by code, and a builder would be more machinery than the
-    /// thing it builds.
+    /// A JSON Schema object.
     pub parameters: serde_json::Value,
 }
 
@@ -286,8 +271,7 @@ pub struct ChatRequest {
     pub tools: Vec<ToolSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
-    /// A ceiling on the completion. `None` omits the key, which is what every endpoint reads as
-    /// "until you are finished or the window is full".
+    /// `None` omits the key, which every endpoint reads as no ceiling.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     /// How hard the model should think, for endpoints that expose it. `None` omits the key.
@@ -295,8 +279,7 @@ pub struct ChatRequest {
     pub reasoning_effort: Option<String>,
     pub temperature: f32,
     pub stream: bool,
-    /// Several endpoints report no `usage` on a streamed response unless asked. Some report none
-    /// regardless, which is what [`Usage::estimate`] is for.
+    /// Several endpoints stream no `usage` unless asked; [`Usage::estimate`] covers the rest.
     pub stream_options: StreamOptions,
 }
 
@@ -305,8 +288,7 @@ pub struct StreamOptions {
     pub include_usage: bool,
 }
 
-// ── Responses
-// ────────────────────────────────────────────────────────────────────────────────────
+// ── Responses ────────────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
@@ -316,20 +298,16 @@ pub struct Usage {
     pub completion_tokens: u64,
     #[serde(default)]
     pub total_tokens: u64,
-    /// Set when the numbers came from [`Usage::estimate`] rather than from the endpoint, so the
-    /// UI can say so rather than presenting a guess as a measurement.
+    /// The numbers came from [`Usage::estimate`], so the UI can call them a guess.
     #[serde(default, skip_deserializing)]
     pub estimated: bool,
 }
 
 impl Usage {
-    /// The fallback when an endpoint reports nothing: count characters. Wrong by tens of percent,
-    /// and that is the point — a token gauge that degrades beats one that freezes at zero for a
-    /// whole run.
+    /// The fallback when an endpoint reports nothing: count characters, wrong by tens of percent.
     pub fn estimate(request: &[Message], completion: &Completion) -> Self {
         let prompt = request.iter().map(Message::approximate_tokens).sum();
-        // Reasoning counts here even though it never enters the history: the endpoint billed for
-        // it, and this is the bill.
+        // Reasoning never enters the history, but it was billed.
         let reply = Message::assistant(completion.content.clone(), completion.tool_calls.clone())
             .approximate_tokens()
             + Message::assistant(completion.reasoning.clone(), Vec::new()).approximate_tokens();
@@ -341,16 +319,14 @@ impl Usage {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Completion {
     pub content: String,
-    /// What the model thought on its way to `content`, for the endpoints that stream it
-    /// separately.
+    /// What the model thought, for the endpoints that stream it apart from `content`.
     pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
     pub finish_reason: Option<String>,
 }
 
-// ── The streaming parser
-// ─────────────────────────────────────────────────────────────────────────
+// ── The streaming parser ─────────────────────────────────────────────────────────────────────────
 
 /// One piece of a completion as it arrives, tagged with which channel it came in on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,22 +362,18 @@ pub fn read_stream(
     Ok(accumulator.finish())
 }
 
-/// Whether an `io::Error` from the body reader is the deadline expiring rather than the
-/// connection breaking, so it can become an [`LlmError::Timeout`] rather than a retryable
-/// transport fault.
+/// The deadline expiring rather than the connection breaking: an [`LlmError::Timeout`].
 fn is_timeout(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::TimedOut
         || format!("{error}").to_ascii_lowercase().contains("timeout")
 }
 
-/// The state machine [`read_stream`] drives, separated from the reader so a test can feed it
-/// lines split wherever it likes.
+/// [`read_stream`]'s state machine, apart from the reader so a test can split lines anywhere.
 #[derive(Debug, Default)]
 pub struct StreamAccumulator {
     content: String,
     reasoning: String,
-    /// Indexed by the `index` field of the delta, which is how the API identifies *which* of
-    /// several parallel calls a fragment belongs to.
+    /// Indexed by the delta's `index`, which says which parallel call a fragment belongs to.
     calls: Vec<PartialCall>,
     usage: Option<Usage>,
     finish_reason: Option<String>,
@@ -415,8 +387,7 @@ struct PartialCall {
 }
 
 impl StreamAccumulator {
-    /// Fold one raw SSE line in. Returns `true` when the stream has said it is finished, so the
-    /// caller stops reading rather than waiting for the connection to close.
+    /// Fold one SSE line in; `true` once the stream says it is finished.
     pub fn push_line(
         &mut self,
         line: &str,
@@ -435,21 +406,18 @@ impl StreamAccumulator {
         let chunk: StreamChunk = serde_json::from_str(payload)
             .map_err(|e| LlmError::Protocol(format!("unparseable stream chunk ({e}): {payload}")))?;
 
-        // An error mid-stream arrives as a normal `data:` frame with a 200 already sent, so it
-        // cannot be handled at the status-code layer — but the status is *in* it, and on
-        // OpenRouter it is routinely a transient upstream fault the retry loop already knows what
-        // to do with.
+        // An error mid-stream is a `data:` frame after a 200, and carries its own status for the
+        // retry loop.
         if let Some(error) = chunk.error {
             return Err(error.into_failure(chunk.provider.as_deref()));
         }
-        // The usage frame is the *last* one and carries an empty `choices` array.
+        // The usage frame is the last one and carries an empty `choices` array.
         if let Some(usage) = chunk.usage {
             self.usage = Some(usage);
         }
 
         for choice in chunk.choices {
-            // Thinking first: a chunk carries one or the other, and on the endpoints that ever
-            // send both together the reasoning is what led to the prose beside it.
+            // Thinking first: where a chunk carries both, the reasoning led to the prose.
             if let Some(text) = choice.delta.reasoning_content.filter(|t| !t.is_empty()) {
                 on_delta(Fragment::Reasoning(&text));
                 self.reasoning.push_str(&text);
@@ -468,8 +436,7 @@ impl StreamAccumulator {
         Ok(false)
     }
 
-    /// The arguments of one call arrive across many chunks and must be concatenated before
-    /// parsing.
+    /// One call's arguments arrive across many chunks and are concatenated before parsing.
     fn merge_call(&mut self, delta: ToolCallDelta) {
         // Not every endpoint sends `index`.
         let index = match delta.index {
@@ -503,8 +470,7 @@ impl StreamAccumulator {
             tool_calls: self
                 .calls
                 .into_iter()
-                // A slot with no name was never a call: an endpoint that sends a sparse `index`
-                // leaves gaps, and `resize` filled them.
+                // A nameless slot is a gap `resize` filled for a sparse `index`.
                 .filter(|call| !call.name.is_empty())
                 .enumerate()
                 .map(|(i, call)| ToolCall {
@@ -545,8 +511,7 @@ struct StreamChoice {
 struct MessageDelta {
     #[serde(default)]
     content: Option<String>,
-    /// A reasoning model's thinking, which arrives on a channel of its own rather than in
-    /// `content`.
+    /// A reasoning model's thinking, on a channel of its own.
     #[serde(default, alias = "reasoning")]
     reasoning_content: Option<String>,
     #[serde(default)]
@@ -576,13 +541,11 @@ struct FunctionDelta {
 pub struct ApiError {
     #[serde(default)]
     pub message: String,
-    /// A string on OpenAI (`"insufficient_quota"`) and an *integer* on OpenRouter (`504`).
-    /// Neither is wrong — the field is in nobody's schema — and typing it as one of them made the
-    /// other unparseable: an integer here failed the whole chunk, so an upstream provider timing
-    /// out was reported as our own parser being broken.
+    /// A string on OpenAI (`"insufficient_quota"`) and an integer on OpenRouter (`504`), so it
+    /// accepts either or the whole chunk fails to parse.
     #[serde(default)]
     pub code: Option<ErrorCode>,
-    /// OpenRouter's, and the tell that this *is* OpenRouter's envelope. Nothing else sends it.
+    /// OpenRouter's, and the tell that this is OpenRouter's envelope.
     #[serde(default)]
     pub metadata: Option<OpenRouterErrorMetadata>,
 }
@@ -596,9 +559,7 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
-    /// The HTTP status this code is, when it is one. `"504"` counts: several gateways send the
-    /// number as a string, and a code that is a *name* (`"insufficient_quota"`) answers `None`
-    /// rather than being forced into a status nobody sent.
+    /// The HTTP status this code is: `"504"` counts, and a name answers `None`.
     pub fn status(&self) -> Option<u16> {
         let number = match self {
             Self::Number(number) => u16::try_from(*number).ok()?,
@@ -617,8 +578,7 @@ impl std::fmt::Display for ErrorCode {
     }
 }
 
-/// The `metadata` object on an OpenRouter error, which is how a routed request says *which*
-/// upstream provider failed and how.
+/// The `metadata` on an OpenRouter error: which upstream provider failed, and how.
 #[derive(Debug, Deserialize)]
 pub struct OpenRouterErrorMetadata {
     #[serde(default)]
@@ -652,8 +612,7 @@ impl ApiError {
             .map(str::trim)
             .filter(|kind| !kind.is_empty());
         let message = match self.message.trim() {
-            // An error that says nothing is rare and horrible to debug, so whatever the frame did
-            // carry is the message: `metadata.error_type` first, since a word beats a number.
+            // Whatever the frame did carry becomes the message, `error_type` before `code`.
             "" => match (error_type, &self.code) {
                 (Some(kind), _) => format!("the endpoint reported a {kind} and said nothing else"),
                 (None, Some(code)) => format!("the endpoint reported {code} and said nothing else"),
@@ -670,8 +629,7 @@ impl ApiError {
         }
     }
 
-    /// The failure this error frame is, which is the whole point of parsing it: a status carried
-    /// inside a 200 is the same status the non-200 path already keys its retries on.
+    /// A status inside a 200 is the same status the non-200 path keys its retries on.
     fn into_failure(self, chunk_provider: Option<&str>) -> LlmError {
         let message = self.describe(chunk_provider);
         let status = match self.is_openrouter(chunk_provider) {
@@ -680,8 +638,7 @@ impl ApiError {
             false => None,
         };
         match status {
-            // No headers exist mid-stream, so this rate limit is *undated* — which is the "keep
-            // the ordinary backoff" case rather than the "park the run" one.
+            // No headers exist mid-stream, so this rate limit is undated and keeps the backoff.
             Some(429) => LlmError::RateLimited { resets_at_ms: None, message },
             Some(status) => LlmError::Http { status, message },
             None => LlmError::Protocol(format!("the endpoint reported: {message}")),
@@ -689,9 +646,7 @@ impl ApiError {
     }
 }
 
-/// Pull the human half out of an error body, falling back to the body itself when it is not the
-/// shape we expected — which for a proxy or a gateway it very often is not. When a 429's quota
-/// reopens, in Unix milliseconds, from the two headers that can say so.
+/// When a 429's quota reopens, in Unix milliseconds, from the two headers that can say so.
 pub fn reset_at_ms(retry_after: Option<&str>, reset: Option<&str>, now_ms: u64) -> Option<u64> {
     // `Retry-After` may also be an HTTP-date.
     if let Some(seconds) = retry_after.and_then(|value| value.trim().parse::<u64>().ok()) {
@@ -699,8 +654,7 @@ pub fn reset_at_ms(retry_after: Option<&str>, reset: Option<&str>, now_ms: u64) 
     }
     let reset = reset?.trim().parse::<u64>().ok()?;
     match reset {
-        // Unix milliseconds: 10^12 ms is 2001, and anything smaller cannot be a millisecond
-        // stamp.
+        // Unix milliseconds: anything below 10^12 cannot be one.
         _ if reset >= 1_000_000_000_000 => Some(reset),
         // Unix seconds.
         _ if reset >= 1_000_000_000 => Some(reset.saturating_mul(1000)),
@@ -709,14 +663,14 @@ pub fn reset_at_ms(retry_after: Option<&str>, reset: Option<&str>, now_ms: u64) 
     }
 }
 
+/// The human half of an error body, or the body itself when it is not the expected shape.
 pub fn describe_error_body(body: &str) -> String {
     #[derive(Deserialize)]
     struct Envelope {
         error: ApiError,
     }
     match serde_json::from_str::<Envelope>(body) {
-        // The same describer the mid-stream frame uses, so one error cannot be worded two ways
-        // depending on which side of the 200 it arrived on.
+        // The mid-stream describer too, so one error reads the same either side of the 200.
         Ok(Envelope { error }) if !error.message.is_empty() => error.describe(None),
         _ => body.chars().take(400).collect(),
     }
@@ -731,9 +685,7 @@ mod tests {
         // The Game Boy screen at `screenshot::SCALE`, which is what `low` is for.
         assert_eq!(image_tokens(ImageDetail::Low, 480, 432), IMAGE_TOKENS);
 
-        // Pallet Town, Celadon and Route 17 — the median map, a big city, and the long thin route
-        // that is the worst case, because a narrow strip is scaled *up* until its short side is
-        // 768.
+        // Pallet Town, Celadon and Route 17, a thin strip scaled up until its short side is 768.
         assert_eq!(image_tokens(ImageDetail::High, 344, 330), 765);
         assert_eq!(image_tokens(ImageDetail::High, 856, 586), 1105);
         assert!(image_tokens(ImageDetail::High, 344, 2314) > 3_000);
@@ -826,9 +778,7 @@ mod tests {
         assert!(estimate.total_tokens > estimate.prompt_tokens);
     }
 
-    /// A reasoning model streams its thinking on a channel of its own, and the two must not be
-    /// concatenated: `content` is what goes back into the history, `reasoning` is what the page
-    /// shows and then collapses.
+    /// `content` goes back into the history; `reasoning` is only shown on the page.
     #[test]
     fn reasoning_is_a_separate_channel_from_the_reply() {
         let completion = drain(&[
@@ -843,15 +793,13 @@ mod tests {
         assert_eq!(completion.content, "Heading north.", "the thinking is not part of the reply");
         assert_eq!(completion.tool_calls.len(), 1);
 
-        // It is billed as completion tokens even though it never enters the history, so the
-        // estimator has to count it — this model spends most of a turn's output on it.
+        // Reasoning is billed as completion tokens, so the estimate counts it.
         let with = Usage::estimate(&[], &completion);
         let without = Usage::estimate(&[], &Completion { reasoning: String::new(), ..completion });
         assert!(with.completion_tokens > without.completion_tokens, "{with:?} vs {without:?}");
     }
 
-    /// The field has two spellings and neither is OpenAI's: LM Studio, vLLM and DeepSeek send
-    /// `reasoning_content`, OpenRouter sends `reasoning`.
+    /// LM Studio, vLLM and DeepSeek send `reasoning_content`; OpenRouter sends `reasoning`.
     #[test]
     fn the_other_spelling_of_the_reasoning_field_is_read_too() {
         let completion = drain(&[
@@ -861,8 +809,6 @@ mod tests {
         assert_eq!(completion.reasoning, "Thinking about it.");
     }
 
-    /// Two different calls arriving with no `index` at all must not be concatenated into one —
-    /// the id is the only thing distinguishing them.
     #[test]
     fn indexless_calls_split_on_a_new_id() {
         let completion = drain(&[
@@ -874,8 +820,6 @@ mod tests {
         assert_eq!(names, ["read_map", "read_bag"]);
     }
 
-    /// Keep-alive comments, `event:` lines and blank separators are all normal traffic and none
-    /// of them are data.
     #[test]
     fn non_data_lines_are_ignored() {
         let completion = drain(&[
@@ -890,7 +834,6 @@ mod tests {
         assert_eq!(completion.content, "hi", "nothing after [DONE] is read");
     }
 
-    /// An error inside a 200 stream: the status code already said everything was fine.
     #[test]
     fn a_mid_stream_error_frame_is_an_error() {
         let failure = error_frame(r#"{"error":{"message":"context length exceeded","code":"400"}}"#);
@@ -921,7 +864,6 @@ mod tests {
         assert!(!text.contains("unparseable"), "the parser is not the thing that went wrong: {text}");
     }
 
-    /// The guard for the scoping decision.
     #[test]
     fn a_bare_error_frame_is_still_only_a_protocol_error() {
         let failure = error_frame(r#"{"choices":[],"error":{"code":503,"message":"overloaded"}}"#);
@@ -929,8 +871,7 @@ mod tests {
         assert!(!failure.is_retryable(), "{failure}");
         assert!(format!("{failure}").contains("overloaded"), "{failure}");
 
-        // Either half of the envelope is enough to recognise it, since the incident above carries
-        // the provider on the chunk and not in the metadata.
+        // Either half of the envelope is enough to recognise it.
         for enveloped in [
             r#"{"provider":"Nvidia","error":{"code":503,"message":"overloaded"}}"#,
             r#"{"error":{"code":503,"message":"overloaded","metadata":{"provider_name":"Nvidia"}}}"#,
@@ -941,8 +882,6 @@ mod tests {
         }
     }
 
-    /// The universal half of the fix: `code` is a string on OpenAI and a number on OpenRouter,
-    /// and a name rather than a status on both.
     #[test]
     fn an_error_code_is_read_whether_it_is_a_number_or_a_string() {
         assert_eq!(ErrorCode::Number(504).status(), Some(504));
@@ -951,8 +890,7 @@ mod tests {
         assert_eq!(ErrorCode::Number(0).status(), None, "not every number is a status");
         assert_eq!(ErrorCode::Number(-1).status(), None, "and it must not wrap into one");
 
-        // A named code is not thrown away just because it decides nothing — it is the most useful
-        // word in the error, so it rides along in the message.
+        // A named code decides nothing but rides along in the message.
         let failure = error_frame(
             r#"{"provider":"Chutes","error":{"code":"insufficient_quota","message":"out of credit"}}"#,
         );
@@ -965,8 +903,6 @@ mod tests {
         assert_eq!(format!("{failure}"), "the endpoint returned 502: Nvidia: upstream died");
     }
 
-    /// A mid-stream 429 is a rate limit and an *undated* one: no headers exist inside a body, so
-    /// there is nothing to park until.
     #[test]
     fn an_openrouter_rate_limit_is_a_rate_limit_and_not_a_park() {
         let failure = error_frame(concat!(
@@ -983,7 +919,6 @@ mod tests {
         assert!(failure.is_retryable());
     }
 
-    /// A 4xx inside the envelope is still the request being wrong, and is still fatal.
     #[test]
     fn an_openrouter_client_error_is_classified_but_not_retried() {
         let failure =
@@ -992,8 +927,6 @@ mod tests {
         assert!(!failure.is_retryable(), "{failure}");
     }
 
-    /// An error frame that says nothing at all is rare and horrible to debug, so whatever it
-    /// *did* carry becomes the message rather than an empty sentence.
     #[test]
     fn an_error_with_no_message_still_says_something() {
         let failure = error_frame(r#"{"provider":"Nvidia","error":{"metadata":{"error_type":"timeout"}}}"#);
@@ -1001,7 +934,6 @@ mod tests {
         assert!(text.contains("Nvidia") && text.contains("timeout"), "{text}");
     }
 
-    /// Truncated JSON is a reported error, never a panic and never a silently empty completion.
     #[test]
     fn a_corrupt_chunk_is_an_error() {
         let mut accumulator = StreamAccumulator::default();
@@ -1029,8 +961,7 @@ mod tests {
         assert!(matches!(failure, LlmError::Cancelled), "{failure}");
     }
 
-    /// The request is what the endpoint is most likely to reject, so pin its shape: no nulls
-    /// where a key should be absent, and `stream_options` present so `usage` comes back at all.
+    /// No nulls where a key should be absent, and `stream_options` so `usage` comes back.
     #[test]
     fn the_request_serialises_to_the_documented_shape() {
         let request = ChatRequest {
@@ -1053,9 +984,7 @@ mod tests {
             stream_options: StreamOptions { include_usage: true },
         };
         let json = serde_json::to_value(&request).expect("serialises");
-        // Both optional keys are *absent* rather than null when unset: an endpoint that has never
-        // heard of `reasoning_effort` must see a request identical to the one it saw before it
-        // existed, and a `max_tokens: null` is a 400 on several of them.
+        // Absent rather than null: `max_tokens: null` is a 400 on several endpoints.
         assert!(json.get("max_tokens").is_none(), "{json}");
         assert!(json.get("reasoning_effort").is_none(), "{json}");
 
@@ -1072,8 +1001,7 @@ mod tests {
         assert_eq!(json["parallel_tool_calls"], true);
         assert_eq!(json["tools"][0]["type"], "function");
         assert_eq!(json["tools"][0]["function"]["name"], "wait");
-        // An assistant message carrying only tool calls has no content key at all, and a system
-        // message has no `tool_calls` key — both are `null`-intolerant on some endpoints.
+        // No `content` on a tool-calls-only message, no `tool_calls` on a system one.
         assert!(json["messages"][1].get("content").is_none());
         assert!(json["messages"][0].get("tool_calls").is_none());
         assert_eq!(json["messages"][2]["tool_call_id"], "c1");
@@ -1101,7 +1029,6 @@ mod tests {
         assert!(!Message::user("no picture here").has_image());
     }
 
-    /// A base64 payload is four thousand characters and about eighty tokens.
     #[test]
     fn an_image_is_estimated_by_the_flat_rate_rather_than_by_its_length() {
         let caption = "look at this";
@@ -1128,7 +1055,6 @@ mod tests {
         );
     }
 
-    /// A tool call the model wrote badly must not be able to poison the conversation.
     #[test]
     fn a_tool_call_that_is_not_a_json_object_cannot_reach_the_history() {
         use super::{Message, ToolCall, FunctionCall};
@@ -1144,16 +1070,14 @@ mod tests {
                 .clone()
         };
 
-        // The two shapes measured in the wild: nothing at all (which several endpoints send for a
-        // zero-parameter tool) and a fragment cut off mid-object.
+        // Nothing at all, and a fragment cut off mid-object.
         assert_eq!(sent(""), "{}");
         assert_eq!(sent(r#"{"id": "PalletTown:5"#), "{}");
         // JSON, but not an object.
         assert_eq!(sent("[1, 2]"), "{}");
         assert_eq!(sent("\"walk north\""), "{}");
 
-        // And a good call is left exactly as the model wrote it: re-serialising would sort the
-        // keys, rewording the model's own history and moving the token count for no reason.
+        // A good call is left as written: re-serialising would sort its keys.
         let good = r#"{"id":"PalletTown:5,6:Warp","summary":"heading to Route 1"}"#;
         assert_eq!(sent(good), good);
 
@@ -1176,8 +1100,7 @@ mod tests {
         // Seconds from now.
         assert_eq!(at("600"), Some(NOW + 600_000));
 
-        // `Retry-After` wins when both are present: it is a delta, so it cannot be wrong about
-        // our clock, and an endpoint sending both means the same thing by them.
+        // `Retry-After` wins: a delta cannot be wrong about our clock.
         assert_eq!(super::reset_at_ms(Some("30"), Some("1786824600000"), NOW), Some(NOW + 30_000));
         // ...but only when it parses.
         assert_eq!(
@@ -1185,8 +1108,7 @@ mod tests {
             Some(NOW + 600_000),
         );
 
-        // `None` is "the endpoint did not say", which the caller must not read as "no limit": it
-        // keeps its ordinary backoff for that case rather than parking the run.
+        // `None` is the endpoint not saying, which keeps the ordinary backoff.
         assert_eq!(super::reset_at_ms(None, None, NOW), None);
         assert_eq!(super::reset_at_ms(None, Some("soon"), NOW), None);
     }

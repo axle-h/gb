@@ -1,13 +1,5 @@
-# The ops shape of a run: one service, one volume, one port.
-#
 #   OPENAI_API_KEY=sk-… GB_MODEL=… docker compose up -d --build
-#   docker compose logs -f
-#   docker compose restart gb          # resumes where it was, notes and all
-#
-# `--policy random` needs neither variable and is the way to check the video pipeline and the page
-# without spending anything:
-#
-#   docker compose run --rm --service-ports gb poke-agent-web --policy random
+#   docker compose run --rm --service-ports gb poke-agent-web --policy random   # no key, no spend
 
 services:
   gb:
@@ -16,27 +8,21 @@ services:
     ports:
       - "${GB_PUBLISH_PORT:-8080}:8080"
     environment:
-      # Required for the default `--policy llm`. `?` so a missing one fails at `up` rather than
-      # inside the container thirty seconds later.
+      # Required for the default `--policy llm`; `?` fails a missing one at `up`.
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY, or run with --policy random}
       GB_MODEL: ${GB_MODEL:?set GB_MODEL, or run with --policy random}
-      # Any OpenAI-compatible endpoint. Everything below is optional; the defaults are the ones
-      # `poke-agent-web --help` documents and `poke-agent/src/llm/config.rs` explains.
+      # Everything below is optional; `poke-agent/src/llm/config.rs` documents the defaults.
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       GB_CONTEXT_LIMIT: ${GB_CONTEXT_LIMIT:-}
       GB_TEMPERATURE: ${GB_TEMPERATURE:-}
       GB_MAX_TOOL_STEPS: ${GB_MAX_TOOL_STEPS:-}
       GB_STATUS_HZ: ${GB_STATUS_HZ:-}
-      # The watchdog. Emulated seconds with the agent asking nothing at all before the model is
-      # asked for a nudge; `0` turns it off. Every firing is a bug report.
+      # The watchdog, in emulated seconds; `0` turns it off.
       GB_STUCK_TIMEOUT_SECS: ${GB_STUCK_TIMEOUT_SECS:-}
     volumes:
       - runs:/runs
     restart: unless-stopped
-    # ⚠️ SIGTERM is what checkpoints the run, and docker's default grace period is 10 s. The
-    # checkpoint is a save state and a couple of small files, so it is far quicker than that — but
-    # a SIGKILL here costs whatever has happened since the last periodic checkpoint, and there is
-    # no reason to be tight about it.
+    # SIGTERM checkpoints the run, so the grace period must exceed the checkpoint time.
     stop_grace_period: 30s
 
 volumes:

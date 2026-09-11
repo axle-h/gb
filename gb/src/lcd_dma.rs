@@ -98,9 +98,8 @@ impl LcdDmaState {
     }
 }
 
-/// The `dma` save-state section as written by version 1 — before A7 replaced the whole-transfer
-/// model with an incremental one. Kept only to decode states written by that build; the section
-/// version tells the two apart.
+/// The `dma` save-state section as version 1 wrote it, a whole-transfer model. Kept only to decode
+/// such states; the section version tells the two apart.
 #[derive(Debug, Clone, Decode, Encode)]
 pub struct LcdDmaV1 {
     state: Option<LcdDmaStateV1>,

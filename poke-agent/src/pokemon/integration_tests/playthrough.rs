@@ -2,8 +2,7 @@
 
 use super::*;
 
-/// Where along the eight-badge route [`super::soak`] turns its fuzzer loose, and the map each of
-/// those save states is cut on.
+/// Where on the eight-badge route [`super::soak`] starts, and the map each state is cut on.
 #[cfg(feature = "slow-tests")]
 pub(super) const SOAK_CHECKPOINTS: &[(&str, Map)] = &[
     ("soak-mt-moon", Map::MtMoonB2F),
@@ -20,16 +19,12 @@ pub(super) const SOAK_CHECKPOINTS: &[(&str, Map)] = &[
     ("soak-route23", Map::Route23),
 ];
 
-/// How long the run has to have been standing on a checkpoint's map before the state is taken —
-/// 50 ticks of [`AGENT_RESOLUTION`], one second of game time.
+/// How long the run must stand on a checkpoint's map before the state is taken: one second of game
+/// time.
 #[cfg(feature = "slow-tests")]
 const CHECKPOINT_SETTLE_TICKS: u32 = 50;
 
 /// Re-cut every [`SOAK_CHECKPOINTS`] state by playing the eight-badge route once.
-/// ```text
-/// cargo test --release --features slow-tests --lib -- \
-///   regen_soak_checkpoints --exact --nocapture
-/// ```
 #[test]
 #[cfg(feature = "slow-tests")]
 #[ignore = "tool: recuts every soak checkpoint; needs GB_REGEN_FIXTURES=1"]
@@ -81,13 +76,8 @@ fn regen_soak_checkpoints() {
     println!("[checkpoint] re-cut {} soak fixtures", written.len());
 }
 
-/// Resume [`full_playthrough`] from the save state a stalled run drops in
-/// `target/test-artifacts/`, with the steps it had left still queued — so a stall 270 steps in
-/// can be re-tested in seconds instead of re-running the whole 20 minutes up to it.
-/// ```text
-/// RESUME_QUEUE_LEN=233 cargo test --release --features slow-tests --lib -- \
-///   probe_resume_playthrough --exact --ignored --nocapture
-/// ```
+/// Resume [`full_playthrough`] from a stalled run's dropped save with its remaining steps queued.
+/// Set `RESUME_QUEUE_LEN` to the number of steps it had left.
 #[test]
 #[cfg(feature = "slow-tests")]
 #[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
@@ -111,9 +101,7 @@ fn probe_resume_playthrough() {
     let s = fixture.game_state();
     println!("resume state: {} @ {} — party {:?}", s.map.map, s.map.player_position,
         s.pokemon.iter().map(|p| (p.species, p.level)).collect::<Vec<_>>());
-    // The bag and the reachable set are the two things a stall is usually *about*: an item a gift
-    // or a purchase silently failed to deliver, or an exit the pathfinder cannot see from where
-    // it stands.
+    // A stall is usually about an item that was not delivered or an exit the pathfinder cannot see.
     println!("   bag[{}]: {:?}", s.bag.len(), s.bag.iter().map(|i| i.id).collect::<Vec<_>>());
     println!("   tile under player: {:?}", s.map.tile_at_checked(s.map.player_position));
     for sprite in &s.map.sprites {
@@ -127,7 +115,7 @@ fn probe_resume_playthrough() {
     println!("resume ended: {} @ {} badges={:?}", s.map.map, s.map.player_position, s.badges);
 }
 
-/// The full end-to-end playthrough — the single source of truth for how far the agent can play.
+/// The scripted route from a fresh save through all eight badges.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "full playthrough; run with --features slow-tests")]
 fn full_playthrough() {
@@ -143,7 +131,6 @@ fn full_playthrough() {
         assert_eq!(state.pokemon.len(), 0, "player should have no pokemon before Oak's script");
     }
 
-    // `step_until_exhausted`, never `run_leg`.
     let started = std::time::Instant::now();
     fixture.step_until_exhausted();
     let elapsed = started.elapsed();
@@ -164,18 +151,17 @@ fn full_playthrough() {
     assert!(state.badges.contains(Badge::CascadeBadge), "should have the Cascade Badge");
     assert!(state.badges.contains(Badge::ThunderBadge), "should have the Thunder Badge");
     assert!(state.badges.contains(Badge::RainbowBadge), "should have the Rainbow Badge");
-    // Post-Rainbow: Silph Scope (Rocket Hideout) → Poké Flute → Snorlax → Soul Badge (Koga).
+    // Post-Rainbow: Silph Scope, Poké Flute, Snorlax, Soul Badge.
     assert!(state.bag.contains(&ItemId::SilphScope), "should have the Silph Scope");
     assert!(state.bag.contains(&ItemId::PokeFlute), "should have the Poké Flute");
     assert!(state.badges.contains(Badge::SoulBadge), "should have the Soul Badge");
-    // Post-Soul: Safari HMs → Vaporeon → Silph (Marsh) → Cinnabar Mansion → Volcano → Viridian
-    // (Earth).
+    // Post-Soul: Safari HMs, Vaporeon, Silph, Cinnabar Mansion, Volcano, Viridian.
     assert!(state.bag.contains(&ItemId::Hm03Surf), "should have HM03 Surf");
     assert!(state.badges.contains(Badge::MarshBadge), "should have the Marsh Badge");
     assert!(state.badges.contains(Badge::VolcanoBadge), "should have the Volcano Badge");
     assert!(state.badges.contains(Badge::EarthBadge), "should have the Earth Badge (all 8 gym badges)");
 
-    // One fighter and two HM slaves, and the slaves are the *only* other members.
+    // One fighter and two HM slaves, and nothing else.
     assert_eq!(state.pokemon.len(), 3, "party should be the starter + the two HM slaves");
     assert!(state.pokemon.iter().any(|p| p.species == PokemonSpecies::Blastoise),
         "the starter should have reached Blastoise");
@@ -184,10 +170,8 @@ fn full_playthrough() {
     assert!(state.pokemon.iter().any(|p| p.species == PokemonSpecies::Machop),
         "should have caught the Victory Road Strength slave");
 
-    // Every HM this route needs, checked on the *party* rather than the bag, because a carrier
-    // that cannot learn one is exactly the failure the starter swap introduced: Cut lives on the
-    // Oddish and Surf, Strength and Dig on Blastoise, and a step aimed at the wrong one waits for
-    // ever rather than failing.
+    // Every HM is checked on the party, since a step aimed at a carrier that cannot learn one waits
+    // for ever: Cut on the Oddish, the rest on Blastoise.
     for want in [PokemonMoveName::Cut, PokemonMoveName::Surf, PokemonMoveName::Strength] {
         assert!(state.pokemon.iter().any(|p| p.moves.iter().flatten().any(|m| m.name == want)),
             "a party member should know {want}");
@@ -197,8 +181,7 @@ fn full_playthrough() {
     fixture.save_state_named("src/pokemon/data/post-victory-road-1f.bin").unwrap();
 }
 
-/// The whole game, to the Hall of Fame — [`PolicyStep::complete_game_steps`], which is what `gb
-/// serve --policy deterministic` plays.
+/// [`PolicyStep::complete_game_steps`] to the Hall of Fame, as `--policy deterministic` plays it.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "~26 min — run with --features slow-tests")]
 fn hall_of_fame_playthrough() {
@@ -219,7 +202,7 @@ fn hall_of_fame_playthrough() {
         println!("{}: {} lv.{}", pokemon.species, pokemon.nickname, pokemon.level);
     }
     assert!(state.badges.contains(Badge::EarthBadge), "all eight badges");
-    // One fighter over the target, and it replaced "three fighters or you lose".
+    // One fighter over the target.
     for species in [PokemonSpecies::Blastoise] {
         let mon = state.pokemon.iter().find(|p| p.species == species)
             .unwrap_or_else(|| panic!("the party should carry a {species:?}"));

@@ -1,9 +1,8 @@
-
 use super::super::*;
 use crate::pokemon::encoding::GameMode;
 
-/// Drive `post-hall-of-fame.bin` forward until the player is standing in a playable overworld
-/// again, and return the state it lands in.
+/// Drive `post-hall-of-fame.bin` until the player is in a playable overworld again, and return that
+/// state.
 pub fn drive_out_of_hall_of_fame(fixture: &mut TestFixture) -> GameState {
     let mut tick = 0u32;
     loop {
@@ -97,8 +96,7 @@ fn the_hall_of_fame_is_announced_once_when_the_ceremony_starts() {
 /// Winning the game does not hand the world back, and the agent must stop playing it.
 #[test]
 fn the_agent_stops_playing_a_world_the_cartridge_has_reset() {
-    // `RandomPolicy` answers every overworld turn it is offered, so a single quiet tick here is
-    // the agent declining to ask rather than a policy declining to answer.
+    // `RandomPolicy` answers every overworld turn, so a quiet tick is the agent declining to ask.
     let mut fixture = TestFixture::with_policy(
         include_bytes!("../../data/post-hall-of-fame.bin"),
         Duration::from_mins(20),
@@ -108,7 +106,7 @@ fn the_agent_stops_playing_a_world_the_cartridge_has_reset() {
     let (mut won, mut reset) = (false, false);
     let (mut before, mut after) = (0usize, 0usize);
     let mut tick = 0u32;
-    // Until the world comes back: a real overworld on some map other than the one being left.
+    // Until a real overworld on another map comes back.
     loop {
         let (mode, map) = {
             let api = fixture.api();
@@ -122,9 +120,8 @@ fn the_agent_stops_playing_a_world_the_cartridge_has_reset() {
             if tick % 2 == 0 { api.press_button(JoypadButton::A); } else { api.release_all_buttons(); }
         }
         tick += 1;
-        // Read before the step, and stated as the same two phases the agent uses, because the
-        // window is not "after the announcement": it opens at the announcement and closes when
-        // the cartridge has reset *and* a game has been loaded again.
+        // The window opens at the announcement and closes once the cartridge has reset and a game
+        // is loaded again.
         let loaded = fixture.api().a_game_is_loaded();
         if won && !loaded { reset = true }
         let in_the_window = won && !(reset && loaded);
@@ -140,12 +137,11 @@ fn the_agent_stops_playing_a_world_the_cartridge_has_reset() {
     }
 
     assert!(won, "the ceremony never started, so this test proved nothing");
-    // Without this the test passes on a run that simply sat in the Hall of Fame for ten minutes.
+    // Without this the test passes on a run that sat in the Hall of Fame.
     assert!(reset, "the cartridge never reached `jp Init`, so the window under test never opened");
     assert!(before <= 2, "{before} walks before the announcement — the room is small");
     assert_eq!(after, 0, "the agent started {after} walks across a room the player had left");
 
-    // And it comes back.
     let state = fixture.game_state();
     assert_eq!(state.map.map, Map::PalletTown, "the reset lands outside the player's own front door");
     let mut played = 0usize;
@@ -157,7 +153,7 @@ fn the_agent_stops_playing_a_world_the_cartridge_has_reset() {
     assert!(played > 0, "the agent never started playing again after the world came back");
 }
 
-/// Task 0.35 — the postgame root fixture.
+/// Cuts `postgame-post-credits.bin` by walking out of the Hall of Fame with nothing lost.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_walk_out_of_the_hall_of_fame() {
@@ -173,7 +169,7 @@ fn can_walk_out_of_the_hall_of_fame() {
     // The special warp lands the player outside their own front door in Pallet Town.
     assert_eq!(state.map.map, Map::PalletTown);
     assert_eq!(state.mode, GameMode::Overworld);
-    // The reset must not have cost anything: this is a save/reload, not a new game.
+    // A save/reload, not a new game: nothing lost.
     assert_eq!(state.badges.bits(), 255, "badges lost across the reset");
     assert_eq!(state.pokemon.len(), 4, "party lost across the reset");
     assert!(state.money > 0, "money lost across the reset");
@@ -181,7 +177,7 @@ fn can_walk_out_of_the_hall_of_fame() {
     fixture.save_state_named("src/pokemon/data/postgame-post-credits.bin").unwrap();
 }
 
-/// Workstream J3 — the options the harness writes must survive a soft reset.
+/// The options the harness writes survive the Hall of Fame's soft reset.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn options_survive_the_hall_of_fame_reset() {
@@ -209,10 +205,10 @@ fn options_survive_the_hall_of_fame_reset() {
         fixture.options_drifts);
 }
 
-/// The postgame root, for every Phase 0 test after 0.35.
+/// The postgame root: Pallet Town after the credits, cut by `can_walk_out_of_the_hall_of_fame`.
 const POST_CREDITS: &[u8] = include_bytes!("../../data/postgame-post-credits.bin");
 
-/// Task 0.4 — stand at a Pokémon Center PC and open it.
+/// Stand at a Pokémon Center PC and open it.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_open_the_pokemon_center_pc() {
@@ -224,8 +220,7 @@ fn can_open_the_pokemon_center_pc() {
         PolicyStep::UsePc { map: Map::ViridianPokecenter },
     ]);
 
-    // `UsePc` pops the moment it issues the walk, so drive the queue dry and then watch the
-    // screen rather than the queue.
+    // `UsePc` pops once it issues the walk, so drain the queue and watch the screen.
     fixture.step_until_exhausted();
 
     // Log every distinct screen for the next 30 s of game time.
@@ -259,11 +254,10 @@ fn can_open_the_pokemon_center_pc() {
                "it should have logged off and be standing in front of the PC again");
 }
 
-/// TM34 Bide — one of the six TMs sitting in the bag that no workstream has a plan for, and the
-/// one `item.rs` already calls "the bag's most useless item".
+/// TM34 Bide, a spare TM that `item.rs` calls "the bag's most useless item".
 const SPARE_TM: ItemId = ItemId::Tm34Bide;
 
-/// Task 0.5 — deposit an item into PC storage.
+/// Deposit an item into PC storage.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_deposit_an_item() {
@@ -279,7 +273,7 @@ fn can_deposit_an_item() {
     assert_eq!(fixture.api().bag_item_quantity(SPARE_TM), 1);
 
     fixture.step_until_exhausted();
-    // The step pops the moment the driver takes over, so wait on the effect, not the queue.
+    // The step pops when the driver takes over, so wait on the effect.
     run_until_bag(&mut fixture, before - 1);
 
     let api = fixture.api();
@@ -288,7 +282,7 @@ fn can_deposit_an_item() {
     println!("bag {before} → {}, PC storage now holds {SPARE_TM:?}", bag_count(&mut fixture));
 }
 
-/// Task 0.6 — withdraw it again.
+/// An item deposited and withdrawn again.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn item_round_trips_through_pc_storage() {
@@ -316,13 +310,13 @@ fn item_round_trips_through_pc_storage() {
     println!("withdrew: bag back to {before}");
 }
 
-/// The six TMs the save arrives carrying that no workstream in the plan has any use for.
+/// The six spare TMs the save arrives carrying.
 const SPARE_TMS: [ItemId; 6] = [
     ItemId::Tm06Toxic, ItemId::Tm11Bubblebeam, ItemId::Tm21MegaDrain,
     ItemId::Tm24Thunderbolt, ItemId::Tm27Fissure, ItemId::Tm34Bide,
 ];
 
-/// Task 0.9 — ship the entry fixture every workstream A–H starts from.
+/// Cuts `postgame-phase0.bin`: six spare TMs banked, the key items kept, the party healed.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_ship_the_phase0_entry_fixture() {
@@ -342,8 +336,7 @@ fn can_ship_the_phase0_entry_fixture() {
     fixture.step_until_exhausted();
     run_until_bag(&mut fixture, before - SPARE_TMS.len() as u8);
 
-    // Then wait for the heal to land — `Interact` pops when it issues the walk, not when the
-    // nurse is done, so gate on the party actually being at full health.
+    // `Interact` pops when it issues the walk, so gate on the party being at full health.
     let state = fixture.run_until(|s| {
         s.mode == GameMode::Overworld && s.pokemon.iter().all(|p| p.current_hp == p.stats.hp)
     });
@@ -353,7 +346,6 @@ fn can_ship_the_phase0_entry_fixture() {
         assert_eq!(api.bag_item_quantity(tm), 0, "{tm:?} should be banked");
         assert_eq!(api.pc_box_item_quantity(tm), 1, "{tm:?} should be in PC storage");
     }
-    // Everything a workstream might want must have survived.
     for keep in [ItemId::Hm01Cut, ItemId::Hm03Surf, ItemId::Hm04Strength, ItemId::PokeFlute,
                  ItemId::SilphScope, ItemId::CardKey, ItemId::SecretKey, ItemId::HelixFossil,
                  ItemId::TownMap, ItemId::SSTicket, ItemId::LiftKey] {
@@ -369,8 +361,8 @@ fn can_ship_the_phase0_entry_fixture() {
     fixture.save_state_named("src/pokemon/data/postgame-phase0.bin").unwrap();
 }
 
-/// Raw `wNumBagItems` — *not* `GameState::bag`, which drops every id `ItemId` cannot name and so
-/// under-reports occupancy against the 20-slot ceiling this whole phase exists to relieve.
+/// Raw `wNumBagItems`, since `GameState::bag` drops ids `ItemId` cannot name and under-reports
+/// against the 20-slot ceiling.
 fn bag_count(fixture: &mut TestFixture) -> u8 {
     fixture.api().mmu().read_pointer(&pokered_symbols::wNumBagItems)
 }

@@ -1,10 +1,6 @@
-//! ```text
-//! impl PolicyStep {
-//!     pub fn fishing_steps() -> Vec<PolicyStep> { … }
-//! }
-//! ```
+//! The post-game mechanisms, each module adding `PolicyStep` constructors such as `old_rod_steps()`.
 
-/// Phase 0 infrastructure, not workstreams — the debug tier (0.7) and item PC storage (0.5/0.6).
+/// The debug tier, the one place RAM writes are allowed.
 pub mod debug;
 
 pub mod item_storage;

@@ -1,15 +1,6 @@
-//! ```text
-//!   emulator thread                         worker thread (this module)
-//!   ───────────────                         ───────────────────────────
-//!   LlmPolicy::pick_*  ──TurnRequest──────►  build messages, stream a completion
-//!            ▲                                        │
-//!            │                                 read tools?  ──ToolBatch──┐
-//!            │                                        │                  │
-//!   service_tools  ◄─────────────────────────────────────────────────────┘
-//!            │      answers from ONE observed GameState, sends ToolBatchResult
-//!            ▼
-//!        Decision   ◄──TurnOutcome────────  a terminal tool call ends the turn
-//! ```
+//! The LLM turn loop: `LlmPolicy::pick_*` sends a `TurnRequest` to the worker thread, whose read
+//! tools come back as a `ToolBatch` answered by `service_tools` from one observed `GameState`,
+//! until a terminal tool call ends the turn as a `TurnOutcome`.
 
 pub mod accounting;
 pub mod battle_report;
@@ -47,16 +38,13 @@ pub enum LlmError {
 }
 
 impl LlmError {
-    /// Whether another attempt is worth making.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http { status, .. } => *status == 408 || *status == 429 || *status >= 500,
             Self::Transport(_) => true,
-            // Transient by definition — but see `stream_with_retries`, which will not *spend*
-            // attempts on one that carries a reset further away than the backoff could ever
-            // reach.
+            // `stream_with_retries` spends no attempts on a reset beyond the backoff's reach.
             Self::RateLimited { .. } => true,
-            // See the variant's own note: the far end still has this request.
+            // The endpoint still has this request.
             Self::Timeout(_) => false,
             Self::Protocol(_) | Self::Cancelled => false,
         }
@@ -89,22 +77,17 @@ impl std::error::Error for LlmError {}
 mod tests {
     use super::*;
 
-    /// The distinction this whole variant exists for.
     #[test]
     fn a_timeout_is_not_retried_but_a_broken_connection_is() {
         assert!(!LlmError::Timeout("no answer".into()).is_retryable());
         assert!(LlmError::Transport("connection refused".into()).is_retryable());
 
-        // The rest of the table is unchanged: rate limits and server faults are transient, a 400
-        // is the request being wrong and will be wrong again.
         assert!(LlmError::Http { status: 429, message: String::new() }.is_retryable());
         assert!(LlmError::Http { status: 503, message: String::new() }.is_retryable());
         assert!(!LlmError::Http { status: 400, message: String::new() }.is_retryable());
         assert!(!LlmError::Cancelled.is_retryable());
     }
 
-    /// The message reaches the operator through a `Notice` and the transcript, so it has to say
-    /// which of the two happened rather than "could not reach the endpoint" for both.
     #[test]
     fn a_timeout_says_the_endpoint_took_the_request() {
         let said = format!("{}", LlmError::Timeout("waited 180s".into()));

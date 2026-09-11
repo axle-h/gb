@@ -5,8 +5,7 @@ use strum::IntoEnumIterator;
 pub struct InterruptFlags(u8);
 
 /// The serialised shape of [`InterruptFlags`]: the five booleans the `irq` save-state section has
-/// always held, in their original order. Keeping it is what let C7 change the representation
-/// without regenerating a single fixture — the same trick as [`crate::timer::TimerSnapshot`].
+/// always held, in their original order, so the representation can change without touching a fixture.
 #[derive(Debug, Clone, Copy, Decode, Encode)]
 pub struct InterruptFlagsSnapshot {
     joypad: bool,
@@ -146,9 +145,8 @@ mod tests {
         assert_eq!(flags.get(), 0x1F); // All flags set
     }
 
-    /// C7: `highest_priority` replaced a scan in `InterruptType::all()` order, so it has to agree
-    /// with that scan on every one of the 1024 (request, enable) combinations — not just the easy
-    /// ones.
+    /// `highest_priority` agrees with a scan in `InterruptType::all()` order on all 1024 (request,
+    /// enable) combinations.
     #[test]
     fn highest_priority_matches_a_scan_in_priority_order() {
         for request in 0..=0x1Fu8 {
@@ -174,7 +172,7 @@ mod tests {
         assert_eq!(InterruptType::from_bit(0xE0), None, "IE's unwired top three bits are not interrupts");
     }
 
-    /// The save-state shape is the pre-C7 five booleans; anything else would break 91 fixtures.
+    /// The save-state shape is the five booleans; anything else would break every fixture.
     #[test]
     fn a_snapshot_round_trips() {
         for bits in 0..=0x1Fu8 {

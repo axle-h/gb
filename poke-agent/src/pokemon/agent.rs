@@ -31,13 +31,12 @@ fn affordable(api: &PokemonApi<'_>, money: u32, item: BagItem) -> Option<BagItem
     (item.quantity > 0).then_some(item)
 }
 
-// Too long and player veers off course on the overworld, too short and the game doesn't get
-// chance to update values between turns
+// Longer and the player veers off course on the overworld; shorter and the game has no chance to
+// update values between turns.
 pub const AGENT_RESOLUTION: MachineCycles = MachineCycles::from_duration(Duration::from_millis(20));
 
-/// How many manual button presses [`PokemonAgent::queue_manual_input`] will hold. A bound rather
-/// than a tuned number: each press costs [`MANUAL_INPUT_TICKS_PER_PRESS`] agent ticks, so a full
-/// queue is ~1 s of emulated time during which the state machine is not running.
+/// Manual presses [`PokemonAgent::queue_manual_input`] will hold; the state machine does not run
+/// while they drain.
 pub const MANUAL_INPUT_CAPACITY: usize = 16;
 
 /// Agent ticks a manual press is held before being released.
@@ -46,19 +45,15 @@ const MANUAL_INPUT_HOLD_TICKS: u8 = 2;
 /// Total ticks one queued press occupies: the hold, plus one tick released.
 pub const MANUAL_INPUT_TICKS_PER_PRESS: u8 = MANUAL_INPUT_HOLD_TICKS + 1;
 
-/// `wMovementFlags` bit 7 — set for exactly as long as an arrow tile is sliding the player, and
-/// cleared the moment they come to rest (`engine/overworld/movement.asm:62`,
-/// `home/overworld.asm:270`).
+/// `wMovementFlags` bit 7: set for exactly as long as an arrow tile is sliding the player.
 const BIT_SPINNING: u8 = 1 << 7;
 
-/// True while an arrow tile is carrying the player.
 fn player_is_spinning(api: &PokemonApi) -> bool {
     api.mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wMovementFlags)
         & BIT_SPINNING != 0
 }
 
-/// True from the moment the player's last Pokémon faints until the black-out warp has put them
-/// outside a Pokémon Centre.
+/// From the last Pokémon fainting until the black-out warp has landed.
 fn blackout_in_flight(api: &PokemonApi) -> bool {
     api.mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wIsInBattle)
         == crate::pokemon::battle::LOST_BATTLE
@@ -67,16 +62,13 @@ fn blackout_in_flight(api: &PokemonApi) -> bool {
 /// A walk that never arrives is silence, and silence is what the watchdog reads.
 const MAX_MOVEMENT_SILENCE: Duration = Duration::from_secs(60);
 
-/// Consecutive agent ticks on which the chosen row is absent from `actions()` before the walk
-/// gives up on it with [`OverworldActionAbortedReason::NoRoute`].
+/// Consecutive ticks the chosen row may be missing from `actions()` before a `NoRoute` abort.
 const MAX_ROUTE_LOST_TICKS: u16 = 250;
 
-/// The same bound for a route that is missing because somebody is standing on it, which
-/// [`MetaTileMap::row_blocked_by_people`] is asked once the bound above runs out.
+/// The same bound once `MetaTileMap::row_blocked_by_people` says someone is standing on the route.
 const MAX_ROUTE_BLOCKED_TICKS: u16 = 1500;
 
-/// Total ticks of *successful* pacing in tall grass or on cave floor before giving up on the
-/// encounter ever coming.
+/// Ticks of successful pacing in grass or on cave floor before giving up on an encounter.
 const PACING_BUDGET_TICKS: u16 = 3000;
 
 /// [`PACING_BUDGET_TICKS`] in seconds of game time, for the sentence that reports it.
@@ -101,31 +93,27 @@ pub enum OverworldActionAbortedReason {
     PuzzleRanLong { pushes: u8 },
     /// A boulder goal whose floor has no solution left from where the player is standing.
     PuzzleUnsolvable,
-    /// The tall grass or the cave floor was paced to the end of its budget and no wild Pokémon
-    /// turned up.
+    /// The grass or cave floor was paced to the end of its budget and nothing turned up.
     NothingAppeared,
-    /// The fishing row's walk arrived and the cast was refused before the bag was opened — see
-    /// [`crate::pokemon::postgame::fishing::CastRefusal`] for the three ways.
+    /// The fishing row's walk arrived and the cast was refused before the bag was opened.
     CastRefused(crate::pokemon::postgame::fishing::CastRefusal),
-    /// A cast that opened the bag and never came back — `fishing::TICK_BUDGET` of driver ticks
-    /// spent without the rod leaving the water.
+    /// A cast that opened the bag and never saw the rod leave the water.
     CastNeverFinished,
 }
 
 impl Display for OverworldActionAbortedReason {
-    /// Why the walk stopped, in the words a viewer would use.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unknown => write!(f, "it stopped making progress"),
             Self::Script => write!(f, "the game took over"),
             Self::Battle => write!(f, "a battle started"),
-            // Not "something was said".
+            // Not "it was interrupted", which reads as a fault.
             Self::Textbox => write!(f, "the game stopped you to say something"),
             Self::NamingScreen => write!(f, "the naming screen opened"),
             Self::WrongMap(map) => write!(f, "it ended up on {map}"),
             Self::NoAdjacentGrass => write!(f, "there is no grass to step into"),
             Self::NoRoute(tile) => write!(f, "there is no route to {tile}"),
-            // Says what it is, and says the walk is what failed.
+            // A time bound, not `NoRoute`: says the walk is what failed.
             Self::DidNotArrive => write!(
                 f, "the walk was given up after {} seconds of game time without getting there",
                 MAX_MOVEMENT_SILENCE.as_secs()),
@@ -135,10 +123,7 @@ impl Display for OverworldActionAbortedReason {
             Self::PuzzleRanLong { pushes } => write!(
                 f, "the boulder was pushed {pushes} times without reaching its target, so it was \
                     given up; leaving this floor and coming back puts every boulder where it started"),
-            // Says what happened rather than that something went wrong, for the same reason
-            // `Textbox` does: walking in grass and meeting nothing is the game's own 8-in-256
-            // roll coming up empty, and a model told its action failed goes looking for a broken
-            // action instead of walking somewhere else.
+            // Says what happened, or a model goes hunting for a broken action.
             Self::NothingAppeared => write!(
                 f, "nothing appeared after {PACING_BUDGET_SECS} seconds of game time walking about in it"),
             Self::CastRefused(why) => write!(f, "the cast was refused because {why}"),
@@ -165,30 +150,24 @@ impl OverworldActionAbortedReason {
 pub enum AgentEvent {
     /// A walk was issued.
     StartedOverworldAction { destination: MetaTile, id: String },
-    /// `at` is where the walk actually stopped, in the *expanded* coordinates everything else the
-    /// model reads uses — the ids in the action menu, the ruler on the map picture, the
-    /// `Location:` line of every turn.
+    /// `at` is where the walk stopped, in the coordinates the action ids use.
     OverworldActionAborted {
         destination: MetaTile,
         reason: OverworldActionAbortedReason,
         at: Option<Point8>,
     },
     OverworldActionCompleted { destination: MetaTile },
-    /// The agent walked to something interactable — a person, a PC — pressed A, and the game
-    /// answered.
+    /// The agent walked to something interactable, pressed A, and the game answered.
     OverworldInteractionCompleted { target: MetaTile },
-    /// An item lying on the ground was walked up to and is still lying there, so nothing was
-    /// picked up.
+    /// An item on the ground was walked up to and is still lying there.
     OverworldPickupFailed { target: MetaTile },
     BattleStarted,
-    /// `actor` and `opponent` are carried rather than looked up later because nothing downstream
-    /// can look them up: the host formats events off the emulator thread and the battle has moved
-    /// on by then.
+    /// `actor` and `opponent` are carried because the host formats events off the emulator thread,
+    /// after the battle has moved on.
     BattleActionStarted { actor: String, opponent: String, action: BattleAction },
     BattleEnded,
     TextBox { message: String },
-    /// The agent went `stuck_for` of emulated time without reaching a decision point of any kind,
-    /// and the watchdog woke the policy up.
+    /// No decision point for `stuck_for` of emulated time, so the watchdog woke the policy.
     WatchdogFired { agent_state: String, stuck_for: Duration },
     /// The game was beaten.
     HallOfFame {
@@ -208,7 +187,6 @@ impl AgentEvent {
         Self::TextBox { message: reader.to_string() }
     }
 
-    /// Whether this is worth saying at all.
     fn is_worth_reporting(&self) -> bool {
         match self {
             Self::TextBox { message } => !message.trim().is_empty(),
@@ -218,8 +196,7 @@ impl AgentEvent {
 }
 
 impl Display for AgentEvent {
-    /// What the web UI puts in its log, via `format!("{event}")` in `host.rs` — so this is prose,
-    /// not a debug dump.
+    /// A sentence for the page's log and, via `describe_event`, the model.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AgentEvent::StartedOverworldAction { destination, .. } =>
@@ -228,14 +205,12 @@ impl Display for AgentEvent {
                 Some(at) => write!(f, "✗ gave up on {destination} at ({}, {}): {reason}", at.x, at.y),
                 None => write!(f, "✗ gave up on {destination}: {reason}"),
             },
-            // Two of these are not arrivals, and "✓ reached the tree at (5, 8), to cut it down"
-            // is the sentence that says so.
+            // A cut is not an arrival.
             AgentEvent::OverworldActionCompleted { destination: MetaTile::Cut { at } } =>
                 write!(f, "✓ cut down the tree at ({}, {})", at.x, at.y),
             AgentEvent::OverworldActionCompleted { destination } =>
                 write!(f, "✓ reached {destination}"),
-            // Not rendered by the page — `useEventStream`'s `fold` drops the kind, because the
-            // dialogue that follows says everything this line does.
+            // The page drops this kind: the dialogue that follows says the same.
             AgentEvent::OverworldInteractionCompleted { target } => match target {
                 MetaTile::Sprite(name) => write!(f, "✓ talked to {name}"),
                 other => write!(f, "✓ used {other}"),
@@ -251,11 +226,8 @@ impl Display for AgentEvent {
             AgentEvent::BattleStarted =>
                 write!(f, "battle started"),
             AgentEvent::BattleActionStarted { actor, opponent, action } => match action {
-                // The tense is deliberate: this is the action being *started*, not its outcome,
-                // so "used" is as far as it goes — whether the move hit is the next line's
-                // business.
+                // The action being started, not its outcome.
                 BattleAction::Fight { battle_move, .. } => write!(f, "{actor} used {} on {opponent}", battle_move.name),
-                // A ball is thrown at the *enemy*.
                 BattleAction::UseItem { item, .. } if thrown_at_the_enemy(item.id) =>
                     write!(f, "threw a {} at {opponent}", item.id),
                 BattleAction::UseItem { item, .. } => write!(f, "used {} on {actor}", item.id),
@@ -272,9 +244,6 @@ impl Display for AgentEvent {
             AgentEvent::WatchdogFired { agent_state, stuck_for } =>
                 write!(f, "⚠️ stuck in `{agent_state}` for {}s of game time without asking for a \
                            decision; asking for a nudge", stuck_for.as_secs()),
-            // The one line in the log that is not narration of a step but the end of the story,
-            // so it says the three things someone reading it later will want: that it happened,
-            // how long it took, and who did it.
             AgentEvent::HallOfFame { playtime, badges, party, .. } =>
                 write!(f, "🏆 entered the HALL OF FAME with {} badges after {playtime} of play, with {}",
                        badges.count_ones(), party.join(", ")),
@@ -296,14 +265,12 @@ fn active_pokemon_name(state: &GameState) -> String {
 fn opponent_pokemon_name(state: &GameState) -> String {
     match state.battle.as_ref() {
         Some(battle) => format!("{}", battle.enemy.species),
-        // Not reachable from the one caller — the battle menu is up — but a name is going into a
-        // sentence, and "used Growl on " is worse than a vague noun.
+        // Unreachable from the one caller, but the name goes into a sentence.
         None => "the foe".to_string(),
     }
 }
 
-/// Whether using this item in battle aims it at the *enemy* rather than at the party member whose
-/// turn it is.
+/// Whether this battle item is aimed at the enemy rather than the active party member.
 fn thrown_at_the_enemy(item: crate::pokemon::item::ItemId) -> bool {
     use crate::pokemon::item::ItemId;
     matches!(item, ItemId::PokeBall | ItemId::GreatBall | ItemId::UltraBall | ItemId::MasterBall | ItemId::SafariBall)
@@ -315,17 +282,14 @@ const CONFIRMING_TICKS: u16 = 15;
 /// Ticks of B-mashing [`BattleState::WaitingForMenu`] does after the game refuses a move.
 const BACKING_OUT_TICKS: u16 = 100;
 
-/// How long the agent may reach no decision point at all before [`AgentState::ReadingTextBox`]
-/// stops confirming what is on screen and starts trying to leave it.
+/// Silence after which [`AgentState::ReadingTextBox`] tries to leave rather than confirm.
 const TEXT_BOX_ESCAPE_SILENCE: Duration = Duration::from_secs(30);
 
-/// Agent ticks (20 ms each) after a text box opens in which it may still be recognised as a menu
-/// the agent inherited rather than a conversation.
+/// Ticks after a text box opens in which it may still be a menu the agent inherited, which is
+/// closed rather than confirmed.
 const MENU_HANDOVER_TICKS: u16 = 50;
 
-/// How long a driver that runs its own menus ([`drives_its_own_menus`]) may go without the agent
-/// reaching a decision point before it is abandoned and the policy asked again. See the at the
-/// call site for why this is one rule rather than nineteen tick budgets.
+/// Silence after which a driver of its own menus ([`drives_its_own_menus`]) is abandoned.
 pub(crate) const DRIVER_ESCAPE_SILENCE: Duration = Duration::from_secs(60);
 
 /// Consecutive overworld ticks a finished Surf mount waits for before handing the walk back.
@@ -343,28 +307,24 @@ pub(crate) struct TurnBackWatch {
     ticks: u16,
 }
 
-/// Overworld ticks between a pickup's text box closing and asking the map whether the item is
-/// still there.
+/// Overworld ticks after a pickup's text box closes before asking whether the item is still there.
 const PICKUP_SETTLE_TICKS: u16 = 10;
 
-/// How long [`PokemonAgent::blackout_ticks`] will hold an overworld decision back while
-/// [`blackout_in_flight`] says the black-out warp has not landed — 1500 ticks, 30 s of game time.
+/// Ceiling on [`PokemonAgent::blackout_ticks`].
 const MAX_BLACKOUT_WAIT_TICKS: u16 = 1500;
 
-/// What [`BattleState::Navigating`] lined up, carried into the confirm so the press that follows
-/// is issued once and then checked against the game's own record of what it selected.
+/// What [`BattleState::Navigating`] lined up, so the confirming press is issued once and then
+/// checked against what the game selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Confirm {
-    /// The action being confirmed, so a cursor that turns out not to be where `Navigating`
-    /// believed can be handed straight back to it rather than wedging.
+    /// Handed back to `Navigating` if the cursor is not where it believed.
     action: BattleAction,
     /// The move slot the policy chose.
     slot: u8,
     /// Whether the single confirming press has been issued.
     pressed: bool,
     waited: u16,
-    /// `Navigating`'s elapsed tick budget, carried across so a confirm that hands back cannot
-    /// reset it.
+    /// `Navigating`'s elapsed budget, carried so a hand-back cannot reset it.
     navigating_ticks: u16,
     /// How many presses have been issued.
     attempts: u8,
@@ -373,8 +333,7 @@ pub(crate) struct Confirm {
 /// How long the confirm waits for the game to act on its one press before trying again.
 const CONFIRM_ACK_TICKS: u16 = 3;
 
-/// How many times the confirming press is repeated before giving up and backing out to the main
-/// menu.
+/// Confirming presses before backing out to the main menu.
 const CONFIRM_ATTEMPTS: u8 = 12;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -440,8 +399,7 @@ impl BattleState {
         }
     }
 
-    /// [`Self::backing_out`], carrying what a sub-state had already read — the refusal net's
-    /// exit.
+    /// [`Self::backing_out`], carrying what a sub-state had already read.
     fn backing_out_carrying(reader: PokemonTextReader) -> Self {
         Self::WaitingForMenu {
             reader,
@@ -455,17 +413,14 @@ impl BattleState {
     /// Whatever a sub-state has read so far, taken out of it.
     fn take_reader(&mut self) -> PokemonTextReader {
         match self {
-            // `message_box_only` left behind rather than a `Default`: a battle screen carries two
-            // HUDs, and a full-screen reader splices them into the front of every message — see
-            // the in `assert_text_box_state`.
+            // A full-screen reader splices a battle's two HUDs into every message.
             Self::UsingItem { reader, .. } | Self::WaitingForMenu { reader, .. } =>
                 std::mem::replace(reader, PokemonTextReader::message_box_only()),
             _ => PokemonTextReader::message_box_only(),
         }
     }
 
-    /// [`Self::default`], but told that a sub-menu was *just* opened on purpose and is waiting to
-    /// be confirmed.
+    /// [`Self::default`], told that a sub-menu was just opened on purpose and awaits confirming.
     fn confirming(action: BattleAction, navigating_ticks: u16) -> Self {
         Self::WaitingForMenu {
             reader: PokemonTextReader::message_box_only(),
@@ -491,19 +446,16 @@ const BATTLE_REFUSALS: &[&str] = &[
     "no will to fight",   // a fainted Pokémon chosen from the party menu
 ];
 
-/// Whether the box at the bottom of a battle screen is the game talking, rather than a menu the
-/// agent is driving.
+/// Whether the battle screen's box is the game talking rather than a menu the agent drives.
 fn reading_dialogue(menu_state: &crate::pokemon::menu::MenuState, confirming: u16) -> bool {
     confirming == 0 && menu_state.text_box_id == crate::pokemon::menu::TextBoxId::MessageBox
 }
 
-/// Whether the screen is showing one of [`BATTLE_REFUSALS`].
 fn shows_battle_refusal(screen: &str) -> bool {
     BATTLE_REFUSALS.iter().any(|r| screen.contains(r))
 }
 
-/// States that press their own buttons through their own menus, and so must not have the generic
-/// text reader pressing A underneath them.
+/// States that drive their own menus, under which the generic text reader must not press A.
 fn drives_its_own_menus(state: &AgentState) -> bool {
     matches!(state,
         AgentState::PokemartShopping(_) | AgentState::TeachingMove { .. } | AgentState::CuttingTree { .. }
@@ -548,31 +500,24 @@ pub(crate) enum AgentState {
     /// The Pokémon nickname entry screen is active.
     NamingPokemon { species: PokemonSpecies, decided: bool, ticks: u16 },
 
-    /// Player alternates between two adjacent tiles until a wild battle triggers — grass above
-    /// ground, plain cave floor underground (see `adjacent_pacing_pair`).
+    /// Stepping between two adjacent tiles until a wild battle starts (see `adjacent_pacing_pair`).
     PacingForEncounters { destination: MetaTile, map: Map, tile_a: Point8, tile_b: Point8, heading_to_b: bool, stalled: u16, paced: u16 },
 
     Battle(BattleState),
 
-    /// Navigating the Pokémart buy flow.
     PokemartShopping(PokemartState),
 
-    /// Teaching an HM/TM (a legitimately-obtained bag item) to a party member, via the real
-    /// menus: START→ITEM→(bag, navigate to the HM)→USE→(party, choose the mon).
+    /// Teaching an HM/TM to a party member: START→ITEM→bag→USE→party.
     TeachingMove { item: crate::pokemon::item::ItemId, target_slot: u8, press: bool, entered_menu: bool, settle: u8, evolve_from: Option<crate::pokemon::species::PokemonSpecies> },
 
-    /// Using the Cut field move on the tree the player is facing: driving START→POKéMON→mon→CUT
-    /// (the game's `UsedCut` then removes the tree).
+    /// Cut on the tree the player is facing: START→POKéMON→mon→CUT.
     CuttingTree { press: bool, entered_menu: bool, tree_pos: Point8, slot: u8, move_index: u8, from_row: bool },
 
-    /// Mounting Surf to cross water: the route is about to step onto a `Water` tile while the
-    /// player is on foot, so drive START→POKéMON→(surf mon at `slot`)→SURF (the game then mounts
-    /// the player and auto-steps onto `water_pos`).
+    /// Mounting Surf before the route steps onto `water_pos`: START→POKéMON→mon→SURF.
     Surfing { press: bool, entered_menu: bool, water_pos: Point8, slot: u8, move_index: u8,
               resume: Option<(MetaTile, Map)>, settle: u8 },
 
-    /// Using a party field move that has no target tile: drive START→POKéMON→(the mon at
-    /// `slot`)→the field-move entry at `move_index`.
+    /// A party field move with no target tile: START→POKéMON→mon at `slot`→entry at `move_index`.
     UsingFieldMove { press: bool, entered_menu: bool, slot: u8, move_index: u8, from_map: Map,
                      resume: Option<(Point8, JoypadButton)>, settle: u8 },
 
@@ -580,44 +525,32 @@ pub(crate) enum AgentState {
     TossingItem { item: crate::pokemon::item::ItemId, press: bool, entered_menu: bool },
     /// Depositing an item into, or withdrawing it from, PC item storage.
     UsingItemPc(crate::pokemon::postgame::item_storage::ItemPcState),
-    /// Workstream A — driving Bill's PC box menus (deposit / withdraw / release / change box).
+    /// Bill's PC box menus: deposit, withdraw, release, change box.
     UsingPcBox(crate::pokemon::postgame::pc_box::PcBoxState),
 
     Flying(crate::pokemon::postgame::fly_bike::FlyState),
-    /// Workstream C — one rod cast: the walk to the shore, the bag menu chain, and the wait on
-    /// "not even a nibble".
+    /// One rod cast: the walk to the shore, the bag menus, and the wait on "not even a nibble".
     Fishing(crate::pokemon::postgame::fishing::FishState),
-    /// Workstream F — selling a bag item to a mart clerk.
+    /// Selling a bag item to a mart clerk.
     SellingToMart(crate::pokemon::postgame::game_corner::SellState),
-    /// Workstream G — a one-NPC script that opens the party menu on a stale cursor (the Day Care,
-    /// the Name Rater): the walk to the NPC and the menu.
+    /// A one-NPC script that opens the party menu on a stale cursor (the Day Care, the Name Rater).
     UsingPartyScript(crate::pokemon::postgame::gifts::PartyScriptState),
-    /// Workstream F — buying a Game Corner prize: the walk to a vendor bg-event and the bespoke
-    /// prize menu.
+    /// Buying a Game Corner prize from a vendor's bespoke menu.
     RedeemingPrize(crate::pokemon::postgame::game_corner::PrizeState),
-    /// Workstream I — using a bag item from the overworld: the START → ITEM → bag → USE chain
-    /// plus whichever menus that item opens afterwards (a party list, a move list, or neither).
+    /// Using a bag item from the overworld: START→ITEM→bag→USE, then whatever menu the item opens.
     UsingBagItem(crate::pokemon::postgame::items::BagItemState),
-    // (H reserved a `SearchingHiddenItem` state here.
 
-    /// Checking a Vermilion Gym trash can for a hidden switch: route to a tile adjacent to
-    /// `target` and face it (recomputed each tick via `MetaTileMap::route_to_face`), then press A
-    /// to trigger `GymTrashScript`.
+    /// Checking a Vermilion Gym trash can: face `target` and press A.
     CheckingTrashCan { target: Point8, checked: bool, press: bool, facing: Option<crate::pokemon::map_metadata::PlayerFacingDirection> },
 
-    /// Using an elevator floor panel: face the panel + A to open the floor list-menu, navigate
-    /// the cursor (`wCurrentMenuItem`) to `floor` + A to pick it, then ride the
-    /// (runtime-redirected) elevator warp out.
+    /// An elevator panel: face it, pick `floor` from its list, then ride the redirected warp out.
     UsingElevator { panel: Point8, floor: u8, selected: bool, press: bool },
 
-    /// Using a bag item on the field: route to face the sprite at `target`, then drive
-    /// START→ITEM→(bag, navigate to the item)→USE.
+    /// Using a bag item on the sprite at `target`: face it, then START→ITEM→bag→USE.
     UsingFieldItem { item: crate::pokemon::item::ItemId, target: Point8, press: bool, entered_menu: bool, backing_out: u16 },
 
-    /// Executing ONE Strength boulder push (the primitive behind `FieldMove::PushBoulder`): route
-    /// the player to the tile behind the boulder at `boulder` (via `route_to`), face it, and hold
-    /// `dir` — the game's double-press logic advances the boulder one tile (the dust animation
-    /// locks input, so it never over-pushes).
+    /// One Strength shove: stand behind `boulder`, face it and hold `dir`. The dust animation locks
+    /// input, so it never over-pushes.
     PushingBoulder { boulder: Point8, dir: JoypadButton, armed: bool },
     /// Carrying out a whole Strength puzzle: push boulders until one sits on `target`.
     SolvingBoulderPuzzle { boulder: Point8, target: Point8, hole: bool, pushes: u8, settle: u16 },
@@ -642,8 +575,8 @@ impl Display for PokemartState {
 }
 
 impl AgentState {
-    /// The [`MetaTile`] of the overworld action still open behind this state, if it is one of the
-    /// states that *is* one.
+    /// The row still open behind this state. The one list of states carrying a row: every exit from
+    /// any of them must close it.
     fn open_overworld_action(&self) -> Option<MetaTile> {
         match self {
             AgentState::OverworldMovement { destination, .. }
@@ -694,9 +627,7 @@ impl Display for AgentState {
     }
 }
 
-/// The first party slot holding `species`, read from `wPartySpecies` — the `$ff`-terminated list
-/// at the head of the party struct, so this costs no `GameState` build and works with a menu on
-/// screen.
+/// The first party slot holding `species`, read from `wPartySpecies` so it works in a menu.
 fn party_slot_of(api: &PokemonApi<'_>, species: PokemonSpecies) -> Option<u8> {
     use gb::ram::ROM;
     let count = api.mmu().read_pointer(&pokered_symbols::wPartyCount);
@@ -707,8 +638,7 @@ fn party_slot_of(api: &PokemonApi<'_>, species: PokemonSpecies) -> Option<u8> {
 /// A party menu a conversation opened, and what the agent answers it with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PartyMenuAnswer {
-    /// The species an in-game trade asked for, or `None` for a conversation the agent cannot
-    /// answer.
+    /// The species an in-game trade asked for; `None` when the agent has no answer.
     give: Option<PokemonSpecies>,
     /// Press/release alternation, so every cursor step is a fresh rising edge.
     press: bool,
@@ -726,81 +656,64 @@ pub struct PokemonAgent {
     policy: Box<dyn Policy>,
     /// Map graph built incrementally as the player traverses.
     world_graph: WorldGraph,
-    /// The Strength goal being carried out, if any: `(target, is_a_hole)`.
+    /// The Strength goal being carried out: `(map, boulder, target, is_a_hole)`.
     boulder_goal: Option<(Map, Point8, Point8, bool)>,
     /// Shoves the current goal has spent.
     boulder_goal_pushes: u8,
-    /// Shortest remaining plan this goal has ever seen, and shoves made since it last got
-    /// shorter.
+    /// Shortest remaining plan this goal has seen, and shoves made since it last got shorter.
     boulder_goal_best: usize,
     boulder_goal_stale: u8,
-    /// Shoves this goal has made that the game never answered at all — the 60 s
-    /// [`DRIVER_ESCAPE_SILENCE`] hatch firing while `AgentState::PushingBoulder` held the walk.
+    /// Shoves the game never answered ([`DRIVER_ESCAPE_SILENCE`] under `PushingBoulder`).
     boulder_goal_silences: u8,
     /// Consecutive `OverworldMovement` ticks on which the chosen row was absent from `actions()`.
     route_lost_ticks: u16,
-    /// [`MetaTileMap::row_blocked_by_people`]'s answer for the row this walk is following, asked
-    /// once on the tick [`MAX_ROUTE_LOST_TICKS`] runs out and remembered until the row comes
-    /// back.
+    /// `MetaTileMap::row_blocked_by_people` for this walk's row, asked once when
+    /// [`MAX_ROUTE_LOST_TICKS`] runs out and remembered until the row comes back.
     route_lost_to_people: bool,
-    /// The map the agent was last on, to detect map changes (warp/connection landings).
+    /// The map the agent was last on, to detect warp and connection landings.
     last_map: Option<Map>,
     /// Trees the agent has cut down, by `(map, expanded tile position)`.
     cut_tiles: std::collections::HashSet<(Map, Point8)>,
-    /// Silph Co door-graphic *walls* ($18/$24 that won't open), by `(map, tile position)`.
+    /// Silph Co door-graphic walls ($18/$24 that won't open), by `(map, tile position)`.
     blocked_tiles: std::collections::HashSet<(Map, Point8)>,
-    /// Consecutive A-presses spent trying to open the card-key door currently in front of the
-    /// player (reset when the player no longer faces a door).
+    /// Consecutive A presses on the card-key door in front of the player.
     door_open_attempts: u32,
-    /// Squares this visit to this map has been turned away from — the third member of the
-    /// `blocked_tiles` family, learned rather than known.
+    /// Squares this visit to this map has been turned away from, learned rather than known.
     turned_back_tiles: std::collections::HashSet<(Map, Point8)>,
-    /// A walk stopped by a text box, waiting to see whether the game puts the player back where
-    /// they came from.
+    /// A walk stopped by a text box, waiting to see whether the game puts the player back.
     turn_back_watch: Option<TurnBackWatch>,
-    /// While a walk is in flight, the last two raw squares the player has stood on, as
-    /// `(previous, current)`.
+    /// The last two raw squares of the walk in flight, as `(previous, current)`.
     walk_squares: Option<(Point8, Point8)>,
-    /// Raw button presses queued by `queue_manual_input`, delivered ahead of the state machine at
-    /// [`MANUAL_INPUT_TICKS_PER_PRESS`] ticks each. Empty in every ordinary run — nothing in the
-    /// agent or in any scripted policy ever enqueues.
+    /// Raw presses from `queue_manual_input`, delivered ahead of the state machine.
     manual_input: VecDeque<JoypadButton>,
     /// Ticks left of the press currently being delivered — see [`MANUAL_INPUT_HOLD_TICKS`].
     manual_input_held: u8,
-    /// Ticks spent in the current state, reset by [`Self::set_state`] — so a state machine that
-    /// is *making progress* (any transition at all, including between battle sub-states) keeps it
-    /// at zero, and only genuinely sitting still accumulates.
+    /// Set once [`AgentState::ReadingTextBox`] stops confirming and starts leaving; B instead of A
+    /// until the next decision point.
     escaping_menus: bool,
 
-    /// Ticks remaining in which a newly-opened text box may still turn out to be a menu the agent
-    /// inherited rather than a conversation it should confirm.
+    /// Ticks in which a newly opened text box may still be a menu the agent inherited.
     menu_handover_ticks: u16,
 
     cycles_since_poll: MachineCycles,
     /// [`Policy::stuck_timeout`], read once when the agent was built.
     stuck_after: Option<MachineCycles>,
-    /// `cycles_since_poll` as of the last [`AgentEvent::WatchdogFired`], so a jam is reported
-    /// when it starts and once per timeout after that rather than fifty times a second.
+    /// `cycles_since_poll` at the last [`AgentEvent::WatchdogFired`], to report once per timeout.
     stuck_reported_at: MachineCycles,
     /// Emulated time since the game last answered a driver, in cycles.
     cycles_since_driver_answer: MachineCycles,
 
     forget_choice: Option<Option<usize>>,
 
-    /// An item ball the agent has just walked up to and pressed A on, waiting for the overworld
-    /// to come back so the map can be asked whether it is still there.
+    /// An item ball just pressed A on, waiting for the overworld to ask whether it is still there.
     pending_pickup: Option<(MetaTile, u16)>,
     /// The party menu the conversation in progress opened, if one has.
     party_menu: Option<PartyMenuAnswer>,
 
-    /// Overworld ticks spent so far waiting out a black-out warp — see [`blackout_in_flight`] for
-    /// what is being waited for and [`MAX_BLACKOUT_WAIT_TICKS`] for the ceiling.
+    /// Overworld ticks spent waiting out a black-out warp (see [`blackout_in_flight`]).
     blackout_ticks: u16,
 
-    // ── The end of the game
-    // ────────────────────────────────────────────────────────────────────── `wNumHoFTeams` as of
-    // the last tick, and `None` until the first one — see [`Self::check_hall_of_fame`], where the
-    // whole of the edge trigger lives.
+    /// `wNumHoFTeams` as of the last tick; see [`Self::check_hall_of_fame`].
     hall_of_fame_teams: Option<u8>,
     /// How far through the ending the cartridge is, once it has started.
     ending: Option<Ending>,
@@ -809,8 +722,7 @@ pub struct PokemonAgent {
 /// What the cartridge is doing between winning the game and being playable again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ending {
-    /// `wNumHoFTeams` has gone up and `jp Init` has not run yet: the ceremony, the parade, the
-    /// credits and the save.
+    /// `wNumHoFTeams` has gone up and `jp Init` has not run: the ceremony, credits and save.
     BeforeTheReset,
     /// The reset has happened — WRAM is cleared and the title screen is up.
     AfterTheReset,
@@ -822,7 +734,6 @@ impl Default for PokemonAgent {
 
 impl PokemonAgent {
     pub fn new(policy: Box<dyn Policy>) -> Self {
-        // Asked once.
         let stuck_after = policy
             .stuck_timeout()
             .filter(|timeout| !timeout.is_zero())
@@ -888,10 +799,8 @@ impl PokemonAgent {
         self.cycles_since_driver_answer = MachineCycles::ZERO;
         self.stuck_reported_at = MachineCycles::ZERO;
         self.blackout_ticks = 0;
-        // Back to `None`, not to `Some(0)`: the next tick re-seeds from whatever the freshly
-        // loaded cartridge says.
+        // `None`, not `Some(0)`: the next tick re-seeds from the loaded cartridge.
         self.hall_of_fame_teams = None;
-        // And the ending with it.
         self.ending = None;
     }
 
@@ -910,8 +819,7 @@ impl PokemonAgent {
         self.set_state(AgentState::Idle);
     }
 
-    /// Manual button presses not yet fully delivered, including the one currently being held.
-    /// Zero means the state machine is back in charge (see [`Self::queue_manual_input`]).
+    /// Manual presses not yet delivered, including the one held; zero means the state machine runs.
     pub fn manual_input_pending(&self) -> usize {
         self.manual_input.len() + usize::from(self.manual_input_held > 0)
     }
@@ -933,10 +841,7 @@ impl PokemonAgent {
         self.policy.current_step_is_long_running()
     }
 
-    /// True while a battle is being fought. The policy queue cannot advance during one — a step
-    /// only completes between battles — so a stall detector that counts "queue unchanged" time
-    /// has to discount this, or a long fight (the Route-22 rival's six mons, an Elite Four room)
-    /// reads as a deadlock.
+    /// True while a battle is fought, when the policy queue cannot advance.
     pub fn in_battle(&self) -> bool {
         matches!(self.state, AgentState::Battle(_))
     }
@@ -951,36 +856,30 @@ impl PokemonAgent {
         format!("{}", self.state)
     }
 
-    /// The policy poll — every one of the agent's decision points goes through here.
+    /// Every decision point goes through here, and it resets the clock the watchdog reads.
     fn poll_policy(&mut self, game_state: &GameState, api: &mut PokemonApi) {
         self.cycles_since_poll = MachineCycles::ZERO;
-        // A decision point is the strongest possible evidence that a driver is not wedged: there
-        // is no driver.
+        // A decision point means no driver is wedged.
         self.cycles_since_driver_answer = MachineCycles::ZERO;
-        // Reaching a decision point is what "out of the menus" means — see the in
-        // `ReadingTextBox`.
+        // A decision point is what "out of the menus" means.
         self.escaping_menus = false;
         self.stuck_reported_at = MachineCycles::ZERO;
-        // Cleared here rather than where the wait ends, for the same reason `escaping_menus` is:
-        // the counter measures a deferral, and a decision point is what ends one.
+        // A decision point ends the deferral this counts.
         self.blackout_ticks = 0;
         self.policy.service_tools(game_state, api, &self.world_graph);
     }
 
-    /// What the decider calls itself — [`Policy::name`], which the host reports on every
-    /// heartbeat and writes into a finished run's record.
+    /// [`Policy::name`], reported on every heartbeat and in a finished run's record.
     pub fn policy_name(&self) -> &'static str {
         self.policy.name()
     }
 
-    /// What the policy would like the player called on a new game — [`Policy::player_name`].
-    /// `None` keeps whatever the starting state was captured with.
+    /// The policy's name for the player on a new game; `None` keeps the starting state's.
     pub fn policy_player_name(&self) -> Option<String> {
         self.policy.player_name()
     }
 
-    /// Emulated time the agent has gone without reaching a decision point of any kind. Zero on
-    /// any tick that polled the policy.
+    /// Emulated time without a decision point: zero on any tick that polled, whatever the answer.
     pub fn since_last_policy_poll(&self) -> Duration {
         self.cycles_since_poll.to_duration()
     }
@@ -993,9 +892,8 @@ impl PokemonAgent {
         self.boulder_goal_stale = self.boulder_goal_stale.saturating_add(1);
     }
 
-    /// Emulated time since the game last answered a driver — what `DRIVER_ESCAPE_SILENCE` is
-    /// measured against, and not the same clock as [`Self::since_last_policy_poll`]. See
-    /// `Self::cycles_since_driver_answer`.
+    /// Emulated time since the game last answered a driver: `DRIVER_ESCAPE_SILENCE`'s clock, not
+    /// [`Self::since_last_policy_poll`]'s.
     pub fn since_driver_answer(&self) -> Duration {
         self.cycles_since_driver_answer.to_duration()
     }
@@ -1005,8 +903,7 @@ impl PokemonAgent {
         let Some(after) = self.stuck_after.filter(|after| self.cycles_since_poll >= *after) else {
             return false;
         };
-        // The naming screen's applies here too, and more so: a failed read must never turn the
-        // watchdog itself into the thing that breaks the tick.
+        // A failed read must never make the watchdog break the tick.
         let Ok(game_state) = api.game_state() else { return false };
 
         let agent_state = self.state_debug();
@@ -1036,9 +933,7 @@ impl PokemonAgent {
             Some(_) => return,
         }
 
-        // Read *now*, on the emulator thread, and carried on the event: the host formats events
-        // off-thread and `run::hall_of_fame` archives later still, by which time the ceremony has
-        // cleared the party out of WRAM's display buffers.
+        // Read now: by the time the host formats the event, the ceremony has cleared the party.
         let playtime = crate::pokemon::observe::playtime(api);
         let playtime_seconds = crate::pokemon::observe::playtime_seconds(api);
         let badges = api.mmu().read_pointer(&sym::wObtainedBadges);
@@ -1049,7 +944,7 @@ impl PokemonAgent {
             .unwrap_or_default();
         self.event(AgentEvent::HallOfFame { teams, playtime, playtime_seconds, badges, party });
 
-        // And from this frame the world in RAM is one the player has left.
+        // From this frame the world in RAM is one the player has left.
         self.ending = Some(Ending::BeforeTheReset);
         api.release_all_buttons();
         self.backup_state = None;
@@ -1092,8 +987,7 @@ impl PokemonAgent {
     fn flush_text_reader(&mut self) {
         let AgentState::ReadingTextBox { reader } = &mut self.state else { return };
         let message = reader.take();
-        // Empty ones are dropped by `event` — a box is detected before its characters are drawn,
-        // so most of these have nothing in them.
+        // Most are empty, detected before their characters are drawn; `event` drops those.
         self.event(AgentEvent::TextBox { message });
     }
 
@@ -1132,13 +1026,11 @@ impl PokemonAgent {
         }
     }
 
-    /// Read the game state, overriding tiles the agent has cut down to `Empty` (the ROM-decoded
-    /// map still shows them as `CutTree`).
+    /// Press A on a slow cadence through the post-Champion script chain; true if the tick was its.
     fn drive_post_champion_cutscene(&mut self, api: &mut PokemonApi) -> bool {
         use crate::pokemon::symbols::pokered_symbols as sym;
-        // Wait for OAK_ARRIVES rather than RIVAL_DEFEATED: the stage before it is the rival's own
-        // concession text, and the policy needs one ordinary tick there to notice the trainer is
-        // beaten and pop its `BattleTrainer` step.
+        // Not RIVAL_DEFEATED: the policy needs one ordinary tick in the rival's concession text to
+        // pop its `BattleTrainer` step.
         const SCRIPT_OAK_ARRIVES: u8 = 4;
         const CYCLE: u32 = 75;
         const PRESS_AT: u32 = 50;
@@ -1163,6 +1055,7 @@ impl PokemonAgent {
         true
     }
 
+    /// The game state with cut trees cleared and learned walls overlaid.
     pub(crate) fn observe_state(&self, api: &PokemonApi) -> Result<crate::pokemon::GameState, String> {
         let mut state = api.game_state()?;
         for &(map, pos) in &self.cut_tiles {
@@ -1173,9 +1066,7 @@ impl PokemonAgent {
                 }
             }
         }
-        // Overlay discovered runtime door-graphic walls ($18/$24) as obstacles (see
-        // `blocked_tiles`), and the squares this visit has been walked back off (see
-        // `turned_back_tiles`).
+        // Door walls found at run time and squares this visit was turned back off are obstacles.
         for &(map, pos) in self.blocked_tiles.iter().chain(self.turned_back_tiles.iter()) {
             if state.map.map == map {
                 let idx = pos.x as usize + pos.y as usize * state.map.width;
@@ -1187,21 +1078,17 @@ impl PokemonAgent {
         Ok(state)
     }
 
-    /// Number of A-presses to spend trying to open a card-key door before giving up and treating
-    /// the tile as an unopenable wall.
+    /// A presses on a card-key door before treating it as a wall.
     const DOOR_OPEN_ATTEMPTS: u32 = 40;
 
-    /// On Silph Co floors, handle the card-key-door graphic tile ($18/$24) the player is facing —
-    /// a closed door or a decorative wall that the `MetaTileMap` can't see (it's
-    /// `ReplaceTileBlock`'d in at runtime over a floor tile).
+    /// On Silph Co, the card-key-door tile ($18/$24) the player faces: a door or a wall that
+    /// `ReplaceTileBlock` put in at run time, invisible to the `MetaTileMap`.
     fn handle_card_key_door(&mut self, api: &mut PokemonApi) -> bool {
         use crate::pokemon::map_metadata::{map_has_card_key_doors, PlayerFacingDirection};
         let Ok(state) = api.game_state() else { return false; };
         if !map_has_card_key_doors(state.map.map) { self.door_open_attempts = 0; return false; }
         let front = api.mmu().read_pointer(&pokered_symbols::wTileInFrontOfPlayer);
-        // Card-key door tiles are $18/$24, EXCEPT on Silph 11F where the gate blocking the
-        // President's chamber (and the Giovanni trigger tiles inside it) is tile $5e (pokered
-        // `PrintCardKeyText` special-cases SILPH_CO_11F + $5e).
+        // The Silph 11F gate is $5e, which `PrintCardKeyText` special-cases.
         let is_11f_gate = front == 0x5e && state.map.map == Map::SilphCo11F;
         if front != 0x18 && front != 0x24 && !is_11f_gate { self.door_open_attempts = 0; return false; }
         let p = state.map.player_position;
@@ -1218,14 +1105,12 @@ impl PokemonAgent {
         }
         self.door_open_attempts += 1;
         if self.door_open_attempts > Self::DOOR_OPEN_ATTEMPTS {
-            // Won't open — it's a decorative wall.
+            // Won't open: a decorative wall.
             self.blocked_tiles.insert((state.map.map, faced));
             self.door_open_attempts = 0;
             false
         } else {
-            // Pulse A facing the door — the game's `PrintCardKeyText` opens any faced $18/$24
-            // while the Card Key is in the bag (then it becomes floor and normal movement
-            // continues).
+            // `PrintCardKeyText` opens a faced door while the Card Key is in the bag.
             api.toggle_button(JoypadButton::A);
             true
         }
@@ -1233,7 +1118,7 @@ impl PokemonAgent {
 
     pub(crate) fn set_state(&mut self, state: AgentState) {
         if self.state != state {
-            // Whatever the reader had collected, said now — see [`Self::flush_text_reader`].
+            // Whatever the reader had collected, said before its state goes.
             self.flush_text_reader();
             self.state = state;
 
@@ -1287,8 +1172,7 @@ impl PokemonAgent {
         self.observe_state(api).ok().map(|state| state.map.player_position)
     }
 
-    /// `pub(crate)` for the fishing driver, which is the tail of an ordinary overworld action and
-    /// so has to be able to end one — see `postgame::fishing::tick`'s `give_up`.
+    /// `pub(crate)` for the fishing driver, the tail of an overworld action.
     pub(crate) fn abort_overworld(
         &mut self,
         destination: MetaTile,
@@ -1306,7 +1190,7 @@ impl PokemonAgent {
         });
         // A fresh walk has no square behind it yet.
         self.walk_squares = None;
-        // Likewise: the previous walk's missing-row streak says nothing about this one.
+        // The previous walk's missing-row streak says nothing about this one.
         self.route_lost_ticks = 0;
         self.route_lost_to_people = false;
         self.set_state(AgentState::OverworldMovement { destination: action.tile, map: action.map });
@@ -1336,23 +1220,21 @@ impl PokemonAgent {
         self.set_state(AgentState::Idle);
     }
 
-    /// Checks if a battle has just started or finished
+    /// Checks if a battle has just started or finished.
     fn assert_battle_state(&mut self, game_mode: GameMode) {
         if matches!(game_mode, GameMode::WildBattle | GameMode::TrainerBattle) {
             match self.state {
                 AgentState::Battle(_) => {}
-                // The nickname screen after a catch runs while wIsInBattle is still 1, so
-                // game_mode stays WildBattle even though we're already in the naming flow.
+                // The nickname screen after a catch runs while `wIsInBattle` is still 1.
                 AgentState::NamingPokemon { .. } => {}
-                // Every state that carries a walk, in one arm — the walk itself, the pace that is
-                // its tail, and the Surf mount it rides through.
+                // Every state that carries a walk.
                 _ if self.state.open_overworld_action().is_some() => {
                     let d = self.state.open_overworld_action().expect("just checked");
                     self.abort_overworld(d, OverworldActionAbortedReason::Battle, None);
                     self.event(AgentEvent::BattleStarted);
                     self.set_battle_state(BattleState::default());
                 }
-                // And a bite is the success of a cast, for exactly the same reason.
+                // A bite ends a cast the same way.
                 AgentState::Fishing(state) => {
                     self.abort_overworld(
                         MetaTile::Fish { rod: state.rod },
@@ -1361,59 +1243,50 @@ impl PokemonAgent {
                     self.set_battle_state(BattleState::default());
                 }
                 _ => {
-                    // Entering battle from somewhere else, maybe a textbox
                     self.event(AgentEvent::BattleStarted);
                     self.set_battle_state(BattleState::default());
                 }
             }
         } else if let AgentState::Battle(battle_state) = &self.state {
-            // Leaving battle.
             if let BattleState::WaitingForMenu { reader, .. } = battle_state {
-                // Dump remaining text
                 self.event(AgentEvent::text_box_from_reader(reader));
             }
 
             self.event(AgentEvent::BattleEnded);
             self.set_state(AgentState::Idle);
-            // A battle reloads the map on the way out, so any tree cut on this map has regrown —
-            // drop the "already cut" memory (same reason as the map-change clear above) so the
-            // agent re-cuts it instead of routing through a regrown tree and jamming.
+            // A battle reloads the map, so any tree cut on it has regrown.
             self.cut_tiles.clear();
         }
     }
 
-    /// Checks if the naming screen has just opened or closed
+    /// Checks if the naming screen has just opened or closed.
     fn assert_naming_screen(&mut self, game_mode: GameMode, api: &mut PokemonApi) -> Result<(), String> {
         if game_mode == GameMode::NamingScreen {
             if !matches!(self.state, AgentState::NamingPokemon { .. }) {
-                // The naming screen has just opened
                 let species = api.naming_screen_species()?;
                 api.release_all_buttons();
                 self.set_state(AgentState::NamingPokemon { species, decided: false, ticks: 0 });
             }
         } else if matches!(self.state, AgentState::NamingPokemon { decided: false, .. }) {
-            // The naming screen closed before the policy reached a decision (unexpected).
+            // Closed before the policy decided.
             self.set_state(AgentState::Idle);
         }
-        // If decided=true the strict NamingScreen detection no longer fires (buf0 is no longer
-        // 0x50 after the name is written), so game_mode is TextBox.
+        // Once decided, the naming screen reads as `TextBox`, so this does not fire.
 
         Ok(())
     }
 
-    /// If a map script triggers, start a PendingScript countdown before committing to
-    /// RunningScript.
+    /// A script is believed only once it outlasts a rollback deadline; a shorter one restores the
+    /// state it interrupted.
     fn assert_script_state(&mut self, game_mode: GameMode) {
-        // Checking a trash can runs GymTrashScript (Script mode); the CheckingTrashCan state
-        // drives and completes it itself, so don't hand it off to the RunningScript machinery.
+        // These drivers run the script they trigger themselves.
         if matches!(self.state, AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. }
             | AgentState::UsingFieldMove { .. } | AgentState::Surfing { .. }) {
             return;
         }
         if game_mode == GameMode::Script {
             if !matches!(self.state, AgentState::RunningScript { .. }) {
-                // A south-facing ledge jump fires Script for up to ~660 ms; use >800 ms when
-                // navigating so no ledge jump ever commits.
+                // A ledge jump fires Script for up to ~660 ms, so a walk waits the long deadline.
                 let rollback_delay = match self.state {
                     AgentState::OverworldMovement { .. } | AgentState::PacingForEncounters { .. } => DelayContext::long(),
                     _ => DelayContext::short(),
@@ -1423,10 +1296,8 @@ impl PokemonAgent {
             }
         } else if let AgentState::RunningScript { rollback_deadline: rollback_delay } = self.state {
             if rollback_delay.is_exhausted() {
-                // The script committed (ran long enough to be genuine).
                 self.backup_state = None;
-                // A shove of a Strength goal comes back here, and has to be given back to the
-                // solver.
+                // A Strength goal's shove comes back here and goes back to the solver.
                 if let Some((_, boulder, target, hole)) = self.boulder_goal {
                     self.boulder_shove_landed();
                     let pushes = self.boulder_goal_pushes;
@@ -1437,28 +1308,26 @@ impl PokemonAgent {
                     delay: DelayContext::default(),
                 });
             } else {
-                // Script mode ended before the deadline — this was transient (e.g. a ledge jump).
+                // Transient, such as a ledge jump.
                 self.restore_state_from_backup();
             }
         }
     }
 
-    /// Detects the Buy/Sell/Quit menu and transitions into PokemartShopping.
+    /// The Buy/Sell/Quit menu is up: ask what to buy.
     fn ask_mart_policy(&mut self, game_state: &GameState, api: &mut PokemonApi) {
         self.poll_policy(game_state, api);
         let Some(item) = self.policy.pick_mart_purchase(game_state) else { return };
-        // Trim the order to the wallet before ordering — see `affordable`, which is also what the
-        // second and later purchases of a visit go through.
+        // Trimmed to the wallet, as every later purchase of the visit is.
         match item.and_then(|item| affordable(api, game_state.money, item)) {
             Some(item) => self.set_pokemart_state(PokemartState::ChoosingBuyOption(item)),
             None => self.set_pokemart_state(PokemartState::Quitting),
         }
     }
 
-    /// Must run before assert_text_box_state so the mart flow takes priority.
+    /// Runs before `assert_text_box_state` so the mart flow takes priority.
     fn assert_pokemart_state(&mut self, game_mode: GameMode, api: &mut PokemonApi) -> Result<(), String> {
         if game_mode != GameMode::TextBox {
-            // Mart interaction ended (returned to Overworld/Script after purchase).
             if matches!(self.state, AgentState::PokemartShopping(_)) {
                 api.release_all_buttons();
                 self.set_state(AgentState::Idle);
@@ -1466,11 +1335,8 @@ impl PokemonAgent {
             return Ok(());
         }
 
-        // When the Buy/Sell/Quit menu appears for the first time, ask the policy what to buy.
         if let Some(menu) = api.menu_state() {
-            // `SellingToMart` is excluded because it drives the *same* Buy/Sell/Quit menu itself:
-            // `PokemartState` only knows how to buy, so letting it take over would answer a sell
-            // step's menu with BUY.
+            // `SellingToMart` drives this menu itself; `PokemartState` would answer BUY.
             if menu.is_mart_buy_sell_menu() && !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::SellingToMart(_)) {
                 api.release_all_buttons();
                 self.set_state(AgentState::PokemartShopping(PokemartState::AwaitingPolicy));
@@ -1482,8 +1348,7 @@ impl PokemonAgent {
         Ok(())
     }
 
-    /// Whether the text box that has just opened is the answer to the interaction the agent
-    /// walked over to perform, rather than something that interrupted the walk.
+    /// Whether the new text box answers the walk's interaction rather than interrupting it.
     fn interaction_landed(&self, destination: MetaTile, api: &PokemonApi) -> bool {
         if !matches!(destination, MetaTile::Sprite(_) | MetaTile::Pc | MetaTile::Switch { .. }) {
             return false;
@@ -1494,9 +1359,7 @@ impl PokemonAgent {
             MetaTile::Sprite(_) => tile == destination,
             // A PC is not in `meta_tiles` and the tile in front reads as `Obstacle`.
             MetaTile::Pc => crate::pokemon::tile_map::pc_locations_for(state.map.map).contains(&at),
-            // Same argument, same table shape: a bin, a drink machine, the poster and a statue
-            // are all hidden events drawn as the scenery they hide in, so the coordinate is again
-            // the only thing that identifies one.
+            // Hidden events drawn as the scenery they hide in: only the coordinate identifies one.
             MetaTile::Switch { object, ordinal } => crate::pokemon::tile_map::hidden_objects_for(state.map.map)
                 .iter()
                 .enumerate()
@@ -1505,7 +1368,7 @@ impl PokemonAgent {
         }
     }
 
-    /// Is `destination` an item lying on the floor, i.e. a sprite drawn as a Poké Ball?
+    /// Is `destination` a sprite drawn as a Poké Ball?
     fn is_item_ball(&self, destination: MetaTile, api: &PokemonApi) -> bool {
         let MetaTile::Sprite(name) = destination else { return false };
         let Ok(state) = self.observe_state(api) else { return false };
@@ -1526,15 +1389,13 @@ impl PokemonAgent {
         let Ok(state) = self.observe_state(api) else { return };
         self.pending_pickup = None;
         let MetaTile::Sprite(name) = target else { return };
-        // `hidden` is the whole answer, and leaving it out reported every successful pickup on a
-        // missable object as a failure.
+        // A picked-up missable object is still in the list, but hidden.
         if state.map.sprites.iter().any(|sprite| sprite.name == name && !sprite.hidden) {
             self.event(AgentEvent::OverworldPickupFailed { target });
         }
     }
 
-    /// Answer an armed [`TurnBackWatch`]: has the cartridge walked the player back off the square
-    /// the last walk was stopped on?
+    /// Answer an armed [`TurnBackWatch`]: has the cartridge walked the player back off the square?
     fn check_turn_back(&mut self, api: &PokemonApi) {
         let Some(watch) = self.turn_back_watch.as_mut() else { return };
         if watch.ticks == 0 || self.last_map != Some(watch.map) {
@@ -1547,7 +1408,6 @@ impl PokemonAgent {
         let (map, tile) = (watch.map, watch.tile);
         self.turn_back_watch = None;
         if self.turned_back_tiles.insert((map, tile)) {
-            // No em dash: this is one of the strings the agent generates.
             self.event(AgentEvent::TextBox { message: format!(
                 "the game walked you back off {tile}, so it is being treated as a wall until you \
                  leave {map} and come back") });
@@ -1555,26 +1415,22 @@ impl PokemonAgent {
     }
 
     fn assert_text_box_state(&mut self, game_mode: GameMode, api: &PokemonApi) {
-        // WFontLoaded=1 while the naming screen is active too; NamingPokemon{decided:true}
-        // handles its own exit, so don't interfere.
+        // `NamingPokemon { decided: true }` handles its own exit.
         if matches!(self.state, AgentState::NamingPokemon { decided: true, .. }) {
             return;
         }
         if game_mode == GameMode::TextBox {
             if !matches!(self.state, AgentState::ReadingTextBox { .. }) {
-                // Text box opened
                 if let AgentState::PacingForEncounters { destination, .. } = self.state {
                     let at = self.player_at(api);
                     self.abort_overworld(destination, OverworldActionAbortedReason::Textbox, at);
                 } else if let AgentState::OverworldMovement { destination, .. } = self.state {
-                    // Talking to someone *is* this action succeeding — see
-                    // `AgentEvent::OverworldInteractionCompleted`.
+                    // Talking to someone is this action succeeding.
                     if self.interaction_landed(destination, api) {
-                        // Armed here rather than answered here.
                         if self.is_item_ball(destination, api) {
                             self.pending_pickup = Some((destination, PICKUP_SETTLE_TICKS));
                         }
-                        // Armed on *who*, because nothing else says a trade is happening.
+                        // Armed on who, because nothing else says a trade is happening.
                         if let MetaTile::Sprite(who) = destination
                             && let Some(map) = self.last_map
                             && let Some(trade) = crate::pokemon::postgame::trades::trade_at(map, who)
@@ -1586,13 +1442,10 @@ impl PokemonAgent {
                         self.event(AgentEvent::OverworldInteractionCompleted { target: destination });
                     } else {
                         let at = self.player_at(api);
-                        // This is where "the game stopped you to say something" might mean "and
-                        // you may not stand there".
+                        // Being stopped may mean "you may not stand there".
                         if let (Some(at), Some((came_from_raw, current_raw)), Some(map))
                             = (at, self.walk_squares, self.last_map)
-                            // The walk has to have actually stepped somewhere, or "back where you
-                            // came from" is the square you are already on and the watch answers
-                            // itself on its first tick.
+                            // Without a step, "back where you came from" is the current square.
                             && came_from_raw != current_raw
                         {
                             self.turn_back_watch = Some(TurnBackWatch {
@@ -1601,29 +1454,25 @@ impl PokemonAgent {
                         self.abort_overworld(destination, OverworldActionAbortedReason::Textbox, at);
                     }
                 }
-                // Which reader is a fact about the *game*, not about the agent's own state, and
-                // reading it off the state was the bug.
+                // Which reader is a fact about the game, not the agent's state.
                 let in_battle = crate::pokemon::battle::BattleStateReader::read_battle_state(api.mmu())
                     .is_some();
                 let reader = match in_battle {
                     true => PokemonTextReader::message_box_only(),
                     false => PokemonTextReader::default(),
                 };
-                // A menu the agent did not open is closed, not confirmed — it must never begin
-                // reading one as though it were a conversation.
+                // A menu the agent did not open is closed, not read as a conversation.
                 self.menu_handover_ticks = MENU_HANDOVER_TICKS;
                 self.set_state(AgentState::ReadingTextBox { reader });
             }
         } else if matches!(self.state, AgentState::ReadingTextBox { .. }) {
-            // Text box closed.
             self.party_menu = None;
             self.set_state(AgentState::Idle);
         }
     }
 
-    /// Advance `gb` by at least `min_cycles`, ticking the state machine every
-    /// [`AGENT_RESOLUTION`] rather than once for the lot. Returns what was actually emulated and
-    /// the last tick's result.
+    /// Advance `gb` by at least `min_cycles`, ticking the state machine every [`AGENT_RESOLUTION`].
+    /// Returns what was emulated and the last tick's result.
     pub fn run(&mut self, gb: &mut gb::game_boy::GameBoy,
                cache: &mut crate::pokemon::map_metadata::MapMetadataCache,
                min_cycles: MachineCycles) -> (MachineCycles, Result<(), String>) {
@@ -1631,20 +1480,17 @@ impl PokemonAgent {
         let mut owed = min_cycles;
         let mut result = Ok(());
         while owed > MachineCycles::ZERO {
-            // `gb.run` finishes the instruction it is in, so this returns *at least* the slice
-            // and `owed` can only reach zero by having emulated the whole of `min_cycles`.
+            // `gb.run` finishes its instruction, so `owed` hits zero only once all has run.
             let slice = gb.run(owed.min(AGENT_RESOLUTION));
             ran += slice;
             owed = owed.saturating_sub(slice);
             let mut api = PokemonApi::with_cache(gb, cache);
-            // The *last* tick's result, which is what a single-tick call has always reported.
             result = self.update(&mut api, slice);
         }
         (ran, result)
     }
 
     pub fn update(&mut self, api: &mut PokemonApi, delta_cycles: MachineCycles) -> Result<(), String> {
-        // ── Throttled decision-making ─────────────────────────────────────────────
         self.cycles += delta_cycles;
         if self.cycles < AGENT_RESOLUTION { return Ok(()); }
 
@@ -1656,8 +1502,7 @@ impl PokemonAgent {
         self.cycles_since_poll += delta_cycles;
         self.cycles_since_driver_answer += delta_cycles;
 
-        // ── Manual input ────────────────────────────────────────────────────────── The policy's
-        // escape hatch (`queue_manual_input`).
+        // The policy's escape hatch.
         let queued = self.policy.take_manual_input();
         if !queued.is_empty() {
             self.queue_manual_input(queued);
@@ -1673,35 +1518,29 @@ impl PokemonAgent {
 
         self.run_watchdog(api);
 
-        // ── Did the game just walk the player off a square?
         self.check_turn_back(api);
 
         let game_mode = api.game_mode()
             .ok_or_else(|| "Not in game".to_string())?;
 
-        // ── Post-Champion cutscene ──────────────────────────────────────────────── Beating the
-        // rival hands the game to a five-stage script chain (Oak's congratulation, his aside
-        // about the rival, "come with me", his exit, the player following him to the Hall of
-        // Fame).
+        // Beating the rival hands the game to a five-stage script chain ending in the Hall of Fame.
         if self.drive_post_champion_cutscene(api) {
             return Ok(());
         }
 
-        // Silph Co's card-key doors/walls are placed into the map at runtime and are invisible to
-        // the ROM-decoded `MetaTileMap`, so the agent routes straight into them.
+        // Silph Co's card-key doors are placed at run time, invisible to the `MetaTileMap`.
         if game_mode == GameMode::Overworld && self.handle_card_key_door(api) {
             return Ok(());
         }
 
-        // A trainer has engaged (line of sight) and the battle is initialising on its own.
+        // A trainer has seen the player and the battle is starting on its own.
         if api.trainer_battle_pending() && game_mode != GameMode::TextBox {
             api.release_all_buttons();
             return Ok(());
         }
 
         {
-            // Detect the forget menu by its on-screen prompt (robust against stale menu geometry)
-            // and drive it from the live cursor (`wCurrentMenuItem`).
+            // Detected by its prompt, not stale menu geometry.
             let forget_showing = api.menu_state().is_some()
                 && api.on_screen_text(true).map_or(false, |t| is_forget_move_prompt(&t));
             if forget_showing {
@@ -1716,13 +1555,11 @@ impl PokemonAgent {
         self.assert_script_state(game_mode);
         self.assert_battle_state(game_mode);
         self.assert_pokemart_state(game_mode, api)?;
-        // Skip generic text-box handling while shopping or teaching a move — those state machines
-        // drive their own menu input.
         if !drives_its_own_menus(&self.state) {
             self.assert_text_box_state(game_mode, api);
         }
 
-        // Below the asserts, so the text box and any script behind it have both finished.
+        // Below the asserts, so the text box and any script behind it have finished.
         if game_mode == GameMode::Overworld {
             self.check_pending_pickup(api);
         }
@@ -1732,7 +1569,7 @@ impl PokemonAgent {
             && self.cycles_since_driver_answer.to_duration() >= DRIVER_ESCAPE_SILENCE {
             let abandoned = format!("{} got no answer from the game for {:?}; starting over",
                                     self.state, DRIVER_ESCAPE_SILENCE);
-            // "Starting over" is only harmless where something else is counting.
+            // Starting over is harmless only where something else is counting.
             if self.boulder_goal.is_some() && matches!(self.state, AgentState::PushingBoulder { .. }) {
                 self.boulder_goal_silences = self.boulder_goal_silences.saturating_add(1);
             }
@@ -1747,7 +1584,6 @@ impl PokemonAgent {
         match self.state {
             AgentState::Idle => {
                 api.release_all_buttons();
-                // A Strength goal picks itself back up here.
                 if game_mode == GameMode::Overworld
                     && let Some((map, boulder, target, hole)) = self.boulder_goal
                 {
@@ -1763,7 +1599,7 @@ impl PokemonAgent {
                     GameMode::TextBox => {
                         self.set_state(AgentState::ReadingTextBox { reader: PokemonTextReader::default() });
                     }
-                    GameMode::Script => { /* assert_script_state will transition to PendingScript */ }
+                    GameMode::Script => { /* assert_script_state moves to RunningScript */ }
                     GameMode::NamingScreen => {
                         self.set_state(AgentState::NamingPokemon {
                             species: api.naming_screen_species()?,
@@ -1780,21 +1616,17 @@ impl PokemonAgent {
                 }
             }
             AgentState::RunningScript { rollback_deadline: ref mut rollback_delay } => {
-                // An arrow tile is the walk, not a script that ended it, and this is the one line
-                // that says so.
+                // An arrow tile is the walk, not a script that ended it.
                 if player_is_spinning(api) {
                     *rollback_delay = DelayContext::long();
                 }
                 if rollback_delay.is_exhausted() {
-                    // Script already breached rollback deadline, start mashing the A button
                     api.toggle_button(JoypadButton::A);
                 } else {
-                    // Still inside the rollback window (might be a transient ledge jump).
+                    // Inside the rollback window: maybe a ledge jump.
                     let crossed = rollback_delay.tick(delta_cycles);
                     api.release_all_buttons();
                     if crossed {
-                        // Script has just breached rollback deadline, commit to RunningScript so
-                        // we can start mashing next cycle
                         if let Some(destination) =
                             self.backup_state.as_ref().and_then(AgentState::open_overworld_action)
                         {
@@ -1809,7 +1641,6 @@ impl PokemonAgent {
                 }
             }
             AgentState::AwaitingOverworldAction { ref mut delay } => {
-                // A black-out warp that has not landed yet is not a world to ask about.
                 let warping = blackout_in_flight(api) && self.blackout_ticks < MAX_BLACKOUT_WAIT_TICKS;
                 if warping {
                     self.blackout_ticks += 1;
@@ -1819,27 +1650,19 @@ impl PokemonAgent {
                 if !warping && delay.tick(delta_cycles) {
                     let game_state = self.observe_state(api)?;
                     self.poll_policy(&game_state, api);
-                    // Incrementally build the world graph: every time we settle in the overworld,
-                    // record this section's live (sprite-resolved) reachable warps/connections,
-                    // keyed by the raw landing coords (the space warp `to_position`s use).
+                    // Keyed by the raw landing coords.
                     if self.last_map != Some(game_state.map.map) {
                         self.last_map = Some(game_state.map.map);
                         self.world_graph.observe(game_state.map.map, api.raw_player_coords(), &game_state.map);
-                        // Cut trees regrow when you leave and re-enter a map, so a tree cut on a
-                        // prior visit is standing again — drop the stale "already cut" memory or
-                        // the agent will route through a regrown tree and jam (e.g. re-entering
-                        // the Vermilion gym enclosure after Lt.
+                        // Cut trees regrow on map re-entry.
                         self.cut_tiles.clear();
-                        // And the squares this map turned the player away from, for the opposite
-                        // reason: they are remembered *because* they might stop being true, and a
-                        // map change is the cheapest honest moment to ask again.
+                        // Turned-back squares may stop being true.
                         self.turned_back_tiles.clear();
                         self.turn_back_watch = None;
                     }
-                    // A non-walking field action (e.g. teach an HM) takes priority over walking.
+                    // A non-walking field action takes priority over walking.
                     match self.policy.pick_field_move(&game_state) {
                         Some(crate::pokemon::policy::FieldMove::ReorderParty { slot }) => {
-                            // Direct RAM reorder — instant, no menus.
                             api.release_all_buttons();
                             api.move_party_member_to_front(slot as usize)?;
                             self.event(AgentEvent::TextBox { message: format!("Moved party slot {slot} to the front") });
@@ -1848,8 +1671,7 @@ impl PokemonAgent {
                         }
                         Some(crate::pokemon::policy::FieldMove::TeachMove { item, target_slot }) => {
                             api.release_all_buttons();
-                            // The same last line of defence `CutTree` has below, for the same
-                            // reason: this driver has no way back.
+                            // This driver has no way back, so refuse here.
                             let incompatible = game_state.pokemon.get(target_slot as usize)
                                 .is_some_and(|mon| !crate::pokemon::learnset::can_learn(mon.species, item));
                             if incompatible {
@@ -1867,8 +1689,7 @@ impl PokemonAgent {
                         }
                         Some(crate::pokemon::policy::FieldMove::CutTree) => {
                             api.release_all_buttons();
-                            // The last line of defence, and it is here because the driver has no
-                            // way back.
+                            // The driver has no way back, so refuse here.
                             if !game_state.can_use_cut {
                                 self.event(AgentEvent::TextBox {
                                     message: "Cut needs a party member that knows it, and the \
@@ -1879,7 +1700,6 @@ CascadeBadge; not cutting".to_string(),
                             }
                             let tree_pos = game_state.map.tile_in_front().map(|(p, _)| p)
                                 .unwrap_or(game_state.map.player_position);
-                            // Whoever in the party knows Cut, not the lead.
                             let Some((slot, move_index)) =
                                 crate::pokemon::policy::field_move_carrier(&game_state, crate::pokemon::move_name::PokemonMoveName::Cut)
                             else {
@@ -1909,8 +1729,7 @@ CascadeBadge; not cutting".to_string(),
                         Some(crate::pokemon::policy::FieldMove::UseItemPc { op, item, qty, pc }) => {
                             use crate::pokemon::postgame::item_storage::ItemPcState;
                             api.release_all_buttons();
-                            // Baseline the source inventory *now*, before any menu is touched, so
-                            // the driver can tell "moved `qty`" from "was already short".
+                            // Baselined before any menu is touched.
                             let start_qty = match op {
                                 crate::pokemon::postgame::item_storage::PcItemOp::Deposit => api.bag_item_quantity(item),
                                 crate::pokemon::postgame::item_storage::PcItemOp::Withdraw => api.pc_box_item_quantity(item),
@@ -1919,10 +1738,8 @@ CascadeBadge; not cutting".to_string(),
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::PushBoulder { boulder, dir }) => {
-                            // Primitive: push the boulder at `boulder` one tile in `dir`.
                             api.release_all_buttons();
-                            // The last line of defence `CutTree`, `TeachMove` and `UseFieldItem`
-                            // have, for the fourth member of the same family.
+                            // The same last line of defence as `CutTree`.
                             if let Some(refusal) = game_state.map.boulder_push_refusal(boulder, dir) {
                                 self.event(AgentEvent::TextBox { message: refusal });
                                 self.set_state(AgentState::Idle);
@@ -1938,8 +1755,7 @@ CascadeBadge; not cutting".to_string(),
                         }
                         Some(crate::pokemon::policy::FieldMove::UseFieldItem { item, target }) => {
                             api.release_all_buttons();
-                            // The last line of defence `CutTree` and `TeachMove` have, for the
-                            // third member of the same family.
+                            // The same last line of defence as `CutTree`.
                             if let Some(refusal) = crate::pokemon::item_use::field_use_refusal(item) {
                                 self.event(AgentEvent::TextBox { message: refusal });
                                 self.set_state(AgentState::Idle);
@@ -1998,8 +1814,6 @@ CascadeBadge; not cutting".to_string(),
                 }
             }
             AgentState::OverworldMovement { destination, map: expected_map } => {
-                // The 60 s bound, and why it is silence rather than ticks:
-                // `MAX_MOVEMENT_SILENCE`.
                 if self.cycles_since_poll.to_duration() >= MAX_MOVEMENT_SILENCE {
                     api.release_all_buttons();
                     let at = self.player_at(api);
@@ -2008,9 +1822,7 @@ CascadeBadge; not cutting".to_string(),
                     return Ok(());
                 }
                 let game_state = self.observe_state(api)?;
-                // Keep the last two squares of the walk — the turn-back watch needs the one the
-                // player stepped *from*, and this is the only arm that already holds a
-                // `GameState`.
+                // The turn-back watch needs the square the player stepped from.
                 let raw = api.raw_player_coords();
                 self.walk_squares = match self.walk_squares {
                     Some((_, current)) if current != raw => Some((current, raw)),
@@ -2025,15 +1837,12 @@ CascadeBadge; not cutting".to_string(),
                         at,
                     );
                 } else if game_state.map.map != expected_map {
-                    // Map changed — success for warps and connections (both take you off the
-                    // map).
+                    // Success for warps and connections, which both leave the map.
                     if matches!(destination, MetaTile::Warp { .. } | MetaTile::Connection { .. } | MetaTile::ConnectionWater(_)) {
                         new_events.push(AgentEvent::OverworldActionCompleted { destination });
                         self.set_state(AgentState::Idle);
                     } else {
-                        // No position: the player is on a *different map*, so a coordinate here
-                        // would be read against the map named in the destination and mean
-                        // nothing.
+                        // No position: a coordinate would be read against the destination's map.
                         self.abort_overworld(
                             destination,
                             OverworldActionAbortedReason::WrongMap(game_state.map.map),
@@ -2044,21 +1853,20 @@ CascadeBadge; not cutting".to_string(),
                     && to_map == game_state.map.map
                     && game_state.map.player_position == to_position
                 {
-                    // A teleport pad does not change the map, so arriving is the only thing that
-                    // says it worked.
+                    // A teleport pad does not change the map.
                     new_events.push(AgentEvent::OverworldActionCompleted { destination });
                     self.set_state(AgentState::Idle);
                 } else if matches!(destination, MetaTile::Warp { .. })
                     && game_state.map.player_tile() == destination
                     && is_on_map_border(&game_state.map)
-                    // …and it is *not* one of the tileset's step-on warp tiles.
+                    // Not a tileset step-on warp,
                     && !game_state.map.is_step_on_warp(game_state.map.player_position)
-                    // …and the player is on foot.
+                    // the player is on foot,
                     && !game_state.map.surfing
-                    // …and the collision path is actually armed.
+                    // and the collision path is armed.
                     && game_state.map.standing_on_warp
                 {
-                    // Player is standing on an EDGE warp tile (at y=0, y=max, x=0, or x=max).
+                    // Standing on an edge warp.
                     let pos = game_state.map.player_position;
                     let h = game_state.map.height.saturating_sub(1) as u8;
                     let exit_dir = if pos.y == 0 { JoypadButton::Up }
@@ -2068,9 +1876,7 @@ CascadeBadge; not cutting".to_string(),
                     api.release_all_buttons();
                     api.press_button(exit_dir);
                 } else if destination == MetaTile::Empty {
-                    // A cave "wander" (`MetaTileMap::wander_action`): the policy asked for a
-                    // plain floor tile purely to keep the player walking so per-step wild
-                    // encounters fire — there is no grass to stand in underground.
+                    // A cave wander: keep walking so per-step encounters fire.
                     let pos = game_state.map.player_position;
                     match adjacent_pacing_pair(&game_state.map, pos) {
                         Some((tile_a, tile_b)) => self.set_state(AgentState::PacingForEncounters {
@@ -2088,15 +1894,13 @@ CascadeBadge; not cutting".to_string(),
                 } else if game_state.map.player_tile() == destination && !matches!(destination, MetaTile::Warp { .. }) {
                     if destination == MetaTile::Grass {
                         let pos = game_state.map.player_position;
-                        // Pace against a grass neighbour if there is a *steppable* one, and
-                        // against any plain neighbour if there is not.
+                        // Pace against a steppable grass neighbour, else any plain one.
                         let pair = adjacent_grass(&game_state.map, pos).map(|b| (pos, b))
                             .or_else(|| adjacent_pacing_pair(&game_state.map, pos));
                         if let Some((tile_a, tile_b)) = pair {
                             self.set_state(AgentState::PacingForEncounters { destination, map: game_state.map.map, tile_a, tile_b, heading_to_b: true, stalled: 0, paced: 0 });
                         } else {
-                            // TODO this should not happen, we shouldn't generate an action if
-                            // this is true the adjacent grass tile should be in the action
+                            // TODO: unreachable if `actions()` checks the neighbour.
                             let at = Some(game_state.map.player_position);
                             self.abort_overworld(destination, OverworldActionAbortedReason::NoAdjacentGrass, at);
                             self.set_state(AgentState::Idle);
@@ -2106,37 +1910,29 @@ CascadeBadge; not cutting".to_string(),
                         self.set_state(AgentState::Idle);
                     }
                 } else {
-                    // The route is recomputed every tick and only ever its head is pressed, so no
-                    // recipe here may depend on its own tail.
+                    // Re-derived every tick and only its head pressed: no recipe may use its tail.
                     let action = game_state.map.actions().into_iter()
-                        // Not `==` — a boulder goal's row also names the boulder `actions()`
-                        // picked, and that changes under the walk.
+                        // Not `==`: a boulder goal's row names a moving boulder.
                         .find(|a| a.tile.is_same_row_as(&destination))
-                        // A specific connection landing isn't in `actions()` (only the nearest
-                        // crossing is) — re-derive its route each tick so the walk to it can
-                        // still be tracked.
+                        // `actions()` offers only the nearest crossing.
                         .or_else(|| match destination {
                             MetaTile::Connection { to_map, to_position } =>
                                 game_state.map.connection_action(to_map, to_position),
-                            // Nor is a water edge, when a land bridge to the same map is nearer —
-                            // `actions()` emits one crossing per adjacent map.
+                            // Nor is a water edge when a land crossing to the same map is nearer.
                             MetaTile::ConnectionWater(to_map) =>
                                 game_state.map.water_connection_action(to_map),
                             _ => None,
                         });
-                    // The counter behind `MAX_ROUTE_LOST_TICKS`: reset the moment the row is
-                    // back, so what it counts is *consecutive* ticks without it rather than a
-                    // total.
+                    // Reset when the row is back: the count is consecutive.
                     if action.is_some() {
                         self.route_lost_ticks = 0;
                         self.route_lost_to_people = false;
                     }
                     match action {
                         None if !game_state.map.position_settled => {}
-                        // A route that has just gone is not a route that was never there, and the
-                        // difference is people.
+                        // A route that has just gone may be blocked by people.
                         None if self.wait_for_the_route(&game_state.map, destination) => {
-                            // Released, unlike the `position_settled` arm above.
+                            // Released, unlike the `position_settled` arm.
                             api.release_all_buttons();
                         }
                         None => self.abort_overworld(
@@ -2145,14 +1941,9 @@ CascadeBadge; not cutting".to_string(),
                             Some(game_state.map.player_position),
                         ),
                         Some(a) => match a.route.first() {
-                            // Pulse A via toggle so hJoyPressed fires every other tick —
-                            // press_button (after release_all) would only fire once since A stays
-                            // held and hJoyPressed goes dark on the next frame.
+                            // Toggled so `hJoyPressed` fires every other tick.
                             Some(&JoypadButton::A) => api.toggle_button(JoypadButton::A),
-                            // Hold direction buttons for continuous walking.
                             Some(&btn) => {
-                                // If this step would walk onto water while on foot, mount Surf
-                                // first.
                                 let pos = game_state.map.player_position;
                                 let next = step_pos(pos, btn);
                                 let onto_water = !matches!(destination, MetaTile::Fish { .. })
@@ -2165,8 +1956,7 @@ CascadeBadge; not cutting".to_string(),
                                     if let (Some(water_pos), Some((slot, move_index))) = (next,
                                         crate::pokemon::policy::field_move_carrier(&game_state, crate::pokemon::move_name::PokemonMoveName::Surf)) {
                                         api.release_all_buttons();
-                                        // The walk rides through the mount — see
-                                        // `Surfing::resume`.
+                                        // The walk rides through the mount; see `Surfing::resume`.
                                         self.set_state(AgentState::Surfing {
                                             press: true, entered_menu: false, water_pos, slot, move_index,
                                             resume: Some((destination, expected_map)), settle: 0 });
@@ -2187,14 +1977,10 @@ CascadeBadge; not cutting".to_string(),
                                         crate::pokemon::postgame::fishing::FishState::new(rod, at)));
                                     return Ok(());
                                 }
-                                // A cut tree and a boulder finish their own action, for the same
-                                // reason the fishing row does.
+                                // A cut tree and a boulder goal finish their own action too.
                                 if let MetaTile::Cut { at: tree_pos } = destination
                                     && game_state.can_use_cut
-                                    // The row's own tree, and the driver cuts whatever is in
-                                    // front of the player — so if the walk has ended facing
-                                    // something else, this is not that row's cut and the ordinary
-                                    // completion below is the honest answer.
+                                    // The driver cuts whatever is in front.
                                     && game_state.map.tile_in_front()
                                         .is_some_and(|(at, tile)| at == tree_pos && tile == MetaTile::CutTree)
                                     && let Some((slot, move_index)) = crate::pokemon::policy::field_move_carrier(
@@ -2206,7 +1992,6 @@ CascadeBadge; not cutting".to_string(),
                                         from_row: true });
                                     return Ok(());
                                 }
-                                // A Strength goal takes over here and runs to completion.
                                 if let MetaTile::BoulderGoal { boulder, at, hole } = destination {
                                     api.release_all_buttons();
                                     self.boulder_goal = Some((game_state.map.map, boulder, at, hole));
@@ -2226,13 +2011,12 @@ CascadeBadge; not cutting".to_string(),
                 }
             }
             AgentState::ReadingTextBox { ref mut reader } => {
-                // B, not A, inside a PC menu — it is the only way out.
+                // B, not A, inside a PC menu: it is the only way out.
                 let in_battle = api.mmu().read_pointer(&pokered_symbols::wIsInBattle) != 0;
                 let handing_over = self.menu_handover_ticks > 0;
                 self.menu_handover_ticks = self.menu_handover_ticks.saturating_sub(1);
                 let timed_out = self.cycles_since_poll.to_duration() >= TEXT_BOX_ESCAPE_SILENCE;
-                // The hand-over rule believes only the screen; the 30 s rule may also believe the
-                // lingering ids, because by then the silence has ruled out a conversation.
+                // The hand-over rule trusts only the screen; after the silence, the RAM ids too.
                 let evidence = if timed_out { MenuEvidence::OrTheLingeringIds } else { MenuEvidence::OnScreen };
                 if !in_battle && (handing_over || timed_out) && open_menu_on_screen(api, evidence) {
                     if handing_over && !self.escaping_menus {
@@ -2243,23 +2027,21 @@ CascadeBadge; not cutting".to_string(),
                     self.escaping_menus = true;
                     self.menu_handover_ticks = 0;
                 }
-                // A party menu a *conversation* opened is answered here rather than A-mashed.
+                // A party menu a conversation opened is answered here rather than A-mashed.
                 if !in_battle
                     && let Some(screen) = api.on_screen_text(false)
                     && let (x, y, cursor, _) = api.menu_geometry()
                     && crate::pokemon::menu::is_normal_party_menu(x, y, &screen)
                 {
                     reader.accumulate(api);
-                    // Armed here when nothing armed it earlier: a party list in a conversation
-                    // the agent has no answer for is the Day Care or the Name Rater.
+                    // Unarmed, a conversation's party list is the Day Care or the Name Rater.
                     let choice = self.party_menu.unwrap_or(PartyMenuAnswer {
                         give: None, press: true, answered: None,
                     });
                     let button = match (choice.answered, choice.give) {
-                        // Already answered: keep saying the same thing until the list goes.
+                        // Keep giving the same answer until the list goes.
                         (Some(button), _) => button,
                         (None, Some(give)) => match party_slot_of(api, give) {
-                            // On it: hand this one over.
                             Some(slot) if slot == cursor => {
                                 new_events.push(AgentEvent::TextBox { message: format!(
                                     "handed over the {give:?} in party slot {}", slot + 1) });
@@ -2267,7 +2049,7 @@ CascadeBadge; not cutting".to_string(),
                             }
                             Some(slot) if slot > cursor => JoypadButton::Down,
                             Some(_) => JoypadButton::Up,
-                            // Backed out rather than offered the wrong one.
+                            // Backed out rather than offer the wrong one.
                             None => {
                                 new_events.push(AgentEvent::TextBox { message: format!(
                                     "the trade wants a {give:?} and there is none in the party, so \
@@ -2275,7 +2057,6 @@ CascadeBadge; not cutting".to_string(),
                                 JoypadButton::B
                             }
                         },
-                        // The Day Care, the Name Rater, or a party list nobody opened.
                         (None, None) => {
                             new_events.push(AgentEvent::TextBox { message:
                                 "a party menu was left open with no way to answer it; closing it \
@@ -2299,26 +2080,23 @@ CascadeBadge; not cutting".to_string(),
                 reader.update_with(api, button);
             }
             AgentState::Battle(ref mut battle_state) => {
-                // Global safety net: the game has refused the item that was just selected.
+                // The game has refused what was just selected.
                 if api.on_screen_text(false).map_or(false, |t| shows_battle_refusal(&t)) {
                     api.toggle_button(JoypadButton::B);
-                    // Carried, not dropped.
                     let carried = battle_state.take_reader();
                     self.set_battle_state(BattleState::backing_out_carrying(carried));
                     return Ok(());
                 }
                 match battle_state {
                     BattleState::WaitingForMenu { reader, delay, backing_out, confirming, confirm } => {
-                        // Hoisted above everything, because the A presses that defeat it do not
-                        // come from the branch that detects the problem.
+                        // First, because the A presses that defeat it come from other branches.
                         if *backing_out > 0 {
                             *backing_out -= 1;
                             api.toggle_button(JoypadButton::B);
                             return Ok(());
                         }
                         if let Some(menu_state) = api.menu_state() {
-                            // A voluntary switch (PKMN → pick mon) pops the SWITCH/STATS/CANCEL
-                            // sub-menu, which isn't a battle_menu_state.
+                            // A voluntary switch's SWITCH/STATS/CANCEL.
                             if menu_state.is_switch_stats_cancel_menu() {
                                 if menu_state.current_item == 0 {
                                     api.toggle_button(JoypadButton::A);
@@ -2327,28 +2105,19 @@ CascadeBadge; not cutting".to_string(),
                                 }
                                 return Ok(());
                             }
-                            // After an item-use turn the menu geometry/text_box_id are unreliable
-                            // — the leaked battle bag list and the next-turn FIGHT menu can both
-                            // read as (5,4)/ListMenuBox, so battle_menu_state misclassifies them.
+                            // After an item turn a leaked bag list and FIGHT both read as a list.
                             let screen = api.on_screen_text(false).unwrap_or_default();
-                            // Bag first: while the leaked bag list is still on screen (its
-                            // "CANCEL" entry visible, or an unusable-item message), back out with
-                            // B.
                             if screen.contains("No PP left") {
-                                // Latch here, not in the `MoveList` arm below — this check runs
-                                // first and returns, so the arm that "handles" a spent move is
-                                // never reached while the message is on screen.
+                                // Latched here: this check returns before the `MoveList` arm could.
                                 *backing_out = BACKING_OUT_TICKS;
                                 api.toggle_button(JoypadButton::B);
                                 return Ok(());
                             }
-                            // Left unlatched deliberately.
                             if screen.contains("CANCEL") || shows_battle_refusal(&screen) {
                                 api.toggle_button(JoypadButton::B);
                                 return Ok(());
                             }
-                            // The SHIFT prompt, which only exists because the soak stopped using
-                            // the harness's options.
+                            // The SHIFT prompt.
                             if screen.contains("change") && menu_state.is_yes_no_menu() {
                                 api.toggle_button(JoypadButton::B);
                                 return Ok(());
@@ -2360,15 +2129,13 @@ CascadeBadge; not cutting".to_string(),
                                 new_events.push(AgentEvent::text_box_from_reader(reader));
                                 api.release_all_buttons();
                                 self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default() });
-                                // Drained here because this arm returns, and nothing else in
-                                // `update` does.
+                                // Drained here because this arm returns.
                                 for event in new_events {
                                     self.event(event);
                                 }
                                 return Ok(());
                             }
                             match menu_state.battle_menu_state() {
-                                // The main menu is ready: the turn is the policy's to decide.
                                 Some(BattleMenuState::Fight)
                                 | Some(BattleMenuState::SafariBall) | Some(BattleMenuState::SafariBait)
                                 | Some(BattleMenuState::SafariRock) => {
@@ -2378,14 +2145,12 @@ CascadeBadge; not cutting".to_string(),
                                     self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default() });
                                 }
                                 Some(BattleMenuState::PokemonList { index }) => {
-                                    // Only if the party list is what is actually on screen.
+                                    // Only if the party list is what is on screen.
                                     if api.on_screen_text(false).map_or(0, |t| t.matches('/').count()) < 2 {
                                         api.toggle_button(JoypadButton::A);
                                         return Ok(());
                                     }
-                                    // A party list is only ours to drive here for a FORCED switch
-                                    // — the active mon fainted and the game demands a
-                                    // replacement.
+                                    // A party list is ours to drive only for a forced switch.
                                     let game_state = api.game_state()?;
                                     let active_fainted = game_state.battle.as_ref()
                                         .map_or(false, |b| b.player.current_hp == 0);
@@ -2411,19 +2176,17 @@ CascadeBadge; not cutting".to_string(),
                                     }
                                 }
                                 Some(BattleMenuState::MoveList { index }) => {
-                                    // A move list is showing.
                                     let disabled = api.game_state().ok()
                                         .and_then(|g| g.battle)
                                         .and_then(|b| b.player.disabled_move_slot) == Some(index);
-                                    // Only the game's own message counts here.
+                                    // Only the game's own message counts.
                                     let no_pp = api.on_screen_text(false).unwrap_or_default()
                                         .contains("No PP left");
                                     if disabled || no_pp {
                                         *backing_out = BACKING_OUT_TICKS;
                                         api.toggle_button(JoypadButton::B);
                                     } else if reading_dialogue(&menu_state, *confirming) {
-                                        // The geometry is stale and the game is talking: this is
-                                        // the turn resolving, not a move list.
+                                        // Stale geometry: the game is talking.
                                         reader.update(api);
                                     } else if let Some(mut pending) = *confirm {
                                         let pending = &mut pending;
@@ -2431,30 +2194,26 @@ CascadeBadge; not cutting".to_string(),
                                         let committed = api.mmu()
                                             .read_pointer(&crate::pokemon::symbols::pokered_symbols::wPlayerMoveListIndex);
                                         match pending.pressed {
-                                            // Issued, recorded, and therefore *finished* — the
-                                            // confirm has to get out of the way here.
+                                            // Recorded, so finished.
                                             true if committed == pending.slot => {
                                                 *confirm = None;
                                                 api.release_all_buttons();
                                             }
-                                            // Issued and not yet acted on.
                                             true if pending.waited < CONFIRM_ACK_TICKS => {
                                                 pending.waited += 1;
                                                 api.release_all_buttons();
                                             }
-                                            // The press was not acted on.
+                                            // Not acted on: press again.
                                             true if pending.attempts < CONFIRM_ATTEMPTS => {
                                                 pending.pressed = false;
                                                 pending.waited = 0;
                                                 api.release_all_buttons();
                                             }
-                                            // Out of attempts, and this is the assertion that
-                                            // catches a stray press *now*.
+                                            // Out of attempts: back out.
                                             true => {
                                                 *backing_out = BACKING_OUT_TICKS;
                                                 api.toggle_button(JoypadButton::B);
                                             }
-                                            // The press.
                                             false if index == pending.slot => {
                                                 pending.pressed = true;
                                                 pending.waited = 0;
@@ -2479,29 +2238,24 @@ CascadeBadge; not cutting".to_string(),
                                     }
                                 },
                                 Some(BattleMenuState::ItemList { .. }) => {
-                                    // A bag list here is always a leak, and A is always the wrong
-                                    // button.
+                                    // A bag list here is always a leak, and A is always wrong.
                                     api.toggle_button(JoypadButton::B);
                                 },
                                 Some(_) if reading_dialogue(&menu_state, *confirming) => {
-                                    // Same as the move list above: the menu geometry has not
-                                    // caught up, and what is on screen is the game talking.
+                                    // Stale geometry again: the game is talking.
                                     reader.update(api);
                                 },
                                 Some(_) => {
-                                    // A menu really is showing.
                                     api.toggle_button(JoypadButton::A);
                                 },
                                 None => {
-                                    // Something other than the battle menu is showing — wait for
-                                    // the text box to render before reading it
+                                    // Wait for the text box to render before reading it.
                                     if delay.tick(delta_cycles) {
                                         reader.update(api);
                                     }
                                 }
                             }
                         } else {
-                            // No menu is showing, click mashing the A button
                             api.toggle_button(JoypadButton::A);
                         }
                     }
@@ -2535,17 +2289,14 @@ CascadeBadge; not cutting".to_string(),
 
                     BattleState::Navigating { action, delay, ticks, stable } => {
                         if delay.tick(delta_cycles) {
-                            // Nothing below this line polls the policy, so nothing below it may
-                            // run forever.
+                            // Nothing below polls the policy, so nothing below may run for ever.
                             const MAX_NAVIGATING_TICKS: u16 = 250;
                             *ticks += 1;
                             if *ticks >= MAX_NAVIGATING_TICKS {
-                                // Formatted before the state is touched: `action` borrows from
-                                // the `battle_state` that `set_battle_state` replaces.
+                                // `action` borrows from the state about to go.
                                 let gave_up = format!("battle navigation to {action:?} got nowhere in 5s; re-deciding");
                                 api.release_all_buttons();
-                                // Latched: whatever this was navigating may have left a sub-menu
-                                // open, and `WaitingForMenu` opens by pressing A.
+                                // Latched: `WaitingForMenu` opens by pressing A.
                                 self.set_battle_state(BattleState::backing_out());
                                 self.event(AgentEvent::TextBox { message: gave_up });
                                 return Ok(());
@@ -2561,15 +2312,12 @@ CascadeBadge; not cutting".to_string(),
                                 let raw = api.menu_state();
                                 let bms = raw.and_then(|m| m.battle_menu_state());
                                 if raw.map_or(false, |m| m.is_switch_stats_cancel_menu()) {
-                                    // SWITCH(0)/STATS(1)/CANCEL(2) → drive to SWITCH and confirm.
                                     let cur = raw.map_or(0, |m| m.current_item);
                                     api.toggle_button(if cur == 0 { JoypadButton::A } else { JoypadButton::Up });
                                     return Ok(());
                                 }
                                 if bms.is_none() || matches!(bms, Some(BattleMenuState::PokemonList { .. })) {
-                                    // The in-battle party list — whether unrecognized (voluntary
-                                    // switch-in geometry (11,2)) or recognized as PokemonList
-                                    // (low-HP switch geometry (0,1)).
+                                    // The in-battle party list, at either geometry.
                                     let cur = raw.map_or(0, |m| m.current_item);
                                     let btn = if cur == target { JoypadButton::A }
                                         else if cur < target { JoypadButton::Down }
@@ -2577,8 +2325,7 @@ CascadeBadge; not cutting".to_string(),
                                     api.toggle_button(btn);
                                     return Ok(());
                                 }
-                                // Else: still at the main battle grid — fall through to the
-                                // generic navigator to open the PKMN menu.
+                                // Still at the main grid: the generic navigator opens PKMN.
                             }
                             let Some(menu_state) = api.menu_state().and_then(|s| s.battle_menu_state()) else {
                                 api.release_all_buttons();
@@ -2588,10 +2335,7 @@ CascadeBadge; not cutting".to_string(),
                             {
                                 let menu_target = BattleMenuState::from_action(*action);
 
-                                // If a leaked sub-menu is showing that doesn't belong to this
-                                // action — a bag list (ItemList) while we're trying to
-                                // FIGHT/switch, or a party list (PokemonList) while we're trying
-                                // to FIGHT/use-item — back out with B instead of navigating it.
+                                // A leaked sub-menu that is not this action's.
                                 let wrong_submenu = match (menu_state, *action) {
                                     (BattleMenuState::ItemList { .. }, a) => !matches!(a, BattleAction::UseItem { .. }),
                                     (BattleMenuState::PokemonList { .. }, a) => !matches!(a, BattleAction::SwitchPokemon { .. }),
@@ -2602,8 +2346,7 @@ CascadeBadge; not cutting".to_string(),
                                     return Ok(());
                                 }
 
-                                // A sub-menu is only believed once it has been seen twice, and
-                                // that is what stops the wrong move being taken.
+                                // Believed only once seen twice.
                                 if menu_state == menu_target && *stable == 0 {
                                     *stable = 1;
                                     api.release_all_buttons();
@@ -2613,20 +2356,15 @@ CascadeBadge; not cutting".to_string(),
                                     *stable = 0;
                                 }
                                 if menu_state == menu_target {
-                                    // RUN is a terminal menu option (no sub-menu): press A here
-                                    // to actually flee.
+                                    // These options have no sub-menu.
                                     if matches!(menu_target, BattleMenuState::Run
                                         | BattleMenuState::SafariBall
                                         | BattleMenuState::SafariBait
                                         | BattleMenuState::SafariRock) {
-                                        // Re-confirmed for as long as the option keeps coming
-                                        // back: a Gen 1 escape is a dice roll whose odds improve
-                                        // with each attempt, so bouncing to the policy after one
-                                        // failure would mean a flee rarely fires.
+                                        // A Gen 1 escape's odds improve with each try.
                                         api.toggle_button(JoypadButton::A);
                                     } else {
                                         api.release_all_buttons();
-                                        // Not a plain `default()`.
                                         let (chosen, elapsed) = (*action, *ticks);
                                         self.set_battle_state(BattleState::confirming(chosen, elapsed));
                                     }
@@ -2663,11 +2401,10 @@ CascadeBadge; not cutting".to_string(),
                     }
 
                     BattleState::UsingItem { item, start_qty, entry_hp, press, confirmed, delay: _, ticks, reader } => {
-                        // Same bound and same reason as `Navigating`: this drives six menus deep
-                        // on a decision the policy already made and polls nothing on the way.
+                        // Same bound as `Navigating`: six menus deep and nothing polled on the way.
                         const MAX_HEALING_TICKS: u16 = 250;
                         let ticks = *ticks;
-                        // Read before anything is pressed, and on every tick this state owns.
+                        // Read before anything is pressed, on every tick this state owns.
                         if api.menu_state()
                             .is_some_and(|m| m.text_box_id == crate::pokemon::menu::TextBoxId::MessageBox)
                         {
@@ -2689,9 +2426,7 @@ CascadeBadge; not cutting".to_string(),
                         let raw = api.menu_state();
                         let bms = raw.and_then(|m| m.battle_menu_state());
 
-                        // Three phases, keyed on the potion's bag count and the active mon's HP:
-                        // • consumed (live < start_qty) → the heal fully applied; back out of the
-                        // leftover bag/party menus (B) until the main grid reappears (next turn).
+                        // Keyed on the item's bag count and the active mon's HP.
                         let gs = api.game_state().ok();
                         let active = gs.as_ref().and_then(|g| g.battle.as_ref().map(|b| b.active_party_slot)).unwrap_or(0);
                         let active_hp = gs.as_ref().and_then(|g| g.pokemon.get(active as usize).map(|p| p.current_hp)).unwrap_or(0);
@@ -2699,18 +2434,18 @@ CascadeBadge; not cutting".to_string(),
                             .and_then(|g| g.bag.iter().find(|b| b.id == item).map(|b| b.quantity))
                             .unwrap_or(0);
                         if live < start_qty {
-                            // Potion consumed — the heal is committed.
+                            // Consumed: the heal is committed.
                             api.release_all_buttons();
                             self.set_battle_state(BattleState::carrying(reader));
                             return Ok(());
                         }
                         if active_hp > entry_hp {
-                            // Heal bar filling — wait, don't touch the (still-open) party menu.
+                            // The HP bar is filling: leave the still-open party menu alone.
                             api.release_all_buttons();
                             self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: !press, confirmed: true, delay: DelayContext::default(), ticks: ticks + 1, reader });
                             return Ok(());
                         }
-                        // Two-tick press/release cadence for clean rising edges.
+                        // Press and release on alternate ticks for clean rising edges.
                         if !press {
                             api.release_all_buttons();
                             self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: true, confirmed, delay: DelayContext::default(), ticks: ticks + 1, reader });
@@ -2728,14 +2463,12 @@ CascadeBadge; not cutting".to_string(),
 
                         let next_confirmed = confirmed;
                         let button: Option<JoypadButton> = if party_showing {
-                            // Drive the cursor to the active mon and press A.
                             let cur = raw.map_or(0, |m| m.current_item);
                             if cur == active { Some(JoypadButton::A) }
                             else if cur < active { Some(JoypadButton::Down) }
                             else { Some(JoypadButton::Up) }
                         } else if let Some(BattleMenuState::ItemList { index }) = bms {
-                            // Navigate to the potion by its position in the raw bag (== the
-                            // battle list order).
+                            // The bag's raw order is the battle list's order.
                             match api.bag_item_position(item) {
                                 Some(target) => Some(if index == target { JoypadButton::A }
                                     else if index < target { JoypadButton::Down } else { JoypadButton::Up }),
@@ -2743,7 +2476,6 @@ CascadeBadge; not cutting".to_string(),
                             }
                         } else if let Some(grid) = bms.filter(|b| matches!(b,
                             BattleMenuState::Fight | BattleMenuState::Item | BattleMenuState::Pokemon | BattleMenuState::Run)) {
-                            // Battle grid → ITEM (0,1).
                             let cur = grid.location();
                             let tgt = BattleMenuState::Item.location();
                             Some(if cur.x < tgt.x { JoypadButton::Right } else if cur.x > tgt.x { JoypadButton::Left }
@@ -2766,7 +2498,6 @@ CascadeBadge; not cutting".to_string(),
                 let game_state = api.game_state()?;
                 if game_state.mode == GameMode::Overworld {
                     if game_state.map.map != map {
-                        // Something moved the player off the map the pace belongs to.
                         let at = Some(game_state.map.player_position);
                         self.abort_overworld(
                             destination,
@@ -2788,11 +2519,9 @@ CascadeBadge; not cutting".to_string(),
                         *heading_to_b = !*heading_to_b;
                         *stalled = 0;
                     } else {
-                        // Not there yet.
                         *stalled += 1;
                         if *stalled >= STALL_TICKS {
-                            // A pair is chosen once and the map moves under it, so ask for
-                            // another one before calling this a malfunction.
+                            // The map moves under a pair, so ask for another before giving up.
                             let repicked = adjacent_grass(&game_state.map, pos).map(|b| (pos, b))
                                 .or_else(|| adjacent_pacing_pair(&game_state.map, pos))
                                 .filter(|&(a, b)| (a, b) != (*tile_a, *tile_b));
@@ -2802,7 +2531,7 @@ CascadeBadge; not cutting".to_string(),
                                 *heading_to_b = true;
                                 *stalled = 0;
                             } else {
-                                // `Unknown`, which the oracle scores as a defect, and rightly.
+                                // `Unknown`, which the coverage oracle scores as a defect.
                                 api.release_all_buttons();
                                 self.abort_overworld(
                                     destination,
@@ -2824,15 +2553,12 @@ CascadeBadge; not cutting".to_string(),
                 let menu = api.menu_state();
 
                 match pokemart_state {
-                    // The shop is open and nobody has said what to buy.
                     PokemartState::AwaitingPolicy => {
                         api.release_all_buttons();
                         let game_state = api.game_state()?;
                         self.ask_mart_policy(&game_state, api);
                     }
 
-                    // Keep navigating/pressing A on the Buy/Sell/Quit menu until the item list
-                    // appears.
                     PokemartState::ChoosingBuyOption(item) => {
                         if let Some(menu) = menu {
                             if menu.is_mart_item_list() {
@@ -2844,7 +2570,7 @@ CascadeBadge; not cutting".to_string(),
                                     api.toggle_button(JoypadButton::Up);
                                 }
                             } else {
-                                // Some other text box (e.g., greeting) — mash A.
+                                // Some other text box, such as the greeting.
                                 api.toggle_button(JoypadButton::A);
                             }
                         } else {
@@ -2852,7 +2578,6 @@ CascadeBadge; not cutting".to_string(),
                         }
                     }
 
-                    // Navigate item list to target item, then press A to select it.
                     PokemartState::ChoosingItem(item) => {
                         if let Some(menu) = menu {
                             if menu.is_mart_item_list() {
@@ -2865,9 +2590,7 @@ CascadeBadge; not cutting".to_string(),
                                     }
                                     Some(target_idx) => {
                                         if current == target_idx {
-                                            // Clear stale wMaxItemQuantity==99 so
-                                            // AwaitingQtySelector can detect the fresh write from
-                                            // pokemart.asm reliably.
+                                            // Clear a stale 99 so pokemart.asm's write is seen.
                                             api.write_max_item_quantity(0);
                                             api.toggle_button(JoypadButton::A);
                                             self.set_pokemart_state(PokemartState::AwaitingQtySelector(*item));
@@ -2882,8 +2605,7 @@ CascadeBadge; not cutting".to_string(),
                         }
                     }
 
-                    // A was pressed on the target item; keep pressing A each tick until
-                    // wMaxItemQuantity==99 (set by pokemart.asm right after item selection).
+                    // `wMaxItemQuantity` reaches 99 once pokemart.asm has accepted the item.
                     PokemartState::AwaitingQtySelector(item) => {
                         if api.mart_in_quantity_selector() {
                             api.release_all_buttons();
@@ -2893,32 +2615,26 @@ CascadeBadge; not cutting".to_string(),
                         }
                     }
 
-                    // Adjust quantity with Up/Down then confirm with A.
                     PokemartState::ChoosingQuantity { item, qty_last, stall_ticks } => {
                         let item = *item;
                         let qty_last = *qty_last;
                         let stall_ticks = *stall_ticks;
-                        // NLL: borrow of self.state via pokemart_state ends here (values copied)
 
                         let yes_no = menu.map_or(false, |m| m.is_yes_no_menu());
                         let cur_qty = api.mart_item_quantity();
 
                         if yes_no {
-                            // Release all buttons before entering ConfirmingPurchase so the next
-                            // gb.run has joypad=0, guaranteeing a fresh A rising edge for the YES
-                            // confirmation (avoids a held-A false-no-edge).
+                            // Released first, so the YES press is a fresh rising edge.
                             api.release_all_buttons();
                             self.set_pokemart_state(PokemartState::ConfirmingPurchase(item));
                             return Ok(());
                         }
 
                         if cur_qty == 0 {
-                            // Qty selector not yet initialized — wait.
                             return Ok(());
                         }
                         let target = item.quantity;
 
-                        // Track consecutive ticks where wItemQuantity didn't change.
                         let (new_qty_last, new_stall_ticks) = if cur_qty == qty_last {
                             (qty_last, stall_ticks + 1)
                         } else {
@@ -2929,8 +2645,7 @@ CascadeBadge; not cutting".to_string(),
                             *st = new_stall_ticks;
                         }
 
-                        // Stall AND at target → stuck in post-confirm price-text before Yes/No.
-                        // Only mash A here; when qty != target we keep pressing Up/Down below.
+                        // Stalled at the target: the price text.
                         if new_stall_ticks >= 8 && cur_qty == target {
                             api.toggle_button(JoypadButton::A);
                             return Ok(());
@@ -2945,10 +2660,9 @@ CascadeBadge; not cutting".to_string(),
                         }
                     }
 
-                    // Select Yes on the Yes/No confirmation, navigate to YES and press A.
                     PokemartState::ConfirmingPurchase(item) => {
                         if menu.map_or(false, |m| m.is_mart_item_list()) {
-                            // B-cancel from Yes/No (wrong qty) sent us back to the item list.
+                            // B from YES/NO on the wrong quantity lands back on the item list.
                             api.release_all_buttons();
                             self.set_pokemart_state(PokemartState::ChoosingItem(*item));
                             return Ok(());
@@ -2977,27 +2691,20 @@ CascadeBadge; not cutting".to_string(),
                         }
                     }
 
-                    // Purchase was confirmed; advance post-purchase text with B, then cancel the
-                    // item list that .buyMenuLoop re-opens.
+                    // B through the text, then cancel the re-opened item list.
                     PokemartState::PurchasedItem { ticks } => {
                         let ticks = *ticks;
-                        // NLL: borrow of self.state via pokemart_state ends here (value copied)
                         if menu.map_or(false, |m| m.is_mart_buy_sell_menu()) {
                             api.release_all_buttons();
-                            // One mart visit can be several purchases, because Potions and Poké
-                            // Balls are one errand and the model was paying two overworld turns
-                            // and two mart turns for it.
+                            // One visit can be several purchases.
                             let money = api.game_state().map(|s| s.money).unwrap_or(0);
                             match self.policy.next_mart_purchase().and_then(|item| affordable(api, money, item)) {
                                 Some(item) => self.set_pokemart_state(PokemartState::ChoosingBuyOption(item)),
                                 None => self.set_pokemart_state(PokemartState::Quitting),
                             }
                         } else if menu.map_or(false, |m| m.is_yes_no_menu()) {
-                            // HandleMenuInput runs Delay3 (3 VBlanks ≈ 50ms) before reading
-                            // joypad.
                             api.toggle_button(JoypadButton::A);
                         } else {
-                            // Post-purchase text or transitional state — pulse B to advance.
                             let new_ticks = ticks + 1;
                             if let AgentState::PokemartShopping(PokemartState::PurchasedItem { ticks: ref mut t }) = self.state {
                                 *t = new_ticks;
@@ -3018,7 +2725,6 @@ CascadeBadge; not cutting".to_string(),
                                     _ => api.toggle_button(JoypadButton::Up),
                                 }
                             } else {
-                                // Still in post-purchase text or a transition menu — press B.
                                 api.toggle_button(JoypadButton::B);
                             }
                         } else {
@@ -3030,9 +2736,7 @@ CascadeBadge; not cutting".to_string(),
             AgentState::TeachingMove { item, target_slot, press, entered_menu, settle, evolve_from } => {
                 use crate::pokemon::menu::TextBoxId;
                 let gs = api.game_state()?;
-                // Done once the mon knows the move (teach) — or, for an evolution stone, once the
-                // slot's species has changed away from `evolve_from` (the evolve animation/text
-                // has committed).
+                // Done once the move is known or, for a stone, the species has changed.
                 let consumed = entered_menu && api.bag_item_position(item).is_none();
                 let done = match evolve_from {
                     Some(from) => gs.pokemon.get(target_slot as usize).map_or(false, |p| p.species != from),
@@ -3061,9 +2765,7 @@ CascadeBadge; not cutting".to_string(),
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
-                // Returned to the overworld without learning — this attempt fizzled (e.g. a
-                // mis-nav); bail so `pick_field_move` re-issues TeachMove and we start the menu
-                // chain fresh.
+                // Back in the overworld without learning: start the chain afresh.
                 if entered_menu && game_mode == GameMode::Overworld {
                     api.release_all_buttons();
                     self.set_state(AgentState::Idle);
@@ -3071,8 +2773,7 @@ CascadeBadge; not cutting".to_string(),
                 }
                 let entered_menu = entered_menu || game_mode != GameMode::Overworld;
 
-                // Plain press/release "mashing" — a fresh rising edge every 2 ticks (see
-                // CuttingTree).
+                // Press and release on alternate ticks, for a fresh rising edge every two.
                 if !press {
                     api.release_all_buttons();
                     self.set_state(AgentState::TeachingMove { item, target_slot, press: true, entered_menu, settle: 0, evolve_from });
@@ -3086,15 +2787,13 @@ CascadeBadge; not cutting".to_string(),
                     else if cur > target { JoypadButton::Up }
                     else { JoypadButton::A }
                 };
-                // Drive each menu of the teach chain to its target index, then confirm with A.
                 let button = if game_mode == GameMode::Overworld {
                     JoypadButton::Start // no menu yet → open START
                 } else if (top_x, top_y) == START_MENU_ORIGIN {
-                    // Not a literal 2 — see `start_menu_row`.
+                    // Not a literal 2; see `start_menu_row`.
                     nav(current, start_menu_row(api, StartMenuRow::Item))
                 } else if tbid == Some(TextBoxId::ListMenuBox) {
-                    // Bag list → the item's row (absolute index = cursor + scroll), then A to
-                    // select it.
+                    // Absolute index is cursor plus scroll.
                     match api.bag_item_position(item) {
                         Some(target_idx) => nav(current + scroll, target_idx),
                         None => JoypadButton::B,
@@ -3113,9 +2812,6 @@ CascadeBadge; not cutting".to_string(),
                 self.set_state(AgentState::TeachingMove { item, target_slot, press: false, entered_menu, settle: 0, evolve_from });
             }
             AgentState::CuttingTree { press, entered_menu, tree_pos, slot, move_index, from_row } => {
-                
-                // A successful Cut opens the Pokémon menu, plays a fade/animation, then returns
-                // to the overworld.
                 if entered_menu && game_mode == GameMode::Overworld {
                     self.cut_tiles.insert((api.game_state()?.map.map, tree_pos));
                     if from_row {
@@ -3130,17 +2826,13 @@ CascadeBadge; not cutting".to_string(),
                 }
                 let entered_menu = entered_menu || game_mode != GameMode::Overworld;
 
-                // Plain press/release "mashing": press a button on a press tick, clear all on a
-                // release tick.
                 if !press {
                     api.release_all_buttons();
                     self.set_state(AgentState::CuttingTree { press: true, entered_menu, tree_pos, slot, move_index, from_row });
                     return Ok(());
                 }
 
-                // In the overworld a Down/Up would move the player off the tree, so there we only
-                // open the menu; from there the shared chain drives to CUT on the mon that knows
-                // it.
+                // Up or Down here would move the player off the tree.
                 let button = if game_mode == GameMode::Overworld {
                     JoypadButton::Start // facing the tree, no menu yet → open START
                 } else {
@@ -3151,14 +2843,10 @@ CascadeBadge; not cutting".to_string(),
                 self.set_state(AgentState::CuttingTree { press: false, entered_menu, tree_pos, slot, move_index, from_row });
             }
             AgentState::Surfing { press, entered_menu, water_pos, slot, move_index, resume, settle } => {
-                
-                // Mounting Surf opens the party menu, plays the field-move menu + a mount
-                // animation, then returns to the overworld now surfing (the game auto-steps onto
-                // the water tile).
                 if entered_menu && game_mode == GameMode::Overworld {
                     api.release_all_buttons();
                     let mounted = api.mmu().read_pointer(&pokered_symbols::wWalkBikeSurfState) == 2;
-                    // A *sustained* overworld, for the reason `TeachingMove`'s `settle` gives.
+                    // Wait for a sustained overworld before handing back.
                     if mounted && settle < MOUNT_SETTLE_TICKS {
                         self.set_state(AgentState::Surfing {
                             press, entered_menu, water_pos, slot, move_index, resume, settle: settle + 1 });
@@ -3167,7 +2855,7 @@ CascadeBadge; not cutting".to_string(),
                     if mounted {
                         self.event(AgentEvent::TextBox { message: format!("Surfed onto the water at {water_pos}") });
                     }
-                    // Back to the walk, not to the policy — see `Surfing::resume`.
+                    // Back to the walk, not the policy.
                     let same_map = api.game_state().map(|g| g.map.map);
                     match resume {
                         Some((destination, map)) if mounted && same_map == Ok(map) =>
@@ -3178,7 +2866,7 @@ CascadeBadge; not cutting".to_string(),
                     }
                     return Ok(());
                 }
-                // A refused surf has to be *remembered*, or the same tile is chosen again.
+                // A refused surf is remembered, or the same tile is chosen again.
                 if api.on_screen_text(false).map_or(false, |t| t.contains("No SURFing")) {
                     let now = api.game_state().map(|g| g.map.map).ok();
                     let map = now.unwrap_or(self.last_map.unwrap_or(Map::PalletTown));
@@ -3208,7 +2896,6 @@ CascadeBadge; not cutting".to_string(),
                     return Ok(());
                 }
 
-                // Plain press/release mashing (see CuttingTree).
                 if !press {
                     api.release_all_buttons();
                     self.set_state(AgentState::Surfing {
@@ -3217,8 +2904,7 @@ CascadeBadge; not cutting".to_string(),
                 }
 
                 let button = if game_mode == GameMode::Overworld {
-                    // No menu yet: face the water tile first (a walk step brought us adjacent but
-                    // maybe facing another way), then open START.
+                    // Face the water first, then open START.
                     let gs = self.observe_state(api)?;
                     let facing_water = gs.map.tile_in_front().map(|(p, _)| p == water_pos).unwrap_or(false);
                     if facing_water {
@@ -3227,7 +2913,6 @@ CascadeBadge; not cutting".to_string(),
                         dir_to(gs.map.player_position, water_pos).unwrap_or(JoypadButton::Start)
                     }
                 } else {
-                    // SURF is the surf mon's only field move, hence index 0.
                     field_move_menu_button(api, slot, move_index)
                 };
                 api.release_all_buttons();
@@ -3236,21 +2921,16 @@ CascadeBadge; not cutting".to_string(),
                     press: false, entered_menu, water_pos, slot, move_index, resume, settle: 0 });
             }
             AgentState::UsingFieldMove { press, entered_menu, slot, move_index, from_map, resume, settle } => {
-                
                 let map_changed = api.game_state().map_or(false, |s| s.map.map != from_map);
                 if entered_menu && (game_mode == GameMode::Overworld || map_changed) {
                     api.release_all_buttons();
-                    // A *sustained* overworld before a push is handed back — see `settle` on this
-                    // variant.
+                    // Wait for a sustained overworld before handing back.
                     if resume.is_some() && !map_changed && settle < MOUNT_SETTLE_TICKS {
                         self.set_state(AgentState::UsingFieldMove {
                             press, entered_menu, slot, move_index, from_map, resume, settle: settle + 1 });
                         return Ok(());
                     }
-                    // A push that came here to arm STRENGTH is given straight back, rather than
-                    // dropping to `Idle` and costing a whole decision to say "now push it" —
-                    // which for the model is a paid request and for the scripted policy is a step
-                    // that has to remember the flag.
+                    // Arming Strength hands straight back to the push, not to a new decision.
                     match resume.filter(|_| !map_changed) {
                         Some((boulder, dir)) =>
                             self.set_state(AgentState::PushingBoulder { boulder, dir, armed: true }),
@@ -3260,7 +2940,6 @@ CascadeBadge; not cutting".to_string(),
                 }
                 let entered_menu = entered_menu || game_mode != GameMode::Overworld;
 
-                // Plain press/release mashing (see CuttingTree).
                 if !press {
                     api.release_all_buttons();
                     self.set_state(AgentState::UsingFieldMove { press: true, entered_menu, slot, move_index, from_map, resume, settle: 0 });
@@ -3278,7 +2957,6 @@ CascadeBadge; not cutting".to_string(),
             }
             AgentState::TossingItem { item, press, entered_menu } => {
                 use crate::pokemon::menu::TextBoxId;
-                // Done once the item has left the bag.
                 if entered_menu && api.bag_item_position(item).is_none() {
                     if game_mode != GameMode::Overworld {
                         api.release_all_buttons();
@@ -3291,8 +2969,7 @@ CascadeBadge; not cutting".to_string(),
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
-                // Back in the overworld with the item still held — the attempt fizzled; let the
-                // policy re-issue it and start the menu chain fresh.
+                // Back in the overworld with the item still held: let the policy re-issue it.
                 if entered_menu && game_mode == GameMode::Overworld {
                     api.release_all_buttons();
                     self.set_state(AgentState::Idle);
@@ -3314,10 +2991,9 @@ CascadeBadge; not cutting".to_string(),
                 let button = if game_mode == GameMode::Overworld {
                     JoypadButton::Start
                 } else if (top_x, top_y) == START_MENU_ORIGIN {
-                    // Not a literal 2 — see `start_menu_row`.
+                    // Not a literal 2; see `start_menu_row`.
                     nav(current, start_menu_row(api, StartMenuRow::Item))
                 } else if tbid == Some(TextBoxId::ListMenuBox) {
-                    // Bag list → the item's row.
                     match api.bag_item_position(item) {
                         Some(target_idx) => nav(current + scroll, target_idx),
                         None => JoypadButton::B,
@@ -3334,36 +3010,31 @@ CascadeBadge; not cutting".to_string(),
                 self.set_state(AgentState::TossingItem { item, press: false, entered_menu });
             }
             AgentState::SolvingBoulderPuzzle { boulder: which, target, hole, pushes, settle } => {
-                /// Absolute ceiling on the shoves one goal may spend, so that "a plan is always
-                /// found and never completes" cannot become the 279 009-turn loop this whole
-                /// feature was written to end.
+                /// Absolute ceiling on the shoves one goal may spend.
                 const MAX_PUSHES: u8 = 120;
-                /// The bound that actually protects anything: shoves since the plan last got
-                /// shorter.
+                /// The bound that protects: shoves since the plan last got shorter.
                 const MAX_PUSHES_WITHOUT_PROGRESS: u8 = 12;
-                /// And the bound for the shoves that never happen at all.
+                /// Shoves the game never answered.
                 const MAX_SILENT_SHOVES: u8 = 3;
                 /// Ticks to let a shove's script and its dust settle before re-planning.
                 const SETTLE_TICKS: u16 = 12;
 
                 let game_state = self.observe_state(api)?;
-                // Success is checked before the mode is, because success is what changes the
-                // mode.
+                // Success first, because success is what changes the mode.
                 if self.boulder_goal.is_some()
                     && pushes > 0
                     && !hole
                     && game_state.map.boulders().contains(&target)
                 {
                     self.boulder_goal = None;
-                    // `self.event`, not `new_events.push` — this arm `return`s, and an early
-                    // return jumps clean over the `new_events` drain at the bottom of `tick`.
+                    // `self.event`, not `new_events.push`: this arm returns before the drain.
                     self.event(AgentEvent::OverworldActionCompleted {
                         destination: MetaTile::BoulderGoal { boulder: which, at: target, hole } });
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
                 if game_state.mode != GameMode::Overworld {
-                    // The goal survives, which is the same argument `resume_after_battle` makes.
+                    // The goal survives the interruption.
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
@@ -3373,23 +3044,20 @@ CascadeBadge; not cutting".to_string(),
                     return Ok(());
                 }
                 let live = game_state.map.boulders();
-                // A push moves a boulder exactly one tile, so the one this goal named is either
-                // still on its square or on a neighbour.
+                // A push moves a boulder one tile, to a neighbour.
                 let step_away = |b: &Point8| (b.x as i32 - which.x as i32).abs()
                                            + (b.y as i32 - which.y as i32).abs();
                 let moved_to = live.iter().copied().min_by_key(step_away)
                     .filter(|b| step_away(b) <= 1);
 
-                // Done, and a switch and a hole are done differently — which is the whole of the
-                // Seafoam B3F defect.
+                // A switch keeps its boulder and a hole swallows it, so they complete differently.
                 let done = pushes > 0 && match hole {
                     false => live.contains(&target),
                     true => live.contains(&target) || (!live.contains(&which) && moved_to.is_none()),
                 };
                 if done {
                     self.boulder_goal = None;
-                    // `self.event`, not `new_events.push` — this arm `return`s, and an early
-                    // return jumps clean over the `new_events` drain at the bottom of `tick`.
+                    // `self.event`, not `new_events.push`: this arm returns before the drain.
                     self.event(AgentEvent::OverworldActionCompleted {
                         destination: MetaTile::BoulderGoal { boulder: which, at: target, hole } });
                     self.set_state(AgentState::Idle);
@@ -3407,8 +3075,7 @@ CascadeBadge; not cutting".to_string(),
                     );
                     return Ok(());
                 }
-                // Re-planned every time rather than held: the floor moves under a stored plan,
-                // and the search is capped and cheap on a map with a handful of boulders.
+                // Re-planned every time: the floor moves under a stored plan.
                 let which = moved_to.unwrap_or(which);
                 if let Some((map, _, target, hole)) = self.boulder_goal {
                     self.boulder_goal = Some((map, which, target, hole));
@@ -3427,8 +3094,7 @@ CascadeBadge; not cutting".to_string(),
                         api.release_all_buttons();
                         self.set_state(AgentState::PushingBoulder { boulder, dir: push, armed: false });
                     }
-                    // `NoRoute`, and it is honest here: the layout in front of us has no
-                    // solution, which for this row is exactly "the action cannot be carried out".
+                    // No solution from this layout.
                     None => {
                         self.boulder_goal = None;
                         let at = Some(game_state.map.player_position);
@@ -3442,12 +3108,9 @@ CascadeBadge; not cutting".to_string(),
             }
             AgentState::PushingBoulder { boulder, dir, armed } => {
                 let game_state = self.observe_state(api)?;
-                // Any interruption (wild battle in the cave, a script/text box) — drop to Idle.
                 if game_state.mode != GameMode::Overworld {
                     api.release_all_buttons();
-                    // A goal in flight ends with it: the interruption may be a battle that moves
-                    // the player, and a puzzle resumed onto a floor nobody is standing on is
-                    // worse than one handed back.
+                    // The goal ends too: a battle may move the player off the floor.
                     self.boulder_goal = None;
                     self.set_state(AgentState::Idle);
                     return Ok(());
@@ -3456,11 +3119,9 @@ CascadeBadge; not cutting".to_string(),
                 let boulder_at = |p: Point8| map.sprites.iter()
                     .any(|s| s.name.starts_with("Boulder") && !s.hidden && s.position == p);
 
-                // Done the moment the boulder leaves its tile — it moved one step (into `boulder
-                // + dir`) or fell through a hole.
+                // Done once the boulder leaves its tile, one step on or down a hole.
                 if !boulder_at(boulder) {
                     api.release_all_buttons();
-                    // One shove of a goal is not the end of the decision.
                     match self.boulder_goal {
                         Some((_, boulder, target, hole)) => {
                             self.boulder_shove_landed();
@@ -3471,8 +3132,7 @@ CascadeBadge; not cutting".to_string(),
                     }
                     return Ok(());
                 }
-                // Asked every tick, not once on the way in, and it is what ends this state on
-                // anything but success.
+                // Asked every tick: it ends this state on anything but success.
                 if let Some(refusal) = map.boulder_push_refusal(boulder, dir) {
                     api.release_all_buttons();
                     self.event(AgentEvent::TextBox { message: refusal });
@@ -3489,8 +3149,7 @@ CascadeBadge; not cutting".to_string(),
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
-                // STRENGTH is armed here rather than asked for, and that is the whole reason
-                // there is no separate arming decision.
+                // Strength is armed here rather than asked for.
                 if !game_state.strength_active {
                     api.release_all_buttons();
                     let carrier = crate::pokemon::policy::field_move_carrier(
@@ -3512,7 +3171,7 @@ CascadeBadge; not cutting".to_string(),
                         from_map: game_state.map.map, resume: Some((boulder, dir)), settle: 0 });
                     return Ok(());
                 }
-                // The tile the player must stand on to push: one step *behind* the boulder.
+                // The push tile, one step behind the boulder.
                 let opposite = match dir {
                     JoypadButton::Up => JoypadButton::Down, JoypadButton::Down => JoypadButton::Up,
                     JoypadButton::Left => JoypadButton::Right, JoypadButton::Right => JoypadButton::Left,
@@ -3525,13 +3184,11 @@ CascadeBadge; not cutting".to_string(),
                 };
 
                 if map.player_position != behind {
-                    // Walk to the push tile.
                     match map.route_to_push_tile(behind).and_then(|r| r.first().copied()) {
                         Some(btn) => { api.release_all_buttons(); api.press_button(btn); }
                         None => { api.release_all_buttons(); self.set_state(AgentState::Idle); return Ok(()); }
                     }
                 } else {
-                    // Behind the boulder: face + hold the push direction.
                     api.release_all_buttons();
                     api.press_button(dir);
                 }
@@ -3545,43 +3202,33 @@ CascadeBadge; not cutting".to_string(),
             AgentState::SellingToMart(s) => return crate::pokemon::postgame::game_corner::sell_tick(self, api, s),
             AgentState::RedeemingPrize(s) => return crate::pokemon::postgame::game_corner::prize_tick(self, api, s),
             AgentState::UsingBagItem(s) => return crate::pokemon::postgame::items::tick(self, api, s),
-            // Reserved seams (task 0.8) — one delegating line each; the bodies live with their
-            // owners.
             AgentState::CheckingTrashCan { target, checked, press, facing } => {
-                // Checking a can triggers GymTrashScript, which prints a text box (leaving the
-                // overworld).
+                // Checking a can runs `GymTrashScript`, which leaves the overworld.
                 if checked && game_mode == GameMode::Overworld {
                     api.release_all_buttons();
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
                 if game_mode != GameMode::Overworld {
-                    // The check's text box / script is up — advance it by mashing A.
                     api.release_all_buttons();
                     if press { api.press_button(JoypadButton::A); }
                     self.set_state(AgentState::CheckingTrashCan { target, checked: true, press: !press, facing });
                     return Ok(());
                 }
-                // In the overworld: route to a tile adjacent to the can and face it, then check
-                // it.
                 let gs = self.observe_state(api)?;
                 match gs.map.route_to_face_dir(target, facing).as_deref() {
                     Some([]) => {
-                        // Adjacent and facing the can — mash A (clean press/release edges) to
-                        // check it.
                         api.release_all_buttons();
                         if press { api.press_button(JoypadButton::A); }
                         self.set_state(AgentState::CheckingTrashCan { target, checked, press: !press, facing });
                     }
                     Some(&[btn, ..]) => {
-                        // Walk/turn toward the can; hold the direction for continuous movement.
                         api.release_all_buttons();
                         api.press_button(btn);
                         self.set_state(AgentState::CheckingTrashCan { target, checked, press: true, facing });
                     }
                     _ => {
-                        // No reachable tile adjacent to the target — abort so we don't spin
-                        // forever.
+                        // No reachable tile beside the target.
                         let what = gs.map.tile_at_checked(target)
                             .map(|tile| format!("{tile}"))
                             .unwrap_or_else(|| "a square that is not on this map".to_string());
@@ -3594,7 +3241,7 @@ CascadeBadge; not cutting".to_string(),
             }
             AgentState::UsingElevator { panel, floor, selected, press } => {
                 let gs = self.observe_state(api)?;
-                // Rode the elevator out — the map is no longer an elevator room.
+                // Rode the elevator out.
                 let in_elevator = matches!(gs.map.map,
                     Map::RocketHideoutElevator | Map::SilphCoElevator | Map::CeladonMartElevator);
                 if !in_elevator {
@@ -3602,13 +3249,9 @@ CascadeBadge; not cutting".to_string(),
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
-                // Floor list-menu is up: navigate the cursor (wCurrentMenuItem) to `floor`, then
-                // A.
                 const SPECIAL_LIST_MENU: u8 = 0x04;
                 if !selected && api.list_menu_id() == SPECIAL_LIST_MENU {
-                    // The floor menu scrolls (Silph Co has 11 floors), so the cursor position
-                    // within the visible window (`current_item`) caps out — compare the
-                    // *absolute* index (`current_item + scroll_offset`) against the target floor.
+                    // The floor menu scrolls, so compare the absolute index with the target floor.
                     let current = api.menu_state().map(|m| m.list_absolute_index()).unwrap_or(0);
                     api.release_all_buttons();
                     let mut selected = selected;
@@ -3623,14 +3266,12 @@ CascadeBadge; not cutting".to_string(),
                     self.set_state(AgentState::UsingElevator { panel, floor, selected, press: !press });
                     return Ok(());
                 }
-                // Non-overworld and not (yet) the floor list.
                 if game_mode != GameMode::Overworld {
                     api.toggle_button(JoypadButton::A);
                     self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true });
                     return Ok(());
                 }
                 if !selected {
-                    // Face the panel and press A to open the floor menu.
                     match gs.map.route_to_face(panel).as_deref() {
                         Some([]) => {
                             api.release_all_buttons();
@@ -3649,8 +3290,7 @@ CascadeBadge; not cutting".to_string(),
                         }
                     }
                 } else {
-                    // Floor picked and the menu redirected the exit warp — step onto it to ride
-                    // out.
+                    // Floor picked and the exit warp redirected: step onto it.
                     let warp = gs.map.actions().into_iter()
                         .find(|a| matches!(a.tile, MetaTile::Warp { .. }));
                     match warp.as_ref().and_then(|a| a.route.first().copied()) {
@@ -3669,15 +3309,12 @@ CascadeBadge; not cutting".to_string(),
             }
             AgentState::UsingFieldItem { item, target, press, entered_menu, backing_out } => {
                 use crate::pokemon::menu::TextBoxId;
-                // Back in the overworld after entering the bag menus → this attempt has resolved
-                // (the item's effect ran and, for the Poké Flute, its battle was fought).
+                // Back in the overworld after the bag menus: done.
                 if entered_menu && game_mode == GameMode::Overworld {
                     api.release_all_buttons();
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
-                // Still in the overworld: route to face the target sprite, then open the bag with
-                // START.
                 if game_mode == GameMode::Overworld {
                     let gs = self.observe_state(api)?;
                     match gs.map.route_to_face(target).as_deref() {
@@ -3699,9 +3336,7 @@ CascadeBadge; not cutting".to_string(),
                     }
                     return Ok(());
                 }
-                // The generic net for a refusal the table could not predict, and the reason it
-                // exists even though `item_use::field_use_refusal` already turns the known ones
-                // away: a refusal can be *contextual*.
+                // A contextual refusal `item_use::field_use_refusal` could not predict.
                 if entered_menu && backing_out == 0
                     && api.on_screen_text(false).is_some_and(|t| shows_battle_refusal(&t)) {
                     self.event(AgentEvent::TextBox { message: format!(
@@ -3719,7 +3354,6 @@ CascadeBadge; not cutting".to_string(),
                         item, target, press: !press, entered_menu, backing_out: backing_out - 1 });
                     return Ok(());
                 }
-                // In the bag menus.
                 if !press {
                     api.release_all_buttons();
                     self.set_state(AgentState::UsingFieldItem { item, target, press: true, entered_menu: true, backing_out });
@@ -3730,9 +3364,8 @@ CascadeBadge; not cutting".to_string(),
                 let nav = |cur: u8, tgt: u8| -> JoypadButton {
                     if cur < tgt { JoypadButton::Down } else if cur > tgt { JoypadButton::Up } else { JoypadButton::A }
                 };
-                // Drive START → ITEM → (bag) item → USE.
                 let button = if (top_x, top_y) == START_MENU_ORIGIN {
-                    // Not a literal 2 — see `start_menu_row`.
+                    // Not a literal 2; see `start_menu_row`.
                     nav(current, start_menu_row(api, StartMenuRow::Item))
                 } else if tbid == Some(TextBoxId::ListMenuBox) {
                     let target_idx = api.bag_item_position(item).unwrap_or(0);
@@ -3747,10 +3380,9 @@ CascadeBadge; not cutting".to_string(),
                 self.set_state(AgentState::UsingFieldItem { item, target, press: false, entered_menu: true, backing_out });
             }
             AgentState::NamingPokemon { species, decided, ticks } => {
-                /// Agent ticks (20 ms each) the *submitted* naming screen gets to close itself.
+                /// Ticks the submitted naming screen gets to close itself.
                 const NAMING_BUDGET: u16 = 1500;
                 if decided && ticks > NAMING_BUDGET {
-                    // The screen has not closed and it is not going to.
                     self.event(AgentEvent::TextBox { message: format!(
                         "naming screen for {species:?} never closed in {NAMING_BUDGET} ticks; giving up") });
                     api.release_all_buttons();
@@ -3758,8 +3390,7 @@ CascadeBadge; not cutting".to_string(),
                     return Ok(());
                 }
                 if decided {
-                    // Buffer already written; keep pulsing START until DisplayNamingScreen exits
-                    // (wFontLoaded → 0, so game_mode leaves TextBox/NamingScreen).
+                    // The buffer is written: pulse START until `DisplayNamingScreen` exits.
                     let submitted = api.mmu().read_pointer(&pokered_symbols::wNamingScreenSubmitName) != 0;
                     api.toggle_button(if submitted { JoypadButton::A } else { JoypadButton::Start });
                     let still_in_naming = matches!(
@@ -3774,14 +3405,12 @@ CascadeBadge; not cutting".to_string(),
                         self.set_state(AgentState::NamingPokemon { species, decided, ticks: ticks + 1 });
                     }
                 } else {
-                    // The only one of the five poll sites with no state of its own already in
-                    // hand.
+                    // The one poll site with no game state already in hand.
                     if let Ok(game_state) = api.game_state() {
                         self.poll_policy(&game_state, api);
                     }
                     if let Some(decision) = self.policy.pick_nickname(species) {
-                        // Write the nickname directly into the naming screen's string buffer,
-                        // bypassing character-grid navigation.
+                        // Written straight into the buffer, bypassing the character grid.
                         api.write_naming_screen_buffer(decision.as_deref())?;
                         self.set_state(AgentState::NamingPokemon { species, decided: true, ticks: 0 });
                     } else {
@@ -3811,8 +3440,7 @@ fn dir_to(from: Point8, to: Point8) -> Option<JoypadButton> {
     }
 }
 
-/// The tile one step from `from` in direction `btn` (None for a non-directional button or if the
-/// step would underflow off the top/left edge).
+/// The tile one step from `from` towards `btn`, or `None` off the top or left edge.
 fn step_pos(from: Point8, btn: JoypadButton) -> Option<Point8> {
     match btn {
         JoypadButton::Up    => (from.y > 0).then(|| Point8 { x: from.x, y: from.y - 1 }),
@@ -3832,8 +3460,8 @@ enum MenuEvidence {
     OrTheLingeringIds,
 }
 
-/// True when what is on screen is a menu — something the agent can leave with B — rather than a
-/// conversation, which it has to confirm with A.
+/// True when the screen shows a menu the agent can leave with B, rather than a conversation to
+/// confirm with A.
 fn open_menu_on_screen(api: &PokemonApi<'_>, evidence: MenuEvidence) -> bool {
     if evidence == MenuEvidence::OrTheLingeringIds
         && api.menu_state().is_some_and(|m| m.is_list_menu() || m.is_field_move_menu()) {
@@ -3844,8 +3472,7 @@ fn open_menu_on_screen(api: &PokemonApi<'_>, evidence: MenuEvidence) -> bool {
     screen.contains("CANCEL") || is_start_menu(top_x, top_y, &screen)
 }
 
-/// A row of the game's own START menu, named rather than numbered. See [`start_menu_row`] for why
-/// the number is not a constant.
+/// A row of the START menu, named because its index depends on the Pokédex.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum StartMenuRow {
     Pokemon,
@@ -3861,10 +3488,8 @@ pub(crate) fn start_menu_row(api: &PokemonApi<'_>, row: StartMenuRow) -> u8 {
     }
 }
 
-/// The party slot (0-based) of the first Pokémon that knows Surf — the mon the Surf-mount menu
-/// picks. The button that advances the field-move menu chain — START → POKéMON → the mon in
-/// `slot` → the field move at `move_index` — from whatever screen is currently up, plus A for the
-/// text in between.
+/// The button that advances START→POKéMON→mon at `slot`→field move at `move_index` from whatever
+/// screen is up, and A for the text between.
 pub(crate) fn field_move_menu_button(api: &PokemonApi<'_>, slot: u8, move_index: u8) -> JoypadButton {
     let (top_x, top_y, current, _) = api.menu_geometry();
     let nav = |target: u8| -> JoypadButton {
@@ -3873,7 +3498,7 @@ pub(crate) fn field_move_menu_button(api: &PokemonApi<'_>, slot: u8, move_index:
         else { JoypadButton::A }
     };
     if (top_x, top_y) == START_MENU_ORIGIN {
-        // Not a literal 1 — see `start_menu_row`.
+        // Not a literal 1; see `start_menu_row`.
         nav(start_menu_row(api, StartMenuRow::Pokemon))
     } else if top_x == 0 && (top_y == 1 || top_y == 3) {
         nav(slot) // party menu → the mon that knows the move
@@ -3884,7 +3509,7 @@ pub(crate) fn field_move_menu_button(api: &PokemonApi<'_>, slot: u8, move_index:
     }
 }
 
-/// Finds a grass tile orthogonally adjacent to `pos` in `map`, returning the first one found.
+/// Two plain floor tiles to pace between: a neighbour of `pos` and one of its neighbours.
 fn adjacent_pacing_pair(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> Option<(Point8, Point8)> {
     let plain = |p: Point8| (p.x as usize) < map.width && (p.y as usize) < map.height
         && map.meta_tiles[p.x as usize + p.y as usize * map.width] == MetaTile::Empty;
@@ -3912,8 +3537,7 @@ fn adjacent_grass(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> O
     })
 }
 
-/// True if the player is on the outermost row/column of the (expanded) map — i.e. an edge
-/// warp/connection tile that fires by stepping off the map edge rather than by stepping on.
+/// True on the outermost row or column, where an edge warp fires by stepping off the map.
 fn is_on_map_border(map: &crate::pokemon::tile_map::MetaTileMap) -> bool {
     let pos = map.player_position;
     pos.x == 0
@@ -3929,8 +3553,7 @@ mod tests {
     use crate::pokemon::item::ItemId;
     use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 
-    /// `impl Display for AgentEvent` is what the web UI puts in its log — `host.rs` does
-    /// `format!("{event}")` into `UiEventBody::Agent { text }` and the page prints it verbatim.
+    /// A battle turn formats as a sentence.
     #[test]
     fn a_battle_turn_reads_as_a_sentence() {
         let say = |action| format!("{}", AgentEvent::BattleActionStarted {
@@ -3956,8 +3579,7 @@ mod tests {
         assert_eq!(say(BattleAction::SafariBall), "threw a Safari Ball at Pidgey");
     }
 
-    /// The last line of a playthrough, and the one most likely to be read by someone who was not
-    /// watching.
+    /// A win formats as a sentence.
     #[test]
     fn a_win_reads_as_a_sentence() {
         let said = format!("{}", AgentEvent::HallOfFame {
@@ -3970,7 +3592,7 @@ mod tests {
         assert_eq!(said, "🏆 entered the HALL OF FAME with 8 badges after 06:12:44 of play, with VAPOREON, ARTICUNO");
     }
 
-    /// A ball is thrown at the enemy, and every other bag item is used on your own Pokémon.
+    /// A ball is thrown at the enemy; every other bag item is used on your own Pokémon.
     #[test]
     fn a_ball_is_thrown_at_the_enemy_and_a_potion_is_not() {
         let say = |item| format!("{}", AgentEvent::BattleActionStarted {
@@ -3985,9 +3607,7 @@ mod tests {
         assert_eq!(say(ItemId::XAttack), "used XAttack on BULBASAUR", "an X item acts on your own side");
     }
 
-    /// The abort reason is the most useful thing the agent says — it is what stops the model
-    /// re-picking a route that cannot be walked — and it goes to the model as well as the page,
-    /// so `NoRoute(Grass)` was costing both of them.
+    /// An abandoned walk says why, and where when it knows.
     #[test]
     fn an_abandoned_walk_says_why() {
         let event = AgentEvent::OverworldActionAborted {
@@ -3996,7 +3616,6 @@ mod tests {
             at: None,
         };
         assert_eq!(format!("{event}"), "✗ gave up on the PC: a battle started");
-        // The square is the fact the model needs and the reason on its own was not.
         let blocked = AgentEvent::OverworldActionAborted {
             destination: MetaTile::Pc,
             reason: OverworldActionAbortedReason::Textbox,
@@ -4009,10 +3628,7 @@ mod tests {
         );
     }
 
-    /// An action the model is never told the outcome of is an action it cannot learn from, and
-    /// walking in grass was one for the whole life of this codebase: the walk handed over to
-    /// `PacingForEncounters` and that state left by three doors and reported through none of
-    /// them.
+    /// A pace in grass reports how it ended.
     #[test]
     fn walking_in_grass_says_what_became_of_it() {
         let nothing = AgentEvent::OverworldActionAborted {
@@ -4024,12 +3640,8 @@ mod tests {
             format!("{nothing}"),
             "✗ gave up on tall grass at (6, 29): nothing appeared after 60 seconds of game time walking about in it",
         );
-        // The budget is quoted rather than described.
         assert!(format!("{nothing}").contains(&format!("{PACING_BUDGET_SECS} seconds")));
 
-        // An encounter ends the same action, reported the way an interrupted walk always has
-        // been: the pace is over and the policy is about to be asked again, which is what every
-        // member of this enum means.
         let met_something = AgentEvent::OverworldActionAborted {
             destination: MetaTile::Grass,
             reason: OverworldActionAbortedReason::Battle,
@@ -4055,8 +3667,7 @@ mod tests {
              the cast was refused because you are surfing, and a cast is made from land",
         );
 
-        // The rod is named, because "there is no rod in the bag" is a different fact from "the
-        // rod this row was minted with has gone".
+        // The rod is named: no rod at all is a different fact from this row's rod having gone.
         let no_rod = AgentEvent::OverworldActionAborted {
             destination: edge,
             reason: OverworldActionAbortedReason::CastRefused(CastRefusal::NoRod(Rod::Old)),
@@ -4065,9 +3676,7 @@ mod tests {
         assert!(format!("{no_rod}").ends_with("the cast was refused because there is no Old Rod in the bag"),
                 "{no_rod}");
 
-        // The budget is quoted from the constant, for the reason `NothingAppeared` quotes
-        // `PACING_BUDGET_SECS`: without a number "the cast never finished" reads as "I did not
-        // wait".
+        // Quoted from the constant.
         let wedged = AgentEvent::OverworldActionAborted {
             destination: edge,
             reason: OverworldActionAbortedReason::CastNeverFinished,
@@ -4081,8 +3690,7 @@ mod tests {
         assert!(format!("{wedged}").contains(&format!(
             "{} seconds", crate::pokemon::postgame::fishing::CAST_BUDGET_SECS)));
 
-        // A shore the walk cannot get to is the sentence that already exists for exactly that,
-        // and it names the row rather than inventing a second phrasing.
+        // An unreachable shore uses the existing no-route sentence.
         let unreachable = AgentEvent::OverworldActionAborted {
             destination: edge,
             reason: OverworldActionAbortedReason::NoRoute(edge),
@@ -4095,8 +3703,7 @@ mod tests {
         );
     }
 
-    /// A pace is a walk, so the two doors that take the state away from outside have to end its
-    /// action too.
+    /// A pace and a Surf mount carrying a walk are open overworld actions; nothing else is.
     #[test]
     fn a_pace_is_an_open_overworld_action_like_the_walk_that_started_it() {
         let pacing = AgentState::PacingForEncounters {
@@ -4113,7 +3720,6 @@ mod tests {
         let walking = AgentState::OverworldMovement { destination: MetaTile::Grass, map: Map::Route18 };
         assert_eq!(walking.open_overworld_action(), Some(MetaTile::Grass));
 
-        // And the third: a Surf mount the walk rides through.
         let mounting = AgentState::Surfing {
             press: true, entered_menu: false,
             water_pos: Point8 { x: 5, y: 24 }, slot: 1, move_index: 0,
@@ -4121,7 +3727,6 @@ mod tests {
         };
         assert_eq!(mounting.open_overworld_action(), Some(MetaTile::Sprite("Fisher 1")));
 
-        // A mount with nothing to resume is not one.
         let asked_for = AgentState::Surfing {
             press: true, entered_menu: false,
             water_pos: Point8 { x: 5, y: 24 }, slot: 1, move_index: 0,
@@ -4129,7 +3734,6 @@ mod tests {
         };
         assert_eq!(asked_for.open_overworld_action(), None);
 
-        // And nothing else is on the list.
         assert_eq!(AgentState::Idle.open_overworld_action(), None);
         assert_eq!(
             AgentState::ReadingTextBox { reader: PokemonTextReader::default() }.open_overworld_action(),
@@ -4137,15 +3741,13 @@ mod tests {
         );
     }
 
-    /// A cut is a row that *does* something at the end of its walk, so its completion is of the
-    /// deed rather than of the journey.
+    /// A cut completes as the deed, not the journey.
     #[test]
     fn a_tree_that_was_cut_down_says_so_in_the_agents_own_voice() {
         let cut = AgentEvent::OverworldActionCompleted {
             destination: MetaTile::Cut { at: Point8 { x: 5, y: 8 } },
         };
         assert_eq!(format!("{cut}"), "✓ cut down the tree at (5, 8)");
-        // Every other destination is an arrival and keeps the sentence it had.
         assert_eq!(
             format!("{}", AgentEvent::OverworldActionCompleted { destination: MetaTile::Pc }),
             "✓ reached the PC",
@@ -4167,12 +3769,10 @@ mod tests {
              the walk was given up after 60 seconds of game time without getting there",
         );
         assert!(!said.contains("no route"), "the route was there on every tick: {said}");
-        // The house rule: this string reaches the model through `AgentEvent`'s `Display`.
         assert!(!said.contains('—'), "no em dashes in what the agent generates: {said}");
     }
 
-    /// A walk that does not say where it is going is the commonest line in the log and the least
-    /// useful.
+    /// A walk names its destination.
     #[test]
     fn a_walk_says_where_it_is_going() {
         let started = |destination| format!("{}", AgentEvent::StartedOverworldAction { destination, id: String::new() });
@@ -4194,7 +3794,7 @@ mod tests {
         );
     }
 
-    /// Talking to someone is that action *succeeding*.
+    /// Talking to someone reads as the action succeeding.
     #[test]
     fn an_interaction_that_landed_reads_as_one() {
         assert_eq!(
@@ -4208,7 +3808,7 @@ mod tests {
         );
     }
 
-    /// The id a model quotes back is not the prose a viewer reads.
+    /// An id keeps the variant name the prose drops.
     #[test]
     fn an_id_keeps_the_variant_name_the_prose_left_behind() {
         assert_eq!(MetaTile::Warp { to_map: Map::OaksLab, to_position: Point8 { x: 5, y: 11 } }.kind(), "Warp");
@@ -4217,19 +3817,17 @@ mod tests {
         assert_eq!(MetaTile::Pc.kind(), "Pc");
     }
 
-    /// A person is named in the id; everything else is its variant.
+    /// A person's id kind is their name; every other variant's is the variant.
     #[test]
     fn a_person_is_named_by_their_id_and_not_called_a_sprite() {
         assert_eq!(MetaTile::Sprite("Mom").id_kind(), "Mom");
         assert_eq!(MetaTile::Sprite("Middle Aged Woman").id_kind(), "MiddleAgedWoman");
         assert_eq!(MetaTile::Sprite("Pokedex 1").id_kind(), "Pokedex1");
 
-        // Every other variant is unchanged: the kind *is* what the model is choosing.
         assert_eq!(MetaTile::Warp { to_map: Map::OaksLab, to_position: Point8 { x: 5, y: 11 } }.id_kind(), "Warp");
         assert_eq!(MetaTile::Pc.id_kind(), "Pc");
         assert_eq!(MetaTile::Grass.id_kind(), "Grass");
 
-        // …and the prose is untouched, spaces and all.
         assert_eq!(format!("{}", MetaTile::Sprite("Middle Aged Woman")), "Middle Aged Woman");
     }
 
@@ -4238,13 +3836,11 @@ mod tests {
         assert!(!AgentEvent::TextBox { message: String::new() }.is_worth_reporting());
         assert!(!AgentEvent::TextBox { message: "   \n ".into() }.is_worth_reporting());
         assert!(AgentEvent::TextBox { message: "Wild PIDGEY appeared!".into() }.is_worth_reporting());
-        // Nothing else is ever dropped: an event with no payload still says something happened.
         assert!(AgentEvent::BattleStarted.is_worth_reporting());
         assert!(AgentEvent::BattleEnded.is_worth_reporting());
     }
 
-    /// Every variant has to produce *something* — an arm that fell through to an empty string
-    /// would show as a blank row rather than as a failure.
+    /// Every event and abort reason formats to something.
     #[test]
     fn no_event_formats_to_nothing() {
         let events = [

@@ -1,4 +1,3 @@
-
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -11,20 +10,16 @@ use gb::lcd_palette::LcdColor;
 
 /// ~2 s of video at 30 fps.
 const VIDEO_CAPACITY: usize = 64;
-/// Events are small and a viewer catching up on a burst of dialogue is normal, so this is
-/// generous.
+/// Generous: a viewer catching up on a burst of dialogue is normal.
 const EVENT_CAPACITY: usize = 1024;
 /// ~1.3 s of audio at 50 packets a second.
 const AUDIO_CAPACITY: usize = 64;
 
 // ── Video
-// ────────────────────────────────────────────────────────────────────────────────────────
 
-/// One video message, encoded once and shared with every subscriber.
 #[derive(Debug, Clone)]
 pub struct VideoMessage {
-    /// Unwrapped, unlike the `u16` on the wire — a late joiner compares these to decide what to
-    /// discard and that comparison is wrong across a wrap (~36 minutes at 30 fps).
+    /// Unwrapped, unlike the wire's `u16`: a late joiner compares these, which fails across a wrap.
     pub seq: u64,
     pub keyframe: bool,
     pub bytes: Arc<[u8]>,
@@ -42,20 +37,17 @@ pub struct FrameSnapshot {
 }
 
 // ── Events
-// ───────────────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct UiEvent {
-    /// Monotonic from process start.
     pub seq: u64,
-    /// Unix milliseconds — when this was published, on the *wall* clock.
+    /// Unix milliseconds on the wall clock, when this was published.
     pub at: u64,
     #[serde(flatten)]
     pub body: UiEventBody,
 }
 
-/// Now, in Unix milliseconds. Saturating rather than `expect`: a host whose clock is set before
-/// 1970 should lose its timestamps, not its run.
+/// Now, in Unix milliseconds; 0 on a clock set before 1970, rather than a panic.
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -65,7 +57,7 @@ pub fn now_ms() -> u64 {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UiEventBody {
-    /// The 10 Hz heartbeat.
+    /// The heartbeat, sent on change.
     Status(Box<StatusSnapshot>),
     /// A [`crate::pokemon::agent::AgentEvent`], flattened.
     Agent { kind: &'static str, text: String },
@@ -73,62 +65,50 @@ pub enum UiEventBody {
     Notice { level: &'static str, message: String },
 
     TurnStarted { turn: u64, kind: &'static str, headline: String },
-    /// One fragment of the assistant's prose, as it arrives.
     AssistantDelta { turn: u64, text: String },
-    /// One fragment of the model's *thinking*, as it arrives, for the endpoints that stream it
-    /// separately from the reply (`reasoning_content`).
+    /// A fragment of the model's thinking, for endpoints that stream `reasoning_content` apart.
     AssistantReasoning { turn: u64, text: String },
-    /// A tool the model called.
     ToolCall { turn: u64, id: String, kind: &'static str, name: String, arguments: String },
     /// What one tool call answered, paired with its [`Self::ToolCall`] by `id`.
     ToolResult { turn: u64, id: String, name: String, ok: bool, content: String, image: bool },
-    /// The terminal call that ended the turn.
     Decision { turn: u64, summary: String, narration: Option<String>, usage: Option<UsageView> },
-    /// The turn was abandoned — the game moved on to a different question, or the model would not
-    /// produce a decision.
+    /// The turn was abandoned: the game moved on, or the model produced no decision.
     TurnCancelled { turn: u64, reason: String },
 
     #[serde(rename = "run_status")]
     Run { status: RunStatus },
     /// The model's plan, in full, whenever it changes.
     Plan { items: Vec<TodoView> },
-    /// The model's battle script, whenever it changes — the program deciding its battle turns.
+    /// The model's battle script, whenever it changes.
     BattleScript { source: Option<String>, armed: bool, is_default: bool, last_failure: Option<String> },
     Compacted {
         before: u64,
         after: u64,
-        /// How many screenshots stage 1 turned into a line of text.
+        /// Screenshots stage 1 turned into a line of text.
         images_evicted: usize,
-        /// Whether stage 2 ran: eviction alone was not enough and the model wrote a summary.
+        /// Stage 2 ran: eviction was not enough and the model wrote a summary.
         summarised: bool,
     },
 }
 
-/// What the run is doing right now.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RunStatus {
-    /// Before the emulator has run a single cycle.
     Booting,
-    /// The agent is driving and no decision is pending.
     Playing,
-    /// A request is out and nothing has come back yet.
     AwaitingLlm { kind: &'static str },
-    /// Tokens are arriving.
     Streaming,
     /// A tool batch is with the emulator thread, or a screenshot is being encoded.
     RunningTool { name: String },
     Compacting,
     /// A retry is being waited out.
     RateLimited { retry_in_ms: u64 },
-    /// The endpoint's quota is exhausted and it said when it reopens, or it has refused a streak of
-    /// requests outright, so the whole run is paused — no requests, and the emulator stopped with it.
+    /// The whole run is paused, emulator included, until `until_ms` (Unix ms): a spent quota said
+    /// when it reopens, or the endpoint refused a streak of requests.
     Throttled { until_ms: u64, message: String },
-    /// The last turn could not be completed.
     Error { message: String },
 }
 
-/// One item on the model's plan, as the page draws it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TodoView {
     pub id: u32,
@@ -136,58 +116,47 @@ pub struct TodoView {
     pub done: bool,
 }
 
-/// Context occupancy and the run's bill so far. Published with every decision, so a viewer sees
-/// the context fill up in real time rather than discovering it in a 400.
+/// Context occupancy and the run's bill so far, published with every decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct UsageView {
-    /// Prompt + completion of the most recent response: how full the window was, last time we
-    /// knew.
+    /// Prompt + completion of the latest response: how full the window was.
     pub context_tokens: u64,
     pub context_limit: u64,
     /// Cumulative for the whole run — this is the bill, not the gauge.
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
-    /// Completions billed this run. More than the number of turns: a turn that reads before it
-    /// decides costs several.
+    /// Completions billed this run; a turn that reads before deciding costs several.
     pub completions: u64,
-    /// Whether these came from `Usage::estimate` rather than from the endpoint. A guess presented
-    /// as a measurement is worse than no number.
+    /// These came from `Usage::estimate`, not from the endpoint.
     pub estimated: bool,
 }
 
-/// What the status panel renders, and the cheapest thing the host can read.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StatusSnapshot {
-    /// Wall-clock milliseconds since the current run started being played by this process, minus
-    /// whatever it has spent parked on a spent quota.
+    /// Wall-clock ms since this process started playing the run, less any time parked on a quota.
     pub wall_ms: u64,
-    /// Emulated milliseconds over that same span.
+    /// Emulated ms over that same span.
     pub emulated_ms: u64,
-    /// Emulated milliseconds the catch-up clamp has discarded on this run. Zero on a host that
-    /// has kept up throughout; a one-off number is a stall that has already been recovered from.
+    /// Emulated ms the catch-up clamp has discarded on this run.
     pub dropped_ms: u64,
-    /// Emulated milliseconds over the run's whole life, across every process that has played it:
-    /// `meta.json`'s total as it stood when this process opened the directory, plus `emulated_ms`
-    /// above.
+    /// Emulated ms over the run's whole life: `meta.json`'s total at open, plus `emulated_ms`.
     pub run_emulated_ms: u64,
     pub target_speed: f64,
-    /// `"random"` or `"llm"`.
+    /// The policy's name, e.g. `"llm"`.
     pub policy: &'static str,
-    /// `GB_MODEL` — who is actually playing. `None` under any policy that is not an LLM.
+    /// `GB_MODEL`; `None` under any policy that is not an LLM.
     pub model: Option<String>,
-    /// [`crate::pokemon::agent::PokemonAgent::state_debug`] — which arm of the state machine is
-    /// driving. The single most useful field when a run looks stuck.
+    /// [`crate::pokemon::agent::PokemonAgent::state_debug`]: which arm of the state machine drives.
     pub agent_state: String,
     pub frame_seq: u64,
     pub game: Option<StatusView>,
-    /// The same value the last [`UiEventBody::Run`] carried, repeated on the heartbeat so a
-    /// viewer that joined between two transitions still knows what the run is doing.
+    /// The last [`UiEventBody::Run`]'s status, repeated for a viewer that joined since.
     pub run: RunStatus,
 }
 
 impl StatusSnapshot {
-    /// Whether this says anything the previous one did not — the test the host suppresses a
-    /// heartbeat on.
+    /// Whether this says nothing the previous one did not, clocks aside; the host suppresses such a
+    /// heartbeat, so every new field must be compared here.
     pub fn says_the_same_as(&self, previous: &Self) -> bool {
         let Self {
             wall_ms: _,
@@ -213,33 +182,26 @@ impl StatusSnapshot {
 }
 
 // ── The buffers
-// ──────────────────────────────────────────────────────────────────────────────────
 
 pub struct Published {
     video: broadcast::Sender<VideoMessage>,
-    /// One Opus packet, encoded once on the emulator thread for every listener.
     audio: broadcast::Sender<Arc<[u8]>>,
     /// The keyframe a late joiner starts from.
     keyframe: RwLock<Option<VideoMessage>>,
     frame: RwLock<Arc<FrameSnapshot>>,
     events: broadcast::Sender<UiEvent>,
     next_event_seq: AtomicU64,
-    /// The current [`RunStatus`].
     status: RwLock<RunStatus>,
-    /// The last [`UsageView`] a decision carried, and how many decisions have landed.
+    /// The last [`UsageView`] a decision carried.
     usage: RwLock<Option<UsageView>>,
     /// Decisions that landed, not `max(turn)`.
     turns: AtomicU64,
     save_state: RwLock<Option<(Arc<Vec<u8>>, u64)>>,
     /// The most recent heartbeat, for a client that has just connected.
     latest_status: RwLock<Option<UiEvent>>,
-    /// The model's plan, as last published, for a client that has just connected.
     latest_plan: RwLock<Option<UiEvent>>,
-    /// The battle script, as last published, for a client that has just connected — the same cell
-    /// as [`Self::latest_plan`] and needed more badly.
     latest_battle_script: RwLock<Option<UiEvent>>,
-    /// The last few pictures a tool answered with, keyed by the seq of the `ToolResult` naming
-    /// them.
+    /// The last few tool pictures, keyed by the seq of the `ToolResult` naming them.
     tool_images: RwLock<VecDeque<(u64, Arc<Vec<u8>>)>>,
     /// The Unix millisecond the endpoint's quota reopens, or `0` for "the run is not parked".
     throttled_until: AtomicU64,
@@ -277,15 +239,13 @@ impl Published {
         })
     }
 
-    /// Publish one encoded frame: the standalone keyframe describing the new state, and the delta
-    /// that gets an already-connected client there.
+    /// Publish one frame: the keyframe of the new state, and the delta for connected clients.
     pub fn publish_video(&self, keyframe: Encoded, delta: Encoded) {
         *self.keyframe.write().expect("video keyframe lock poisoned") = Some(keyframe.into());
         let _ = self.video.send(delta.into());
     }
 
-    /// Video messages from here on. Only [`Self::join_video`] and the ordering test want this;
-    /// everything else wants the keyframe with it.
+    /// Video from here on, without the keyframe; see [`Self::join_video`].
     pub fn subscribe_video(&self) -> broadcast::Receiver<VideoMessage> {
         self.video.subscribe()
     }
@@ -297,23 +257,20 @@ impl Published {
         (receiver, keyframe)
     }
 
-    /// The keyframe on its own, for a subscriber that has already lagged out of the ring buffer
-    /// and needs to re-sync without dropping its connection. Hand one Opus packet to every
-    /// listener.
+    /// Hand one Opus packet to every listener.
     pub fn publish_audio(&self, packet: Arc<[u8]>) {
         let _ = self.audio.send(packet);
     }
 
-    /// Subscribe, and that is the whole of it.
     pub fn join_audio(&self) -> broadcast::Receiver<Arc<[u8]>> {
         self.audio.subscribe()
     }
 
-    /// Whether anyone is listening.
     pub fn audio_listeners(&self) -> usize {
         self.audio.receiver_count()
     }
 
+    /// The keyframe alone, for a subscriber that lagged out of the ring and must re-sync.
     pub fn latest_keyframe(&self) -> Option<VideoMessage> {
         self.keyframe.read().expect("video keyframe lock poisoned").clone()
     }
@@ -322,8 +279,7 @@ impl Published {
         *self.frame.write().expect("frame lock poisoned") = Arc::new(snapshot);
     }
 
-    /// The latest frame as pixels. `Arc`, so a worker encoding a PNG holds the read lock for the
-    /// length of one clone rather than the length of the encode.
+    /// The latest frame, as an `Arc` so a PNG encode does not hold the read lock.
     pub fn latest_frame(&self) -> Arc<FrameSnapshot> {
         Arc::clone(&self.frame.read().expect("frame lock poisoned"))
     }
@@ -338,9 +294,7 @@ impl Published {
         self.save_state.read().expect("save state lock poisoned").clone()
     }
 
-    /// Stamp a sequence number on an event body and broadcast it.
     pub fn publish_event(&self, body: UiEventBody) -> u64 {
-        // The fold behind `usage()`/`turns()`.
         if let UiEventBody::Decision { usage, .. } = &body {
             self.turns.fetch_add(1, Ordering::Relaxed);
             if let Some(view) = usage {
@@ -349,8 +303,7 @@ impl Published {
         }
         let seq = self.next_event_seq.fetch_add(1, Ordering::Relaxed);
         let event = UiEvent { seq, at: now_ms(), body };
-        // Kept before the send, for the reason `publish_status` gives: a client that joins in the
-        // gap should see a stale plan rather than none.
+        // Kept before the send, so a client joining in the gap sees a stale plan rather than none.
         if matches!(event.body, UiEventBody::Plan { .. }) {
             *self.latest_plan.write().expect("plan lock poisoned") = Some(event.clone());
         }
@@ -361,7 +314,6 @@ impl Published {
         seq
     }
 
-    /// Keep a picture a tool answered with, under the seq of the `ToolResult` that announced it.
     pub fn put_tool_image(&self, seq: u64, png: Vec<u8>) {
         let mut images = self.tool_images.write().expect("tool image lock poisoned");
         images.push_back((seq, Arc::new(png)));
@@ -370,25 +322,23 @@ impl Published {
         }
     }
 
-    /// A picture by the seq of the event that named it. `None` once it has fallen off the ring,
-    /// which is an ordinary 404 rather than a fault.
+    /// A picture by the seq of the event that named it; `None` once it has fallen off the ring.
     pub fn tool_image(&self, seq: u64) -> Option<Arc<Vec<u8>>> {
         let images = self.tool_images.read().expect("tool image lock poisoned");
         images.iter().find(|(at, _)| *at == seq).map(|(_, png)| Arc::clone(png))
     }
 
-    /// What the run has spent, as of the last decision that reported figures. `None` under any
-    /// policy that is not an LLM, and until the first decision under one.
+    /// What the run has spent, as of the last decision reporting figures; `None` without an LLM.
     pub fn usage(&self) -> Option<UsageView> {
         *self.usage.read().expect("usage lock poisoned")
     }
 
-    /// Decisions that have landed in this process. See the field for why this is not a turn id.
+    /// Decisions that have landed in this process, not a turn id.
     pub fn turns(&self) -> u64 {
         self.turns.load(Ordering::Relaxed)
     }
 
-    /// Forget what the *previous* run spent, when a new one becomes current.
+    /// Forget what the previous run spent, when a new one becomes current.
     pub fn forget_usage(&self) {
         *self.usage.write().expect("usage lock poisoned") = None;
     }
@@ -421,16 +371,12 @@ impl Published {
         (receiver, opening)
     }
 
-    /// The heartbeat as last published, for something that wants the whole picture at a moment
-    /// rather than a subscription to every change of it.
     pub fn latest_status(&self) -> Option<UiEvent> {
         self.latest_status.read().expect("status lock poisoned").clone()
     }
 
-    /// Record what the run is doing, and say so if it changed.
     pub fn set_status(&self, status: RunStatus) {
-        // Read first, because the overwhelmingly common call is a repeat — `Streaming` is set
-        // once per token of a reply — and a repeat should not take the write lock at all.
+        // Read first: the common call is a repeat (`Streaming`, per token) and needs no write lock.
         if *self.status.read().expect("status lock poisoned") == status {
             return;
         }
@@ -453,8 +399,6 @@ impl Published {
         self.throttled_until.store(until_ms, Ordering::Relaxed);
     }
 
-    /// The moment the run may resume, if it is parked. Read by
-    /// `crate::host::EmulatorHost::tick`.
     pub fn throttled_until(&self) -> Option<u64> {
         match self.throttled_until.load(Ordering::Relaxed) {
             0 => None,
@@ -467,8 +411,7 @@ impl Published {
 mod tests {
     use super::*;
 
-    /// The fold behind `usage()`/`turns()`, which the emulator thread reads when it files a
-    /// finished run.
+    /// Only a decision counts towards `turns()`, and the last reported usage stands until replaced.
     #[test]
     fn a_decision_is_what_counts_towards_a_runs_bill() {
         let published = Published::new();
@@ -492,7 +435,6 @@ mod tests {
         assert_eq!(published.turns(), 1);
         assert_eq!(published.usage().map(|u| u.prompt_tokens), Some(1_000));
 
-        // A turn the endpoint reported no usage for still decided something.
         published.publish_event(UiEventBody::Decision { turn: 42, summary: "fight".into(), narration: None, usage: None });
         assert_eq!(published.turns(), 2);
         assert_eq!(published.usage().map(|u| u.prompt_tokens), Some(1_000), "the last real figure stands");
@@ -510,9 +452,7 @@ mod tests {
         published.publish_event(UiEventBody::Agent { kind: "text_box", text: "HELLO".into() });
         assert_eq!(published.turns(), before, "an abandoned turn and a text box are not decisions");
 
-        // A new run must not inherit the last one's bill — the worker's own reset is
-        // asynchronous, so between the swap and the next decision this cell is the only thing
-        // that says whose tokens these were.
+        // A new run must not inherit the last one's bill.
         published.forget_usage();
         assert!(published.usage().is_none());
         assert_eq!(published.turns(), before, "…and the turn counter is a mark the host subtracts, \
@@ -555,8 +495,7 @@ mod tests {
         assert!(heartbeat.at >= event.at, "the stamps are in publication order");
     }
 
-    /// Who is playing rides on the heartbeat, because the page's title says it and a title that
-    /// waits for the first decision would be wrong for the first minute of every run.
+    /// Who is playing rides on the heartbeat, so the page's title is right from the start.
     #[test]
     fn the_heartbeat_says_which_model_is_playing() {
         let json = serde_json::to_value(snapshot("wait", 1)).expect("serialises");
@@ -567,8 +506,7 @@ mod tests {
         assert!(random.model.is_none(), "`random` is not a model name and must not be shown as one");
         assert_eq!(serde_json::to_value(&random).expect("serialises")["model"], serde_json::Value::Null);
 
-        // And it takes part in the suppression, or the first heartbeat after a change would be
-        // held back for saying nothing new.
+        // It takes part in the suppression, or the first heartbeat after a change is held back.
         assert!(!random.says_the_same_as(&snapshot("wait", 1)));
     }
 
@@ -613,7 +551,7 @@ mod tests {
         }
     }
 
-    /// The comparison the whole send-on-change rule rests on.
+    /// Two heartbeats are the same when only the clock has moved.
     #[test]
     fn a_heartbeat_is_the_same_as_another_when_only_the_clock_has_moved() {
         assert!(snapshot("wait", 5_000).says_the_same_as(&snapshot("wait", 100)));
@@ -623,7 +561,7 @@ mod tests {
         moved.run = RunStatus::Streaming;
         assert!(!moved.says_the_same_as(&snapshot("wait", 100)), "the run status is state, not clock");
 
-        // `dropped_ms` sits beside the two clocks and is the opposite of them.
+        // `dropped_ms` is state, not a clock.
         let mut behind = snapshot("wait", 100);
         behind.dropped_ms = 400;
         assert!(
@@ -636,8 +574,7 @@ mod tests {
         );
     }
 
-    /// The other half of send-on-change: a page that opens while nothing is happening must not
-    /// wait for something to happen.
+    /// A page that opens while nothing is happening is handed the last heartbeat.
     #[test]
     fn a_joiner_is_handed_the_last_heartbeat_rather_than_an_empty_panel() {
         let published = Published::new();
@@ -661,9 +598,7 @@ mod tests {
         assert_eq!(next.agent_state, "wait", "and the stream carries on from there");
     }
 
-    /// The plan is the send-on-change event a reload could not recover, and it failed silently:
-    /// the panel simply was not there (`PlanPanel` renders nothing for an empty list), so it read
-    /// as a styling problem rather than as a missing event.
+    /// A joiner is handed the plan, which a reload cannot otherwise recover.
     #[test]
     fn a_joiner_is_handed_the_plan_as_well_as_the_heartbeat() {
         let published = Published::new();
@@ -677,12 +612,10 @@ mod tests {
 
         let (_receiver, opening) = published.join_events();
         assert_eq!(opening.len(), 2, "the plan and the heartbeat: {opening:#?}");
-        // Oldest first, so the page applies them in the order they happened.
         let UiEventBody::Plan { items } = &opening[0].body else { panic!("the plan first") };
         assert_eq!(items.len(), 1);
         assert!(matches!(opening[1].body, UiEventBody::Status(_)), "then the heartbeat");
 
-        // Absolutely stated, so the newest one is the whole answer and replaces the last.
         published.publish_event(UiEventBody::Plan { items: vec![item(1, "done"), item(2, "Cerulean")] });
         let (_receiver, opening) = published.join_events();
         let plan = opening.iter().find_map(|event| match &event.body {
@@ -693,7 +626,7 @@ mod tests {
         assert!(opening.windows(2).all(|pair| pair[0].seq < pair[1].seq), "oldest first: {opening:#?}");
     }
 
-    /// The same hole as the plan's, one order of magnitude worse.
+    /// A joiner is handed the battle script as well.
     #[test]
     fn a_joiner_is_handed_the_battle_script_as_well() {
         let published = Published::new();
@@ -705,8 +638,7 @@ mod tests {
         };
 
         published.publish_event(armed("battle.fight(battle.best_move);"));
-        // A run's worth of noise on top, which is what a `MAX_BACKLOG` window walks past in
-        // minutes.
+        // Noise a `MAX_BACKLOG` window would walk past.
         for _ in 0..50 {
             published.publish_event(UiEventBody::AssistantReasoning { turn: 1, text: "…".into() });
         }
@@ -721,8 +653,7 @@ mod tests {
         assert_eq!(opening.len(), 3, "the script, the plan and the heartbeat: {opening:#?}");
         assert!(opening.windows(2).all(|pair| pair[0].seq < pair[1].seq), "oldest first: {opening:#?}");
 
-        // Absolutely stated, exactly as the plan is: the newest replaces the last rather than
-        // adding to it, so a disarm is delivered to a joiner as the whole current state.
+        // The newest replaces the last, so a disarm reaches a joiner as the whole current state.
         published.publish_event(UiEventBody::BattleScript {
             source: Some("battle.fight(battle.best_move);".to_string()),
             armed: false,
@@ -741,8 +672,7 @@ mod tests {
         );
     }
 
-    /// A picture is referenced by seq and fetched separately, so the ring is what decides whether
-    /// a viewer can still open it.
+    /// Tool pictures live in a ring, and the oldest fall off it.
     #[test]
     fn a_tool_picture_is_kept_for_a_while_and_then_is_not() {
         let published = Published::new();
@@ -755,8 +685,7 @@ mod tests {
         assert_eq!(published.tool_image(newest).as_deref(), Some(&vec![newest as u8]));
     }
 
-    /// The wire shape, because the SPA's `api.ts` is written against it by hand: a run status is
-    /// one flat object with a `state` discriminator, not a nested one.
+    /// A run status serialises flat with a `state` discriminator, as `api.ts` expects.
     #[test]
     fn a_run_status_serialises_flat_with_a_state_discriminator() {
         let json = serde_json::to_value(UiEvent {

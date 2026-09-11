@@ -115,8 +115,7 @@ pub enum ItemId {
     Tm20Rage = 0xDC,
     Tm21MegaDrain = 0xDD,
     Tm22Solarbeam = 0xDE,
-    /// The cheapest of the three Game Corner prize TMs at 3300 coins, and so the one workstream F
-    /// proves the prize room's `GiveItem` branch with.
+    /// The cheapest Game Corner prize TM, so the one that proves the prize room's `GiveItem` branch.
     Tm23DragonRage = 0xDF,
     Tm24Thunderbolt = 0xE0,
     Tm25Thunder = 0xE1,

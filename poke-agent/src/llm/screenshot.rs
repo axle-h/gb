@@ -21,8 +21,7 @@ pub fn png_data_url(png: &[u8]) -> String {
     url
 }
 
-/// The caption that rides beside the picture. A model shown an unlabelled image of a Game Boy
-/// screen has to work out what it is looking at; one line of prose is cheaper than the inference.
+/// The caption beside the picture, so the model need not work out what it is looking at.
 pub fn caption(seq: u64) -> String {
     format!(
         "Screenshot of the Game Boy screen as it is right now (frame {seq}), {LCD_WIDTH}×{LCD_HEIGHT} \
@@ -56,9 +55,7 @@ mod tests {
     use super::*;
     use gb::lcd_palette::LcdColor;
 
-    /// The URL has to be something an endpoint will accept verbatim, and the pixels inside it
-    /// have to be the frame's own — an off-by-one in the upscale is invisible in a thumbnail and
-    /// shows up as a model confidently misreading the screen.
+    /// An off-by-one in the upscale is invisible in a thumbnail and misleads the model.
     #[test]
     fn a_frame_becomes_a_data_url_holding_the_same_picture() {
         let mut frame: Box<Frame> = Box::new([LcdColor::WHITE; LCD_WIDTH * LCD_HEIGHT]);

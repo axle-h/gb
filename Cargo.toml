@@ -7,15 +7,13 @@ resolver = "3"
 lto = "thin"
 codegen-units = 1
 
-# The default test tier has to be runnable in dev mode, and it emulates every frame. `poke-agent`
-# is here as well as `gb` because unoptimised agent frames overflow the test harness's stack.
+# Tests emulate every frame; unoptimised `poke-agent` frames also overflow the test harness's stack.
 [profile.dev.package.gb]
 opt-level = 3
 
 [profile.dev.package.poke-agent]
 opt-level = 3
 
-# The mock endpoint the agent's own tests talk to is real HTTP over axum and tokio, and the emulator
-# keeps running while it answers — so an unoptimised dependency is paid for in emulated game time.
+# The emulator keeps running while the tests' mock HTTP endpoint answers, so dependencies are optimised too.
 [profile.dev.package."*"]
 opt-level = 2

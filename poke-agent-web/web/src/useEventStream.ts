@@ -12,38 +12,15 @@ import type {
   UsageView,
 } from './api';
 
-/** How long the conversation keeps. A run is hours long; the DOM is not the transcript (W7 is). */
+/** How many rows the log keeps; the transcript is the record. */
 const MAX_ENTRIES = 500;
 
-/** After the browser gives up on its own retry, try again on this cadence rather than never. */
+/** Retry cadence once the browser has given up on its own reconnect. */
 const RETRY_MS = 1000;
 
-/**
- * One SSE connection that stays up for the length of the run.
- *
- * `EventSource` reconnects by itself while it can, but it gives up permanently on some errors —
- * notably the server not being there yet, which is exactly what happens when the page is open while
- * the server restarts. So on `CLOSED` we rebuild it. Shared by both streams; the video one is not a
- * hook because its data must never reach React state.
- *
- * ⚠️ **The error path is only half of it: a stream can die without ever erroring.** See `STALE_MS` —
- * silence is the only symptom a dropped network has, so the watchdog below is what makes this
- * recover rather than freeze. Its signal is the status heartbeat, which arrives at least every 2 s
- * whether or not anything changed. ⚠️ **Not the SSE keep-alive**, which is a comment line
- * (`Sse::keep_alive` in `src/web/mod.rs`) and is deliberately invisible to every `EventSource`
- * handler — a watchdog fed from that would starve and reconnect every 8 s for ever.
- *
- * ⚠️ **A reconnect is also a reload, and `onOpen` is how.** A fresh `/api/events` connection opens
- * with the latest heartbeat and the latest plan and nothing else (`Published::join_events`), so a
- * page that only reopened the stream kept exactly what the *previous* connection had delivered and
- * silently lost everything published in between — a tab left dormant for an hour came back showing
- * the hour-old log, for ever. `onOpen` fires on **every** open, the browser's own transparent
- * retries included (their `onopen` fires again, and they are a gap too), and the caller answers it by
- * throwing its folded state away and fetching `/api/history` afresh — the same model as the video
- * path, where every connection opens with a keyframe. `resync` forces one from outside, for the
- * case the watchdog cannot see: a tab hidden long enough that its queue overflowed on a socket that
- * never died.
- */
+// One SSE connection for the run, rebuilt when `EventSource` gives up or after `STALE_MS` without a
+// heartbeat, since a dropped network raises no error. `onOpen` fires on every open and the caller
+// reloads `/api/history`; `resync` forces a reload for a hidden tab whose socket never died.
 export function subscribe(
   url: string,
   onMessage: (data: string) => void,
@@ -55,7 +32,6 @@ export function subscribe(
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
 
-  /** Throw this connection away and start another. */
   const rebuild = (delay: number) => {
     clearTimeout(watchdog);
     onConnection('reconnecting');
@@ -74,8 +50,7 @@ export function subscribe(
     if (stopped) return;
     source = new EventSource(url);
     source.onopen = () => {
-      // Before `alive`, and before any message of this connection can arrive: the reset has to land
-      // ahead of the opening heartbeat and plan, or they are thrown away with the old state.
+      // Before any message of this connection, or the reset discards its opening heartbeat and plan.
       onOpen();
       alive();
     };
@@ -85,8 +60,7 @@ export function subscribe(
     };
     source.onerror = () => {
       onConnection('reconnecting');
-      // A `CONNECTING` source is the browser retrying on its own, which is left to it — but the
-      // watchdog stays armed underneath, since that retry can stall in exactly the same silence.
+      // A `CONNECTING` source is the browser's own retry; the watchdog stays armed in case it stalls.
       if (source?.readyState === EventSource.CLOSED) rebuild(RETRY_MS);
     };
   };
@@ -110,62 +84,24 @@ export interface EventStream {
   entries: Entry[];
   connection: Connection;
   usage: UsageView | null;
-  /**
-   * How fast the emulator is running against real time **right now**, smoothed — or `null` until the
-   * first window has closed.
-   *
-   * ⚠️ **Derived from the difference between two heartbeats, never from `emulated_ms / wall_ms`.**
-   * That ratio is a lifetime average, and the host drops emulated time on purpose whenever an
-   * iteration overruns (`host::MAX_CATCHUP`), so a single busy startup is subtracted from it for the
-   * rest of the run. A host measured at its 1.0007× ceiling reported 0.95× that way, and could only
-   * ever converge on the truth from below. What was really being shown is `status.dropped_ms`, which
-   * says it in the units it happened in.
-   */
+  /** Smoothed from the difference between heartbeats, never `emulated_ms / wall_ms`; `null` until measured. */
   speed: number | null;
-  /** W6. From the transition event, which is instant; the heartbeat's copy is the late-joiner path. */
+  /** From the transition event; the heartbeat's copy is the late-joiner path. */
   run: RunStatus;
-  /**
-   * W6b. The model's plan, as of the last time it changed.
-   *
-   * ⚠️ **State, not a log row.** It is a *replacement* every time — the server publishes the whole
-   * list — so folding it into the conversation would print the entire plan again for every item the
-   * model ever ticks off, and the page's job is to show what the plan *is*.
-   */
+  /** State, not a log row: each event replaces the whole list. */
   plan: TodoView[];
-  /**
-   * The program deciding the run's battle turns, as of the last time it changed — `null` under every
-   * policy that has never set one, which is every policy that is not an LLM.
-   *
-   * ⚠️ **State, not a log row, for the same reason the plan is** — each event carries the whole
-   * script, so folding it into the conversation would print the source again every time it moved.
-   * The log already has the `set_battle_script` row, which is the *event*; this is the *thing*.
-   */
+  /** State, not a log row, like `plan`; `null` until a script is set. */
   battleScript: BattleScriptView | null;
 }
 
-/**
- * What a row says, ignoring which event it came from and how many times it has been said. Two rows
- * with the same signature are the same line and are collapsed into one with a count.
- */
+/** What a row says, ignoring bookkeeping; rows with equal signatures collapse into one with a count. */
 function signature(entry: Entry): string {
-  // ⚠️ `at` is excluded for the reason `seq` is: it differs on every event by construction, so
-  // leaving it in would mean no two rows ever compared equal and the collapsing below would silently
-  // never fire again.
+  // `at` differs on every event, so leaving it in would stop rows ever comparing equal.
   const { seq: _seq, raw: _raw, count: _count, at: _at, ...body } = entry;
   return JSON.stringify(body);
 }
 
-/**
- * Append a row, or — if it repeats the one above it verbatim — bump that row's counter instead.
- *
- * Worth doing because the agent genuinely repeats itself: under `--policy random` the same battle
- * action comes up several times running, and the text reader emits doubled sentences ("Got away
- * safely! Got away safely!"). Three identical lines say no more than one line and a `×3`, and they
- * push the interesting ones off the top of a 500-row window.
- *
- * The row keeps its **first** `seq`, which is both its React key and what the backfill merge sorts
- * on — a key that changed as the count rose would remount the row on every repeat.
- */
+/** Append a row, or bump an identical row above it; the row keeps its first `seq`, its React key. */
 function push(entries: Entry[], body: EntryBody, event: UiEvent): Entry[] {
   const entry: Entry = { ...body, seq: event.seq, raw: event, count: 1, at: event.at };
   const last = entries[entries.length - 1];
@@ -175,50 +111,17 @@ function push(entries: Entry[], body: EntryBody, event: UiEvent): Entry[] {
   return [...entries, entry];
 }
 
-/**
- * Agent events that are said but not shown.
- *
- * ⚠️ **Dropped here rather than at the server**, and the distinction is the whole point: these still
- * go to the model — dialogue is most of what `### Since your last decision` is made of — and they
- * are still written to `transcript.jsonl`, so `/api/history` and the run's archived record keep
- * every line. Only the page is quiet. Filtering them out of the publish instead would have deleted
- * them from the record too.
- *
- * `text_box` is the screen's own dialogue, which the picture above the log is already showing, one
- * character at a time, in the game's own font. `overworld_interaction_completed` is the "✓ talked to
- * Mom" that the dialogue immediately after it says better.
- */
+/** Dropped from the page only; the model and the transcript keep them, so filter here, never at the publish. */
 const UNLOGGED = new Set(['text_box', 'overworld_interaction_completed']);
 
-/**
- * Rows the **model** produced, as against rows the game narrated.
- *
- * The distinction exists for exactly one reason: it is what closes a block of streaming text. See
- * [`fold`](#fold) — and note that a `turn` row is model-side, because a new turn certainly ends the
- * thought before it.
- */
+/** Rows the model produced, as against the game; the next of these closes a streaming block. */
 const MODEL_SIDE = new Set(['reasoning', 'assistant', 'tool', 'decision', 'turn', 'cancelled', 'compacted']);
 
-/**
- * How far back to look for the call a result belongs to.
- *
- * A tool result arrives one round trip through the emulator after its call, and the agent narrates
- * over the top of that — so the call is never the last row, but it is always within the last few.
- * Bounded rather than a full scan because this runs per event on a 500-row log.
- */
+/** How far back a result looks for its call; the agent narrates in between, so it is never the last row. */
 const RESULT_LOOKBACK = 40;
 
-/**
- * Attach a tool's answer to the row that asked for it, matched on the call id.
- *
- * ⚠️ **Matched on `id`, never on position or on name.** A turn may call three tools in one message
- * and they come back as a batch, so the second result is not the second-to-last row and two
- * `read_party` calls in one turn are indistinguishable by name. The id is the endpoint's own and is
- * the only thing that pairs them.
- *
- * A result with no call to attach to is *dropped*, not shown on its own: it means the call scrolled
- * off the top of the window, and a bare answer to a question nobody can see says nothing.
- */
+// Attach a tool's answer to its call by `id`, never by position or name: a message's calls come
+// back as a batch. A result whose call has scrolled off is dropped.
 function attachResult(
   entries: Entry[],
   event: Extract<UiEvent, { type: 'tool_result' }>,
@@ -238,9 +141,6 @@ function attachResult(
   return entries;
 }
 
-/**
- * The most recent row the model produced, or `-1`. The rows after it are the game talking.
- */
 export function lastModelSide(entries: Entry[]): number {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     if (MODEL_SIDE.has(entries[index].type)) return index;
@@ -248,30 +148,9 @@ export function lastModelSide(entries: Entry[]): number {
   return -1;
 }
 
-/**
- * Fold one event into the log.
- *
- * The interesting cases are `assistant_delta` and `assistant_reasoning`: the worker publishes one
- * event per fragment the model emits, and the reply — or the thought — is the concatenation of all
- * of them. Appending to the row those fragments belong to is what turns a stream of tokens back into
- * a paragraph, and it has to happen *here*, in the updater, rather than in the batch, because a
- * flush can land in the middle of a reply.
- *
- * ⚠️ **A thought is closed by the next thing the *model* says, not by the turn ending and not by the
- * next event of any kind.** Two failures, one on each side of that line:
- *
- * - Grouping on `turn` alone welds two thoughts together. A turn that reads before it decides thinks
- *   once per completion, so the tool call and its result sit between two separate blocks.
- * - Closing on the next event *of any kind* shreds a single thought into a dozen. ⚠️ **The emulator
- *   never pauses while the model thinks** — that is the property the whole agent is built on — so
- *   the game narrates over the top of every thought it has: "→ heading for Mom", "✓ reached the warp
- *   to PalletTown". Each of those used to end the block, so a thought that took the model a minute
- *   arrived as five rows, four of them collapsed to `thought for 9 words`, and none of them the
- *   thing the viewer was watching.
- *
- * So the fragment is appended to the last row the *model* wrote, however many lines the game has said
- * since. The row keeps its place in the log, which is where it belongs: it started when it started.
- */
+// Fold one event into the log. A streamed fragment grows the last row the model wrote, however many
+// game lines arrived since: the emulator narrates while the model thinks, and grouping on `turn`
+// alone would weld the thoughts either side of a tool call together.
 export function fold(entries: Entry[], event: UiEvent): Entry[] {
   if (event.type === 'assistant_delta' || event.type === 'assistant_reasoning') {
     const type = event.type === 'assistant_delta' ? 'assistant' : 'reasoning';
@@ -281,9 +160,7 @@ export function fold(entries: Entry[], event: UiEvent): Entry[] {
       const grown = { ...open, text: open.text + event.text };
       return [...entries.slice(0, index), grown, ...entries.slice(index + 1)];
     }
-    // Not through `push`: a reply grows, so it must never be collapsed against the row above it.
-    // The block keeps the `at` of its **first** fragment: a thought is timed from when the model
-    // started thinking, which is the interesting number, not from the token that ended it.
+    // Not through `push`: a growing row must never be collapsed. It keeps its first fragment's `at`.
     return [
       ...entries,
       { seq: event.seq, type, turn: event.turn, text: event.text, raw: event, count: 1, at: event.at },
@@ -298,8 +175,7 @@ export function fold(entries: Entry[], event: UiEvent): Entry[] {
     case 'turn_started':
       return push(entries, { type: 'turn', turn: event.turn, kind: event.kind, headline: event.headline }, event);
     case 'tool_call':
-      // ⚠️ Not through `push`: this row is waiting for its result and will grow, so collapsing it
-      // against an identical call above it would attach the answer to the wrong one.
+      // Not through `push`: collapsing a row still waiting for its result would misattach the answer.
       return [
         ...entries,
         {
@@ -350,13 +226,7 @@ export function fold(entries: Entry[], event: UiEvent): Entry[] {
   }
 }
 
-/**
- * `/api/events`: the 10 Hz status heartbeat and everything the agent (and, from W4, the model) says.
- *
- * Status and entries are separate state so a heartbeat re-renders the status panel without touching
- * the conversation — at 10 Hz, re-rendering a 500-line log ten times a second is the one performance
- * mistake this page can make.
- */
+/** `/api/events`; status and entries are separate state so the 10 Hz heartbeat never re-renders the log. */
 export function useEventStream(): EventStream {
   const [status, setStatus] = useState<Status | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -366,31 +236,21 @@ export function useEventStream(): EventStream {
   const [plan, setPlan] = useState<TodoView[]>([]);
   const [battleScript, setBattleScript] = useState<BattleScriptView | null>(null);
   const [speed, setSpeed] = useState<number | null>(null);
-  // The heartbeat the current speed window is measured from — see `SPEED_WINDOW_MS`.
   const anchor = useRef<{ wall: number; emulated: number } | null>(null);
-  // Batched between animation frames: a burst of dialogue is many events in one tick, and a
-  // streaming reply is one per token — each would otherwise be its own render.
+  // Batched per animation frame: a streaming reply is one event per token.
   const pending = useRef<UiEvent[]>([]);
   const frame = useRef<number | undefined>(undefined);
 
   useEffect(() => {
-    // **W7 / §11.** ⚠️ **Subscribe first, backfill second** — the same ordering the video path uses
-    // (§5.2), and for the same reason: the other way round loses everything published between the
-    // fetch returning and the stream attaching, and loses it invisibly.
-    //
-    // ⚠️ **And on every connection, not once.** The backfill runs from `onOpen`, so a reconnect —
-    // the watchdog's, the browser's own, or one forced by the tab coming back — reloads the
-    // transcript rather than resuming a log with a hole in it that nothing would ever fill. See
-    // `subscribe`. `generation` is what makes that safe: a fetch started by the old connection can
-    // resolve after the new one has reset the page, and its rows are the stale ones.
+    // Subscribe first, backfill second, and backfill on every open (see `subscribe`); `generation`
+    // discards a fetch started by an earlier connection.
     let generation = 0;
     const backfill = (started: number) => {
       fetch('/api/history')
         .then((response) => (response.ok ? response.json() : []))
         .then((backlog: UiEvent[]) => {
           if (started !== generation || backlog.length === 0) return;
-          // The **last** decision's usage: it is a running total, so the newest one is the figure.
-          // The stream wins if it has already delivered a newer one.
+          // The last decision's usage, a running total; a newer one from the stream wins.
           for (let index = backlog.length - 1; index >= 0; index -= 1) {
             const event = backlog[index];
             if (event.type !== 'decision' || !event.usage) continue;
@@ -398,15 +258,10 @@ export function useEventStream(): EventStream {
             setUsage((current) => current ?? usage);
             break;
           }
-          // ⚠️ The **last** plan in the backlog, and only if the stream has not already delivered a
-          // newer one — the same "live wins" rule the entries below use. Each event carries the
-          // whole list, so replaying them in order and keeping the final one is the current plan.
+          // The last plan and script in the backlog, unless the stream has delivered newer ones.
           const planned = backlog.filter((event) => event.type === 'plan');
           const latest = planned[planned.length - 1];
           if (latest?.type === 'plan') setPlan((live) => (live.length > 0 ? live : latest.items));
-          // The same rule for the script, and it needs the backlog more than the plan does: a script
-          // is set once and never touched again, so its event is the *first* thing to fall off the
-          // end of a live stream and the last thing a joiner would otherwise ever see.
           const scripts = backlog.filter((event) => event.type === 'battle_script');
           const script = scripts[scripts.length - 1];
           if (script?.type === 'battle_script') {
@@ -420,15 +275,13 @@ export function useEventStream(): EventStream {
           }
           const older = backlog.reduce(fold, [] as Entry[]);
           setEntries((live) => {
-            // Anything the stream has already delivered wins; the transcript only fills in what
-            // happened before this page existed.
+            // Live rows win; the transcript fills in only what came before them.
             const oldest = live.length > 0 ? live[0].seq : Number.MAX_SAFE_INTEGER;
             return [...older.filter((entry) => entry.seq < oldest), ...live].slice(-MAX_ENTRIES);
           });
         })
         .catch(() => {
-          // No transcript, or a build with no run directory. The live stream is the whole of the
-          // page either way, so there is nothing to report.
+          // No transcript: the live stream is the whole page.
         });
     };
 
@@ -440,12 +293,7 @@ export function useEventStream(): EventStream {
       setEntries((previous) => arrived.reduce(fold, previous).slice(-MAX_ENTRIES));
     };
 
-    /**
-     * A connection has (re)opened: forget everything the last one delivered and load the transcript
-     * again. On the first open this is a reset of nothing, which is why mount needs no special case.
-     * The opening heartbeat and plan of the new connection arrive right behind this, so the panels
-     * refill within a tick; the log refills when `/api/history` answers.
-     */
+    /** A connection has (re)opened: forget what the last one delivered and reload the transcript. */
     const reload = () => {
       generation += 1;
       pending.current = [];
@@ -455,7 +303,7 @@ export function useEventStream(): EventStream {
       setPlan([]);
       setBattleScript(null);
       setUsage(null);
-      // A speed window must not span the gap: the first heartbeat after a reconnect is a new anchor.
+      // A speed window must not span the gap.
       anchor.current = null;
       setSpeed(null);
       backfill(generation);
@@ -469,8 +317,6 @@ export function useEventStream(): EventStream {
           const { seq: _seq, type: _type, ...rest } = event;
           setStatus(rest);
           sampleSpeed(rest, anchor, setSpeed);
-          // The heartbeat carries the run status too, which is how a page opened mid-turn shows the
-          // right thing without waiting for the next transition.
           setRun(rest.run);
           return;
         }
@@ -493,8 +339,7 @@ export function useEventStream(): EventStream {
         }
         if (event.type === 'decision' && event.usage) setUsage(event.usage);
         pending.current.push(event);
-        // A backgrounded tab gets no animation frames, and a livestream is left in one for hours —
-        // so the queue is capped as well as the list it flushes into.
+        // A background tab gets no animation frames, so the queue is capped too.
         if (pending.current.length > MAX_ENTRIES) pending.current.splice(0, 1);
         frame.current ??= requestAnimationFrame(flush);
       },
@@ -502,10 +347,8 @@ export function useEventStream(): EventStream {
       reload,
     );
 
-    // A tab that comes back from the background is resynced whether or not its socket died. A
-    // hidden tab gets no animation frames, so `pending` overflows on a connection that is perfectly
-    // healthy, and the watchdog's timer is throttled along with everything else — so waiting for
-    // it is waiting for nothing. Short absences keep the connection: a tab flip is not a gap.
+    // A tab back from the background resyncs: its queue may have overflowed on a healthy socket and
+    // the watchdog timer was throttled. A short absence is not a gap.
     let hiddenAt: number | null = null;
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') {
@@ -516,7 +359,7 @@ export function useEventStream(): EventStream {
       hiddenAt = null;
       if (away > STALE_MS) stream.resync();
     };
-    // A bfcache restore hands back a page whose `EventSource` and timers were frozen mid-flight.
+    // A bfcache restore returns a page whose `EventSource` and timers were frozen.
     const onPageShow = (event: PageTransitionEvent) => {
       if (event.persisted) stream.resync();
     };
@@ -536,33 +379,15 @@ export function useEventStream(): EventStream {
   return { status, entries, connection, usage, run, plan, battleScript, speed };
 }
 
-/**
- * The shortest span two heartbeats may be apart and still be measured.
- *
- * `GB_STATUS_HZ` defaults to 10, so consecutive samples can be 100 ms apart — and over a span that
- * short the reading is dominated by the host's own cadence rather than by its speed: `gb.run`
- * overshoots the cycles it was asked for, the overshoot is spent down against `ahead_by_cycles`
- * before any more are requested, and the iterations in between emulate nothing at all and sleep.
- * Half a second covers enough of that cycle to be stable, and still reacts within about a second.
- */
+/** The shortest heartbeat span measured; shorter is dominated by the host's own cadence. */
 const SPEED_WINDOW_MS = 500;
 
-/** How much of each closed window to believe, against the running value. */
 const SPEED_SMOOTHING = 0.3;
 
-/**
- * Fold one heartbeat into the running speed, if it closes a window.
- *
- * ⚠️ **A park needs no case here and must not be given one.** The host stops the emulator and
- * subtracts the wait from `wall_ms`, so *both* counters stand still and no window ever closes: the
- * last live reading is held while `PausedOverlay` says what is actually going on. Guarding on
- * `dw > 0` instead would close windows on the rounding between two frozen samples and report `0.00×`
- * under the PAUSED plate.
- */
+// Fold one heartbeat into the running speed. A park freezes both counters, so no window closes and
+// the last reading holds; do not special-case it.
 function sampleSpeed(
   status: Status,
-  // Structural rather than a `RefObject`, which has changed shape between React majors and is the
-  // only thing this needs from one.
   anchor: { current: { wall: number; emulated: number } | null },
   setSpeed: (next: (current: number | null) => number | null) => void,
 ): void {
@@ -573,8 +398,7 @@ function sampleSpeed(
   }
   const dw = status.wall_ms - previous.wall;
   const de = status.emulated_ms - previous.emulated;
-  // Both counters are reset together by `start_new_run`, so either going backwards means the run
-  // under us changed and everything measured against the old one is meaningless.
+  // Both counters reset on a new run, so either going backwards restarts measurement.
   if (dw < 0 || de < 0) {
     anchor.current = { wall: status.wall_ms, emulated: status.emulated_ms };
     setSpeed(() => null);

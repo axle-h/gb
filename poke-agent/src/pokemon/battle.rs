@@ -13,8 +13,7 @@ use crate::pokemon::symbols::{pokered_symbols, DmgPointer, DmgPointerRead};
 #[derive(Debug, Clone, Copy, Eq, PartialEq, strum_macros::Display)]
 pub enum BattleType { Wild, Trainer, Safari }
 
-/// Whether the cartridge will refuse to let *any* move execute this battle, because it is a ghost
-/// battle.
+/// A ghost battle, in which the cartridge lets no move execute.
 pub fn is_ghost_battle(map: Map, bag: &Bag, battle_type: BattleType) -> bool {
     battle_type == BattleType::Wild
         && (Map::PokemonTower1F..=Map::PokemonTower7F).contains(&map)
@@ -26,32 +25,24 @@ pub struct BattleState {
     pub battle_type:       BattleType,
     pub player:            PokemonSummary,
     pub enemy:             PokemonSummary,
-    /// 0-based index into the pokemon party for the currently-active Pokemon.
+    /// Party index of the active Pokémon.
     pub active_party_slot: u8,
-    /// The enemy is part-way through a partial-trapping move — Wrap, Fire Spin, Clamp, Bind.
+    /// The enemy is part-way through Wrap, Fire Spin, Clamp or Bind.
     pub enemy_trapping: bool,
-    /// `wEnemyMonActualCatchRate` — the catch rate `ItemUseBall` actually compares `Rand1`
-    /// against.
+    /// `wEnemyMonActualCatchRate`, the rate `ItemUseBall` compares `Rand1` against.
     pub enemy_catch_rate: u8,
 }
 
-/// Action the player can take on their turn.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum BattleAction {
-    /// Use the move in the given slot (0–3).
     Fight { slot: u8, battle_move: PokemonMove },
-    /// Use the bag item at `bag_slot` (index into `BattleState.bag`).
     UseItem { slot: u8, item: BagItem },
-    /// Switch to the party Pokemon at `party_slot` (index into `BattleState.party`).
     SwitchPokemon { slot: u8, pokemon: PokemonSummary },
-    /// Attempt to flee (wild battles only).
+    /// Wild battles only.
     Run,
-    // ── Safari Zone battle actions (only offered when `battle_type == Safari`) ── Throw a Safari
-    // Ball to try to catch the Pokémon.
+    // Offered only when `battle_type == Safari`.
     SafariBall,
-    /// Throw bait — makes the Pokémon less likely to flee but harder to catch.
     SafariBait,
-    /// Throw a rock — makes the Pokémon easier to catch but more likely to flee.
     SafariRock,
 }
 
@@ -60,12 +51,10 @@ impl Display for BattleAction {
         match self {
             BattleAction::Fight { battle_move, .. } => write!(f, "FIGHT  {}  PP {}", battle_move.name, battle_move.pp),
             BattleAction::UseItem { item, .. } => write!(f, "ITEM   {} ×{}", item.id, item.quantity),
-            // Not `{:?}`, which is what this was.
             BattleAction::SwitchPokemon { pokemon, .. } => {
                 write!(f, "PKMN   {} Lv{} — {}/{} HP",
                        pokemon.species, pokemon.level, pokemon.current_hp, pokemon.stats.hp)?;
-                // `PokemonStatus`' `Display` is `strum`'s, so a healthy Pokémon prints `None` — a
-                // missing value rather than good news.
+                // `PokemonStatus`' `Display` would print a healthy Pokémon as `None`.
                 match pokemon.status {
                     PokemonStatus::None => Ok(()),
                     status => write!(f, ", {status}"),
@@ -89,13 +78,11 @@ pub trait BattleStateReader {
 impl BattleStateReader for MMU {
     fn read_battle_state(&self) -> Option<BattleState> {
         let is_in_battle = self.read_pointer(&pokered_symbols::wIsInBattle);
-        // [`LOST_BATTLE`] is a battle that has ended, and reading it as one put a live `###
-        // Battle` block — the fainted Pokémon still "out", the enemy still on its last HP — into
-        // the overworld turn the model was asked after a blackout.
+        // `LOST_BATTLE` has ended: read as a battle, a blackout's fainted Pokémon is still out.
         if is_in_battle == 0 || is_in_battle == LOST_BATTLE {
             return None;
         }
-        // WBattleType: 0 = normal, 1 = old-man tutorial, 2 = Safari Zone.
+        // `wBattleType`: 0 normal, 1 old-man tutorial, 2 Safari Zone.
         let battle_type = if self.read_pointer(&pokered_symbols::wBattleType) == 2 {
             BattleType::Safari
         } else if is_in_battle == 2 {
@@ -104,14 +91,10 @@ impl BattleStateReader for MMU {
             BattleType::Wild
         };
 
-        // WPlayerMonNumber is the party index of the active Pokémon and is updated on a
-        // mid-battle switch (wBattleMonPartyPos is not — it stays at the battle's starting mon,
-        // which made a trained bench mon look like it never came in and the policy re-switch
-        // forever).
+        // `wPlayerMonNumber` follows a mid-battle switch; `wBattleMonPartyPos` stays on the first mon.
         let active_party_slot = self.read_pointer(&pokered_symbols::wPlayerMonNumber);
 
-        // WPlayer/EnemyDisabledMove: high nibble = disabled move slot (1-based), low = turn
-        // counter.
+        // High nibble the disabled move slot, 1-based; low nibble the turn counter.
         let disabled_slot = |raw: u8| -> Option<u8> {
             let slot = raw >> 4;
             (slot >= 1).then(|| slot - 1)
@@ -170,8 +153,7 @@ impl BattleStateReader for MMU {
                 },
             },
             active_party_slot,
-            // `wEnemyBattleStatus1` bit 5 = `USING_TRAPPING_MOVE`
-            // (`pokered/constants/battle_constants.asm:86`).
+            // `wEnemyBattleStatus1` bit 5 is `USING_TRAPPING_MOVE`.
             enemy_trapping: self.read_pointer(&pokered_symbols::wEnemyBattleStatus1) & (1 << 5) != 0,
             enemy_catch_rate: self.read_pointer(&pokered_symbols::wEnemyMonActualCatchRate),
         })
@@ -186,25 +168,20 @@ mod tests {
         Bag::new(items.iter().map(|&id| BagItem::new(id, 1)).collect())
     }
 
-    /// Each of `IsGhostBattle`'s three conditions, one at a time, plus the boundary of the range
-    /// it checks.
+    /// Each of `IsGhostBattle`'s three conditions, and both edges of its map range.
     #[test]
     fn a_ghost_battle_is_a_wild_one_in_the_tower_without_the_scope() {
         let empty = bag_with(&[]);
         let scope = bag_with(&[ItemId::SilphScope]);
 
-        // Every floor the ROM's range covers, and a wild battle on each is a ghost.
         for map in [Map::PokemonTower1F, Map::PokemonTower3F, Map::PokemonTower7F] {
             assert!(is_ghost_battle(map, &empty, BattleType::Wild), "{map} without the Scope");
-            // The Scope is what ends it, and it ends it everywhere at once.
             assert!(!is_ghost_battle(map, &scope, BattleType::Wild), "{map} carrying the Scope");
         }
 
-        // Trainer battles are excluded by `wIsInBattle == 1`.
         assert!(!is_ghost_battle(Map::PokemonTower3F, &empty, BattleType::Trainer));
 
-        // The two maps immediately either side of the range, which is what a range check wants
-        // guarding: the tower is `0x8E..=0x94`, so these are `0x8D` and `0x95`.
+        // Either side of the tower's `0x8E..=0x94`.
         assert!(!is_ghost_battle(Map::LavenderPokecenter, &empty, BattleType::Wild));
         assert!(!is_ghost_battle(Map::MrFujisHouse, &empty, BattleType::Wild));
     }

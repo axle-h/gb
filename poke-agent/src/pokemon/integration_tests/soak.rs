@@ -12,7 +12,7 @@ const SOAK_GAME_TIME: Duration = Duration::from_secs(40 * 60);
 /// How often to print, in game time.
 const PROGRESS_EVERY: Duration = Duration::from_secs(10 * 60);
 
-/// Events kept for the failure report — enough to see what the agent was doing on the way in.
+/// Events kept for the failure report.
 const EVENT_TAIL: usize = 12;
 
 /// The seed the fuzzer plays by default.
@@ -23,8 +23,8 @@ const EVENT_TAIL: usize = 12;
 /// ```
 const DEFAULT_SEED: u64 = 1;
 
-/// The options `gb serve` plays on: pokered's own `InitOptions` byte, `TEXT_DELAY_MEDIUM` — which
-/// is battle animations on and battle style SHIFT, neither of which any other tier ever sees.
+/// The options `gb serve` plays on, pokered's `InitOptions`: animations on and SHIFT style, which
+/// no other tier sees.
 const DEPLOYMENT_OPTIONS: GameOptions = GameOptions {
     battle_animations_on: true,
     battle_style: BattleStyle::Shift,
@@ -36,7 +36,7 @@ struct SoakState {
     /// Matches the fixture's file stem, so a failure names something greppable.
     name: &'static str,
     state: &'static [u8],
-    /// What this state puts within reach that the others do not — the reason it is in the list.
+    /// What this state puts within reach that the others do not.
     covers: &'static str,
     /// Where the capture is supposed to have been taken, asserted on the way in.
     expect_map: Option<Map>,
@@ -130,8 +130,7 @@ const STATES: &[SoakState] = &[
         expect_map: None,
     },
 
-    // ── Checkpoints cut off the mainline by `playthrough::regen_soak_checkpoints`
-    // ────────────────
+    // ── Checkpoints cut off the mainline by `playthrough::regen_soak_checkpoints` ──
     SoakState {
         name: "soak-mt-moon",
         state: include_bytes!("../data/soak-mt-moon.bin"),
@@ -210,22 +209,20 @@ const STATES: &[SoakState] = &[
     },
 ];
 
-/// Look a state up by name, so each `#[test]` names its fixture rather than an index into a list
-/// somebody will reorder.
+/// Look a state up by name, so each test names its fixture rather than an index.
 fn state(name: &str) -> &'static SoakState {
     STATES.iter().find(|s| s.name == name).expect("every soak test names a state in STATES")
 }
 
-/// Read a `u64` out of the environment, falling back to `default` when it is unset or
-/// unparseable.
+/// A `u64` from the environment, or `default` when unset or unparseable.
 fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
 }
 
-/// Turn `state` loose under `RandomPolicy` and fail if the agent ever goes quiet for longer than
-/// the deployed watchdog would allow.
+/// Turn `state` loose under `RandomPolicy` and fail if the agent goes quiet for longer than the
+/// watchdog allows.
 fn soak(state: &SoakState) {
-    // `GB_SOAK_LIMIT_SECS` tightens the net below the watchdog's 300 s.
+    // `GB_SOAK_LIMIT_SECS` tightens the net below the watchdog's.
     let limit = Duration::from_secs(env_u64("GB_SOAK_LIMIT_SECS",
                                             crate::llm::config::DEFAULT_STUCK_TIMEOUT_SECS));
     let seed = env_u64("GB_SOAK_SEED", DEFAULT_SEED);
@@ -237,11 +234,10 @@ fn soak(state: &SoakState) {
 
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
     gb.load_state(state.state).expect("a committed soak fixture loads");
-    // Nobody listens to a jam hunt, so the APU does not mix or resample: ~10% off a tier that
-    // runs for as long as you leave it.
+    // Nobody listens to a jam hunt, so the APU does not mix or resample.
     gb.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
     let mut cache = MapMetadataCache::default();
-    // The *deployment's* options, not `FAST_FIXTURE_OPTIONS` — see the module docs.
+    // The deployment's options, not `FAST_FIXTURE_OPTIONS`.
     PokemonApi::with_cache(&mut gb, &mut cache).debug_set_options(&DEPLOYMENT_OPTIONS);
     if let Some(want) = state.expect_map {
         let on = PokemonApi::with_cache(&mut gb, &mut cache).game_state().map(|s| s.map.map);
@@ -251,8 +247,7 @@ fn soak(state: &SoakState) {
                     pokemon::integration_tests::playthrough::regen_soak_checkpoints --exact`",
                    state.name);
     }
-    // `exploring`, not `seeded` — the recency-weighted draw, whose argument is on
-    // `RandomPolicy::exploring`.
+    // `exploring`, the recency-weighted draw argued on `RandomPolicy::exploring`.
     let mut agent = PokemonAgent::new(Box::new(RandomPolicy::exploring(seed)));
 
     let target = MachineCycles::from_duration(game_time);
@@ -267,11 +262,10 @@ fn soak(state: &SoakState) {
         emulated += ran;
 
         let mut api = PokemonApi::with_cache(&mut gb, &mut cache);
-        // A failure here is not what is being tested — `update` reports transient read errors
-        // during map transitions — but a wedged agent shows up as silence either way.
+        // `update` reports transient read errors during map transitions; a wedged agent shows up as
+        // silence either way.
         agent.update(&mut api, ran).ok();
 
-        // Drained every tick, not left to accumulate.
         for event in agent.drain_events() {
             tail.push_back(format!("{event:?}"));
             if tail.len() > EVENT_TAIL { tail.pop_front(); }
@@ -283,14 +277,12 @@ fn soak(state: &SoakState) {
             worst_state = agent.state_debug();
         }
         if gap >= limit {
-            // The screen is half the bug report.
             let (screen, menu, buttons) = {
                 let api = PokemonApi::with_cache(&mut gb, &mut cache);
                 (api.on_screen_text(false).map(|t| t.replace('\n', " ")), api.menu_state(),
                  format!("{:?}", api.read_joypad_state()))
             };
             let where_it_is = PokemonApi::with_cache(&mut gb, &mut cache).game_state().ok();
-            // Named per state *and* per seed.
             let dir = std::path::Path::new("target/test-artifacts");
             std::fs::create_dir_all(dir).ok();
             let stem = dir.join(format!("soak-{}-seed{seed}", state.name));
@@ -345,15 +337,13 @@ fn soak(state: &SoakState) {
     assert!(worst < limit, "checked in the loop above");
 }
 
-/// A fresh save — the state `gb serve` starts a new run in, and the one both production jams were
-/// found eight tiles from.
+/// A fresh save, the state `gb serve` starts a new run in.
 #[test]
 fn random_play_from_a_fresh_save_never_goes_quiet() {
     soak(state("start-of-game"));
 }
 
-/// Viridian Forest: trainers, and the 8/256 grass that showed the pacing budget was three times
-/// too generous.
+/// Viridian Forest: trainers, and 8/256 grass.
 #[test]
 fn random_play_in_viridian_forest_never_goes_quiet() {
     soak(state("viridian-forest"));
@@ -370,20 +360,19 @@ fn random_play_around_vermilion_never_goes_quiet() {
     soak(state("at-vermilion"));
 }
 
-/// Lavender: the tower full of ghosts the player has no Silph Scope for, so every encounter is a
-/// battle that cannot be fought normally.
+/// Lavender: the tower's ghosts with no Silph Scope, so no encounter can be fought normally.
 #[test]
 fn random_play_around_lavender_never_goes_quiet() {
     soak(state("at-lavender"));
 }
 
-/// Celadon: the department store, which is the deepest menu tree in the game.
+/// Celadon: the department store, the deepest menu tree in the game.
 #[test]
 fn random_play_around_celadon_never_goes_quiet() {
     soak(state("at-celadon"));
 }
 
-/// The Rocket Hideout: spin tiles and a lift, i.e. movement the agent does not control.
+/// The Rocket Hideout: spin tiles and a lift, movement the agent does not control.
 #[test]
 fn random_play_in_the_rocket_hideout_never_goes_quiet() {
     soak(state("at-rocket-hideout"));
@@ -413,8 +402,7 @@ fn random_play_in_victory_road_never_goes_quiet() {
     soak(state("vr1f-strength"));
 }
 
-/// A PC with mons in the box — withdraw, deposit and release, none of which any other state here
-/// can reach.
+/// A PC with mons in the box: withdraw, deposit and release.
 #[test]
 fn random_play_with_a_full_pc_box_never_goes_quiet() {
     soak(state("postgame-pc-box"));
@@ -426,8 +414,7 @@ fn random_play_with_a_bike_and_fly_never_goes_quiet() {
     soak(state("postgame-fly-bike"));
 }
 
-/// The postgame chain head: a full bag, a full party, every field move, and the largest action
-/// space in the suite.
+/// The postgame chain head: a full bag and party, every field move, the largest action space.
 #[test]
 fn random_play_in_the_postgame_never_goes_quiet() {
     soak(state("postgame-aides"));
@@ -439,20 +426,19 @@ fn random_play_in_mt_moon_never_goes_quiet() {
     soak(state("soak-mt-moon"));
 }
 
-/// The S.S.
+/// The S.S. Anne: identical cabin doors, on a map that stops existing once the route leaves it.
 #[test]
 fn random_play_on_the_ss_anne_never_goes_quiet() {
     soak(state("soak-ss-anne"));
 }
 
-/// Rock Tunnel with no Flash — the walker chooses tiles it cannot see.
+/// Rock Tunnel with no Flash: the walker chooses tiles it cannot see.
 #[test]
 fn random_play_in_rock_tunnel_never_goes_quiet() {
     soak(state("soak-rock-tunnel"));
 }
 
-/// Pokémon Tower *with* the Silph Scope, which is the other half of `at-lavender`: the ghosts
-/// fight back.
+/// Pokémon Tower with the Silph Scope, the other half of `at-lavender`: the ghosts fight back.
 #[test]
 fn random_play_in_pokemon_tower_never_goes_quiet() {
     soak(state("soak-pokemon-tower"));
@@ -464,8 +450,7 @@ fn random_play_at_the_snorlax_never_goes_quiet() {
     soak(state("soak-route12-snorlax"));
 }
 
-/// Inside the Safari Zone with the step counter running, rather than `post-safari`'s view from
-/// afterwards.
+/// Inside the Safari Zone with the step counter running.
 #[test]
 fn random_play_inside_the_safari_zone_never_goes_quiet() {
     soak(state("soak-safari-zone"));
@@ -477,7 +462,7 @@ fn random_play_inside_silph_co_never_goes_quiet() {
     soak(state("soak-silph-co"));
 }
 
-/// The Saffron Gym warp maze — every door is a warp and none of them is out.
+/// The Saffron Gym warp maze: every door is a warp and none is the way out.
 #[test]
 fn random_play_in_the_saffron_gym_never_goes_quiet() {
     soak(state("soak-saffron-gym"));

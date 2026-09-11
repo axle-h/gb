@@ -54,7 +54,7 @@ impl From<u8> for PokemonStatus {
 mod tests {
     use super::*;
 
-    /// Every byte a running game can put there decodes to *something*.
+    /// Every byte a running game can put there decodes to something.
     #[test]
     fn every_status_byte_decodes_without_panicking() {
         for byte in 0..=u8::MAX {

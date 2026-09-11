@@ -1,4 +1,3 @@
-
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -7,16 +6,15 @@ use crate::pokemon::integration_tests::llm_harness::{Brain, Call, LlmRun, Reply,
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::Map;
 
-/// How long a test will wait on the wall clock — a deadline rather than a wait, so a passing run
-/// spends none of it.
+/// How long a test waits on the wall clock; a deadline, so a passing run spends none of it.
 const PATIENCE: Duration = Duration::from_secs(120);
 
-/// A wild battle on Route 6: Ivysaur lv29 against an Oddish lv13, five Poké Balls and a bag full
-/// of things the game will refuse.
+/// A wild battle on Route 6: Ivysaur lv29 against Oddish lv13, five Poké Balls and a bag of things
+/// the game refuses.
 const WILD: &[u8] = include_bytes!("../data/stall-battle-key-item.bin");
 
-/// A trainer battle in Viridian Forest: an Articuno against a Bug Catcher's Weedle lv7, with
-/// eight Great Balls in the bag.
+/// A trainer battle in Viridian Forest: Articuno against a Bug Catcher's Weedle lv7, eight Great
+/// Balls in the bag.
 const TRAINER: &[u8] = include_bytes!("../data/stall-battle-key-item-trainer.bin");
 
 /// A Safari Zone battle against a Rhyhorn, with the menu cursor left on BAIT.
@@ -24,16 +22,14 @@ const SAFARI: &[u8] = include_bytes!("../data/stall-safari-menu.bin");
 
 const VIRIDIAN: &[u8] = include_bytes!("../data/postgame-sold.bin");
 
-// ── The brain
-// ────────────────────────────────────────────────────────────────────────────────────
+// ── The brain ──
 
-/// Everything a refusal test reads back out of a run, all of it strings the model was actually
-/// sent.
+/// Everything a refusal test reads back out of a run, all strings the model was sent.
 #[derive(Default)]
 struct Seen {
     /// One entry per request that was a battle turn, in order: the rendered situation.
     battle_turns: Vec<String>,
-    /// Every overworld turn's situation, same rule.
+    /// Every overworld turn's situation, in order.
     overworld_turns: Vec<String>,
     /// Every distinct `tool`-role message the endpoint has been sent, in the order first seen.
     tool_results: Vec<String>,
@@ -91,8 +87,7 @@ impl Brain for Refuser {
             }
         }
 
-        // A compaction asks the same endpoint with no tools at all; a tool call here would hang
-        // it rather than fail it.
+        // A compaction has no tools, so a tool call here would hang it rather than fail it.
         if request.is_summary() {
             return Reply::Content("I am testing what happens when the game says no.".to_string());
         }
@@ -125,7 +120,7 @@ fn run_on(fixture: &'static [u8], name: &'static str, plan: Vec<Call>) -> (LlmRu
     let brain = Refuser { plan: plan.into(), seen: Arc::clone(&seen) };
     let run = LlmRun::builder(fixture)
         .named(name)
-        // Fifteen game-minutes for a battle that takes seconds, and the margin is the point.
+        // Fifteen game-minutes for a battle that takes seconds.
         .game_time(Duration::from_secs(15 * 60))
         .start(Box::new(brain));
     (run, seen)
@@ -141,13 +136,11 @@ fn held(run: &mut LlmRun, item: ItemId) -> u8 {
         .map_or(0, |entry| entry.quantity)
 }
 
-/// The cartridge's own words for a ball that did not catch — `ItemUseBallText00`–`04`, whichever
-/// the shake calculation lands on.
+/// The cartridge's words for a ball that did not catch, `ItemUseBallText00` to `04`.
 const BALL_FAILED: [&str; 5] =
     ["You missed", "Darn! The", "Aww! It", "Shoot! It", "It dodged"];
 
-// ── The cells
-// ────────────────────────────────────────────────────────────────────────────────────
+// ── The cells ──
 
 #[test]
 fn a_poke_ball_that_fails_hands_the_battle_back_rather_than_ending_it() {
@@ -156,8 +149,7 @@ fn a_poke_ball_that_fails_hands_the_battle_back_rather_than_ending_it() {
     let before = held(&mut run, ItemId::PokeBall);
     assert_eq!(before, 5, "the committed fixture carries five Poké Balls");
 
-    // Two battle turns: the one that throws, and the one that proves there is still a battle to
-    // be asked about.
+    // Two battle turns: the throw, and the one that proves the battle is still on.
     let asked_twice = run.tick_until(PATIENCE, |run| {
         run.drain_events();
         seen.lock().expect("not poisoned").battle_turns.len() >= 2
@@ -182,12 +174,11 @@ fn a_poke_ball_that_fails_hands_the_battle_back_rather_than_ending_it() {
          four sentences for it and not one of them reached the turn.\n  turn 2 was:\n{}",
         seen.battle_turns.get(1).map_or("<never asked>", String::as_str),
     );
-    // Still the same fight, which is what makes the sentence above actionable rather than
-    // alarming.
+    // Still the same fight, so the sentence is actionable.
     assert!(seen.battle_said("Wild battle"), "the second turn was not a wild battle any more");
     assert!(seen.battle_said("Oddish"), "the second turn was about a different Pokémon");
-    // And the bag must not leak into it, the same guard
-    // `llm::what_the_enemy_did_is_reported_rather_than_only_what_we_did` puts on the move list.
+    // The bag must not leak into it, as
+    // `llm::what_the_enemy_did_is_reported_rather_than_only_what_we_did` guards the move list.
     for turn in seen.battle_turns.iter() {
         let quoted: Vec<&str> = turn.lines().filter(|line| line.starts_with("- Text:")).collect();
         for line in quoted {
@@ -313,11 +304,10 @@ fn an_item_the_bag_has_run_out_of_leaves_the_menu_and_is_refused_by_name() {
         vec![choose("item:PokeBall"), choose("item:PokeBall"), choose("run")],
     );
     run.fixture().api().debug_set_catch_rate(0);
-    // One ball, so the throw below is the last of them.
+    // One ball, so the throw below is the last.
     run.fixture().api().debug_take_item(ItemId::PokeBall).expect("the fixture holds Poké Balls");
     run.fixture().api().debug_give_item(ItemId::PokeBall, 1).expect("a bag with a slot free");
 
-    // Three requests, not two.
     let asked = run.tick_until(PATIENCE, |run| {
         run.drain_events();
         seen.lock().expect("not poisoned").battle_turns.len() >= 3
@@ -345,7 +335,6 @@ fn an_item_the_bag_has_run_out_of_leaves_the_menu_and_is_refused_by_name() {
          the two turns.\n  tool results: {:?}",
         seen.tool_results,
     );
-    // The sentence this cell was found by.
     assert!(
         !seen.told("ids are minted for the map"),
         "the refusal talked about map ids in a battle.\n  tool results: {:?}",
@@ -411,8 +400,7 @@ fn the_last_safari_ball_ends_the_game_around_the_battle_it_was_thrown_in() {
         );
     }
 
-    // And the run carries on: a terminus that leaves the model with nothing to do is the failure
-    // this whole file is about.
+    // The run carries on: a terminus that leaves the model nothing to do is the failure.
     let playing_on = run.tick_until(PATIENCE, |run| {
         run.drain_events();
         !seen.lock().expect("not poisoned").overworld_turns.is_empty()
@@ -420,7 +408,7 @@ fn the_last_safari_ball_ends_the_game_around_the_battle_it_was_thrown_in() {
     assert!(playing_on, "no overworld turn followed the ejection from the Safari Zone");
 }
 
-/// The old man's catching tutorial cannot be reached, and this is the reason.
+/// The old man's catching tutorial is a battle the agent cannot walk into.
 #[test]
 fn the_old_mans_tutorial_is_a_battle_the_agent_cannot_walk_into() {
     let seen = Arc::new(Mutex::new(Seen::default()));
@@ -458,7 +446,7 @@ fn the_old_mans_tutorial_is_a_battle_the_agent_cannot_walk_into() {
 
     let mut run = LlmRun::builder(VIRIDIAN)
         .named("refusal-old-man")
-        // Same margin as [`run_on`]'s, and for the same reason.
+        // Same margin as [`run_on`]'s.
         .game_time(Duration::from_secs(15 * 60))
         .start(Box::new(brain));
 

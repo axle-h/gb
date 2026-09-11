@@ -1,4 +1,3 @@
-
 use crate::pokemon::GameState;
 use crate::pokemon::PokemonApi;
 use crate::pokemon::PokemonApiTrait;
@@ -22,10 +21,7 @@ macro_rules! view {
     };
 }
 
-// ── Trainer
-// ──────────────────────────────────────────────────────────────────────────────────────
-
-// There was a `TrainerView` and a `read_trainer` here.
+// ── Play time
 
 /// `HH:MM:SS` of in-game play time. Saturates at 255:59:59, as the game itself does.
 pub fn playtime(api: &PokemonApi<'_>) -> String {
@@ -49,7 +45,6 @@ fn playtime_parts(api: &PokemonApi<'_>) -> (u8, u8, u8) {
 }
 
 // ── Party
-// ────────────────────────────────────────────────────────────────────────────────────────
 
 view! {
     /// One move, with the PP that decides whether it can be used again.
@@ -57,8 +52,7 @@ view! {
         pub name: String,
         pub pp: u8,
         pub max_pp: u8,
-        /// `None` for a status move — the ROM prices those at zero power, which is not the same
-        /// thing as "does nothing".
+        /// `None` for a status move, which the ROM prices at zero power.
         pub power: Option<u8>,
         pub accuracy: u8,
         pub move_type: String,
@@ -66,14 +60,12 @@ view! {
 }
 
 view! {
-    /// A party member. Deliberately *not* the whole [`crate::pokemon::pokemon::Pokemon`]: IVs,
-    /// EVs and raw experience are invisible in-game and would be several hundred tokens of noise
-    /// per mon.
+    /// A party member, without the IVs, EVs and raw experience the game never shows.
     pub struct PartyMemberView {
-        /// 0-based party slot, which is what every action that targets a Pokémon takes.
+        /// 0-based party slot, which every action targeting a Pokémon takes.
         pub slot: usize,
         pub species: String,
-        /// `None` when the mon has not been nicknamed, i.e. the nickname is the species name.
+        /// `None` when the nickname is the species name.
         pub nickname: Option<String>,
         pub level: u8,
         pub hp: u16,
@@ -131,14 +123,12 @@ fn move_view(m: &crate::pokemon::move_name::PokemonMove) -> MoveView {
 }
 
 // ── Bag
-// ──────────────────────────────────────────────────────────────────────────────────────────
 
 view! {
     pub struct BagItemView {
         pub item: String,
         pub quantity: u8,
-        /// What a mart charges, from the ROM's own price table. `None` for the key items and TMs
-        /// no mart sells — which is also the answer to "can I buy more of this?".
+        /// A mart's price, from the ROM's table; `None` for anything no mart sells.
         pub price: Option<u32>,
     }
 }
@@ -167,7 +157,6 @@ pub fn bag(state: &GameState, api: &PokemonApi<'_>) -> BagView {
 }
 
 // ── PC
-// ───────────────────────────────────────────────────────────────────────────────────────────
 
 view! {
     pub struct BoxedPokemonView {
@@ -191,10 +180,8 @@ view! {
         pub pokemon: Vec<BoxedPokemonView>,
         pub stored_items: Vec<String>,
         pub party_size: usize,
-        /// The honest caveat, and it is a real limit rather than a hedge. Eleven of the twelve
-        /// boxes live in SRAM banks the emulator layer does not window, so only the open one can
-        /// be read — and `change_box` is what copies WRAM to SRAM, which means looking in another
-        /// box is a write that saves the game rather than a read.
+        /// Only the open box can be read: the other eleven live in SRAM banks the emulator does not
+        /// window, and `change_box`, which copies WRAM to SRAM, saves the game.
         pub note: String,
     }
 }
@@ -224,7 +211,6 @@ pub fn pc(state: &GameState, api: &PokemonApi<'_>) -> PcView {
 }
 
 // ── Map
-// ──────────────────────────────────────────────────────────────────────────────────────────
 
 /// What each character of `impl Display for MetaTileMap` means.
 pub const MAP_LEGEND: &[(char, &str)] = &[
@@ -260,15 +246,12 @@ view! {
         pub at: Point,
         pub to_map: String,
         pub to_position: Point,
-        /// Whether `at` can be walked to from where the player is standing right now.
         pub reachable_from_here: bool,
     }
 }
 
 view! {
-    /// The reachable actions are deliberately not here. They were, and they were a second copy of
-    /// the menu the turn request already renders — but *without the ids*, since an id is minted
-    /// from `MetaTile::kind` in the tool layer and this view never had one.
+    /// Carries no actions: the turn's menu has them, with the ids this view cannot mint.
     pub struct MapView {
         pub map: String,
         pub position: Point,
@@ -285,8 +268,7 @@ view! {
 }
 
 view! {
-    /// `Point8` by another name. Its own type so the JSON is `{"x": 4, "y": 7}` rather than a
-    /// two-element array a model has to guess the order of.
+    /// `Point8` as `{"x": 4, "y": 7}` rather than an array a model has to guess the order of.
     pub struct Point { pub x: u8, pub y: u8 }
 }
 
@@ -305,12 +287,10 @@ pub fn map_view(state: &GameState) -> MapView {
         facing: format!("{:?}", map.player_direction),
         width: map.width,
         height: map.height,
-        // Hidden people are absent from the map the player sees; reporting them would invite the
-        // model to try to talk to someone who is not there.
+        // Hidden people are not on the map the player sees.
         people: map.sprites.iter().filter(|s| !s.hidden && reachable.contains(&s.name)).map(|s| PersonView {
             index: s.index,
-            // Through `MetaTile::id_kind` so this is the same spelling as the action id, by
-            // construction rather than by two functions agreeing.
+            // Through `MetaTile::id_kind`, so the spelling is the action id's.
             name: MetaTile::Sprite(s.name).id_kind().into_owned(),
             position: s.position.into(),
             on_screen: s.on_screen,
@@ -328,9 +308,8 @@ pub fn map_view(state: &GameState) -> MapView {
     }
 }
 
-/// The map's warps, sorted so two consecutive reads of an unchanged map produce identical output
-/// — `warp_targets` is a `HashSet` and would otherwise reorder on every call, which reads to a
-/// model as the world having changed.
+/// The map's warps, sorted: `warp_targets` is a `HashSet`, and a reordered list reads to a model
+/// as a changed world.
 fn warps(state: &GameState) -> Vec<WarpView> {
     let map = &state.map;
     let routable = map.reachable_tiles();
@@ -349,7 +328,6 @@ fn warps(state: &GameState) -> Vec<WarpView> {
 }
 
 // ── Screen text
-// ──────────────────────────────────────────────────────────────────────────────────
 
 /// Whatever text is on screen, decoded from VRAM.
 pub fn screen_text(api: &PokemonApi<'_>) -> Option<String> {
@@ -357,18 +335,14 @@ pub fn screen_text(api: &PokemonApi<'_>) -> Option<String> {
 }
 
 // ── World graph
-// ──────────────────────────────────────────────────────────────────────────────────
 
 view! {
-    /// One map on the way to somewhere. `via` is how it is entered and which tile of the previous
-    /// map to leave by — `"Warp at (25, 9)"`, `"Connection at (9, 0)"` — and is absent on the
-    /// first hop, which is the map already stood on.
+    /// One map on the way. `via` is the tile of the previous map to leave by, e.g. `"Warp at (25,
+    /// 9)"`, and is absent on the first hop, the map already stood on.
     pub struct RouteHopView {
         pub map: String,
         pub via: Option<String>,
-        /// Whether `via`'s tile can actually be walked to from where the player is standing right
-        /// now. Only ever set on the second hop, which is the only one that is a fact about the
-        /// map under the player's feet; `None` everywhere else, and absent from the JSON.
+        /// Whether `via`'s tile is reachable from here; set on the second hop only.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub reachable_from_here: Option<bool>,
     }
@@ -389,19 +363,15 @@ pub fn route(graph: &WorldGraph, from: Map, to: Map) -> Option<Vec<RouteHopView>
     )
 }
 
-/// [`route`], with the one thing the graph cannot know added: whether the player can get to the
-/// tile it is telling them to leave by.
+/// [`route`], plus whether the player can get to the tile it says to leave by.
 pub fn route_from(graph: &WorldGraph, map: &crate::pokemon::tile_map::MetaTileMap, to: Map)
     -> Option<Vec<RouteHopView>> {
-    // One search, not two.
     let steps = graph.shortest_path(map.map, to)?;
     let reachable = (steps.len() > 1).then(|| map.reachable_tiles());
     Some(steps.into_iter().enumerate().map(|(index, step)| RouteHopView {
         map: format!("{}", step.map),
         via: step.via.zip(step.via_at).map(|(kind, at)| format!("{kind:?} at ({}, {})", at.x, at.y)),
-        // Hop 0 is the map being stood on and carries no `via`; hop 1 names the tile to leave it
-        // by, which is the only coordinate in the whole route on ground the player is standing
-        // on.
+        // Hop 1's `via` is the only coordinate in the route on the map being stood on.
         reachable_from_here: match (index, step.via_at, reachable.as_ref()) {
             (1, Some(at), Some(reachable)) => Some(reachable.contains(&at)),
             _ => None,
@@ -410,7 +380,6 @@ pub fn route_from(graph: &WorldGraph, map: &crate::pokemon::tile_map::MetaTileMa
 }
 
 // ── Battle
-// ───────────────────────────────────────────────────────────────────────────────────────
 
 view! {
     pub struct BattleSideView {
@@ -419,33 +388,24 @@ view! {
         pub hp: u16,
         pub max_hp: u16,
         pub status: String,
-        /// The field that made this read answerable. Every `MoveView` carries its own `move_type`
-        /// and `power`, so a model reading this had the *attacking* half of every matchup and
-        /// never the defending half — no types on either side, so the multiplier could not be
-        /// worked out from the result at all, and `read_party` (which does carry types) only ever
-        /// covers your own.
+        /// The defending half of every matchup; `read_party` carries types for your own side only.
         pub types: Vec<String>,
-        /// Slot of a move Disable has locked out this battle. The game bounces straight back to
-        /// the move menu if it is chosen, so a decider that ignores this can loop forever.
+        /// A Disabled move's slot: choosing it bounces back to the move menu, so ignoring it loops.
         pub disabled_move_slot: Option<u8>,
         pub moves: Vec<MoveView>,
     }
 }
 
 view! {
-    /// The legal actions are deliberately not here, for the same reason [`MapView`] does not
-    /// carry them: they were a second copy of the turn's own battle menu without the ids that
-    /// menu mints, so every one of them was a choice the model could not make.
+    /// Carries no actions, for the same reason as [`MapView`].
     pub struct BattleView {
         /// `"Wild"`, `"Trainer"` or `"Safari"`.
         pub battle_type: String,
         pub player: BattleSideView,
         pub enemy: BattleSideView,
-        /// Which party slot is out.
         pub active_party_slot: u8,
-        /// Set while the enemy has the player in Wrap/Fire Spin/Clamp/Bind. The battle menu still
-        /// opens and items, switching and running all still work, but any move chosen is replaced
-        /// with "cannot move" — so a decider that keeps picking moves here achieves nothing.
+        /// Set while trapped by Wrap, Fire Spin, Clamp or Bind: items, switching and running work,
+        /// but any move chosen becomes "cannot move".
         pub enemy_trapping: bool,
         /// The live catch rate `ItemUseBall` compares against, after any Safari rock or bait.
         pub enemy_catch_rate: u8,
@@ -484,12 +444,10 @@ pub fn battle(state: &GameState) -> Option<BattleView> {
 }
 
 // ── Status
-// ───────────────────────────────────────────────────────────────────────────────────────
 
 view! {
-    /// One badge and whether it has been earned, in the order of
-    /// [`Badge::ORDER`](crate::pokemon::badge::Badge::ORDER) — which is also the order of the
-    /// sprites in `/api/badges.png`, so index `i` is the badge and the sprite.
+    /// One badge, in [`Badge::ORDER`](crate::pokemon::badge::Badge::ORDER), which is also the
+    /// sprite order of `/api/badges.png`.
     pub struct BadgeView {
         pub name: String,
         pub earned: bool,
@@ -499,8 +457,7 @@ view! {
 view! {
     /// One party slot on the status panel: enough for a sprite, a name and a health bar.
     pub struct PartyMonView {
-        /// What the player calls it, which is the species name in upper case unless they renamed
-        /// it.
+        /// The species name in upper case unless renamed.
         pub nickname: String,
         pub dex: u16,
         pub level: u8,
@@ -512,23 +469,18 @@ view! {
 }
 
 view! {
-    /// The cheap subset the web UI polls at 10 Hz. Everything but the clock is already in
-    /// `GameState`, so this costs one clone of a few small fields and three byte reads.
+    /// The cheap subset the web UI polls; all of it is in `GameState` but the clock.
     pub struct StatusView {
-        /// The name on the save, which is whoever the run was started for — `GB_MODEL` shortened
-        /// to the seven characters Gen 1 allows, or `HUMAN`, or a random draw.
+        /// The name on the save: `AI` for a model, `HUMAN`, or a random draw.
         pub trainer: String,
-        /// `wPlayerID`. Sent as the number and formatted by the client, because the game itself
-        /// prints it five digits wide with leading zeroes (`PrintNumber`, `LEADING_ZEROES | 2,
-        /// 5`) and that is what a player recognises as their ID.
+        /// `wPlayerID`; the client prints it five digits wide, zero-padded, as the game does.
         pub trainer_id: u16,
         pub map: String,
         pub position: Point,
         pub mode: String,
         pub badges: Vec<BadgeView>,
         pub money: u32,
-        /// `HH:MM:SS` of in-game play time — the run's own clock, which is what a viewer wants to
-        /// see rather than how long the process has been up.
+        /// `HH:MM:SS` of in-game play time.
         pub playtime: String,
         pub party: Vec<PartyMonView>,
         pub in_battle: bool,

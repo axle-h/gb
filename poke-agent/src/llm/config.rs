@@ -1,60 +1,53 @@
-//! The configuration block, entirely from the environment.
+//! The LLM configuration, read once at startup and entirely from the environment.
 
-/// Everything the worker and the client need, resolved once at startup.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmConfig {
+    /// `OPENAI_BASE_URL`: any OpenAI-compatible endpoint, the public one by default.
     pub base_url: String,
+    /// `OPENAI_API_KEY`, required.
     pub api_key: String,
+    /// `GB_MODEL`, required.
     pub model: String,
-    /// The context window in tokens.
+    /// `GB_CONTEXT_LIMIT`: the context window in tokens.
     pub context_limit: u64,
-    /// The occupancy at which the history is compacted, as a fraction of [`Self::context_limit`].
-    /// Both stages trigger here: eviction first, and summarisation only if eviction left it still
-    /// over.
+    /// `GB_COMPACT_ABOVE`: the fraction of [`Self::context_limit`] at which the history is
+    /// compacted, by eviction first and summarisation only if that leaves it still over.
     pub compact_above: f64,
+    /// `GB_TEMPERATURE`.
     pub temperature: f32,
+    /// `GB_MAX_TOOL_STEPS`: the most completions one turn may take.
     pub max_tool_steps: usize,
-    /// How long the endpoint may take to start answering, and to keep answering, before the
-    /// request is abandoned as an [`LlmError::Timeout`](crate::llm::LlmError::Timeout).
+    /// `GB_REQUEST_TIMEOUT_SECS`: how long the endpoint may take to start, and to keep, answering
+    /// before the request is abandoned as an [`LlmError::Timeout`](crate::llm::LlmError::Timeout).
     pub request_timeout: std::time::Duration,
-    /// A ceiling on one completion, or `None` for whatever the endpoint does by default.
+    /// `GB_MAX_TOKENS`: a ceiling on one completion, or `None` for the endpoint's default.
     pub max_tokens: Option<u32>,
-    /// `reasoning_effort`, passed straight through when set. See
-    /// `ChatRequest::reasoning_effort` for what the values actually do — it is the endpoint's
-    /// vocabulary, not ours.
+    /// `GB_REASONING_EFFORT`, sent as `reasoning_effort` when set, in the endpoint's vocabulary.
     pub reasoning_effort: Option<String>,
-    /// How much *emulated* time the agent may go without reaching a decision point of any kind
-    /// before the watchdog asks for a nudge on its behalf. `None` when `GB_STUCK_TIMEOUT_SECS=0`,
-    /// which turns it off.
+    /// `GB_STUCK_TIMEOUT_SECS`: emulated time without any decision point before the watchdog asks
+    /// for a nudge; `None` when set to `0`, which turns it off.
     pub stuck_timeout: Option<std::time::Duration>,
 }
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_CONTEXT_LIMIT: u64 = 128_000;
 pub const DEFAULT_COMPACT_ABOVE: f64 = 0.85;
-/// The range [`DEFAULT_COMPACT_ABOVE`] may be moved through. The ceiling is not superstition:
-/// above it, the remaining window cannot hold the summary that compaction exists to produce, so
-/// the run silently degrades to the last-resort trim.
+/// Above this ceiling the remaining window cannot hold the compaction summary, and the run
+/// silently degrades to the last-resort trim.
 pub const COMPACT_ABOVE_RANGE: std::ops::RangeInclusive<f64> = 0.2..=0.95;
 pub const DEFAULT_TEMPERATURE: f32 = 1.0;
 pub const DEFAULT_MAX_TOOL_STEPS: usize = 12;
-/// Three minutes. Enough for any hosted endpoint and for a local one that is merely slow; see
-/// [`LlmConfig::request_timeout`] for why the number wants to grow rather than shrink.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 180;
-/// Generous by design — see [`LlmConfig::max_tokens`].
 pub const DEFAULT_MAX_TOKENS: u32 = 8192;
-/// Five minutes of *emulated* time.
+/// In emulated seconds.
 pub const DEFAULT_STUCK_TIMEOUT_SECS: u64 = 300;
 
 impl LlmConfig {
-    /// Read the block from the process environment.
     pub fn from_env() -> Result<Self, String> {
         Self::from_lookup(&|name| std::env::var(name).ok())
     }
 
-    /// [`Self::from_env`] against an arbitrary lookup, so the parsing and the defaults are
-    /// testable without touching the real environment — which is process-global and would make
-    /// the tests order-dependent.
+    /// [`Self::from_env`] against any lookup, so tests need not touch the process environment.
     pub fn from_lookup(env: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
         let required = |name: &str| -> Result<String, String> {
             match env(name).map(|value| value.trim().to_string()) {
@@ -72,8 +65,7 @@ impl LlmConfig {
             api_key: required("OPENAI_API_KEY")?,
             model: required("GB_MODEL")?,
             context_limit: number(env, "GB_CONTEXT_LIMIT", DEFAULT_CONTEXT_LIMIT)?,
-            // Rejected rather than clamped: a run started with `GB_COMPACT_ABOVE=95` meant to say
-            // 0.95, and quietly playing on at 0.85 would hide that for the length of the run.
+            // Rejected, not clamped: `GB_COMPACT_ABOVE=95` meant 0.95, and 0.85 would hide it.
             compact_above: match number(env, "GB_COMPACT_ABOVE", DEFAULT_COMPACT_ABOVE)? {
                 fraction if COMPACT_ABOVE_RANGE.contains(&fraction) => fraction,
                 fraction => {
@@ -91,9 +83,7 @@ impl LlmConfig {
                 0 => None,
                 cap => Some(cap),
             },
-            // Not validated against a list: the accepted values belong to the endpoint, and
-            // refusing one it would have taken is worse than passing through one it rejects —
-            // which it says so, in a 400 whose body we keep.
+            // Not validated: the endpoint owns the values and rejects a bad one in a 400 we keep.
             reasoning_effort: env("GB_REASONING_EFFORT")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
@@ -102,8 +92,6 @@ impl LlmConfig {
                 "GB_REQUEST_TIMEOUT_SECS",
                 DEFAULT_REQUEST_TIMEOUT_SECS,
             )?),
-            // Zero is "off" rather than "fire on every tick", which is the only reading that
-            // makes the variable a way to turn the watchdog off.
             stuck_timeout: match number(env, "GB_STUCK_TIMEOUT_SECS", DEFAULT_STUCK_TIMEOUT_SECS)? {
                 0 => None,
                 seconds => Some(std::time::Duration::from_secs(seconds)),
@@ -111,9 +99,6 @@ impl LlmConfig {
         })
     }
 
-    /// Where the completions live. Split out because it is the one string most likely to be wrong
-    /// against a non-OpenAI endpoint, and an error saying which URL was tried is worth a great
-    /// deal more than one that does not.
     pub fn completions_url(&self) -> String {
         format!("{}/chat/completions", self.base_url)
     }
@@ -129,19 +114,15 @@ where
     }
 }
 
-/// Whether a resumed run picks its conversation back up — `GB_RESTORE_HISTORY`, on unless it is
-/// set to `0`, `false`, `no` or `off`.
+/// `GB_RESTORE_HISTORY`: whether a resumed run keeps its conversation; on unless `0`, `false`,
+/// `no` or `off`.
 pub fn restore_history() -> bool {
     restores_history(std::env::var("GB_RESTORE_HISTORY").ok())
 }
 
-/// The reading, split out so it can be tested without touching the process environment — the same
-/// reason [`LlmConfig::from_lookup`] exists.
 fn restores_history(value: Option<String>) -> bool {
     match value {
-        // Blank counts as unset, which is the shape a placeholder Secret takes — the same reading
-        // `GB_ADMIN_TOKEN` already has, and the opposite of treating an empty string as "off" and
-        // silently dropping every resumed conversation on the deployment.
+        // Blank reads as unset, the shape a placeholder Secret takes.
         Some(value) => !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
         None => true,
     }
@@ -159,8 +140,6 @@ mod tests {
 
     const MINIMAL: &[(&str, &str)] = &[("OPENAI_API_KEY", "sk-test"), ("GB_MODEL", "gpt-test")];
 
-    /// Seven characters is the game's limit and a model id is nothing like seven characters, so
-    /// the whole question is what to throw away.
     #[test]
     fn the_two_required_variables_are_the_only_two_required() {
         let config = LlmConfig::from_lookup(&lookup(MINIMAL)).expect("the defaults cover the rest");
@@ -192,8 +171,6 @@ mod tests {
         assert!(failure.contains("GB_STUCK_TIMEOUT_SECS"), "{failure}");
     }
 
-    /// The failure an operator actually hits, and it must name the variable rather than say
-    /// "config".
     #[test]
     fn a_missing_or_blank_requirement_names_itself() {
         for (missing, present) in [("OPENAI_API_KEY", "GB_MODEL"), ("GB_MODEL", "OPENAI_API_KEY")] {
@@ -212,8 +189,7 @@ mod tests {
         pairs.push(("GB_COMPACT_ABOVE", "0.9"));
         assert_eq!(LlmConfig::from_lookup(&lookup(&pairs)).expect("valid").compact_above, 0.9);
 
-        // The two shapes of typo that matter: a percentage written as one, and a fraction written
-        // upside down.
+        // A percentage written as one, and a fraction written upside down.
         for bad in ["90", "0.05", "1.0", "-0.5"] {
             let mut pairs = MINIMAL.to_vec();
             pairs.push(("GB_COMPACT_ABOVE", bad));
@@ -228,7 +204,6 @@ mod tests {
         );
     }
 
-    /// The patience knob.
     #[test]
     fn the_request_timeout_can_be_lengthened_for_a_slow_endpoint() {
         let mut pairs = MINIMAL.to_vec();
@@ -237,9 +212,6 @@ mod tests {
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(900));
     }
 
-    /// Zero is "no ceiling", not "a ceiling of zero" — the same reading as
-    /// `GB_STUCK_TIMEOUT_SECS`, and the only one that makes the variable a way to restore the
-    /// endpoint's own default.
     #[test]
     fn a_zero_token_cap_removes_the_ceiling_rather_than_setting_it_to_nothing() {
         let mut pairs = MINIMAL.to_vec();
@@ -251,7 +223,6 @@ mod tests {
         assert_eq!(LlmConfig::from_lookup(&lookup(&pairs)).expect("valid").max_tokens, Some(2048));
     }
 
-    /// Passed through verbatim and *not* validated: the vocabulary is the endpoint's.
     #[test]
     fn the_reasoning_effort_is_whatever_the_endpoint_calls_it() {
         let mut pairs = MINIMAL.to_vec();
@@ -259,16 +230,12 @@ mod tests {
         let config = LlmConfig::from_lookup(&lookup(&pairs)).expect("valid");
         assert_eq!(config.reasoning_effort.as_deref(), Some("none"));
 
-        // Blank is not a value: it is the variable being present in a template and never filled
-        // in, which must read the same as unset or the endpoint gets an empty string it will
-        // reject.
+        // Blank is an unfilled template and must read as unset.
         let mut pairs = MINIMAL.to_vec();
         pairs.push(("GB_REASONING_EFFORT", "   "));
         assert_eq!(LlmConfig::from_lookup(&lookup(&pairs)).expect("valid").reasoning_effort, None);
     }
 
-    /// A trailing slash in `OPENAI_BASE_URL` is the single most common way to get a 404 out of a
-    /// self-hosted endpoint, and it costs one `trim_end_matches` to make impossible.
     #[test]
     fn a_trailing_slash_on_the_base_url_does_not_double_up() {
         let mut pairs = MINIMAL.to_vec();
@@ -299,7 +266,6 @@ mod tests {
         }
     }
 
-    /// The default has to be *on*, and blank has to read as unset.
     #[test]
     fn a_conversation_is_restored_unless_something_actually_says_not_to() {
         assert!(restores_history(None), "unset resumes the conversation");

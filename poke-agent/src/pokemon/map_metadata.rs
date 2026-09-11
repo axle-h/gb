@@ -19,42 +19,28 @@ pub struct MapMetadata {
     pub map_data: Vec<u8>,
     pub tileset_data: Vec<u8>,
     pub collision_tiles: HashSet<u8>,
-    /// Tile IDs from `wTilesetTalkingOverTiles` — counters/desks the player can interact through
-    /// by facing them and pressing A (pokered "talking over" mechanic).
+    /// Counters and desks the player can talk across (`wTilesetTalkingOverTiles`).
     pub talking_over_tiles: HashSet<u8>,
     pub warp_events: Vec<WarpEvent>,
-    /// True if the current tileset is listed in the WaterTilesets table, meaning tile $14/$32/$48
-    /// should be treated as water/shore.
+    /// The tileset is in `WaterTilesets`, so its water and shore ids are water.
     pub is_water_tileset: bool,
-    /// Tile ID for tall grass in the current tileset (from `wGrassTile`). Zero means this map has
-    /// no grass tile.
+    /// The tileset's tall-grass tile id, zero for none.
     pub grass_tile_id: u8,
     pub connected_strips: Vec<ConnectedMapStrip>,
-    /// Maps ledge tile IDs to their jump direction. Only populated for the Overworld tileset,
-    /// which is the only tileset where HandleLedges fires.
+    /// Ledge tile ids to jump direction; only the Overworld tileset has `HandleLedges`.
     pub ledge_tiles: HashMap<u8, JumpDirection>,
-    /// Pairs of raw tile IDs that the player may not walk *between* in this tileset, even though
-    /// both tiles are individually passable (pokered `TilePairCollisionsLand` filtered to the
-    /// current tileset). Used to simulate elevation boundaries — e.g. in the Cavern tileset you
-    /// cannot step between tile $20 and tile $05.
+    /// Raw tile pairs the player may not step between though each is passable, the elevation
+    /// boundaries of `TilePairCollisionsLand`.
     pub tile_pair_collisions: Vec<(u8, u8)>,
-    /// The same, but from pokered `TilePairCollisionsWater` — the table the game checks whenever
-    /// water is involved: mounting Surf (`UsedSurf` → `.tryToSurf`), stepping ashore again
-    /// (`.tryToStopSurfing`), and every move made while surfing (`CollisionCheckOnWater`). In the
-    /// Cavern tileset it holds `($14, $05)`, i.e. inside Seafoam Islands you may not surf on or
-    /// off the water from a plain cave floor tile — only from the shore tiles ($15, …).
+    /// `TilePairCollisionsWater`, checked on mounting Surf, stepping ashore and every surfing move;
+    /// in Seafoam it forbids surfing on or off from plain cave floor.
     pub tile_pair_collisions_water: Vec<(u8, u8)>,
-    /// Pre-computed tile grid without sprites. Tiles, warps, and connection strips are all
-    /// ROM-derived and never change, so this is computed once at construction and cloned in
-    /// `meta_tiles` before the sprite overlay is applied.
+    /// The tile grid without sprites, computed once and cloned under each sprite overlay.
     pub meta_tiles_base: Vec<MetaTile>,
-    /// Bottom-left raw tile ID of each expanded meta-tile (parallel to `meta_tiles_base`). This
-    /// is the sub-tile pokered's collision check reads (`lda_coord 8,9` for the player's standing
-    /// tile, and the bottom-left of the meta-tile in front for the destination).
+    /// Bottom-left raw tile id of each meta-tile, the sub-tile the cartridge's collision check reads.
     pub raw_tile_ids: Vec<u8>,
 }
 
-/// Deliberately a summary, not `#[derive(Debug)]`.
 impl std::fmt::Debug for MapMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "MapMetadata({}, {}x{} blocks, tileset {:?})",
@@ -63,9 +49,9 @@ impl std::fmt::Debug for MapMetadata {
 }
 
 impl MapMetadata {
-    pub const BLOCK_TILE_WIDTH: usize = 4; // a block is 4x4 tiles
+    pub const BLOCK_TILE_WIDTH: usize = 4;
     pub const BLOCK_TILES: usize = Self::BLOCK_TILE_WIDTH * Self::BLOCK_TILE_WIDTH;
-    pub const TILES_PER_META: usize = 2; // a meta tile on the map is 2x2 graphical tiles
+    pub const TILES_PER_META: usize = 2;
 
     pub fn tile_id(&self, tile_x: usize, tile_y: usize) -> u8 {
         let block_x = tile_x / Self::BLOCK_TILE_WIDTH;
@@ -80,7 +66,6 @@ impl MapMetadata {
         self.collision_tiles.contains(&self.tile_id(tile_x, tile_y))
     }
 
-    /// Returns true if this sub-tile is a water or shore tile.
     pub fn is_water(&self, tile_x: usize, tile_y: usize) -> bool {
         is_water_tile_id(self.tile_id(tile_x, tile_y), self.is_water_tileset, self.map_header.tileset)
     }
@@ -114,8 +99,7 @@ impl MapMetadata {
         result
     }
 
-    /// What each person is standing on — their square and the tile the overlay above painted
-    /// over. One entry per non-hidden sprite that is on the map.
+    /// Each visible person's square and the tile the sprite overlay painted over.
     pub fn underfoot(&self, sprites: &[Sprite]) -> Vec<(Point8, MetaTile)> {
         let dimensions = self.dimensions();
         let exp_width = dimensions.full_width();
@@ -133,13 +117,11 @@ impl MapMetadata {
     pub fn build_meta_tiles_base(&self) -> Vec<MetaTile> {
         let dimensions = self.dimensions();
 
-        // Connection strips expand the map by one meta-tile row/column per direction.
         let exp_width = dimensions.full_width();
         let exp_height = dimensions.full_height();
 
         let mut result = vec![MetaTile::Obstacle; exp_width * exp_height];
 
-        // Fill current map tiles, shifted by the connection offsets.
         let width_tiles  = self.map_header.width  as usize * Self::BLOCK_TILE_WIDTH;
         let height_tiles = self.map_header.height as usize * Self::BLOCK_TILE_WIDTH;
         for tile_y in 0..height_tiles {
@@ -151,7 +133,7 @@ impl MapMetadata {
                     if self.is_water(tile_x, tile_y) {
                         result[index] = MetaTile::Water;
                     } else if tile_x % Self::TILES_PER_META == 0 && tile_y % Self::TILES_PER_META == 1 {
-                        // Bottom-left sub-tile: the one pokered actually checks.
+                        // The bottom-left sub-tile is the one the cartridge checks.
                         let tile_id = self.tile_id(tile_x, tile_y);
                         if self.map_header.tileset.cut_tree_tile_id() == Some(tile_id) {
                             result[index] = MetaTile::CutTree;
@@ -176,15 +158,13 @@ impl MapMetadata {
             let mx = warp.position.x as usize + dimensions.west_extra;
             let my = warp.position.y as usize + dimensions.north_extra;
             if mx < exp_width && my < exp_height {
-                // Only register the warp if the position is physically accessible (has at least
-                // one walkable raw sub-tile).
+                // Only where at least one raw sub-tile is walkable.
                 if result[mx + my * exp_width] != MetaTile::Obstacle {
                     result[mx + my * exp_width] = warp.tile();
                 }
             }
         }
 
-        // Fill the extra border rows/columns from connected map strips.
         for (strip, strip_idx, mx, my) in self.strip_cells() {
             result[mx + my * exp_width] = strip.meta_tile_at(strip_idx);
         }
@@ -192,8 +172,8 @@ impl MapMetadata {
         result
     }
 
-    /// Every connection-strip meta-tile and where it lands in the expanded grid, as `(strip,
-    /// strip_idx, mx, my)`.
+    /// Every connection-strip cell as `(strip, strip_idx, mx, my)`, the one placement both the
+    /// classifier and the renderer use.
     pub fn strip_cells(&self) -> impl Iterator<Item = (&ConnectedMapStrip, usize, usize, usize)> {
         let dimensions = self.dimensions();
         let (exp_width, exp_height) = (dimensions.full_width(), dimensions.full_height());
@@ -220,7 +200,6 @@ impl MapMetadata {
         })
     }
 
-    /// Build the bottom-left raw tile ID grid parallel to `meta_tiles_base`.
     pub fn build_raw_tile_ids(&self) -> Vec<u8> {
         let dimensions = self.dimensions();
         let exp_width  = dimensions.full_width();
@@ -239,7 +218,7 @@ impl MapMetadata {
         ids
     }
 
-    /// Overlay runtime `ReplaceTileBlock` door blocks onto an already-built `meta_tiles` grid.
+    /// Overlay runtime `ReplaceTileBlock` door blocks onto a built grid.
     pub fn apply_door_blocks(&self, result: &mut [MetaTile], doors: &[DoorBlock]) {
         let dims = self.dimensions();
         let exp_width = dims.full_width();
@@ -251,7 +230,6 @@ impl MapMetadata {
                     if mx >= exp_width { continue; }
                     let idx = mx + my * exp_width;
                     if idx >= result.len() { continue; }
-                    // Bottom-left sub-tile of this meta-cell within the closed block.
                     let tile_off = (sub_x * Self::TILES_PER_META)
                         + (sub_y * Self::TILES_PER_META + 1) * Self::BLOCK_TILE_WIDTH;
                     let tile = self.tileset_data
@@ -270,10 +248,8 @@ impl MapMetadata {
 }
 
 impl MapMetadata {
-    /// Card Key door tiles in the Facility tileset (pokered `card_key.asm`:
-    /// `wTileInFrontOfPlayer` == $18 or $24). While locked they are walls; once the Card Key is
-    /// held the game opens them on approach, so force them passable then (the static tileset
-    /// marks them impassable).
+    /// Card Key door tiles `$18` and `$24`: walls while locked, passable once the key opens them on
+    /// approach, though the static tileset marks them impassable.
     pub fn apply_card_key_doors(&self, result: &mut [MetaTile], locked: bool) {
         for (idx, &tile) in self.raw_tile_ids.iter().enumerate() {
             if tile == 0x18 || tile == 0x24 {
@@ -284,11 +260,8 @@ impl MapMetadata {
 }
 
 impl MapMetadata {
-    /// Pokémon Mansion 3F floor holes: stepping onto any of them drops the player to 1F, landing
-    /// at (16,14) (pokered `PokemonMansion3F.asm` `.holeCoords` + `special_warps.asm`
-    /// `DungeonWarpData`). Model them as inter-map warps so BFS routes 3F → hole → 1F
-    /// automatically — the only way to reach 1F's right side, and thus the B1F staircase down to
-    /// the Secret Key.
+    /// Pokémon Mansion 3F's floor holes as warps to 1F, the only way to 1F's right side and the B1F
+    /// stairs.
     pub fn apply_mansion_holes(&self, result: &mut [MetaTile]) {
         if self.map != Map::PokemonMansion3F { return; }
         let w = self.dimensions().full_width();
@@ -300,9 +273,7 @@ impl MapMetadata {
         }
     }
 
-    /// Victory Road 3F has one floor hole at (23,15). Stepping on it drops the player to VR2F
-    /// (`IsPlayerOnDungeonWarp` + `DungeonWarpData VICTORY_ROAD_2F` → the fly-warp landing
-    /// (22,16)) — the only way onto VR2F's east side that reaches the Route 23 exit.
+    /// Victory Road 3F's floor hole as a warp to 2F, the only way onto 2F's east side and the exit.
     pub fn apply_victory_road_holes(&self, result: &mut [MetaTile]) {
         if self.map != Map::VictoryRoad3F { return; }
         let w = self.dimensions().full_width();
@@ -312,9 +283,7 @@ impl MapMetadata {
         }
     }
 
-    /// Seafoam Islands floor holes. Each floor has two (pokered `SeafoamIslands*.asm`
-    /// `Seafoam{1,2,3,4}HolesCoords`); standing on one drops the player to the floor below,
-    /// landing at the matching `DungeonWarpData` `fly_warp` (`data/maps/special_warps.asm`).
+    /// Seafoam Islands' floor holes, two a floor, as warps to the `DungeonWarpData` landing below.
     pub fn apply_seafoam_holes(&self, result: &mut [MetaTile]) {
         let holes: &[((u8, u8), Map, (u8, u8))] = match self.map {
             Map::SeafoamIslands1F  => &[((17, 6), Map::SeafoamIslandsB1F, (18, 7)),
@@ -336,11 +305,8 @@ impl MapMetadata {
         }
     }
 
-    /// Seafoam Islands B3F strong-current trap tile. Surfing onto (15,8) hands control to
-    /// `SeafoamIslandsB3FDefaultScript`, which force-walks the player DOWN 6 / RIGHT 5 / DOWN 3
-    /// into the (20,17) warp and out onto B4F's *east* water — a region walled off from Articuno.
-    /// The agent models no currents, so the tile is simply marked impassable and BFS routes
-    /// around it.
+    /// Seafoam B3F's current at (15,8) force-walks the player onto B4F's east water, walled off from
+    /// Articuno; no current is modelled, so the tile is an obstacle.
     pub fn apply_seafoam_currents(&self, result: &mut [MetaTile]) {
         if self.map != Map::SeafoamIslandsB3F { return; }
         let w = self.dimensions().full_width();
@@ -351,7 +317,6 @@ impl MapMetadata {
     }
 }
 
-/// True on the Silph Co floors that have card-key doors.
 pub fn map_has_card_key_doors(map: Map) -> bool {
     matches!(map,
         Map::SilphCo1F | Map::SilphCo2F | Map::SilphCo3F | Map::SilphCo4F | Map::SilphCo5F
@@ -359,37 +324,33 @@ pub fn map_has_card_key_doors(map: Map) -> bool {
         | Map::SilphCo11F)
 }
 
-/// A runtime door block that is currently *closed* (a wall), to be overlaid on the static map.
+/// A runtime door block that is currently closed, to be overlaid on the static map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DoorBlock {
-    /// Block coordinates (in 4×4-tile blocks) passed to pokered `ReplaceTileBlock` as `lb bc, y,
-    /// x`.
+    /// Block coordinates, as passed to `ReplaceTileBlock`.
     pub block_x: u8,
     pub block_y: u8,
-    /// The tileset block ID drawn when the door is shut (pokered `wNewTileBlockID`).
+    /// The block drawn when the door is shut (`wNewTileBlockID`).
     pub block_id: u8,
 }
 
-/// Static description of an event-gated `ReplaceTileBlock` door for one map.
 struct DoorSpec {
     block_x: u8,
     block_y: u8,
-    /// Block ID drawn when shut.
     closed_block_id: u8,
-    /// The door is *open* if ANY clause is fully satisfied; each clause is a set of `(wEventFlags
-    /// byte offset, bit mask)` that must ALL be set.
+    /// Open if any clause has all its `(wEventFlags byte, bit mask)` pairs set.
     open_clauses: &'static [&'static [(u16, u8)]],
 }
 
-/// Event-gated door blocks per map (pokered `*DoorCallbackScript`).
+/// Event-gated door blocks per map (`*DoorCallbackScript`).
 fn map_door_specs(map: Map) -> &'static [DoorSpec] {
     match map {
-        // Elevator door: shut ($54) until Rocket 5 (trainer 4) is beaten (EVENT_677 / TRAINER_4).
+        // The elevator door, shut until Rocket 5 is beaten.
         Map::RocketHideoutB1F => &[DoorSpec {
             block_x: 12, block_y: 8, closed_block_id: 0x54,
             open_clauses: &[&[(206, 0x80)], &[(206, 0x20)]],
         }],
-        // Giovanni-room door: shut ($2d) until both Rockets (trainers 0 & 1) are beaten.
+        // Giovanni's door, shut until both Rockets are beaten.
         Map::RocketHideoutB4F => &[DoorSpec {
             block_x: 12, block_y: 5, closed_block_id: 0x2d,
             open_clauses: &[&[(212, 0x20)], &[(212, 0x04), (212, 0x08)]],
@@ -398,7 +359,6 @@ fn map_door_specs(map: Map) -> &'static [DoorSpec] {
     }
 }
 
-/// Read the event flags and return the door blocks on `map` that are currently shut.
 fn closed_door_blocks(mmu: &MMU, map: Map) -> Vec<DoorBlock> {
     let base = pokered_symbols::wEventFlags.address;
     map_door_specs(map).iter().filter_map(|spec| {
@@ -411,18 +371,18 @@ fn closed_door_blocks(mmu: &MMU, map: Map) -> Vec<DoorBlock> {
     }).collect()
 }
 
-/// `wMovementFlags` bit 2 (`constants/ram_constants.asm`).
 const BIT_STANDING_ON_WARP: u8 = 0b100;
 
 /// A warp entry that a map script cancels, and the events that stop it cancelling.
 struct WarpGateSpec {
-    /// The warp entry's square, in the map's raw coordinates (no connection padding).
+    /// Raw coordinates, without connection padding.
     at: Point8,
-    /// The warp is live once ALL of these `(wEventFlags byte offset, bit mask)` are set.
+    /// Live once all these `(wEventFlags byte, bit mask)` pairs are set.
     live_when_all_set: &'static [(u16, u8)],
 }
 
-/// The warps a map's own script cancels, per map.
+/// The warps a map's own script cancels. Kept tiny: withholding a real door is how a floor loses
+/// its only exit, so only a refusal proved in the cartridge's source goes in.
 fn map_warp_gate_specs(map: Map) -> &'static [WarpGateSpec] {
     match map {
         // The two staircases out of B4F's east pocket.
@@ -434,8 +394,7 @@ fn map_warp_gate_specs(map: Map) -> &'static [WarpGateSpec] {
     }
 }
 
-/// Read the event flags and return the squares on `map` whose warp is currently cancelled by a
-/// script. Raw coordinates; the caller pads them.
+/// The squares on `map` whose warp a script is cancelling now, in raw coordinates.
 pub(crate) fn script_cancelled_warps(mmu: &MMU, map: Map) -> Vec<Point8> {
     let base = pokered_symbols::wEventFlags.address;
     map_warp_gate_specs(map).iter().filter_map(|spec| {
@@ -445,7 +404,7 @@ pub(crate) fn script_cancelled_warps(mmu: &MMU, map: Map) -> Vec<Point8> {
     }).collect()
 }
 
-/// Largest block ID referenced by any door spec for `map` (so the tileset load covers it).
+/// The largest door block on `map`, so the tileset load covers it.
 fn max_door_block_id(map: Map) -> usize {
     map_door_specs(map).iter().map(|d| d.closed_block_id as usize).max().unwrap_or(0)
 }
@@ -455,7 +414,7 @@ pub struct MapDimensions {
     pub meta_height: usize,
     pub meta_width: usize,
 
-    /// Extra meta-tile rows/columns added for each connected direction.
+    /// One extra meta-tile row or column per connected direction.
     pub north_extra: usize,
     pub east_extra: usize,
     pub south_extra: usize,
@@ -476,40 +435,31 @@ impl MapDimensions {
 pub struct ConnectedMapStrip {
     pub direction: MapConnectionDirection,
     pub map: Map,
-    /// Block IDs along the single-block-deep border row/column of the connected map.
+    /// The connected map's border row or column of blocks.
     pub border_blocks: Vec<u8>,
     pub tileset_data: Vec<u8>,
     pub collision_tiles: HashSet<u8>,
     pub is_water_tileset: bool,
     pub tileset: TileSetId,
-    /// Sub-position within each block: N/S: 0 = top meta-row (south connection), 1 = bottom
-    /// meta-row (north connection). E/W: 0 = left meta-col (east connection), 1 = right meta-col
-    /// (west connection).
+    /// Which meta-row (N/S) or meta-column (E/W) of each block borders us: 0 for south or east.
     pub block_sub_offset: u8,
     pub strip_length: u8,
-    /// Offset (in meta-tiles) along the perpendicular axis where the strip begins. x-offset for
-    /// N/S connections, y-offset for E/W connections.
+    /// Where the strip begins along our edge, in meta-tiles.
     pub meta_align_offset: usize,
     pub to_border_coord: u8,
-    /// Where the strip begins along the *perpendicular* axis in the connected map (meta-tiles).
-    /// Strip tile `i` (0-based meta-tile index) lands at perpendicular coord `to_strip_start +
-    /// i`.
+    /// Strip cell `i` lands at `to_strip_start + i` along the connected map's edge.
     pub to_strip_start: u8,
-    /// Number of blocks to skip at the start of `border_blocks` before applying strip meta-tile
-    /// index `i`. Arises when the strip source pointer (`strip_src`) begins earlier in the
-    /// connected map than the tile that aligns with the current map's edge.
+    /// Blocks to skip where `strip_src` begins before the tile aligned with our edge.
     pub border_blocks_start_offset: usize,
 }
 
 impl ConnectedMapStrip {
-    /// The four graphical tile ids that draw the meta-tile at `strip_idx`, as top-left,
-    /// top-right, bottom-left, bottom-right — what the strip *looks like*, as against
-    /// `Self::meta_tile_at`'s answer to what it means.
+    /// The four tile ids that draw the cell at `strip_idx`, reading order; `meta_tile_at` is what
+    /// it means.
     pub fn tile_ids_at(&self, strip_idx: usize) -> Option<[Option<u8>; 4]> {
         let block_idx = strip_idx / 2 + self.border_blocks_start_offset;
         let block_id = *self.border_blocks.get(block_idx)?;
 
-        // For N/S: strip_idx selects left(0)/right(1) within each block; sub_offset is the row.
         let (sub_col, sub_row) = match self.direction {
             MapConnectionDirection::North | MapConnectionDirection::South =>
                 (strip_idx % 2, self.block_sub_offset as usize),
@@ -517,28 +467,24 @@ impl ConnectedMapStrip {
                 (self.block_sub_offset as usize, strip_idx % 2),
         };
 
-        // Indices of the four graphical tiles that form this 2×2 meta-tile within the block.
         let base = sub_col * 2 + sub_row * 8;
         let block_start = block_id as usize * MapMetadata::BLOCK_TILES;
         Some([base, base + 1, base + 4, base + 5]
             .map(|idx| self.tileset_data.get(block_start + idx).copied()))
     }
 
-    /// Returns the MetaTile for position `strip_idx` (0..strip_length*2) in this border strip.
     fn meta_tile_at(&self, strip_idx: usize) -> MetaTile {
 
         let Some(tile_indices) = self.tile_ids_at(strip_idx) else { return MetaTile::Obstacle };
 
         let has_water = tile_indices.iter().flatten().any(|&tile_id| self.is_water_tile(tile_id));
 
-        // Bottom-left only, exactly as `build_meta_tiles_base` classifies in-map tiles —
-        // `GetTileAndCoordsInFrontOfPlayer` collides against that one sub-tile and no other.
+        // Bottom-left only, as in-map tiles: the cartridge collides against that sub-tile alone.
         let has_walkable = matches!(tile_indices[2], Some(tile_id) if self.collision_tiles.contains(&tile_id));
 
         if has_water {
             MetaTile::ConnectionWater(self.map)
         } else if has_walkable {
-            // Compute the exact tile in the connected map that this strip position leads to.
             let perp = self.to_strip_start.saturating_add(strip_idx as u8);
             let to_position = match self.direction {
                 MapConnectionDirection::North | MapConnectionDirection::South =>
@@ -557,7 +503,6 @@ impl ConnectedMapStrip {
     }
 }
 
-/// Returns true if `tile_id` is a water or shore tile for the given tileset.
 fn is_water_tile_id(tile_id: u8, is_water_tileset: bool, tileset: TileSetId) -> bool {
     const WATER: u8 = 0x14;
     const EASTERN_SHORE: u8 = 0x32;
@@ -572,15 +517,12 @@ fn is_water_tile_id(tile_id: u8, is_water_tileset: bool, tileset: TileSetId) -> 
     tile_id == WATER
 }
 
-/// The `wCurMapHeader` block: tileset, height, width, and the data/text/script pointers, ending
-/// with the connection flags.
+/// The `wCurMapHeader` block, tileset to connection flags.
 const MAP_HEADER_BYTES: usize = 10;
 
-/// Bytes 5 and 6 of that block — `wCurMapTextPtr`, the only field in it the game rewrites while a
-/// map is loaded, so the only one [`map_header_is_loaded`] cannot compare.
+/// `wCurMapTextPtr`, the one field the game rewrites while a map is loaded, so never compared.
 const MAP_HEADER_TEXT_PTR: std::ops::Range<usize> = 5..7;
 
-/// True once the sprite table has been filled for the map that is being loaded.
 pub fn map_sprites_are_loaded(mmu: &impl DmgPointerRead) -> bool {
     // Slot 0 is the player and is not in `wNumSprites`; the loader fills 1..=15.
     let filled = (1..=0xFu16)
@@ -589,12 +531,9 @@ pub fn map_sprites_are_loaded(mmu: &impl DmgPointerRead) -> bool {
     filled == mmu.read_pointer(&pokered_symbols::wNumSprites) as usize
 }
 
-/// `wWalkBikeSurfState`'s surfing value — `cp $02` in `home/overworld.asm`'s
-/// `.noDirectionChange`.
 const SURFING: u8 = 2;
 
-/// True once the header in WRAM is the header of `map` — i.e. the cartridge has finished loading
-/// the map that `wCurMap` already names.
+/// The cartridge has finished loading the map `wCurMap` already names.
 pub fn map_header_is_loaded(mmu: &impl DmgPointerRead, map: Map) -> bool {
     let Some(rom) = map.header_pointer() else { return true };
     let live = mmu.read_pointer_vec(&pokered_symbols::wCurMapHeader, MAP_HEADER_BYTES);
@@ -609,8 +548,7 @@ pub trait MapMetadataReader {
     fn read_current_map(&self) -> Result<CurrentMap, String>;
 }
 
-/// Pokémon-layer cache for `read_map_metadata`. ROM data never changes during a session, so
-/// results are deterministic per map and safe to cache indefinitely.
+/// A cache for `read_map_metadata`, safe for ever because ROM data never changes.
 #[derive(Default)]
 pub struct MapMetadataCache(RefCell<HashMap<Map, Arc<MapMetadata>>>);
 
@@ -699,22 +637,14 @@ impl MapMetadataReader for MMU {
     }
 }
 
-/// Maps whose walkable layout is rewritten at runtime by `ReplaceTileBlock` in a way the static
-/// ROM blocks can't capture — Pokémon Mansion's switch-gates, the two gyms whose doors are a
-/// puzzle, Victory Road's boulder barriers and the Elite Four's rooms. For these, build metadata
-/// from the live `wOverworldMap` block buffer instead of ROM (see
-/// `MMU::read_map_metadata_runtime`).
+/// Every map `ReplaceTileBlock` rewrites, built from the live `wOverworldMap` instead of ROM. A map
+/// missing here is offered rows through closed doors, and no finished-game fixture can show it.
 pub fn map_uses_runtime_blocks(map: Map) -> bool {
     matches!(map,
         Map::PokemonMansion1F | Map::PokemonMansion2F | Map::PokemonMansion3F
         | Map::PokemonMansionB1F | Map::CinnabarGym
-        // Victory Road: boulder-on-switch `ReplaceTileBlock`s open barriers to the up-ladders.
         | Map::VictoryRoad1F | Map::VictoryRoad2F | Map::VictoryRoad3F
-        // Elite Four rooms: beating each member runs a `ReplaceTileBlock` that opens the door up
-        // to the next room, so the tile map must reflect the live block state to route to the
-        // (now-open) exit.
         | Map::LoreleisRoom | Map::BrunosRoom | Map::AgathasRoom | Map::LancesRoom | Map::ChampionsRoom
-        // Vermilion Gym's double doors, which are shut until the trash-can puzzle opens them.
         | Map::VermilionGym)
 }
 
@@ -738,13 +668,11 @@ trait MapRomReader {
 }
 
 impl MapMetadataInternals for MMU {
-    /// Shared tail of map-metadata construction, given the block map (`map_data`) from either the
-    /// ROM (static) or `wOverworldMap` (runtime).
+    /// Shared tail of construction, given a block map from ROM or from `wOverworldMap`.
     fn finish_map_metadata(&self, map: Map, map_header: MapHeader, map_data: Vec<u8>) -> Result<MapMetadata, String> {
         let ts = self.read_tileset_header(map_header.tileset);
         let collision_tiles = self.read_collision_tiles(ts.coll_ptr);
-        // Size the tileset read to cover every block actually referenced (ROM or runtime) plus
-        // any runtime door block.
+        // Cover every referenced block and any runtime door block.
         let max_block_id = (*map_data.iter().max().unwrap() as usize).max(max_door_block_id(map));
         let tileset_data = self.rom_data_from_pointer(ts.bank, ts.blocks_ptr, (max_block_id + 1) * MapMetadata::BLOCK_TILES).to_vec();
 
@@ -775,9 +703,6 @@ impl MapMetadataInternals for MMU {
         Ok(metadata)
     }
 
-    /// Build map metadata from the CURRENT runtime block map (`wOverworldMap`) rather than the
-    /// static ROM blocks, so switch-toggled gates (Pokémon Mansion) and gym gate blocks (Cinnabar
-    /// Gym) are reflected in routing.
     fn read_map_metadata_runtime(&self, map: Map) -> Result<MapMetadata, String> {
         const BORDER: usize = 3;
         let map_header = self.read_map_header(map)?;
@@ -804,9 +729,7 @@ struct TilesetHeader {
 
 impl MapRomReader for MMU {
     fn read_warp_events(&self, cur_map: Map, map_header: &MapHeader) -> Result<Vec<WarpEvent>, String> {
-        // Read directly from ROM so we get the raw destination byte (including 0xFF / self-ref)
-        // before pokémon Red's runtime wLastMap resolution, which becomes stale when navigating
-        // between indoor floors (e.g. Red's House 1F → 2F → 1F).
+        // From ROM, because the runtime `wLastMap` resolution goes stale between indoor floors.
         let objects_pointer = map_header.objects_pointer();
         let warp_count = self.read_pointer(&(objects_pointer + 1)) as u16;
         let mut result = vec![];
@@ -814,25 +737,21 @@ impl MapRomReader for MMU {
             let base = objects_pointer + (2 + index * 4);
             let entry = self.rom_data_from_rom_pointer(&base, 4);
             let raw_map_id = entry[3];
-            let dest_warp_id = entry[2] as u16; // 0-indexed into destination map's warp table
+            let dest_warp_id = entry[2] as u16;
             let map_id = if raw_map_id == 0xFF {
-                // LAST_MAP building-exit: the true destination is the outdoor map whose warp
-                // table points back here.
+                // `LAST_MAP`: the outdoor map whose warp table points back here.
                 match self.find_outdoor_entry_map(cur_map, index) {
                     Some(m) => m,
                     None => continue,
                 }
             } else if raw_map_id == cur_map as u8 {
-                // Self-referential warp = an INTERNAL teleporter (Saffron Gym's warp maze): the
-                // game teleports you to warp #dest_warp_id on THIS same map.
+                // A teleporter within the map, as in Saffron Gym's maze.
                 cur_map
             } else {
                 Map::from_repr(raw_map_id)
                     .ok_or_else(|| format!("Invalid map number {raw_map_id}"))?
             };
-            // A warp can target a header-less placeholder map — e.g. the Silph Co / Rocket
-            // Hideout elevators, whose exits point at UNUSED_MAP_ED and are redirected at runtime
-            // once the player picks a floor.
+            // An elevator's exits point at a headerless placeholder, redirected once a floor is picked.
             let destination_position = if map_id.header_pointer().is_some() {
                 self.read_destination_warp_position(map_id, dest_warp_id)
                     .unwrap_or(Point8 { y: 0, x: 0 })
@@ -848,7 +767,6 @@ impl MapRomReader for MMU {
         Ok(result)
     }
 
-    /// Reads the ROM `Tilesets` table entry for `tileset` and returns the derived header fields.
     fn read_tileset_header(&self, tileset: TileSetId) -> TilesetHeader {
         const TILESET_ENTRY_SIZE: u16 = 12;
         let entry = pokered_symbols::Tilesets + tileset as u16 * TILESET_ENTRY_SIZE;
@@ -863,8 +781,7 @@ impl MapRomReader for MMU {
         TilesetHeader { bank, blocks_ptr, coll_ptr, talking_over_tiles, grass_tile }
     }
 
-    /// Returns the tile position (`Point8 { y, x }`) that the player lands on after taking a warp
-    /// that targets `dest_map` at warp-table index `dest_warp_id` (0-indexed).
+    /// Where the player lands taking warp `dest_warp_id` into `dest_map`.
     fn read_destination_warp_position(&self, dest_map: Map, dest_warp_id: u16) -> Result<Point8, String> {
         let header = self.read_map_header(dest_map)?;
         let objects_pointer = header.objects_pointer();
@@ -879,8 +796,7 @@ impl MapRomReader for MMU {
         Ok(Point8 { y: dest_entry[0], x: dest_entry[1] })
     }
 
-    /// Scans every Overworld-tileset map in ROM for a warp tile whose destination map equals
-    /// `indoor_map`.
+    /// The outdoor map with a warp into `indoor_map`, preferring the one back to our warp.
     fn find_outdoor_entry_map(&self, indoor_map: Map, gate_warp_index: u16) -> Option<Map> {
         let map_banks = self.rom_data_from_rom_pointer(&pokered_symbols::MapHeaderBanks, Map::COUNT);
         let mut fallback = None;
@@ -888,15 +804,12 @@ impl MapRomReader for MMU {
             let Some(outdoor_map) = Map::from_repr(id as u8) else { continue };
             if outdoor_map == indoor_map { continue; }
             let Ok(header) = self.read_map_header(outdoor_map) else { continue };
-            // Consider any outdoor-style map that could be the return side.
             if !matches!(header.tileset, TileSetId::Overworld | TileSetId::Plateau | TileSetId::Cavern) { continue; }
             let bank        = map_banks[id] as usize;
             let warp_count  = self.rom_data_from_pointer(bank, header.objects_address + 1, 1)[0] as u16;
             for wi in 0..warp_count {
                 let entry = self.rom_data_from_pointer(bank, header.objects_address + 2 + wi * 4, 4);
                 if entry[3] == indoor_map as u8 {
-                    // Exact match: this outdoor warp returns to *our* warp → the correct side of
-                    // a gate.
                     if entry[2] as u16 == gate_warp_index { return Some(outdoor_map); }
                     fallback.get_or_insert(outdoor_map);
                 }
@@ -905,7 +818,6 @@ impl MapRomReader for MMU {
         fallback
     }
 
-    /// Reads the `LedgeTiles` ROM table and returns a map of tile_id → JumpDirection.
     fn read_ledge_tiles(&self) -> HashMap<u8, JumpDirection> {
         let data = self.rom_data_from_rom_pointer(&pokered_symbols::LedgeTiles, 64);
         let mut result = HashMap::new();
@@ -926,8 +838,7 @@ impl MapRomReader for MMU {
         result
     }
 
-    /// Reads a tile-pair-collision table (`TilePairCollisionsLand` / `…Water`) and returns the
-    /// `(tile1, tile2)` pairs that apply to `tileset`.
+    /// The pairs of a tile-pair-collision table that apply to `tileset`.
     fn read_tile_pair_collisions(&self, table: &crate::pokemon::symbols::DmgPointer, tileset: u8) -> Vec<(u8, u8)> {
         let data = self.rom_data_from_rom_pointer(table, 64);
         let mut pairs = vec![];
@@ -942,7 +853,7 @@ impl MapRomReader for MMU {
         pairs
     }
 
-    /// Reads an FF-terminated list of walkable tile IDs from a bank-0 ROM address.
+    /// The `$FF`-terminated walkable tile list at a bank-0 address.
     fn read_collision_tiles(&self, ptr: u16) -> HashSet<u8> {
         let mut tiles = HashSet::new();
         for index in 0..256u16 {
@@ -954,7 +865,6 @@ impl MapRomReader for MMU {
     }
 
     fn load_connected_strips(&self, map_header: &MapHeader) -> Vec<ConnectedMapStrip> {
-        // Each entry in the Tilesets ROM table is 12 bytes:
         let all_map_banks: Vec<u8> = self
             .rom_data_from_rom_pointer(&pokered_symbols::MapHeaderBanks, Map::COUNT)
             .to_vec();
@@ -968,10 +878,8 @@ impl MapRomReader for MMU {
                 let connected_map_bank = all_map_banks[connection.map as usize] as usize;
                 let connected_header = self.read_map_header(connection.map).ok()?;
 
-                // Read the single block row/column that borders the current map.
                 let (border_blocks, block_sub_offset): (Vec<u8>, u8) = match connection.direction {
                     MapConnectionDirection::South => {
-                        // First block row of the connected map.
                         let blocks = self.rom_data_from_pointer(
                             connected_map_bank,
                             connection.strip_src,
@@ -980,8 +888,7 @@ impl MapRomReader for MMU {
                         (blocks, 0)
                     }
                     MapConnectionDirection::North => {
-                        // Strip_src points to the start of the 3-block-deep strip
-                        // (connected_height − 3 rows in).
+                        // `strip_src` is the top of the 3-block-deep strip; the border row is its last.
                         let addr = connection.strip_src + 2 * connection.connected_map_width as u16;
                         let blocks = self.rom_data_from_pointer(
                             connected_map_bank,
@@ -991,8 +898,6 @@ impl MapRomReader for MMU {
                         (blocks, 1)
                     }
                     MapConnectionDirection::East => {
-                        // Strip_src points to column 0 of each row; stride by
-                        // connected_map_width.
                         let blocks = (0..connection.strip_length as u16)
                             .map(|row| {
                                 self.rom_data_from_pointer(
@@ -1005,8 +910,7 @@ impl MapRomReader for MMU {
                         (blocks, 0)
                     }
                     MapConnectionDirection::West => {
-                        // Strip_src points to column (width−3); border column is +2 (column
-                        // width−1).
+                        // `strip_src` is column width−3; the border column is width−1.
                         let blocks = (0..connection.strip_length as u16)
                             .map(|row| {
                                 self.rom_data_from_pointer(
@@ -1048,9 +952,6 @@ impl MapRomReader for MMU {
                         (-(connection.y_alignment as i32)).max(0) as usize,
                 };
 
-                // When `strip_src` points into the connected map at an offset > 0 (i.e. some
-                // blocks to the left/above the current map's edge are included), the strip data
-                // starts earlier than the tile that aligns with the current map's column/row 0.
                 let border_blocks_start_offset = match connection.direction {
                     MapConnectionDirection::North | MapConnectionDirection::South =>
                         (connection.x_alignment as i32 / 2).max(0).min(3) as usize,
@@ -1102,7 +1003,7 @@ impl MapRomReader for MMU {
         );
 
         let mut sprites: Vec<Sprite> = Vec::new();
-        for index in 1..=0xFu16 { // do not read index=0 as it is always the player
+        for index in 1..=0xFu16 { // slot 0 is always the player
             let offset = index << 4;
             let picture_id = match PictureId::from_repr(self.read(pokered_symbols::wSpriteDataStart.address | offset)) {
                 Some(picture_id) => picture_id,
@@ -1131,7 +1032,6 @@ impl MapRomReader for MMU {
                 index: index as u8,
                 picture_id,
                 position: if picture_id == PictureId::Red {
-                    // Read player position from the map state
                     Point8 {
                         x: self.read_pointer(&pokered_symbols::wXCoord),
                         y: self.read_pointer(&pokered_symbols::wYCoord)
@@ -1181,39 +1081,23 @@ pub struct CurrentMap {
     pub player_direction: PlayerFacingDirection,
     pub sprites: Vec<Sprite>,
     pub metadata: Arc<MapMetadata>,
-    /// Runtime `ReplaceTileBlock` door blocks that are currently shut (event-gated). Empty for
-    /// maps with no such doors.
+    /// Event-gated `ReplaceTileBlock` doors that are shut now.
     pub closed_doors: Vec<DoorBlock>,
-    /// `wGrassRate` — the chance, out of 256, that a step in this map's tall grass rolls a wild
-    /// encounter. Zero means there are none at all, and that is not a rare edge: every town and
-    /// city in the game points at `NothingWildMons` (`data/wild/grass_water.asm`), while still
-    /// drawing perfectly ordinary tall grass.
+    /// `wGrassRate`, out of 256; zero in every town, whose tall grass still looks ordinary.
     pub grass_encounter_rate: u8,
-    /// True on Silph Co floors while the Card Key is not yet in the bag: the card-key door tiles
-    /// ($18/$24) are then impassable walls (the game refuses to open them without the key), so
-    /// BFS must route around them. Once the key is held they open on approach and become
-    /// passable.
+    /// On a Silph Co floor without the Card Key, whose door tiles are then walls.
     pub card_key_locked: bool,
-    /// False while a map transition is in flight — `wCurMap` is the map being entered and
-    /// everything else here still belongs to the one being left. See [`map_header_is_loaded`] for
-    /// the window and for what was offered inside it;
-    /// [`crate::pokemon::tile_map::MetaTileMap::position_settled`] is where it lands.
+    /// False mid-transition, while `wCurMap` names the map being entered and all else belongs to the
+    /// one being left; lands in `MetaTileMap::position_settled`.
     pub header_loaded: bool,
-    /// `wWalkBikeSurfState == 2`. The cartridge branches on this byte before it decides anything
-    /// about a collision, and one of the things down the surfing side is a warp that will not
-    /// fire: see [`crate::pokemon::tile_map::MetaTileMap::surfing`].
+    /// The cartridge branches on this before any collision, and a warp does not fire while surfing.
     pub surfing: bool,
-    /// False while the sprite table is being filled — see [`map_sprites_are_loaded`]. Lands in
-    /// `position_settled` beside [`Self::header_loaded`], because the two are the same statement
-    /// about different halves of a map load: an intra-map teleport reloads the map without ever
-    /// changing `wCurMap`, so only this one sees it.
+    /// False while the sprite table is filling: an intra-map teleport reloads without changing
+    /// `wCurMap`, so only this sees it.
     pub sprites_loaded: bool,
-    /// `wMovementFlags` bit 2, `BIT_STANDING_ON_WARP` — set by `CheckWarpsNoCollision` when a
-    /// completed step lands on a warp entry, and cleared on every step that does not.
+    /// `BIT_STANDING_ON_WARP`, set when a completed step lands on a warp entry.
     pub standing_on_warp: bool,
-    /// Squares whose warp this map's own script is currently cancelling, in raw coordinates.
-    /// Empty for every map but the handful in `map_warp_gate_specs`, which is where the
-    /// argument is.
+    /// Squares whose warp this map's script is cancelling, in raw coordinates.
     pub script_cancelled_warps: Vec<Point8>,
 }
 
@@ -1221,23 +1105,18 @@ impl CurrentMap {
     pub fn meta_tiles(&self) -> Vec<MetaTile> {
         let mut result = self.metadata.meta_tiles(&self.sprites);
         self.metadata.apply_door_blocks(&mut result, &self.closed_doors);
-        // Only on Silph Co floors: elsewhere tiles $18/$24 are ordinary tiles, not card-key
-        // doors.
+        // Elsewhere `$18` and `$24` are ordinary tiles.
         if map_has_card_key_doors(self.metadata.map) {
             self.metadata.apply_card_key_doors(&mut result, self.card_key_locked);
         }
-        // Pokémon Mansion 3F floor holes → warp down to 1F (inert on every other map).
+        // Each of these is inert on every other map.
         self.metadata.apply_mansion_holes(&mut result);
-        // Victory Road 3F floor hole → fall down to 2F (inert on every other map).
         self.metadata.apply_victory_road_holes(&mut result);
-        // Seafoam Islands floor holes → fall to the floor below (inert on every other map).
         self.metadata.apply_seafoam_holes(&mut result);
-        // Seafoam Islands B3F strong-current trap tile → impassable (inert on every other map).
         self.metadata.apply_seafoam_currents(&mut result);
         result
     }
 
-    /// [`MapMetadata::underfoot`], for the people on this map.
     pub fn underfoot(&self) -> Vec<(Point8, MetaTile)> {
         self.metadata.underfoot(&self.sprites)
     }
@@ -1266,53 +1145,39 @@ mod test {
             }
         }
 
-        // `$14` is water everywhere it is allowed to be, which is the half that must not be
-        // narrowed with the other: it is how Cerulean Gym's pool, Seafoam's lake and every
-        // route's sea are found, and requiring passability instead drops all of them (12 legs,
-        // measured).
+        // `$14` is water in every water tileset: it is how every pool, lake and sea is found.
         for tileset in [TileSetId::Overworld, TileSetId::Gym, TileSetId::Cavern] {
             assert!(is_water_tile_id(WATER, true, tileset), "{tileset:?} keeps its real water");
         }
-        // And nothing at all outside `WaterTilesets`, whatever the id.
         assert!(!is_water_tile_id(WATER, false, TileSetId::House));
     }
 
-    /// Verifies that `WarpEvent::destination_position` is resolved correctly from ROM data by
-    /// cross-checking with known map objects in the pokered disassembly.
+    /// Warp destinations match the disassembly's map objects.
     #[test]
     fn test_warp_event_destination_position() {
 
         let mmu = MMU::from_rom(POKERED).unwrap();
 
-        // ── Pallet Town ──────────────────────────────────────────────────────────
-        
         let pt_header = mmu.read_map_header(Map::PalletTown).unwrap();
         let pt_warps  = mmu.read_warp_events(Map::PalletTown, &pt_header).unwrap();
         assert_eq!(pt_warps.len(), 3);
 
-        // Warp 0: x=5, y=5 → source tile (y=5, x=5); dest=RedsHouse1F[0] RedsHouse1F warp[0] =
-        // warp_event 2, 7, … → ROM [Y=7, X=2] → {y:7, x:2}
         assert_eq!(pt_warps[0].position,             Point8 { y: 5, x: 5  });
         assert_eq!(pt_warps[0].destination_map,      Map::RedsHouse1F);
         assert_eq!(pt_warps[0].destination_position, Point8 { y: 7, x: 2  });
 
-        // Warp 1: x=13, y=5 → source tile (y=5, x=13); dest=BluesHouse[0]
         assert_eq!(pt_warps[1].position,        Point8 { y: 5,  x: 13 });
         assert_eq!(pt_warps[1].destination_map, Map::BluesHouse);
 
-        // Warp 2: x=12, y=11 → source tile (y=11, x=12); dest=OaksLab[1] OaksLab warp[1] =
-        // warp_event 5, 11, … → ROM [Y=11, X=5] → {y:11, x:5}
         assert_eq!(pt_warps[2].position,             Point8 { y: 11, x: 12 });
         assert_eq!(pt_warps[2].destination_map,      Map::OaksLab);
         assert_eq!(pt_warps[2].destination_position, Point8 { y: 11, x: 5  });
 
-        // ── Red's House 1F ────────────────────────────────────────────────────────
         let rh1_header = mmu.read_map_header(Map::RedsHouse1F).unwrap();
         let rh1_warps  = mmu.read_warp_events(Map::RedsHouse1F, &rh1_header).unwrap();
         assert_eq!(rh1_warps.len(), 3);
 
-        // Warps 0 & 1: LAST_MAP exits → PalletTown[0] PalletTown warp[0] = warp_event 5, 5, … →
-        // ROM [Y=5, X=5] → {y:5, x:5}
+        // `LAST_MAP` exits resolve to Pallet Town.
         assert_eq!(rh1_warps[0].position,             Point8 { y: 7, x: 2 });
         assert_eq!(rh1_warps[0].destination_map,      Map::PalletTown);
         assert_eq!(rh1_warps[0].destination_position, Point8 { y: 5, x: 5 });
@@ -1321,8 +1186,6 @@ mod test {
         assert_eq!(rh1_warps[1].destination_map,      Map::PalletTown);
         assert_eq!(rh1_warps[1].destination_position, Point8 { y: 5, x: 5 });
 
-        // Warp 2: x=7, y=1 → source tile (y=1, x=7); dest=RedsHouse2F[0] RedsHouse2F warp[0] =
-        // warp_event 7, 1, … → ROM [Y=1, X=7] → {y:1, x:7}
         assert_eq!(rh1_warps[2].position,             Point8 { y: 1, x: 7 });
         assert_eq!(rh1_warps[2].destination_map,      Map::RedsHouse2F);
         assert_eq!(rh1_warps[2].destination_position, Point8 { y: 1, x: 7 });
@@ -1335,15 +1198,11 @@ mod test {
         assert_eq!(rh2_warps[0].destination_position, Point8 { y: 1, x: 7 });
     }
 
-    /// Verifies that every `MetaTile::Connection` tile in a strip carries the correct
-    /// `to_position` — i.e. the raw wXCoord/wYCoord value the game engine writes after the
-    /// connection transition (before `MetaTileMap::new()` adds any extras).
+    /// A connection cell's `to_position` is the raw coordinate the cartridge writes on crossing.
     #[test]
     fn test_connection_tile_to_position() {
         let mmu = MMU::from_rom(POKERED).unwrap();
 
-        // ── PalletTown north → Route1 ───────────────────────────────────────── y_alignment=35 →
-        // raw y = 35 (bottom row of Route1 in wYCoord space).
         let pt_meta = mmu.read_map_metadata(Map::PalletTown).unwrap();
         let north_strip = pt_meta.connected_strips.iter()
             .find(|s| s.map == Map::Route1)
@@ -1358,8 +1217,6 @@ mod test {
             }
         }
 
-        // ── CeladonCity east → Route7 ───────────────────────────────────────── x_alignment=0 →
-        // raw x = 0 (left column of Route7 in wXCoord space).
         let celadon_meta = mmu.read_map_metadata(Map::CeladonCity).unwrap();
         let east_strip = celadon_meta.connected_strips.iter()
             .find(|s| s.map == Map::Route7)
@@ -1374,8 +1231,6 @@ mod test {
             }
         }
 
-        // ── CeladonCity west → Route16 ──────────────────────────────────────── x_alignment=39 →
-        // raw x = 39 (right column of Route16 in wXCoord space).
         let west_strip = celadon_meta.connected_strips.iter()
             .find(|s| s.map == Map::Route16)
             .expect("CeladonCity should have a west strip to Route16");
@@ -1417,12 +1272,12 @@ mod test {
 
     }
 
-    /// The block row a north strip is read from.
+    /// A north strip is the connected map's bottom block row.
     #[test]
     fn test_north_strip_reads_the_connected_maps_border_row() {
         let mmu = MMU::from_rom(POKERED).unwrap();
 
-        // Route3 → Route4: strip_length 13, connected width 45 — the case that diverges.
+        // Strip length 13 against connected width 45, where a wrong stride diverges.
         let route3 = mmu.read_map_metadata(Map::Route3).unwrap();
         let strip = route3.connected_strips.iter()
             .find(|s| s.map == Map::Route4)
@@ -1434,8 +1289,6 @@ mod test {
             "Route3's north strip must be Route4's bottom block row, not a row from its middle"
         );
 
-        // Control: PalletTown → Route1 has strip_length == connected width (10), so it reads the
-        // same row under either stride.
         let pallet = mmu.read_map_metadata(Map::PalletTown).unwrap();
         let control = pallet.connected_strips.iter()
             .find(|s| s.map == Map::Route1)
@@ -1452,8 +1305,6 @@ mod test {
     fn test_a_ledge_across_a_border_is_not_a_connection() {
         let mmu = MMU::from_rom(POKERED).unwrap();
 
-        // ── Route3 north → Route4 ───────────────────────────────────────────── 13 blocks = 26
-        // meta-tiles, cell i landing on Route4 (i, 17).
         let route3 = mmu.read_map_metadata(Map::Route3).unwrap();
         let strip = route3.connected_strips.iter()
             .find(|s| s.map == Map::Route4)
@@ -1470,9 +1321,7 @@ mod test {
             }
         }
 
-        // ── Route18 north → Route17 ─────────────────────────────────────────── Cycling Road's
-        // south wall: seven of the twenty cells are south-only ledges, and only x = 10 is a
-        // genuine way up.
+        // Cycling Road's south wall: among its south-only ledges, x = 10 is the one way up.
         let route18 = mmu.read_map_metadata(Map::Route18).unwrap();
         let cycling = route18.connected_strips.iter()
             .find(|s| s.map == Map::Route17)
@@ -1488,7 +1337,7 @@ mod test {
         }
     }
 
-    /// The deployed wedge, reproduced without the emulator.
+    /// Route 3's east corridor reaches Route 4 by walking west to a real crossing.
     #[test]
     fn test_route3_east_corridor_routes_west_to_reach_route4() {
         let mmu = MMU::from_rom(POKERED).unwrap();

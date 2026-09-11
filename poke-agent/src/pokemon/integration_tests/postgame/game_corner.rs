@@ -1,9 +1,8 @@
-
 use super::super::*;
 
 const FLY_BIKE: &[u8] = include_bytes!("../../data/postgame-fly-bike.bin");
 
-/// Task F1 — the Coin Case, from the gym guide in the Celadon Diner.
+/// The Coin Case from the gym guide in the Celadon Diner.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_the_coin_case() {
@@ -13,18 +12,17 @@ fn can_get_the_coin_case() {
         "entry fixture already has the Coin Case");
 
     let state = fixture.run_leg(|s| s.bag.iter().any(|i| i.id == ItemId::CoinCase));
-    // Outdoors, not in the Diner: the leg's last step walks back out so the next leg's `Fly` is
-    // not refused for being indoors.
+    // Outdoors: the leg walks back out so the next leg's `Fly` is not refused.
     assert_eq!(state.map.map, Map::CeladonCity);
     println!("Coin Case in the bag — bag now {} entries", state.bag.len());
 
     fixture.save_state_named("src/pokemon/data/postgame-coin-case.bin").unwrap();
 }
 
-/// F1's output: Celadon City, outside the Diner, with the Coin Case in the bag (17/20).
+/// `can_get_the_coin_case`'s output: Celadon City outside the Diner, with the Coin Case.
 const COIN_CASE: &[u8] = include_bytes!("../../data/postgame-coin-case.bin");
 
-/// Task F2 — buy coins at the counter: ¥1000 → 50, one conversation each.
+/// Buy coins at the counter, ¥1000 for 50, one conversation each.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_buy_game_coins() {
@@ -44,10 +42,10 @@ fn can_buy_game_coins() {
     fixture.save_state_named("src/pokemon/data/postgame-coins.bin").unwrap();
 }
 
-/// F2's output: Celadon City with the Coin Case and 200 coins, ¥37,209.
+/// `can_buy_game_coins`'s output: Celadon City with 200 coins.
 const COINS: &[u8] = include_bytes!("../../data/postgame-coins.bin");
 
-/// Task F3 — sell to a mart.
+/// Sell to a mart.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_sell_junk_to_a_mart() {
@@ -63,10 +61,10 @@ fn can_sell_junk_to_a_mart() {
     fixture.save_state_named("src/pokemon/data/postgame-sold.bin").unwrap();
 }
 
-/// F3's output: Viridian City, ¥43,209, 200 coins, three junk TMs sold.
+/// `can_sell_junk_to_a_mart`'s output: Viridian City, 200 coins, three junk TMs sold.
 const SOLD: &[u8] = include_bytes!("../../data/postgame-sold.bin");
 
-/// Task F4 — redeem a prize: an Abra from the first vendor, 180 coins.
+/// Redeem an Abra from the first prize vendor for 180 coins.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_redeem_a_prize_pokemon() {
@@ -93,14 +91,14 @@ fn can_redeem_a_prize_pokemon() {
     fixture.save_state_named("src/pokemon/data/postgame-game-corner.bin").unwrap();
 }
 
-/// F4's output: Celadon City, an Abra in the party, 20 coins, ¥43,209.
+/// `can_redeem_a_prize_pokemon`'s output: Celadon City, an Abra in the party, 20 coins.
 const GAME_CORNER: &[u8] = include_bytes!("../../data/postgame-game-corner.bin");
 
 fn seed_money(fixture: &mut TestFixture, amount: u32) {
     fixture.api().debug_set_money(amount);
 }
 
-/// Task F4, second branch — a prize TM, which is a different code path from a prize mon.
+/// A prize TM, a different code path from a prize mon.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_redeem_a_prize_tm() {

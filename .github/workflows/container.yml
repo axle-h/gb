@@ -1,16 +1,5 @@
-# Builds the container from a bare checkout, proves the thing it produced actually runs, and — on
-# main only — publishes it to ghcr.io/axle-h/gb for `k8s/` to pull.
-#
-# The build is the whole of `Dockerfile` — rgbds from source, `pokered.gbc` checked against
-# upstream's sha1, the SPA, then the crate — so a green run here means the four stages still compose
-# on a machine that has none of this project's build artifacts lying around. That is a different
-# claim from `cargo test`, which runs against a working tree where the ROM and `web/dist` already
-# exist, and it is the one that rots silently.
-#
-# ⚠️ **`submodules: recursive` is load-bearing.** `pokered/` is a submodule and an uninitialised one
-# is an empty directory; stage 1 catches that deliberately (`test -f main.asm`) rather than letting
-# `make` fail with "No rule to make target 'main.asm'", but only the checkout below stops it
-# happening at all.
+# Builds the image from a bare checkout, smoke-tests the running container, and on main pushes it
+# to ghcr.io for `k8s/` to pull. `submodules: recursive` is required: pokered is a submodule.
 name: container
 
 on:
@@ -19,59 +8,39 @@ on:
   pull_request:
   workflow_dispatch:
 
-# A second push to the same branch makes the first build irrelevant — building both wastes ~15
-# minutes of a runner for an answer nobody will read.
+# A newer push to the same ref makes the older build irrelevant.
 concurrency:
   group: container-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
-  # ⚠️ This is what lets GITHUB_TOKEN push to ghcr.io, and it is per-workflow: the repository's
-  # default token permissions (Settings → Actions → General) can be read-only and this still works,
-  # because the `permissions:` key sets the token's scopes for this workflow rather than inheriting
-  # them. What it cannot do is make the published package *public* — that is a one-off in the
-  # package's own settings, after the first push creates it. See `k8s/README.md`.
+  # Lets GITHUB_TOKEN push to ghcr.io whatever the repository default; making the package public is a
+  # one-off in its settings (see `k8s/README.md`).
   packages: write
 
-# The registry path is derived, not typed: `github.repository` is `axle-h/gb`, so this is
-# `ghcr.io/axle-h/gb` — the same string `k8s/gb/deployment.yml` pulls.
+# `ghcr.io/axle-h/gb`, the image `k8s/gb/deployment.yml` pulls.
 env:
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Stage 1 compiles rgbds and assembles the ROM, stage 3 is a release build of the crate; both
-    # are minutes even when warm, and the default 6 h timeout would let a hang burn the afternoon.
     timeout-minutes: 60
 
     steps:
-      # Major-version tags, so what this job runs is legible at a glance and picks up patches on its
-      # own. ⚠️ The trade-off is real and worth knowing rather than forgetting: a tag is mutable, so
-      # this trusts the action's owner not to move it — pinning by commit SHA is what removes that
-      # trust, at the cost of a version nobody can read.
+      # Major-version tags are mutable; pinning by commit SHA would remove that trust.
       - name: Check out, with the pokered submodule
         uses: actions/checkout@v7
         with:
           submodules: recursive
 
-      # ⚠️ Not "install buildx" — the runner already has it. This creates a builder on the
-      # `docker-container` driver, which the GHA cache below requires: the default `docker` driver
-      # cannot export cache at all ("Cache export is not supported for the docker driver"). Remove
-      # the caching and this step, and `docker build` on its own is enough.
+      # A `docker-container` builder, which the GHA cache requires.
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
 
-      # What `GET /version` serves and what the startup line prints. The binary cannot know any of
-      # it: `CARGO_PKG_VERSION` is in the crate, but "when" and "from what" only exist out here.
-      #
-      # ⚠️ **`github.head_ref || github.ref_name`, in that order.** On a pull request `ref_name` is
-      # the synthetic `123/merge`, which names no branch anyone has; `head_ref` is the branch the PR
-      # came from and is empty on a push. Same story one line down: `github.sha` on a PR is the merge
-      # commit, so the head SHA is the one that identifies what was built. Neither case reaches the
-      # registry — the push steps are main-only — but the smoke test below reads this back, and a
-      # value that is only ever right on main is a value nobody can trust on a PR.
+      # The build stamp `GET /version` serves. On a PR, `ref_name` and `github.sha` name the synthetic
+      # merge, so the head branch and head SHA come first.
       - name: Work out what we are building
         id: build_info
         env:
@@ -82,17 +51,12 @@ jobs:
           {
             echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "branch=$BRANCH"
-            # Seven characters: git's own default minimum, and the prefix of the full SHA the image
-            # is tagged with, so one pastes into `git show` and greps the other.
+            # The prefix of the full SHA the image is tagged with.
             echo "sha=$(printf '%s' "$REVISION" | cut -c1-7)"
             echo "revision=$REVISION"
           } >> "$GITHUB_OUTPUT"
 
-      # ⚠️ `type=gha` caches **layers**, not BuildKit cache mounts. The cargo registry, the cargo
-      # target directory and the pnpm store are all `--mount=type=cache` and start empty on every
-      # runner, so an invalidated stage 3 pays a full cold `cargo build --release`. What the cache
-      # does buy is the two expensive stages that rarely change: a run that touches only `src/`
-      # reuses rgbds, the ROM and the SPA rather than rebuilding them.
+      # `type=gha` caches layers, not BuildKit cache mounts, so an invalidated cargo stage builds cold.
       - name: Build the image
         uses: docker/build-push-action@v7
         with:
@@ -102,21 +66,16 @@ jobs:
           tags: gb:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # ⚠️ These are consumed in the *runtime* stage, below the `COPY` of the binary — see the
-          # ⚠️ in the Dockerfile. `GB_BUILD_DATE` changes on every run, so an arg the cargo stage
-          # read would mean a full cold `cargo build --release` every time this workflow fires.
+          # Consumed in the runtime stage only: `GB_BUILD_DATE` changes every run, so the cargo stage
+          # must not read them.
           build-args: |
             GB_BUILD_DATE=${{ steps.build_info.outputs.date }}
             GB_GIT_BRANCH=${{ steps.build_info.outputs.branch }}
             GB_GIT_SHA=${{ steps.build_info.outputs.sha }}
             GB_GIT_REVISION=${{ steps.build_info.outputs.revision }}
 
-      # An image that builds is not the claim worth making — the interesting failures are an empty
-      # `web/dist` baked in, or a ROM the Pokémon layer cannot read, and both build perfectly.
-      #
-      # `--policy random` is what makes this runnable in CI at all: it is the one policy that needs
-      # no OPENAI_API_KEY and spends nothing. The argv is the full command because `CMD` is exec form
-      # with no `ENTRYPOINT`, so overriding it replaces the lot.
+      # `--policy random` needs no API key. `CMD` is exec form with no `ENTRYPOINT`, so the argv is
+      # the whole command.
       - name: Start the container
         run: |
           docker run -d --name gb-ci -p 8080:8080 gb:ci poke-agent-web --policy random --new-run
@@ -125,8 +84,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # HEALTHCHECK allows a 20 s start period; the emulator boots the ROM before the first
-          # frame is published, so poll rather than sleep on a guess.
+          # The emulator boots the ROM before the first frame, so poll rather than sleep.
           for i in $(seq 1 60); do
             if curl -fsS http://localhost:8080/api/healthz >/dev/null 2>&1; then break; fi
             if [ "$i" = 60 ]; then echo "::error::/api/healthz never came up"; exit 1; fi
@@ -134,10 +92,7 @@ jobs:
           done
           curl -fsS http://localhost:8080/api/healthz
 
-          # The injection above actually reached the image. This is the one thing about /version
-          # that can break silently: the endpoint answers either way, with nulls where the build
-          # args did not arrive, and an image that cannot say which commit it is looks perfectly
-          # healthy right up until someone needs to know.
+          # /version answers either way, with nulls where the build args did not arrive.
           curl -fsS -o version.json http://localhost:8080/version
           cat version.json
           python3 - <<'PY'
@@ -152,8 +107,7 @@ jobs:
             = "${{ steps.build_info.outputs.sha }}" \
             || { echo "::error::/version reports a commit that is not the one we built"; exit 1; }
 
-          # Stage 2 landed in the binary. The failure this catches is a *successful* build with an
-          # empty web/dist, which serves the "UI is not built" placeholder instead of the SPA.
+          # A successful build with an empty web/dist serves the "UI is not built" placeholder.
           index=$(curl -fsS http://localhost:8080/)
           case "$index" in
             *'id="root"'*) echo "the SPA is embedded" ;;
@@ -161,20 +115,15 @@ jobs:
                printf '%s\n' "$index" | head -20; exit 1 ;;
           esac
 
-          # Stage 1 landed too, and is readable as a *cartridge* rather than as bytes: all three of
-          # these are decoded out of the ROM at runtime, and nothing pictorial is committed to the
-          # repo. The Pokémon sprite is the one worth having here — it is *decompressed* rather than
-          # merely sliced, and the container is exactly where its `.2bpp` oracle is absent
-          # (.dockerignore excludes them), so this is the only place that decompressor runs in CI.
+          # Decoded from the ROM at run time. The sprite is decompressed, and its `.2bpp` oracle is
+          # excluded from the context, so this is the only place that decompressor runs in CI.
           for path in api/badges.png api/pokemon/1/front.png favicon.png; do
             curl -fsS -o rom.png "http://localhost:8080/$path"
             file rom.png | grep -q 'PNG image data' \
               || { echo "::error::/$path is not a PNG — the ROM did not decode"; exit 1; }
           done
 
-          # And the emulator is actually running: video_seq is null until the first keyframe is
-          # published, so a non-null value means frames are being produced, not merely that axum
-          # answered.
+          # video_seq is null until the first keyframe, so non-null means frames are being produced.
           emulating=""
           for i in $(seq 1 30); do
             seq=$(curl -fsS http://localhost:8080/api/healthz | python3 -c 'import json,sys; print(json.load(sys.stdin)["video_seq"])')
@@ -184,12 +133,8 @@ jobs:
           [ -n "$emulating" ] \
             || { echo "::error::no video keyframe was ever published — the emulator thread is not running"; exit 1; }
 
-          # And the sound: a real Opus packet, out of a real emulator, through the real route. This
-          # is the one end-to-end proof there is — a unit test can encode a synthetic tone, but only
-          # this says the container's APU, encoder and route are wired to each other.
-          #
-          # ⚠️ `--max-time` on a stream that never ends leaves curl exit code 28, so the failure is
-          # judged on the *bytes* rather than on the status.
+          # A real Opus packet through the real route. `--max-time` on an endless stream exits 28,
+          # so the bytes are judged rather than the status.
           curl -sS --max-time 5 -o audio.bin http://localhost:8080/api/audio || true
           python3 - <<'PY' || exit 1
           import struct, sys
@@ -207,39 +152,24 @@ jobs:
           packets = [m for m in messages[1:] if m]
           if not packets:
               sys.exit("::error::/api/audio sent a header and no Opus packets")
-          # RFC 6716 §3.1: the TOC's low two bits are the frame count code, and we send one per packet.
+          # RFC 6716 section 3.1: the TOC's low two bits are the frame count code, and we send one per packet.
           if any(p[0] & 3 for p in packets):
               sys.exit("::error::/api/audio packets are not single-frame Opus")
           print(f"audio — {len(packets)} Opus packets, {sum(map(len, packets))} bytes")
           PY
           exit 0
 
-      # ── publish ────────────────────────────────────────────────────────────────────────────────
-      #
-      # Everything below runs only after the smoke test above has passed, which is the whole point
-      # of the ordering: what reaches the registry is the exact image that was proven to serve the
-      # SPA, decode the cartridge and emulate. A build-and-push that runs in parallel with its own
-      # tests publishes whatever it made and finds out afterwards.
-      #
-      # ⚠️ Main only. A pull request from a fork gets a read-only GITHUB_TOKEN — `packages: write`
-      # above cannot grant what the fork's token never had — so without this guard every fork PR
-      # would fail on a login it was never going to be allowed to do.
+      # Publish: runs only after the smoke test passed, and only on main, since a fork PR's token is
+      # read-only whatever `permissions:` asks for.
       - name: Log in to ghcr.io
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        # Through the environment rather than interpolated into the command: `${{ }}` inside `run:`
-        # is substituted into the script text before bash sees it, so a secret used that way is one
-        # `set -x` away from the log.
+        # Through the environment, since `${{ }}` in `run:` is substituted into the script text.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$GITHUB_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
 
-      # `docker tag` + `docker push` of the image already in the runner's docker, rather than a
-      # second `build-push-action` with `push: true`. The second build would be a near-total cache
-      # hit and is the more common pattern, but this pushes bytes that have demonstrably run — there
-      # is no step between the test and the registry that could produce a different image.
-      #
-      # Two tags: `latest`, which `k8s/gb/deployment.yml` pulls with `imagePullPolicy: Always`, and
-      # the commit, which is the only one that can be rolled back to or pinned.
+      # Pushes the exact image the smoke test ran. `latest` is what `k8s/` pulls; the commit tag is
+      # the one to pin or roll back to.
       - name: Push it
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: |
@@ -253,8 +183,7 @@ jobs:
           echo "kubectl -n gb set image deploy/gb gb=$IMAGE:$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-      # The container's own stdout is where the agent reports what it did, so it is the first thing
-      # worth having when any of the above fails.
+      # The container's stdout is where the agent reports what it did.
       - name: Container logs
         if: always()
         run: docker logs gb-ci 2>&1 | tail -100

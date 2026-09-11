@@ -10,51 +10,30 @@ import { StatusPanel } from './components/StatusPanel';
 import { useEventStream } from './useEventStream';
 import { useWakeLock } from './useWakeLock';
 
-/**
- * The phone's tabs: the log, the trainer card and party, the model's plan, and the program deciding
- * its battles. The last two are conditional — see `pane` below.
- */
+/** The phone's tabs; Plan and Script are offered only while they have content. */
 type PaneTab = 'log' | 'status' | 'plan' | 'script';
 
 export function App() {
   const { status, entries, connection, usage, run, plan, battleScript, speed } = useEventStream();
-  // A phone watching a livestream is an idle phone as far as the phone is concerned, and it dims and
-  // then locks. Nothing else on the page notices, so this holds the screen on while it is visible.
-  // No-op on a desk, on an insecure origin, and while the tab is in the background: see the hook.
+  // Holds the screen on while the page is visible, so a phone watching does not lock; see the hook.
   useWakeLock();
-  // Which pane a phone is showing. From 640px up the stylesheet hides the tab bar and ignores the
-  // tab classes, so this state is inert on a desk. The log is the default because it is the thing
-  // the page is for.
+  // Which pane a phone shows; inert from 640px up, where the stylesheet ignores it.
   const [tab, setTab] = useState<PaneTab>('log');
-  // The Plan and Script tabs are only offered while there is something in them — neither panel draws
-  // anything otherwise, and only an LLM ever has either — so a selection that outlives its pane falls
-  // back to the log rather than to an empty column. Both can vanish under a running page: a
-  // `POST /api/new-run` clears the plan and the script together.
-  //
-  // ⚠️ **The Script tab is now offered from an LLM run's first turn**, because every run starts on
-  // `battle_script::DEFAULT` rather than on nothing. That is the honest answer and not clutter: the
-  // chip in the head says `default`, which is the live fact that this run's battles are costing it a
-  // request each. A run under `random` or `deterministic` still publishes no script and gets no tab.
+  // A selection whose pane has emptied falls back to the log; a new run clears plan and script
+  // together. Every LLM run has a script from its first turn, the default; other policies never do.
   const scripted = battleScript?.source != null;
   const chosen: PaneTab = tab === 'script' && !scripted ? 'log' : tab;
   const pane: PaneTab = chosen === 'plan' && plan.length === 0 ? 'log' : chosen;
-  // The leaderboard's only cue that it is stale. A win is rare enough that this counter changes at
-  // most once per run, and the log is already carrying the event that says so.
+  // The leaderboard's cue that it is stale.
   const wins = useMemo(
     () => entries.filter((entry) => entry.type === 'agent' && entry.kind === 'hall_of_fame').length,
     [entries],
   );
 
-  // Who is playing. `null` under every policy that is not an LLM — `random`, `scripted` — where the
-  // run has no model and saying it has one would be a small lie; the policy name beside it is the
-  // honest answer there.
+  // `null` under every policy that is not an LLM.
   const player = status?.model ?? null;
 
-  // ⚠️ **The tab is a third audience, and it is the one that is read while the page is not.** A
-  // livestream lives in a background tab for hours, where the title is the whole of the UI, so it
-  // says who is playing rather than what the site is called — and under a policy with nobody to
-  // name, how it is being played. `index.html` still ships a title for the moment before the first
-  // heartbeat lands.
+  // A background tab's title is its whole UI, so it names who is playing.
   useEffect(() => {
     document.title = describeTitle(player, status?.policy ?? null);
   }, [player, status?.policy]);
@@ -62,9 +41,7 @@ export function App() {
   return (
     <div className="app">
       <header>
-        {/* Two groups: who is playing, and what the run is doing. The split is what the narrow
-            layout hangs off — the identity stays and the figures fold away, rather than every item
-            in a flat row wrapping into a paragraph of chips. */}
+        {/* Identity and run figures are two groups so the narrow layout can fold the figures away. */}
         <span className="who">
           <span className="title">Pokémon Red</span>
           <span className="dim">played by</span>
@@ -77,9 +54,7 @@ export function App() {
           {describeRun(run)}
         </span>
         <span className="spacer" />
-        {/* W6's gauge. It appears only once a turn has reported figures, rather than as a
-            placeholder zero, and it says when the numbers are our own estimate rather than the
-            endpoint's: a guess presented as a measurement is worse than no number. */}
+        {/* Shown only once a turn has reported figures, marked `~` when estimated. */}
         {usage && (
           <span className="context" title={describeUsage(usage)}>
             <span className="gauge">
@@ -90,15 +65,9 @@ export function App() {
           </span>
         )}
         <Leaderboard wins={wins} />
-        {/* Beside the trophy rather than on the screen, where it first went: over four shades of
-            Game Boy it was a small grey glyph on whatever the game happened to be drawing, and it
-            had to be dimmed further still not to sit on top of the picture. Here it is one control
-            among several, at a size the rest of the row already established. Like the trophy it
-            survives the phone layout — the media query drops the context gauge and the links
-            because they are a desk's questions, and sound is not. */}
+        {/* Kept on phones, like the trophy; the media query drops the gauge and the links. */}
         <SoundButton />
-        {/* Off the header on a phone and at the foot of the Trainer tab instead, with the context
-            figure: neither is about the run, and the row has three lines' worth of things that are. */}
+        {/* On a phone the links move to the foot of the Trainer tab. */}
         <Links />
         <span className={`pill ${connection}`}>
           {connection === 'live' ? status?.game?.mode ?? 'connected' : connection}
@@ -108,10 +77,7 @@ export function App() {
       <main className={`tab-${pane}`}>
         <section className="left">
           <Screen pausedUntil={run.state === 'throttled' ? run.until_ms : null} />
-          {/* Phone-only (hidden from 640px up): the three panes that share what height the screen
-              leaves become tabs, one scrollable pane at a time. The screen itself stays above them,
-              because it is the one thing every tab wants. The buttons key off `pane` rather than
-              `tab` so the Plan fallback above also moves the highlight. */}
+          {/* Phone-only tabs. The buttons key off `pane`, not `tab`, so a fallback moves the highlight. */}
           <nav className="pane-tabs">
             <button className={pane === 'log' ? 'on' : ''} onClick={() => setTab('log')}>
               Log
@@ -142,13 +108,7 @@ export function App() {
             <span className="spacer" />
             <Links />
           </div>
-          {/* Under the game rather than beside the conversation: it changes a few times an hour and
-              is read at a glance, where the log is read as it scrolls. */}
           <PlanPanel plan={plan} />
-          {/* Under the plan, and closed: the plan is what the run is trying to do and moves every few
-              turns, this is how it fights and moves a handful of times a playthrough. On a phone it
-              is a tab of its own, where the pane it fills already answers the question the chevron
-              asks. */}
           <BattleScriptPanel script={battleScript} alwaysOpen={pane === 'script'} />
         </section>
         <section className="right">
@@ -159,7 +119,7 @@ export function App() {
   );
 }
 
-/** The repo this is, and who made it. The face is `web/public/mugshot.png`, copied from ax-h.com. */
+/** The repo and its author; the face is `web/public/mugshot.png`. */
 function Links() {
   return (
     <span className="links">
@@ -182,7 +142,7 @@ function occupancy(usage: UsageView): number {
   return Math.min(100, (100 * usage.context_tokens) / Math.max(1, usage.context_limit));
 }
 
-/** The gutter is narrow and a run is long: 128 400 tokens is `128k`. */
+/** 128 400 tokens is `128k`. */
 function compactTokens(tokens: number): string {
   if (tokens < 10_000) return `${tokens}`;
   if (tokens < 1_000_000) return `${Math.round(tokens / 1000)}k`;
@@ -198,18 +158,7 @@ function describeUsage(usage: UsageView): string {
   ].join('\n');
 }
 
-/**
- * What the run is doing, in the fewest words that still distinguish the cases. `playing` is the
- * quiet one and reads as such; everything else is something a viewer might want to act on.
- */
-/**
- * The tab, which is a sentence rather than a label — see the `useEffect` that sets it.
- *
- * A model plays under its **full** `GB_MODEL`, not the seven characters the trainer card had to be
- * shortened to: the tab has room, and `gemma-3-12b` and `gemma-3-27b` are the same `GEMMA3` on the
- * card. Every other policy has no model to name, so it says how the game is being played instead —
- * `Pokémon Red` alone reads as a fan site rather than as a run of one.
- */
+/** The tab title: the full `GB_MODEL`, or how the game is played under a policy with no model. */
 function describeTitle(player: string | null, policy: string | null): string {
   if (player) return `${player} plays Pokémon Red`;
   switch (policy) {
@@ -219,13 +168,13 @@ function describeTitle(player: string | null, policy: string | null): string {
       return 'Playing Pokémon Red by hand';
     case 'scripted':
       return 'Scripted playthrough of Pokémon Red';
-    // `llm` with no model cannot happen (the model is what the policy is built from), and an
-    // unknown policy is a build newer than this page. Both want the plain name.
+    // An unknown policy is a build newer than this page.
     default:
       return 'Pokémon Red';
   }
 }
 
+/** What the run is doing, in the fewest words that distinguish the cases. */
 function describeRun(run: RunStatus): string {
   switch (run.state) {
     case 'booting':

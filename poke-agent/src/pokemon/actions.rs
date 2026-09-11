@@ -14,15 +14,13 @@ pub struct OverworldAction {
 }
 
 impl OverworldAction {
-    /// The id of this action: stable across a re-sort, unique within a map, and readable enough
-    /// that a model quoting it back is obviously quoting the right thing.
+    /// Stable across a re-sort, unique within a map, and plainly the right row when quoted back.
     pub fn id(&self) -> String {
-        // A sprite is keyed on the object, with no coordinate at all, because it has no
-        // coordinate that holds still.
+        // A sprite's id has no coordinate, because it has none that holds still.
         if matches!(self.tile, MetaTile::Sprite(_)) {
             return format!("{}:{}", self.map, self.tile.id_kind());
         }
-        // A boulder goal is keyed on its *target*, not on where the walk starts.
+        // A boulder goal is keyed on its target, not on where the walk starts.
         let at = match self.tile {
             MetaTile::BoulderGoal { at, .. } => at,
             _ => self.destination,
@@ -44,8 +42,7 @@ impl Ord for OverworldAction {
 }
 
 impl Display for OverworldAction {
-    /// The imperative form — this is a menu entry, one row of what the policy may choose next, so
-    /// it leads with the verb where [`MetaTile`]'s own `Display` is a noun phrase.
+    /// The imperative, as a menu row, where [`MetaTile`]'s own `Display` is a noun phrase.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.tile {
             MetaTile::Warp { to_map, to_position }       => write!(f, "Warp → {to_map} {to_position}"),
@@ -99,8 +96,7 @@ mod tests {
                    "the four squares an NPC can be faced from are one decision, not four");
     }
 
-    /// And every other row keeps its coordinate, because for those the destination *is* the
-    /// thing: two warps on one map are two decisions and the square is what tells them apart.
+    /// Every other row keeps its square: two warps on one map are two decisions.
     #[test]
     fn a_row_that_is_not_a_sprite_still_carries_its_square() {
         let warp = MetaTile::Warp { to_map: Map::ViridianPokecenter,
