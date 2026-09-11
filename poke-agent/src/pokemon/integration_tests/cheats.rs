@@ -153,9 +153,11 @@ impl Cheats {
         }
     }
 
-    /// Whether it is safe to write the party struct: no battle, and the black-out window closed.
+    /// Whether it is safe to write the party struct: the plain overworld, so no battle, no
+    /// black-out window, and no naming screen or catch still writing a new member into the slots.
     fn party_writes_are_safe(&self, api: &PokemonApi<'_>, state: &GameState) -> bool {
-        state.battle.is_none()
+        state.mode == crate::pokemon::encoding::GameMode::Overworld
+            && state.battle.is_none()
             && api.mmu().read_pointer(&pokered_symbols::wIsInBattle)
                 != crate::pokemon::battle::LOST_BATTLE
     }
