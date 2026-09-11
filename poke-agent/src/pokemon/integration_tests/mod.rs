@@ -12,6 +12,19 @@ use crate::pokemon::tile::MetaTile;
 use crate::pokemon::map::MapSprite;
 use gb::ram::{RAM, ROM};
 
+/// Each named cell as two tests, one per battle-animation setting: animations stretch every gap a
+/// battle bound measures, and only a served run plays with them on.
+macro_rules! in_both_animation_modes {
+    ($($cell:ident),* $(,)?) => {
+        mod animated {
+            $( #[test] fn $cell() { super::$cell(crate::pokemon::options::SERVED_OPTIONS) } )*
+        }
+        mod still {
+            $( #[test] fn $cell() { super::$cell(crate::pokemon::options::HEADLESS_OPTIONS) } )*
+        }
+    };
+}
+
 pub(crate) mod fixture;
 pub use fixture::TestFixture;
 

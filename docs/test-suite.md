@@ -38,6 +38,10 @@ cargo test --release --workspace --features slow-tests -- probe_ --ignored --noc
   no battle costs a request. It never touches `PolicyStep`.
 - Neither replaces the other: they gate different halves, and the leg tier is not a substitute for
   either.
+- Each filter also matches an animated twin, `full_playthrough_animated` (the route to Brock, ~25 s)
+  and `godmode_run_animated`: battle animations on is what is served, and it spends the RNG
+  differently.
+- A battle cell runs in both animation modes through `in_both_animation_modes!`.
 
 ## Fixtures
 

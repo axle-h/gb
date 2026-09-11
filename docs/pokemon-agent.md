@@ -28,6 +28,9 @@ can break in silence.
   hands a walk back — and for a water crossing it *finishes* the walk.
 - The route is re-derived from `actions()` every tick and only `route[0]` is pressed, so no recipe may
   depend on its own tail.
+- A battle menu outlives the choice made on it by a frame or two, so `BattleState::AwaitingPolicy`
+  goes back to reading once the menu is off the screen, and only on a tick the policy did not answer:
+  the scripted policies answer at once, and their timing is the golden replay.
 
 ## Closed loops under A
 

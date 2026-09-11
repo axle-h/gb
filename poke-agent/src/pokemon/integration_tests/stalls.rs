@@ -1,6 +1,7 @@
 //! Stalls the fuzzer found, each frozen into a save state and re-run in a second.
 
 use super::*;
+use crate::pokemon::options::GameOptions;
 use crate::pokemon::policy::RandomPolicy;
 
 /// Game time each case is given to reach a decision point.
@@ -9,12 +10,21 @@ const ESCAPE_BUDGET: Duration = Duration::from_secs(120);
 /// The longest silence a case may show before it counts as still stuck.
 const QUIET_LIMIT: Duration = Duration::from_secs(90);
 
-/// Replay `state` against a fresh agent; return the longest silence before a decision point, and
-/// where it ended.
-fn longest_silence(state: &[u8], seed: u64) -> (Duration, String, String) {
+/// `state` on a fresh machine, on `options` if given and otherwise on whatever the save was written with.
+fn boot(state: &[u8], options: Option<&GameOptions>) -> (GameBoy, MapMetadataCache) {
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
     gb.load_state(state).expect("a committed stall fixture should load");
     let mut cache = MapMetadataCache::default();
+    if let Some(options) = options {
+        PokemonApi::with_cache(&mut gb, &mut cache).debug_set_options(options);
+    }
+    (gb, cache)
+}
+
+/// Replay `state` against a fresh agent; return the longest silence before a decision point, and
+/// where it ended.
+fn longest_silence(state: &[u8], seed: u64, options: Option<&GameOptions>) -> (Duration, String, String) {
+    let (mut gb, mut cache) = boot(state, options);
     let mut agent = PokemonAgent::new(Box::new(RandomPolicy::seeded(seed)));
 
     let budget = MachineCycles::from_duration(ESCAPE_BUDGET);
@@ -44,9 +54,14 @@ fn longest_silence(state: &[u8], seed: u64) -> (Duration, String, String) {
 
 /// Assert a fixture escapes its stall, reporting what it did if it does not.
 fn assert_escapes(name: &str, state: &[u8]) {
+    assert_escapes_on(name, state, None);
+}
+
+/// [`assert_escapes`] on `options` rather than the save's own.
+fn assert_escapes_on(name: &str, state: &[u8], options: Option<&GameOptions>) {
     // Escaping must not depend on what the policy picks once free.
     for seed in [1, 2, 3] {
-        let (worst, worst_state, where_it_is) = longest_silence(state, seed);
+        let (worst, worst_state, where_it_is) = longest_silence(state, seed, options);
         assert!(
             worst < QUIET_LIMIT,
             "{name} (seed {seed}): the agent went {worst:?} of game time without reaching a decision \
@@ -57,25 +72,19 @@ fn assert_escapes(name: &str, state: &[u8]) {
 }
 
 /// A Bulbasaur out of PP against a Viridian Forest Weedle, found by `soak`.
-#[test]
-fn a_move_with_no_pp_left_does_not_trap_the_battle() {
-    assert_escapes("no-pp-move", include_bytes!("../data/stall-no-pp-move.bin"));
+fn a_move_with_no_pp_left_does_not_trap_the_battle(options: GameOptions) {
+    assert_escapes_on("no-pp-move", include_bytes!("../data/stall-no-pp-move.bin"), Some(&options));
 }
 
 /// A key item used in battle on the S.S. Anne, found by `soak`.
-#[test]
-fn a_key_item_used_in_battle_does_not_trap_the_bag() {
-    assert_escapes("battle-key-item", include_bytes!("../data/stall-battle-key-item.bin"));
+fn a_key_item_used_in_battle_does_not_trap_the_bag(options: GameOptions) {
+    assert_escapes_on("battle-key-item", include_bytes!("../data/stall-battle-key-item.bin"), Some(&options));
 }
 
 /// Erika's Vileplume against a party with no PP anywhere, from `can_get_rainbow_badge`.
-#[test]
-fn a_party_with_no_pp_anywhere_still_gets_an_answer() {
+fn a_party_with_no_pp_anywhere_still_gets_an_answer(options: GameOptions) {
     use crate::pokemon::policy::DeterministicPolicy;
-    let state = include_bytes!("../data/stall-no-pp-trainer-battle.bin");
-    let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
-    gb.load_state(state).expect("a committed stall fixture should load");
-    let mut cache = MapMetadataCache::default();
+    let (mut gb, mut cache) = boot(include_bytes!("../data/stall-no-pp-trainer-battle.bin"), Some(&options));
     // An empty queue: `pick_battle_action` does not read it.
     let mut agent = PokemonAgent::new(Box::new(DeterministicPolicy::new(1, [])));
 
@@ -99,9 +108,8 @@ fn a_party_with_no_pp_anywhere_still_gets_an_answer() {
 }
 
 /// The Lift Key against a Bug Catcher's Weedle, found by `soak` from `postgame-pc-box`.
-#[test]
-fn a_key_item_used_against_a_trainer_does_not_trap_the_bag() {
-    assert_escapes("battle-key-item-trainer", include_bytes!("../data/stall-battle-key-item-trainer.bin"));
+fn a_key_item_used_against_a_trainer_does_not_trap_the_bag(options: GameOptions) {
+    assert_escapes_on("battle-key-item-trainer", include_bytes!("../data/stall-battle-key-item-trainer.bin"), Some(&options));
 }
 
 /// The man in the Cerulean badge house, found by `soak` from `at-vermilion`.
@@ -117,9 +125,8 @@ fn a_field_move_the_game_refuses_does_not_trap_the_party_menu() {
 }
 
 /// A fainted Pokémon chosen from the battle party menu, found by `soak`.
-#[test]
-fn a_fainted_pokemon_chosen_in_battle_does_not_trap_the_party_menu() {
-    assert_escapes("fainted-switch", include_bytes!("../data/stall-fainted-switch.bin"));
+fn a_fainted_pokemon_chosen_in_battle_does_not_trap_the_party_menu(options: GameOptions) {
+    assert_escapes_on("fainted-switch", include_bytes!("../data/stall-fainted-switch.bin"), Some(&options));
 }
 
 /// A Card Key door on Silph Co 2F with no Card Key, found by `soak`.
@@ -129,9 +136,8 @@ fn a_card_key_door_that_will_not_open_is_only_tried_once() {
 }
 
 /// A Ditto on Route 15 frozen on one frame, found by `soak` from `postgame-aides`.
-#[test]
-fn a_battle_message_over_the_party_list_is_cleared_first() {
-    assert_escapes("battle-message-over-party", include_bytes!("../data/stall-battle-message-over-party.bin"));
+fn a_battle_message_over_the_party_list_is_cleared_first(options: GameOptions) {
+    assert_escapes_on("battle-message-over-party", include_bytes!("../data/stall-battle-message-over-party.bin"), Some(&options));
 }
 
 /// The water current on Seafoam Islands B4F, found by `soak` from `at-cinnabar`.
@@ -147,18 +153,13 @@ fn a_menu_offering_cancel_does_not_trap_a_conversation() {
 }
 
 /// BAIT thrown at the same Rhyhorn for ever, found by `soak`.
-#[test]
-fn a_safari_menu_cursor_left_on_bait_does_not_repeat_itself() {
-    assert_escapes("safari-menu", include_bytes!("../data/stall-safari-menu.bin"));
+fn a_safari_menu_cursor_left_on_bait_does_not_repeat_itself(options: GameOptions) {
+    assert_escapes_on("safari-menu", include_bytes!("../data/stall-safari-menu.bin"), Some(&options));
 }
 
-#[test]
-fn a_ghost_battle_is_left_rather_than_fought_for_ever() {
+fn a_ghost_battle_is_left_rather_than_fought_for_ever(options: GameOptions) {
     use crate::pokemon::policy::DeterministicPolicy;
-    let state = include_bytes!("../data/stall-ghost-battle.bin");
-    let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
-    gb.load_state(state).expect("a committed stall fixture should load");
-    let mut cache = MapMetadataCache::default();
+    let (mut gb, mut cache) = boot(include_bytes!("../data/stall-ghost-battle.bin"), Some(&options));
     // An empty queue, as in the no-PP case.
     let mut agent = PokemonAgent::new(Box::new(DeterministicPolicy::new(1, [])));
 
@@ -185,6 +186,17 @@ fn a_ghost_battle_is_left_rather_than_fought_for_ever() {
         agent.state_debug()));
     println!("[stall] ghost-battle: out in {left_at:?} after {turns} battle actions");
 }
+
+in_both_animation_modes!(
+    a_move_with_no_pp_left_does_not_trap_the_battle,
+    a_key_item_used_in_battle_does_not_trap_the_bag,
+    a_party_with_no_pp_anywhere_still_gets_an_answer,
+    a_key_item_used_against_a_trainer_does_not_trap_the_bag,
+    a_fainted_pokemon_chosen_in_battle_does_not_trap_the_party_menu,
+    a_battle_message_over_the_party_list_is_cleared_first,
+    a_safari_menu_cursor_left_on_bait_does_not_repeat_itself,
+    a_ghost_battle_is_left_rather_than_fought_for_ever,
+);
 
 /// The Route 8 gate can be re-entered from its own doorstep without stalling.
 #[test]

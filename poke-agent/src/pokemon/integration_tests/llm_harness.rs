@@ -557,6 +557,7 @@ pub struct LlmRun {
     /// How many processes this run has had. `1` until the first [`Self::restart`].
     pub processes: u64,
     pub cheats: Option<crate::pokemon::integration_tests::cheats::Cheats>,
+    options: crate::pokemon::options::GameOptions,
 }
 
 /// How to build one. Everything has a default that suits the default tier.
@@ -572,6 +573,7 @@ pub struct LlmRunBuilder {
     refusal_park: RefusalPark,
     name: &'static str,
     coverage: bool,
+    options: crate::pokemon::options::GameOptions,
 }
 
 impl LlmRunBuilder {
@@ -588,6 +590,7 @@ impl LlmRunBuilder {
             refusal_park: SHORT_REFUSAL_PARK,
             name: "llm-run",
             coverage: false,
+            options: crate::pokemon::options::HEADLESS_OPTIONS,
         }
     }
 
@@ -618,6 +621,12 @@ impl LlmRunBuilder {
 
     pub fn refusal_park(mut self, park: RefusalPark) -> Self {
         self.refusal_park = park;
+        self
+    }
+
+    /// Play on `options` rather than [`crate::pokemon::options::HEADLESS_OPTIONS`].
+    pub fn options(mut self, options: crate::pokemon::options::GameOptions) -> Self {
+        self.options = options;
         self
     }
 
@@ -680,6 +689,7 @@ impl LlmRunBuilder {
             stuck_timeout: self.stuck_timeout,
             processes: 0,
             cheats: None,
+            options: self.options,
         };
         run.bring_up(None);
         run
@@ -725,7 +735,7 @@ impl LlmRun {
         let policy = Box::new(LlmPolicy::new(handles, self.stuck_timeout));
         // Resumed from `state.gbst`, not from the emulator just held.
         let state = saved.unwrap_or_else(|| self.fixture_state.to_vec());
-        let mut fixture = TestFixture::with_policy(&state, self.max_game_time, policy);
+        let mut fixture = TestFixture::with_policy(&state, self.max_game_time, policy).with_options(self.options);
         if self.want_coverage {
             fixture = fixture.with_coverage();
         }
