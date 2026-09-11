@@ -594,3 +594,33 @@ fn a_vending_row_buys_the_drink_it_names() {
     assert!(!held(&mut run, ItemId::FreshWater), "the cheapest drink was bought instead, or as well");
     assert!(!seen.lock().expect("not poisoned").was_stuck, "the watchdog fired at the machine");
 }
+
+/// Print the first overworld turns a dropped save produces, as the model would see them.
+/// Set `GB_PROBE_STATE` to the save.
+#[test]
+#[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
+fn probe_policy_menu() {
+    let path = std::env::var("GB_PROBE_STATE").expect("GB_PROBE_STATE");
+    let bytes: &'static [u8] = Box::leak(std::fs::read(&path).expect("state").into_boxed_slice());
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let log = Arc::clone(&seen);
+    let brain = move |request: &TurnRequest| {
+        if request.is_summary() {
+            return Reply::Content("Looking around.".to_string());
+        }
+        if request.has_tool("choose_action") {
+            log.lock().expect("not poisoned").overworld_turns.push(request.situation().to_string());
+        }
+        Reply::Calls(vec![Call::wait(20)])
+    };
+    let mut run = LlmRun::builder(bytes)
+        .named("probe-menu")
+        .game_time(Duration::from_secs(10 * 60))
+        .start(Box::new(brain));
+    run.tick_until(Duration::from_secs(30), |_| seen.lock().expect("not poisoned").overworld_turns.len() >= 3);
+    for (n, turn) in seen.lock().expect("not poisoned").overworld_turns.iter().enumerate() {
+        let rows: Vec<&str> = turn.lines().filter(|line| line.starts_with("- `")).collect();
+        println!("turn {n}: {} rows", rows.len());
+        for row in rows { println!("   {row}"); }
+    }
+}

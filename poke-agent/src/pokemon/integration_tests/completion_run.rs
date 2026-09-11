@@ -261,6 +261,10 @@ pub struct CompletionBrain {
     pub turns: Arc<Mutex<usize>>,
 }
 
+/// How long a step that found no row waits before looking again. A map is still loading for a
+/// moment after a warp, and its rows arrive with it, so this has to outlast that.
+const UNRESOLVED_TICKS: u64 = 60;
+
 impl CompletionBrain {
     /// Turns a step may find nothing before the run is called stuck.
     const PATIENCE: usize = 25;
@@ -950,7 +954,7 @@ impl CompletionBrain {
                         self.stuck(format!("step {} of {} ({step:?}) had no row on {map} for {} turns:\n{}",
                             self.at + 1, self.steps.len(), Self::PATIENCE, request.situation()));
                     }
-                    Reply::Calls(vec![Call::wait(20)])
+                    Reply::Calls(vec![Call::wait(UNRESOLVED_TICKS)])
                 }
             };
         }
@@ -1508,5 +1512,77 @@ fn completion_phase_poke_flute() {
     // South of the gate on Route 12, on the stretch the Fuchsia phase walks.
     let later = [Entry::ItemBall { map: Map::Route12, object: 9, item: ItemId::Tm16PayDay as u8 }];
     let missing: Vec<Entry> = missing.into_iter().filter(|entry| !later.contains(entry)).collect();
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// Saffron: the gate guard's drink, Silph Co from the lobby to the president, Sabrina, the Dojo,
+/// and the Copycat's Poké Doll.
+pub fn to_the_marsh_badge() -> Vec<Step> {
+    use Step::*;
+    const SILPH: &[&str] = &["SilphCo1F", "SilphCo2F", "SilphCo3F", "SilphCo4F", "SilphCo5F",
+                             "SilphCo6F", "SilphCo7F", "SilphCo8F", "SilphCo9F", "SilphCo10F",
+                             "SilphCo11F"];
+    let mut steps = vec![
+        Collect(true),
+        // The guard takes the drink as the player walks past him, without being talked to, and
+        // the gate's far door names the map it was entered from until he does.
+        // Both doors lead back onto Route 7: the guard is what blocks the room between them, and
+        // his thanks interrupt the walk, so it is taken again.
+        GoTo("Route7"), GoTo("Route7Gate"), Take("Route7, arriving at (19, "),
+        Take("Route7, arriving at (19, "), GoTo("SaffronCity"),
+    ];
+    steps.extend([
+        // The Copycat trades TM31 for a Poké Doll, sold on Celadon Mart's fourth floor, and she is
+        // one of the doors the exploring below opens.
+        Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"),
+        GoTo("CeladonMart1F"), GoTo("CeladonMart2F"), GoTo("CeladonMart3F"), GoTo("CeladonMart4F"),
+        Talk("Clerk"), Buy(&[("PokeDoll", 1)]),
+        GoTo("CeladonMart3F"), GoTo("CeladonMart2F"), GoTo("CeladonMart1F"), GoTo("CeladonCity"),
+        Field(r#"{"move":"fly","map":"SaffronCity"}"#), GoTo("SaffronCity"),
+        Explore { maps: &["SaffronCity", "SaffronPokecenter", "SaffronMart", "SaffronPidgeyHouse",
+                          "MrPsychicsHouse", "CopycatsHouse1F", "CopycatsHouse2F", "FightingDojo"],
+                  patience: 800 },
+        // Silph Co hands over a Lapras and a Master Ball, and neither fits a full bag.
+        Tidy,
+        GoTo("SilphCo1F"), Explore { maps: SILPH, patience: 2500 },
+        // 11F's office is walled off from its own lift and stairs. The way in is a chain of
+        // teleport pads: 3F (11, 11) lands on 7F (5, 3), and 7F (5, 7) lands inside the office.
+        GoTo("SilphCoElevator"), Field(r#"{"move":"elevator","map":"SilphCo3F"}"#),
+        Take("warp to SilphCo7F, arriving at (5, 3)"),
+        // The rival is fought head-on: routing past him trips his sight and desyncs the 11F pad.
+        Talk("Rival"),
+        Take("warp to SilphCo11F, arriving at (3, 2)"),
+        // The president reaches into his pocket for a Master Ball.
+        Tidy,
+        Talk("Rocket1"), Talk("Giovanni"), Talk("SilphPresident"),
+        Explore { maps: SILPH, patience: 1500 },
+        Take("warp to SilphCo7F, arriving at (5, 7)"),
+        Take("warp to SilphCo3F, arriving at (11, 11)"),
+        GoTo("SilphCoElevator"), Field(r#"{"move":"elevator","map":"SilphCo1F"}"#),
+        GoTo("SilphCo1F"), GoTo("SaffronCity"),
+        // Sabrina's gym opens once Silph Co is clear of Rockets. Flying out and back lands the
+        // run at the Centre, since people standing in the streets pocket the city.
+        Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"),
+        Field(r#"{"move":"fly","map":"SaffronCity"}"#), GoTo("SaffronCity"),
+        GoTo("SaffronGym"), Explore { maps: &["SaffronGym"], patience: 600 }, GoTo("SaffronCity"),
+    ]);
+    steps
+}
+
+#[test]
+#[ignore = "a phase of the completion run; run with --ignored"]
+fn completion_phase_marsh_badge() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-flute.bin"), "completion-marsh",
+                          to_the_marsh_badge(), 420, Duration::from_secs(3000));
+    let missing = missing_on(&mut played, &[
+        Map::SaffronCity, Map::SaffronPokecenter, Map::SaffronMart, Map::SaffronPidgeyHouse,
+        Map::MrPsychicsHouse, Map::SaffronGym, Map::FightingDojo, Map::CopycatsHouse1F,
+        Map::CopycatsHouse2F, Map::SilphCo1F, Map::SilphCo2F, Map::SilphCo3F, Map::SilphCo4F,
+        Map::SilphCo5F, Map::SilphCo6F, Map::SilphCo7F, Map::SilphCo8F, Map::SilphCo9F,
+        Map::SilphCo10F, Map::SilphCo11F, Map::SilphCoElevator,
+    ], &[Entry::Badge(5), Entry::Way(Way::GiftLapras), Entry::Way(Way::GiftFightingDojo),
+         Entry::KeyItem(vec![ItemId::CardKey as u8])]);
+    cut(&mut played, "completion-marsh");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
