@@ -152,6 +152,56 @@ const MAX_PARK: Duration = Duration::from_secs(25 * 60 * 60);
 /// How finely the park is chopped.
 const PARK_SLICE: Duration = Duration::from_millis(200);
 
+/// When a run that the endpoint keeps refusing outright is parked, and for how long. A refusal is
+/// an [`LlmError::Http`] that [`LlmError::is_retryable`] rejects: a spent credit, a revoked key,
+/// none of which carries a time to come back at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusalPark {
+    /// Refusals in a row that are only failed turns. Each of those re-sends a different
+    /// conversation, and a request the conversation made unacceptable can be cured between them.
+    pub after: u32,
+    /// The first park, doubled for every refusal after it up to `max`.
+    pub first: Duration,
+    pub max: Duration,
+}
+
+impl Default for RefusalPark {
+    fn default() -> Self {
+        Self { after: 3, first: Duration::from_secs(60), max: Duration::from_secs(30 * 60) }
+    }
+}
+
+impl RefusalPark {
+    /// How long to park after the `in_a_row`th consecutive refusal, if at all.
+    fn window(&self, in_a_row: u32) -> Option<Duration> {
+        let doublings = in_a_row.checked_sub(self.after)?;
+        Some(self.first.saturating_mul(1u32 << doublings.min(16)).min(self.max))
+    }
+}
+
+/// Why [`Worker::park_until`] is stopping the run, which is what the page is told.
+enum Park {
+    /// A dated 429.
+    Quota,
+    Refused { in_a_row: u32 },
+}
+
+impl Park {
+    fn why(&self) -> String {
+        match self {
+            Park::Quota => "the endpoint's quota is spent".to_string(),
+            Park::Refused { in_a_row } => format!("the endpoint refused {in_a_row} requests in a row"),
+        }
+    }
+
+    fn resumed(&self) -> &'static str {
+        match self {
+            Park::Quota => "the quota window reopened; the run is resuming where it stopped",
+            Park::Refused { .. } => "the pause is over; the run is asking the endpoint again",
+        }
+    }
+}
+
 /// A duration as a viewer would say it.
 fn describe_wait(ms: u64) -> String {
     let seconds = ms / 1000;
@@ -186,6 +236,9 @@ pub struct Worker {
     config: LlmConfig,
     published: Arc<Published>,
     retry: RetryPolicy,
+    refusal_park: RefusalPark,
+    /// Consecutive refusals, reset by any other answer — see [`RefusalPark`].
+    refused_in_a_row: u32,
 
     generation: Arc<AtomicU64>,
     turns: Receiver<TurnRequest>,
@@ -255,6 +308,8 @@ pub fn channels(
         config,
         published,
         retry: RetryPolicy::default(),
+        refusal_park: RefusalPark::default(),
+        refused_in_a_row: 0,
         generation: Arc::clone(&generation),
         turns: turn_rx,
         outcomes: outcome_tx,
@@ -296,6 +351,11 @@ impl Worker {
     /// Replace the retry policy.
     pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
+        self
+    }
+
+    pub fn with_refusal_park(mut self, park: RefusalPark) -> Self {
+        self.refusal_park = park;
         self
     }
 
@@ -538,7 +598,7 @@ impl Worker {
     }
 
     /// Stop the run until `until_ms`, and stop the emulator with it.
-    fn park_until(&mut self, id: u64, until_ms: u64, message: &str) -> bool {
+    fn park_until(&mut self, id: u64, until_ms: u64, park: Park, message: &str) -> bool {
         let now = now_ms();
         // Clamped, because the wait is driven by a number the *endpoint* chose.
         let until_ms = until_ms.min(now.saturating_add(MAX_PARK.as_millis() as u64));
@@ -549,8 +609,8 @@ impl Worker {
         self.published.publish_event(UiEventBody::Notice {
             level: "warn",
             message: format!(
-                "the endpoint's quota is spent, so the run is paused for {}; the game is stopped and \
-                 nothing is lost. {message}",
+                "{}, so the run is paused for {}; the game is stopped and nothing is lost. {message}",
+                park.why(),
                 describe_wait(until_ms - now),
             ),
         });
@@ -572,7 +632,7 @@ impl Worker {
         if !cancelled {
             self.published.publish_event(UiEventBody::Notice {
                 level: "info",
-                message: "the quota window reopened; the run is resuming where it stopped".to_string(),
+                message: park.resumed().to_string(),
             });
         }
         !cancelled
@@ -644,13 +704,32 @@ impl Worker {
                         // The quota is spent and the endpoint dated its reopening: stop asking,
                         // stop the game with it, and put the same question again when it opens.
                         Err(LlmError::RateLimited { resets_at_ms: Some(until_ms), message }) => {
-                            if !self.park_until(id, until_ms, &message) {
+                            if !self.park_until(id, until_ms, Park::Quota, &message) {
                                 break Err(LlmError::Cancelled);
                             }
                             // Back to `AwaitingLlm` *before* asking again.
                             self.published.set_status(RunStatus::AwaitingLlm { kind: kind.label() });
                         }
-                        settled => break settled,
+                        // Refused outright, and not for the first time: stop the game rather
+                        // than ask again every two seconds of it, for longer each time.
+                        Err(refusal @ LlmError::Http { .. }) if !refusal.is_retryable() => {
+                            self.refused_in_a_row += 1;
+                            let Some(window) = self.refusal_park.window(self.refused_in_a_row) else {
+                                break Err(refusal);
+                            };
+                            let until_ms = now_ms().saturating_add(window.as_millis() as u64);
+                            let park = Park::Refused { in_a_row: self.refused_in_a_row };
+                            if !self.park_until(id, until_ms, park, &refusal.to_string()) {
+                                break Err(LlmError::Cancelled);
+                            }
+                            self.published.set_status(RunStatus::AwaitingLlm { kind: kind.label() });
+                        }
+                        settled => {
+                            if !matches!(settled, Err(LlmError::Cancelled)) {
+                                self.refused_in_a_row = 0;
+                            }
+                            break settled;
+                        }
                     }
                 };
                 match result {
@@ -1070,7 +1149,8 @@ impl Worker {
             self.published.publish_event(UiEventBody::Notice {
                 level: "warn",
                 message: format!(
-                    "context is full and holds no completed turn to drop; removed {dropped}                      questions the endpoint never answered",
+                    "context is full and holds no completed turn to drop; removed {dropped} \
+                     questions the endpoint never answered",
                 ),
             });
         }
@@ -1132,5 +1212,21 @@ fn describe(decision: &Terminal) -> String {
             None => "forget_move (decline)".to_string(),
         },
         Terminal::Wait { ticks } => format!("wait {ticks} ticks"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_parks_only_after_the_streak_and_then_for_longer_each_time() {
+        let park = RefusalPark::default();
+        let windows: Vec<Option<u64>> = (1..=10).map(|n| park.window(n).map(|w| w.as_secs())).collect();
+        assert_eq!(
+            windows,
+            [None, None, Some(60), Some(120), Some(240), Some(480), Some(960), Some(1800), Some(1800), Some(1800)],
+        );
+        assert_eq!(park.window(u32::MAX), Some(park.max), "a long enough streak must not overflow");
     }
 }

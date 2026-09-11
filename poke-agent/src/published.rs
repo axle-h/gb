@@ -121,8 +121,8 @@ pub enum RunStatus {
     Compacting,
     /// A retry is being waited out.
     RateLimited { retry_in_ms: u64 },
-    /// The endpoint's quota is exhausted and it said when it reopens, so the whole run is paused
-    /// — no requests, and the emulator stopped with it.
+    /// The endpoint's quota is exhausted and it said when it reopens, or it has refused a streak of
+    /// requests outright, so the whole run is paused — no requests, and the emulator stopped with it.
     Throttled { until_ms: u64, message: String },
     /// The last turn could not be completed.
     Error { message: String },

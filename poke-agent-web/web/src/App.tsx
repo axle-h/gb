@@ -243,7 +243,7 @@ function describeRun(run: RunStatus): string {
     case 'rate_limited':
       return `rate limited · retrying in ${Math.round(run.retry_in_ms / 100) / 10}s`;
     case 'throttled':
-      return `quota spent · paused for ${describeRemaining(run.until_ms - Date.now())}`;
+      return `endpoint refusing · paused for ${describeRemaining(run.until_ms - Date.now())}`;
     case 'error':
       return run.message;
   }

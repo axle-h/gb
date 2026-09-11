@@ -120,6 +120,6 @@ argument lives in the code.
   message is not one, so a history of unanswered plans had no boundary anywhere in it and published
   `before == after` as a success. `drop_unanswered` is the pass below it. A compaction that still
   reclaims nothing raises an error notice, because from there on every request is over the window.
-- Open: an undated hard failure is still not parked. That is a decision rather than an omission —
-  parking stops the bleeding and does not touch the ratchet — and a guard pins that it no longer
-  ratchets the history.
+- Only a refusal counts toward `RefusalPark`: an `Http` that `is_retryable` rejects. A timeout, a
+  dropped connection or exhausted 5xx retries must neither count nor park, and any other answer
+  resets the streak, or one bad hour of a flaky endpoint stops the game for thirty minutes.

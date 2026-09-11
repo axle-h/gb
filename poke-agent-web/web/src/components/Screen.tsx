@@ -67,7 +67,7 @@ export function describeRemaining(ms: number): string {
 }
 
 /**
- * What a viewer sees while the run is parked on a spent quota: the last frame dimmed under a PAUSED
+ * What a viewer sees while the run is parked on an endpoint that will not answer: the last frame dimmed under a PAUSED
  * plate and a live countdown.
  *
  * ⚠️ **The countdown is the one thing on this page driven by a local timer**, and it has to be: the
@@ -91,7 +91,7 @@ function PausedOverlay({ until }: { until: number }) {
         <span className="word">PAUSED</span>
         {/* The reason, because a paused game with no explanation reads as a fault. It is the run
             that is waiting, not the page, and nothing is lost while it does. */}
-        <span className="why">the model's quota is spent</span>
+        <span className="why">the model's endpoint is refusing requests</span>
         <span className="eta">
           {remaining > 0 ? `resumes in ${describeRemaining(remaining)}` : 'resuming…'}
         </span>
