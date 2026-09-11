@@ -60,6 +60,9 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
 - `actions()` emits one crossing per adjacent map *per kind*, land and water: one row per edge
   perturbs the scripted run's timing, and collapsing the kinds hides every neighbour whose land
   crossing is nearer than its water one.
+- A `Pace` row stands only where the cartridge rolls an encounter off grass: any floor of an indoor
+  map outside the forest tileset, and water whose bottom-right tile is `$14` (`paces_on`). A shore
+  square is water that never rolls.
 - A step onto water costs `SURF_MOUNT_COST`, so `bfs_from_player`'s `dist` is a price, not a step
   count; `wander_action` is the one caller that means steps.
 - A square the cartridge refuses to let you stand on is not in the block map, so routing over one

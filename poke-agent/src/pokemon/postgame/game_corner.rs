@@ -330,6 +330,17 @@ impl Prize {
 
     pub const fn menu_row(self) -> u8 { self.window_and_row().1 }
 
+    /// The prize a name means: a species, a move, or the TM that teaches it.
+    pub fn named(name: &str) -> Option<Self> {
+        let squashed: String = name.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+        [Self::Abra, Self::Clefairy, Self::Nidorina, Self::Dratini, Self::Scyther, Self::Porygon,
+         Self::DragonRage, Self::HyperBeam, Self::Substitute].into_iter().find(|prize| {
+            let own = format!("{prize:?}").to_ascii_lowercase();
+            let tm = match prize { Self::DragonRage => "tm23", Self::HyperBeam => "tm15", Self::Substitute => "tm50", _ => "" };
+            squashed == own || (!tm.is_empty() && (squashed == tm || squashed == format!("{tm}{own}")))
+        })
+    }
+
     pub const fn cost(self) -> u16 {
         match self {
             Self::Abra => 180, Self::Clefairy => 500, Self::Nidorina => 1200,

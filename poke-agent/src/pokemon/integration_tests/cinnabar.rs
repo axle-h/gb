@@ -18,6 +18,7 @@ fn seafoam_articuno_is_reachable_offline() {
             player_direction: crate::pokemon::map_metadata::PlayerFacingDirection::Down,
             sprites: vec![], metadata, closed_doors: vec![], card_key_locked: false,
             grass_encounter_rate: 0,
+            water_encounter_rate: 0,
             header_loaded: true,
             surfing: true,
             sprites_loaded: true,

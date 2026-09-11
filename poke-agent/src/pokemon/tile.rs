@@ -27,6 +27,8 @@ pub enum MetaTile {
     Grass,
     /// A shore tile to fish from, facing the water.
     Fish { rod: crate::pokemon::postgame::fishing::Rod },
+    /// Floor or water to walk up and down until something attacks, where there is no grass.
+    Pace { water: bool },
 }
 
 impl MetaTile {
@@ -49,11 +51,14 @@ impl MetaTile {
         match self {
             Self::Sprite(name) if name.contains(' ') => name.replace(' ', "").into(),
             Self::Sprite(name) => (*name).into(),
+            Self::Switch { object: HiddenObject::Quiz { yes }, ordinal } =>
+                format!("Quiz{}{ordinal}", if *yes { "Yes" } else { "No" }).into(),
             Self::Switch { object, ordinal } => format!("{}{ordinal}", <&'static str>::from(object)).into(),
             // The id names only the target, because the boulder moves on every shove.
             Self::BoulderGoal { hole, .. } =>
                 if *hole { "PushBoulderIntoHole".into() } else { "PushBoulderOntoSwitch".into() },
             Self::Cut { .. } => "CutTree".into(),
+            Self::Pace { water: true } => "PaceOnWater".into(),
             other => other.kind().into(),
         }
     }
@@ -85,6 +90,8 @@ impl Display for MetaTile {
             Self::Fish { rod } => write!(f, "the water's edge, to fish with the {}", rod.name()),
             Self::Switch { object, .. } => write!(f, "{object}"),
             Self::Grass => write!(f, "tall grass"),
+            Self::Pace { water: false } => write!(f, "the floor, to walk it for wild Pokémon"),
+            Self::Pace { water: true } => write!(f, "the water, to surf it for wild Pokémon"),
         }
     }
 }
@@ -98,6 +105,8 @@ pub enum HiddenObject {
     Statue,
     /// Bill's cell separator: the PC in his house, pressed once to turn him back into a person.
     CellSeparator,
+    /// A Cinnabar Gym quiz machine, answered YES or NO: two rows, since the answer is the choice.
+    Quiz { yes: bool },
 }
 
 impl Display for HiddenObject {
@@ -108,6 +117,7 @@ impl Display for HiddenObject {
             Self::Poster => write!(f, "the poster"),
             Self::Statue => write!(f, "a statue"),
             Self::CellSeparator => write!(f, "the cell separator"),
+            Self::Quiz { .. } => write!(f, "a quiz machine"),
         }
     }
 }

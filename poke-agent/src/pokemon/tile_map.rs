@@ -68,6 +68,10 @@ pub struct MetaTileMap {
     /// Shore tiles Surf may not be mounted from ("The current is much too fast!").
     pub no_surf_mount: HashSet<Point8>,
     pub has_grass_encounters: bool,
+    /// An indoor map outside the forest tileset rolls its grass rate on every floor tile
+    /// (`TryDoWildEncounter`), so a cave floor is as good as grass.
+    pub floor_encounters: bool,
+    pub has_water_encounters: bool,
     /// The metadata these tiles came from, so the map picture needs no MMU read.
     pub metadata: Option<std::sync::Arc<crate::pokemon::map_metadata::MapMetadata>>,
 }
@@ -243,6 +247,10 @@ impl MetaTileMap {
             warp_targets: warp_targets_of(&meta_tiles),
             connection_targets: connection_targets_of(&meta_tiles),
             has_grass_encounters: map.grass_encounter_rate != 0,
+            floor_encounters: map.grass_encounter_rate != 0
+                && map.metadata.map as u8 >= Map::RedsHouse1F as u8
+                && map.metadata.map_header.tileset != crate::pokemon::map_header::TileSetId::Forest,
+            has_water_encounters: map.water_encounter_rate != 0,
             raw_tile_ids: map.metadata.raw_tile_ids.clone(),
             tileset: map.metadata.map_header.tileset,
             tile_pair_collisions: map.metadata.tile_pair_collisions.clone(),
@@ -929,6 +937,32 @@ impl MetaTileMap {
         hidden_objects_for(self.map)
     }
 
+    /// A square of `kind` beside `at` that a step from `at` reaches, to pace between the two.
+    pub fn pacing_neighbour(&self, at: Point8, kind: MetaTile) -> Option<Point8> {
+        [JoypadButton::Up, JoypadButton::Down, JoypadButton::Left, JoypadButton::Right].into_iter()
+            .filter_map(|dir| self.step(at, dir))
+            .find(|&next| self.paces_on(next, kind) && !self.pair_blocked(at, next))
+    }
+
+    /// Whether standing on `p` rolls `kind`'s encounters. Water rolls only where the square's
+    /// bottom-right tile is the plain water tile, so a shore square is water that never rolls.
+    fn paces_on(&self, p: Point8, kind: MetaTile) -> bool {
+        /// "in all tilesets with a water tile, this is its id" (`TryDoWildEncounter`).
+        const WATER_TILE: u8 = 0x14;
+        self.tile_at_checked(p) == Some(kind) && (kind != MetaTile::Water
+            || self.metadata.as_ref()
+                .and_then(|metadata| metadata.encounter_tile_ids.get(p.x as usize + p.y as usize * self.width))
+                == Some(&WATER_TILE))
+    }
+
+    /// The nearest reachable square of `kind` with a [`Self::pacing_neighbour`].
+    fn nearest_pacing_square(&self, kind: MetaTile, dist: &HashMap<Point8, u32>) -> Option<Point8> {
+        dist.iter()
+            .filter(|(p, _)| self.paces_on(**p, kind) && self.pacing_neighbour(**p, kind).is_some())
+            .min_by_key(|(p, d)| (**d, p.y, p.x))
+            .map(|(p, _)| *p)
+    }
+
     /// Every row this map offers, from where the player is standing.
     pub fn actions(&self) -> Vec<OverworldAction> {
         if !self.position_settled {
@@ -1091,6 +1125,19 @@ impl MetaTileMap {
         if self.has_grass_encounters && let Some((_, dest)) = nearest(&|t| *t == MetaTile::Grass) {
             let route = reconstruct(dest, &full_from);
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Grass, route });
+        } else if self.floor_encounters
+            && let Some(dest) = self.nearest_pacing_square(MetaTile::Empty, &full_dist)
+        {
+            let route = reconstruct(dest, &full_from);
+            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest,
+                                           tile: MetaTile::Pace { water: false }, route });
+        }
+        if self.has_water_encounters && self.can_surf
+            && let Some(dest) = self.nearest_pacing_square(MetaTile::Water, &full_dist)
+        {
+            let route = reconstruct(dest, &full_from);
+            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest,
+                                           tile: MetaTile::Pace { water: true }, route });
         }
 
         if let Some(rod) = self.best_rod
@@ -1609,7 +1656,7 @@ impl Display for MetaTileMap {
                     MetaTile::Switch { .. } => write!(f, "s")?,
                     MetaTile::CutTree => write!(f, "t")?,
                     // Never in `meta_tiles`: an action on the floor beside a thing drawn as itself.
-                    MetaTile::Cut { .. } | MetaTile::BoulderGoal { .. } => write!(f, "_")?,
+                    MetaTile::Cut { .. } | MetaTile::BoulderGoal { .. } | MetaTile::Pace { .. } => write!(f, "_")?,
                     MetaTile::Pc      => write!(f, "p")?,
                     MetaTile::Grass   => write!(f, "g")?,
                     // Never in `meta_tiles` — a fishing spot is an action on ordinary ground.
@@ -1681,6 +1728,17 @@ impl HiddenObjectSite {
     }
 }
 
+/// The Cinnabar Gym's quiz machines and their questions, `hidden_events_for CINNABAR_GYM` and
+/// `_CinnabarQuizQuestionsText1` to `6`. The right answers stay in the cartridge.
+pub const CINNABAR_QUIZ_MACHINES: [(u8, u8, &str); 6] = [
+    (15, 7, "CATERPIE evolves into BUTTERFREE?"),
+    (10, 1, "There are 9 certified POKéMON LEAGUE BADGEs?"),
+    (9, 7, "POLIWAG evolves 3 times?"),
+    (9, 13, "Are thunder moves effective against ground element-type POKéMON?"),
+    (1, 13, "POKéMON of the same kind and level are not identical?"),
+    (1, 7, "TM28 contains TOMBSTONER?"),
+];
+
 /// Every hidden object a playthrough presses on `map`, from pokered's `hidden_events.asm`.
 pub fn hidden_objects_for(map: Map) -> &'static [HiddenObjectSite] {
     use HiddenObject::{Poster, Statue, TrashCan, VendingMachine};
@@ -1715,8 +1773,22 @@ pub fn hidden_objects_for(map: Map) -> &'static [HiddenObjectSite] {
     const BILLS_SEPARATOR: &[HiddenObjectSite] =
         &[HiddenObjectSite::new(1, 4, HiddenObject::CellSeparator, UP)];
 
+    /// Each machine twice, YES then NO, in `hidden_events_for CINNABAR_GYM` order.
+    const CINNABAR_QUIZ: &[HiddenObjectSite] = &{
+        let mut sites = [HiddenObjectSite::new(0, 0, HiddenObject::Quiz { yes: true }, UP); 12];
+        let mut machine = 0;
+        while machine < CINNABAR_QUIZ_MACHINES.len() {
+            let (x, y, _) = CINNABAR_QUIZ_MACHINES[machine];
+            sites[machine * 2] = HiddenObjectSite::new(x, y, HiddenObject::Quiz { yes: true }, UP);
+            sites[machine * 2 + 1] = HiddenObjectSite::new(x, y, HiddenObject::Quiz { yes: false }, UP);
+            machine += 1;
+        }
+        sites
+    };
+
     match map {
         Map::BillsHouse        => BILLS_SEPARATOR,
+        Map::CinnabarGym       => CINNABAR_QUIZ,
         Map::VermilionGym      => VERMILION_BINS,
         Map::CeladonMartRoof   => CELADON_DRINKS,
         Map::GameCorner        => GAME_CORNER_POSTER,
@@ -1914,7 +1986,7 @@ mod boulder_solver_tests {
             can_surf: false, best_rod: None, can_cut: false,
             can_strength: false, bill_cell_separator: false,
             strength_switches: vec![switch], holes: vec![], no_surf_mount: HashSet::new(),
-            has_grass_encounters: false,
+            has_grass_encounters: false, floor_encounters: false, has_water_encounters: false,
             // No ROM map behind it.
             metadata: None,
         }, switch)

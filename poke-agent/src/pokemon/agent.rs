@@ -705,6 +705,8 @@ pub struct PokemonAgent {
     /// Set once [`AgentState::ReadingTextBox`] stops confirming and starts leaving; B instead of A
     /// until the next decision point.
     escaping_menus: bool,
+    /// The next YES/NO menu is answered NO: a quiz row chosen for that answer.
+    answer_no: bool,
 
     /// Ticks in which a newly opened text box may still be a menu the agent inherited.
     menu_handover_ticks: u16,
@@ -782,6 +784,7 @@ impl PokemonAgent {
             manual_input: VecDeque::new(),
             manual_input_held: 0,
             escaping_menus: false,
+            answer_no: false,
             menu_handover_ticks: 0,
             forget_choice: None,
             pending_pickup: None,
@@ -1198,6 +1201,8 @@ impl PokemonAgent {
     }
 
     pub fn take_overworld_action(&mut self, action: OverworldAction) {
+        self.answer_no = matches!(action.tile,
+            MetaTile::Switch { object: crate::pokemon::tile::HiddenObject::Quiz { yes: false }, .. });
         self.event(AgentEvent::StartedOverworldAction {
             destination: action.tile.clone(),
             id: action.id(),
@@ -2006,6 +2011,17 @@ CascadeBadge; not cutting".to_string(),
                                         from_row: true });
                                     return Ok(());
                                 }
+                                // A pacing row walks to its square, then paces it against a neighbour.
+                                if let MetaTile::Pace { water } = destination
+                                    && let pos = game_state.map.player_position
+                                    && let Some(next) = game_state.map.pacing_neighbour(pos, pace_kind(water))
+                                {
+                                    api.release_all_buttons();
+                                    self.set_state(AgentState::PacingForEncounters {
+                                        destination, map: game_state.map.map, tile_a: pos, tile_b: next,
+                                        heading_to_b: true, stalled: 0, paced: 0 });
+                                    return Ok(());
+                                }
                                 if let MetaTile::BoulderGoal { boulder, at, hole } = destination {
                                     api.release_all_buttons();
                                     self.boulder_goal = Some((game_state.map.map, boulder, at, hole));
@@ -2088,6 +2104,13 @@ CascadeBadge; not cutting".to_string(),
                     for event in new_events {
                         self.event(event);
                     }
+                    return Ok(());
+                }
+                // A quiz row chosen for NO: the cursor to NO, then A, once.
+                if self.answer_no && let Some(menu) = api.menu_state().filter(|menu| menu.is_yes_no_menu()) {
+                    let button = if menu.current_item == 0 { JoypadButton::Down } else { JoypadButton::A };
+                    self.answer_no &= button == JoypadButton::Down;
+                    reader.update_with(api, button);
                     return Ok(());
                 }
                 let button = if api.in_pc_menu() || self.escaping_menus { JoypadButton::B } else { JoypadButton::A };
@@ -2565,9 +2588,12 @@ CascadeBadge; not cutting".to_string(),
                         *stalled += 1;
                         if *stalled >= STALL_TICKS {
                             // The map moves under a pair, so ask for another before giving up.
-                            let repicked = adjacent_grass(&game_state.map, pos).map(|b| (pos, b))
-                                .or_else(|| adjacent_pacing_pair(&game_state.map, pos))
-                                .filter(|&(a, b)| (a, b) != (*tile_a, *tile_b));
+                            let repicked = match destination {
+                                MetaTile::Pace { water } =>
+                                    game_state.map.pacing_neighbour(pos, pace_kind(water)).map(|b| (pos, b)),
+                                _ => adjacent_grass(&game_state.map, pos).map(|b| (pos, b))
+                                    .or_else(|| adjacent_pacing_pair(&game_state.map, pos)),
+                            }.filter(|&(a, b)| (a, b) != (*tile_a, *tile_b));
                             if let Some((a, b)) = repicked {
                                 *tile_a = a;
                                 *tile_b = b;
@@ -3561,6 +3587,11 @@ fn adjacent_pacing_pair(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8
         Point8 { x: p.x.saturating_sub(1), y: p.y }, Point8 { x: p.x.saturating_add(1), y: p.y },
     ].into_iter().filter(move |&n| n != p && plain(n) && !map.pair_blocked(p, n));
     neighbours(pos).find_map(|a| neighbours(a).find(|&b| b != pos).map(|b| (a, b)))
+}
+
+/// The squares a [`MetaTile::Pace`] row paces on.
+fn pace_kind(water: bool) -> MetaTile {
+    if water { MetaTile::Water } else { MetaTile::Empty }
 }
 
 /// A grass tile next to `pos` that the player can actually step onto.

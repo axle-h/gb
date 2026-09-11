@@ -44,6 +44,7 @@ mod interruption;
 mod llm;
 pub(crate) mod llm_harness;
 mod battle_refusals;
+mod model_surface;
 mod branch_points;
 mod vermilion;
 mod celadon;

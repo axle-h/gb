@@ -166,6 +166,7 @@ fn every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot() {
         metadata: Arc::clone(&metadata),
         closed_doors: Vec::new(),
         grass_encounter_rate: 0,
+        water_encounter_rate: 0,
         card_key_locked: false,
         header_loaded: true,
         surfing: false,
