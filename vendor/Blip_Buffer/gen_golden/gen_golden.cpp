@@ -1,17 +1,17 @@
 // Golden-vector generator for the Rust port of Blip_Buffer.
 //
-// Links the *real* C++ library in vendor/ and writes its output to src/audio/data/*.bin, which the
-// Rust tests in src/audio/blip/tests.rs then assert against bit-exactly. Blip_Buffer ships no test
-// suite of its own — only interactive SDL demos — so this is where the reference behaviour comes
-// from.
+// Links the *real* C++ library in the directory above and writes its output to
+// gb/src/audio/data/*.bin, which the Rust tests in gb/src/audio/blip/tests.rs then assert against
+// bit-exactly. Blip_Buffer ships no test suite of its own — only interactive SDL demos — so this is
+// where the reference behaviour comes from.
 //
 // Every case is deterministic and uses no libc rand(): the pseudo-random case runs an explicit LCG
-// that src/audio/blip/tests.rs reimplements line for line. Anything sourced from the host (time,
+// that gb/src/audio/blip/tests.rs reimplements line for line. Anything sourced from the host (time,
 // address layout, locale) would make the goldens unreproducible.
 //
-// Build and run from the repo root:  tools/blip-golden/build.sh
+// Build and run from the repo root:  vendor/Blip_Buffer/gen_golden/build.sh
 
-#include "vendor/Blip_Buffer.h"
+#include "../Blip_Buffer.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +19,7 @@
 #include <vector>
 
 // ---------------------------------------------------------------------------------------------
-// Parameters shared with the Rust side. Any change here must be mirrored in src/audio/blip/.
+// Parameters shared with the Rust side. Any change here must be mirrored in gb/src/audio/blip/.
 // ---------------------------------------------------------------------------------------------
 
 static const long   CLOCK_RATE  = 1048576; // Game Boy M-cycle rate
@@ -237,7 +237,7 @@ static void gen_lcg(void)
 // ---------------------------------------------------------------------------------------------
 // (e) The real thing: 30 ms of captured Pokemon Red APU output.
 //
-// Input is src/audio/data/apu_capture_in.bin, produced by the ignored Rust test
+// Input is gb/src/audio/data/apu_capture_in.bin, produced by the ignored Rust test
 // audio::reference::tests::capture_golden_input. Format: u32 run count, then per run
 // (u16 clocks, i16 left, i16 right) — already quantised to the synth's integer amplitude domain,
 // so this comparison is independent of the f32 mixing path.

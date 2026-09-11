@@ -4,8 +4,8 @@
 .idea/
 # Claude Code's own per-project state is local.
 .claude/
-# Compiled golden-vector generator (gb/tools/blip-golden/build.sh builds into target/)
-/gb/tools/blip-golden/gen_golden
+# Compiled golden-vector generator (vendor/Blip_Buffer/gen_golden/build.sh builds into target/)
+/vendor/Blip_Buffer/gen_golden/gen_golden
 
 # The SPA: `pnpm run build` in `poke-agent-web/web/` produces `web/dist`. The directory must exist
 # for the crate to compile, which is what the committed `.gitkeep` is for.

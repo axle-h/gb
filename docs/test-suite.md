@@ -77,5 +77,5 @@ cargo test --release --workspace --features slow-tests -- probe_ --ignored --noc
   that list is a backlog of blocked tests and a fuzzer is not one.
 - Every `#[ignore]` names its reason in a few words. The probes, the fixture cutters and the
   benchmarks are all `#[ignore]`d under `slow-tests`, because their pass/fail is not a signal.
-- `gb/tools/blip-golden/build.sh` regenerates the resampler's golden vectors from the vendored C++,
-  after `capture_golden_input` if the input needs refreshing.
+- `vendor/Blip_Buffer/gen_golden/build.sh` regenerates the resampler's golden vectors from the
+  vendored C++, after `capture_golden_input` if the input needs refreshing.

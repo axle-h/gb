@@ -51,7 +51,7 @@ git clone --recursive https://github.com/axle-h/gb.git && cd gb
 
 # 1. The cartridge. `pokered.gbc` is embedded into the binary at compile time and `pokered.sym` is
 #    parsed by build.rs, and neither is in git.
-make -C poke-agent/pokered pokered.gbc
+make -C vendor/pokered pokered.gbc
 
 # 2. The browser UI. `web/dist` is baked into the binary, so this comes before cargo.
 cd poke-agent-web/web && pnpm install && pnpm run build && cd ../..
@@ -260,9 +260,10 @@ an `env!()` would put it in the cargo layer's inputs. `k8s/` has manifests for k
 
 ```
 gb/               the emulator, as a library: CPU, PPU, APU, MBCs, save states, the test ROMs
-poke-agent/       the Pokémon layer — agent, policies, LLM turn loop, the run directory, pokered
+poke-agent/       the Pokémon layer — agent, policies, LLM turn loop, the run directory
 poke-agent-web/   the axum server, the video and audio codecs, and the SPA
 poke-agent-sdl/   the desktop window
+vendor/           pokered, the disassembly, as a submodule; Blip_Buffer's C++, for golden vectors
 ```
 
 `gb` ← `poke-agent` ← the two binaries, and nothing else. Each crate has one feature, `slow-tests`.
@@ -293,11 +294,11 @@ recipe.
 
 There is no top-level `LICENSE` here yet. If one is added, the constraint to check first is
 `gb/src/audio/blip/`: it is a translation of blargg's Blip_Buffer 0.4.0, which is LGPL 2.1+. The
-original C++ and its licence are vendored under `gb/tools/blip-golden/`.
+original C++ and its licence are vendored under `vendor/Blip_Buffer/`.
 
 The other two constrain nothing: `opus-rs` is BSD-3-Clause, a Rust port of libopus, which is BSD-3
 itself, and `rhai` is MIT OR Apache-2.0. Both are named because this paragraph is the list, and a
 dependency absent from it is one nobody checked.
 
-The ROM is not distributed and cannot be — `poke-agent/pokered/` is a submodule of the disassembly
+The ROM is not distributed and cannot be — `vendor/pokered/` is a submodule of the disassembly
 project, and the cartridge is assembled locally from it.

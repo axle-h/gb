@@ -9,7 +9,7 @@ fn main() -> std::io::Result<()> {
     let dest_path = Path::new(&out_dir).join("pokered_symbols.rs");
     let mut output = File::create(dest_path)?;
 
-    let sym_file = File::open("pokered/pokered.sym")?;
+    let sym_file = File::open("../vendor/pokered/pokered.sym")?;
     let reader = BufReader::new(sym_file);
 
     let entry_regex = Regex::new(r"^([0-9a-fA-F]{2}):([0-9a-fA-F]{4})\s+(\w+)$").unwrap();
@@ -44,7 +44,7 @@ fn main() -> std::io::Result<()> {
     writeln!(output, "}}")?;
     writeln!(output, "")?;
 
-    println!("cargo:rerun-if-changed=pokered/pokered.sym");
+    println!("cargo:rerun-if-changed=../vendor/pokered/pokered.sym");
 
     Ok(())
 }

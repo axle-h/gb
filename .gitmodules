@@ -1,3 +1,3 @@
 [submodule "pokered"]
-	path = poke-agent/pokered
+	path = vendor/pokered
 	url = https://github.com/pret/pokered.git
