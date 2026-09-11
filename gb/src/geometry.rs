@@ -42,7 +42,6 @@ impl Ord for Point8 {
     }
 }
 
-
 impl Display for Point8 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "({}, {})", self.x, self.y)

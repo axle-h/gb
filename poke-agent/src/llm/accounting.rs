@@ -1,28 +1,9 @@
-//! **W6 / §9** — what the run has spent, and how full the context is.
-//!
-//! Two numbers that look the same and are not:
-//!
-//! - **What the endpoint reported.** `usage` on the last response: ground truth for the request that
-//!   was actually sent, and what the UI shows. It says nothing about the messages appended since.
-//! - **What we can measure ourselves.** [`Message::approximate_tokens`] over the current history,
-//!   which can be recomputed at any moment — after a tool result, after an eviction — but is a
-//!   character count and wrong by tens of percent.
-//!
-//! ⚠️ **Compaction has to be decided on one scale, and mixing them is how it goes wrong.** If the
-//! endpoint says 90 k and our own count says 40 k, evicting three screenshots takes the estimate to
-//! 39 k — below any threshold expressed in reported tokens — and stage 2 never runs on a context
-//! that is genuinely nearly full. So every reported figure calibrates the estimator
-//! ([`Accounting::calibration`]) and every *decision* is taken against the calibrated estimate. When
-//! the endpoint reports nothing at all the ratio stays 1.0 and this degrades to the plain estimate,
-//! which is the W4 behaviour.
+//! What the run has spent, and how full the context is.
 
 use crate::llm::protocol::{Message, Usage};
 use crate::published::UsageView;
 
-/// Bounds on the calibration ratio. A endpoint that counts images, system overhead or a chat
-/// template very differently from us is normal and worth tracking; one that appears to be off by a
-/// factor of ten is a misunderstanding, and clamping keeps a misunderstanding from turning into
-/// either a compaction that never fires or one that fires every turn.
+/// Bounds on the calibration ratio.
 const MIN_CALIBRATION: f64 = 0.25;
 const MAX_CALIBRATION: f64 = 8.0;
 
@@ -33,12 +14,11 @@ pub struct Accounting {
     context_tokens: u64,
     prompt_total: u64,
     completion_total: u64,
-    /// Completions billed this run. Larger than the number of turns: a turn that reads before it
-    /// decides is two or more.
+    /// Completions billed this run.
     completions: u64,
     /// Whether the most recent figures came from [`Usage::estimate`] rather than the endpoint.
     estimated: bool,
-    /// Reported prompt tokens ÷ our own estimate of the very same messages. See the module note.
+    /// Reported prompt tokens ÷ our own estimate of the very same messages.
     calibration: f64,
 }
 
@@ -57,20 +37,11 @@ impl Accounting {
 
     /// The accounting for a run whose conversation has just been read back off disk
     /// ([`crate::llm::history`]).
-    ///
-    /// ⚠️ **The calibration is carried and the totals deliberately are not.** They look like the
-    /// obvious thing to restore and restoring them is the "a run's figures used to be a process's"
-    /// bug: `EmulatorHost::progress` folds these totals into a [`crate::run::RunProgress`], which
-    /// `RunDir::checkpoint` *rebases* onto the baseline already in `meta.json`, so a restored
-    /// `prompt_total` would add the whole run's tokens a second time at the next checkpoint. Every
-    /// one of them is display-only and re-derives from the next response; the calibration does not,
-    /// and it is not cosmetic either. It is the ratio [`Self::occupancy`] measures on, so an
-    /// endpoint that counts 3× what we do leaves a restored 85 %-full history reading as 28 % full
-    /// at the default 1.0 — and the first request of the new process goes out over the window.
     pub fn resumed(limit: u64, calibration: f64) -> Self {
         Self {
-            // A number that came off disk, so it is checked rather than trusted: `clamp` propagates
-            // a NaN instead of rejecting it, which would poison every occupancy reading silently.
+            // A number that came off disk, so it is checked rather than trusted: `clamp`
+            // propagates a NaN instead of rejecting it, which would poison every occupancy
+            // reading silently.
             calibration: match calibration.is_finite() {
                 true => calibration.clamp(MIN_CALIBRATION, MAX_CALIBRATION),
                 false => 1.0,
@@ -85,8 +56,8 @@ impl Accounting {
         self.calibration
     }
 
-    /// Fold in one response. `sent` is the history as it went out — not as it stands now — because
-    /// that is what the reported `prompt_tokens` counted.
+    /// Fold in one response. `sent` is the history as it went out — not as it stands now —
+    /// because that is what the reported `prompt_tokens` counted.
     pub fn record(&mut self, usage: Usage, sent: &[Message]) {
         let ours: u64 = sent.iter().map(Message::approximate_tokens).sum();
         if !usage.estimated && usage.prompt_tokens > 0 && ours > 0 {
@@ -145,8 +116,8 @@ mod tests {
         vec![Message::user("a".repeat(chars))]
     }
 
-    /// The totals are cumulative across the run and the context figure is not — one is a bill, the
-    /// other is a gauge.
+    /// The totals are cumulative across the run and the context figure is not — one is a bill,
+    /// the other is a gauge.
     #[test]
     fn totals_accumulate_while_the_context_figure_is_the_latest_one() {
         let mut accounting = Accounting::new(100_000);
@@ -164,8 +135,8 @@ mod tests {
         assert!(accounting.has_figures());
     }
 
-    /// ⚠️ The module's whole reason for existing: a decision taken after the history has changed must
-    /// be on the endpoint's scale, not ours. Here the endpoint counts 3× what we do.
+    /// The module's whole reason for existing: a decision taken after the history has changed
+    /// must be on the endpoint's scale, not ours.
     #[test]
     fn the_estimator_is_calibrated_against_what_the_endpoint_reported() {
         let mut accounting = Accounting::new(30_000);
@@ -175,11 +146,11 @@ mod tests {
         assert_eq!(accounting.tokens_in(&sent), 30_000, "the estimate now agrees with the report");
         assert!((accounting.occupancy(&sent) - 1.0).abs() < 0.01);
 
-        // Halve the history — as an eviction would — and the occupancy halves *on the same scale*.
+        // Halve the history — as an eviction would — and the occupancy halves *on the same
+        // scale*.
         assert!((accounting.occupancy(&history(18_500)) - 0.5).abs() < 0.01);
     }
 
-    /// An endpoint that reports nothing leaves the estimator alone, which is exactly W4's behaviour.
     #[test]
     fn an_endpoint_that_reports_nothing_degrades_to_the_plain_estimate() {
         let mut accounting = Accounting::new(10_000);
@@ -193,8 +164,8 @@ mod tests {
         assert!(accounting.view().estimated, "and the UI is told the numbers are a guess");
     }
 
-    /// A wildly disagreeing endpoint is clamped rather than believed: the failure it would otherwise
-    /// cause is a compaction that never fires, or one that fires on every turn.
+    /// A wildly disagreeing endpoint is clamped rather than believed: the failure it would
+    /// otherwise cause is a compaction that never fires, or one that fires on every turn.
     #[test]
     fn an_absurd_ratio_is_clamped() {
         let mut accounting = Accounting::new(1_000);
@@ -207,13 +178,10 @@ mod tests {
         assert_eq!(accounting.tokens_in(&sent), 250, "…and at a quarter");
     }
 
-    /// ⚠️ **The calibration is the reason a restored history is measured at all.** Now that a
-    /// conversation comes back off disk, a process that starts at the default 1.0 against an
-    /// endpoint counting three times what we do reads a nearly full context as a third full, and the
-    /// first request of the new process goes out over the window with no compaction in front of it.
     #[test]
     fn a_resumed_run_measures_its_restored_history_on_the_endpoints_scale_not_ours() {
-        // Sized so the two land either side of the default threshold rather than merely differing.
+        // Sized so the two land either side of the default threshold rather than merely
+        // differing.
         let limit = 10_000;
         let sent: Vec<Message> = (0..12)
             .map(|_| Message::user("x".repeat(1_000)))
@@ -223,9 +191,7 @@ mod tests {
         let warm = Accounting::resumed(limit, 3.0);
         let threshold = crate::llm::config::DEFAULT_COMPACT_ABOVE;
 
-        // ⚠️ **The precondition is that they disagree about compacting**, not merely about the
-        // number. A test where both sat on the same side would pass with `resumed` ignoring its
-        // argument entirely.
+        // The precondition is that they disagree about compacting, not merely about the number.
         assert!(
             cold.occupancy(&sent) < threshold,
             "at 1.0 this history looks like it fits: {}",
@@ -238,9 +204,7 @@ mod tests {
         );
     }
 
-    /// The number came off a file, so it is checked rather than trusted. ⚠️ `clamp` *propagates* a
-    /// NaN rather than rejecting it, and a NaN calibration makes every occupancy reading false
-    /// silently — so the non-finite case is handled separately from the range.
+    /// The number came off a file, so it is checked rather than trusted.
     #[test]
     fn a_calibration_read_off_disk_is_checked_rather_than_trusted() {
         assert_eq!(Accounting::resumed(1_000, 3.0).calibration(), 3.0, "an ordinary value is kept");
@@ -249,7 +213,7 @@ mod tests {
         assert_eq!(Accounting::resumed(1_000, f64::NAN).calibration(), 1.0);
         assert_eq!(Accounting::resumed(1_000, f64::INFINITY).calibration(), 1.0);
 
-        // ⚠️ The totals deliberately do not come back: `RunProgress` rebases them onto `meta.json`,
+        // The totals deliberately do not come back: `RunProgress` rebases them onto `meta.json`,
         // so a restored total would be counted twice at the next checkpoint.
         let resumed = Accounting::resumed(1_000, 3.0);
         assert!(!resumed.has_figures(), "a resumed run has spent nothing yet");

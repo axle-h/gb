@@ -1,18 +1,4 @@
 //! The band-limited step synthesiser — `Blip_Synth` from Blip_Buffer 0.4.0.
-//!
-//! Holds a windowed-sinc **step response** sampled at [`BLIP_RES`] sub-sample phases. Adding an
-//! amplitude transition means scatter-adding `QUALITY` scaled taps into the buffer's delta array at
-//! the phase the transition falls on; the buffer's reader integrates those deltas back into
-//! samples. Because the taps for every phase sum to exactly `kernel_unit`, a step of amplitude `a`
-//! contributes exactly `a` of DC — no drift however many transitions go by.
-//!
-//! ## Amplitude domain
-//!
-//! `delta_factor = volume / RANGE * 2^30 / kernel_unit` is stored as an integer, so for exact gain
-//! the ratio has to land on a whole number, and it must be at least 2 or [`Self::set_volume`]
-//! attenuates the kernel itself to compensate — costing tap precision. With `volume = 1.0` and the
-//! un-shifted `kernel_unit` of 32768 that means `RANGE` must be a power of two no greater than
-//! 32768, and the largest such value with `delta_factor >= 2` is 16384. See [`super::SYNTH_RANGE`].
 
 use super::buffer::BlipBuffer;
 use super::eq::{BlipEq, FIMPULSE_LEN};
@@ -78,10 +64,6 @@ impl<const QUALITY: usize> BlipSynth<QUALITY> {
     }
 
     /// Rebuild the impulse table for a new equalisation.
-    ///
-    /// Mirrors `Blip_Synth_::treble_eq`: generate a half kernel, mirror it about its centre,
-    /// integrate and first-difference it into the phase-interleaved layout `offset` walks, then
-    /// hand off to [`Self::adjust_impulse`] for the error correction.
     pub fn set_treble_eq(&mut self, eq: BlipEq) {
         // The original leaves the tail of this scratch array uninitialised; nothing reads past
         // `IMPULSES_LEN + BLIP_RES`, which the written region always covers.
@@ -123,11 +105,6 @@ impl<const QUALITY: usize> BlipSynth<QUALITY> {
     }
 
     /// Distribute rounding error so that every phase's taps sum to exactly `kernel_unit`.
-    ///
-    /// This is the whole reason a step contributes no DC error. The loop bounds look wrong and are
-    /// not: the original's `for (int p = blip_res; p-- >= blip_res / 2;)` runs its body with
-    /// `p = 63 … 31`, and on the first iteration `p2 = BLIP_RES - 2 - p` is **-1**, so the paired
-    /// index `i + p2` reaches tap 0. Getting either detail wrong shifts the whole table.
     fn adjust_impulse(&mut self) {
         let size = Self::IMPULSES_LEN as i32;
         for p in (BLIP_RES as i32 / 2 - 1..BLIP_RES as i32).rev() {
@@ -152,8 +129,7 @@ impl<const QUALITY: usize> BlipSynth<QUALITY> {
         self.set_volume_unit(volume * (1.0 / super::SYNTH_RANGE as f64));
     }
 
-    /// `Blip_Synth_::volume_unit`. If the requested gain is so small that `delta_factor` would fall
-    /// below 2, the kernel is attenuated instead so the multiply keeps its precision.
+    /// `Blip_Synth_::volume_unit`.
     fn set_volume_unit(&mut self, new_unit: f64) {
         if new_unit == self.volume_unit {
             return;
@@ -170,8 +146,8 @@ impl<const QUALITY: usize> BlipSynth<QUALITY> {
             if shift > 0 {
                 self.kernel_unit >>= shift;
                 assert!(self.kernel_unit > 0, "volume unit too low");
-                // Bias into positive territory first: a sign-preserving right shift rounds towards
-                // negative infinity, which would skew the negative taps.
+                // Bias into positive territory first: a sign-preserving right shift rounds
+                // towards negative infinity, which would skew the negative taps.
                 let offset = 0x8000i64 + (1i64 << (shift - 1));
                 let offset2 = 0x8000i64 >> shift;
                 for i in 0..Self::IMPULSES_LEN {
@@ -184,9 +160,6 @@ impl<const QUALITY: usize> BlipSynth<QUALITY> {
     }
 
     /// Track a waveform's absolute amplitude, emitting whatever transition it implies.
-    ///
-    /// The zero-delta early-out is what makes feeding this a sample per instruction cheap: the
-    /// Game Boy's mixed output only actually changes a few tens of thousands of times a second.
     pub fn update(&mut self, time: u32, amp: i32, buf: &mut BlipBuffer) {
         let delta = amp - self.last_amp;
         self.last_amp = amp;
@@ -201,23 +174,12 @@ impl<const QUALITY: usize> BlipSynth<QUALITY> {
     }
 
     /// The scatter-add, in resampled (16.16 fixed-point) time.
-    ///
-    /// The original expresses this as two unrolled macro chains carrying an accumulator register
-    /// between pairs of taps. Tracing that carry through shows it is a plain scatter-add over
-    /// `QUALITY` distinct slots, with the kernel's second half recovered from its first by symmetry
-    /// (`BLIP_RES - phase` forward, `phase` reverse) — so the two loops below are bit-identical to
-    /// the original while being readable.
-    ///
-    /// One deliberate divergence: the original computes `tap * delta` in 32-bit `int`, which
-    /// overflows above roughly 2^30. Doing it in `i64` is identical everywhere the original is
-    /// well-defined and correct past the point where it is not.
     pub fn offset_resampled(&self, time: u64, delta: i32, buf: &mut BlipBuffer) {
         let delta = delta as i64 * self.delta_factor as i64;
         let phase = ((time >> (BLIP_BUFFER_ACCURACY - BLIP_PHASE_BITS)) & (BLIP_RES as u64 - 1)) as usize;
         let index = (time >> BLIP_BUFFER_ACCURACY) as usize;
-        // Caller error rather than a runtime condition: it means a frame ran longer than the buffer
-        // can hold without anyone calling end_frame. Kept as a hard assert (the original asserts
-        // here too) because silently dropping the transition would leave a permanent DC error.
+        // Caller error rather than a runtime condition: it means a frame ran longer than the
+        // buffer can hold without anyone calling end_frame.
         assert!(
             index < buf.size(),
             "transition at sample {index} is past the end of a {}-sample buffer — end_frame more often",
@@ -237,7 +199,8 @@ impl<const QUALITY: usize> BlipSynth<QUALITY> {
     }
 
     /// Install a table produced elsewhere — used by the golden tests to isolate the integer DSP
-    /// path from any disagreement between this platform's libm and the one that built the fixtures.
+    /// path from any disagreement between this platform's libm and the one that built the
+    /// fixtures.
     #[cfg(test)]
     pub fn set_raw_impulses(&mut self, taps: &[i16], kernel_unit: i64, delta_factor: i32) {
         assert_eq!(taps.len(), Self::IMPULSES_LEN);

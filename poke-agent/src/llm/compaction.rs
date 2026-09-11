@@ -1,23 +1,4 @@
-//! **W6 / §9** — keeping the history inside the context window.
-//!
-//! Two stages, cheapest first, both triggered at the same occupancy threshold
-//! ([`LlmConfig::compact_above`](crate::llm::config::LlmConfig::compact_above), `GB_COMPACT_ABOVE`):
-//!
-//! 1. **Image eviction.** Every screenshot except the two most recent becomes one line of text. A
-//!    run that looks at the screen often spends most of its context on pictures it has already acted
-//!    on, and this is a hundred times cheaper than asking the model to summarise.
-//! 2. **Summarising compaction.** If eviction was not enough, one extra completion writes the story
-//!    so far, and everything except the system prompt and the last few messages is replaced by it.
-//!
-//! Everything here is a pure function over `Vec<Message>` so the awkward parts — which message is a
-//! safe place to cut, what survives — are testable without an endpoint. The worker owns the
-//! *decision* to compact and the completion that stage 2 needs; this module owns the surgery.
-//!
-//! ⚠️ **The one thing that must survive a compaction is the turn contract** (§7.5). The system
-//! prompt is never touched, which is the first copy; [`CONTRACT_REMINDER`] is appended to the summary
-//! as fixed text, which is the second. Neither is left to the model to carry over — compaction is
-//! exactly where a long-running behavioural rule gets quietly dropped, and the failure it produces
-//! (prose, no terminal call) stalls a run rather than erroring.
+//! Keeping the history inside the context window.
 
 use crate::llm::config::LlmConfig;
 use crate::llm::protocol::{ChatRequest, Content, Message, Role, StreamOptions};
@@ -26,30 +7,26 @@ use crate::llm::protocol::{ChatRequest, Content, Message, Role, StreamOptions};
 /// "the last time I looked".
 pub const KEEP_IMAGES: usize = 2;
 
-/// How many messages survive stage 2, before the cut is moved forward to a turn boundary. §9's
-/// number.
+/// How many messages survive stage 2, before the cut is moved forward to a turn boundary.
 pub const KEEP_MESSAGES: usize = 8;
 
-/// What an evicted picture leaves behind. Kept short, and kept *present*: a model that is told the
-/// screenshot is gone will ask for another one if it needs it, whereas a silently vanished image
-/// makes the surrounding conversation read as if it hallucinated looking at the screen.
-// ⚠️ "image", not "screenshot": `read_map` puts a rendered map in the history too, and a
-// line claiming a screenshot went away where a map did is a small lie the model has no way
-// to check. `is_evicted_image` matches on this constant, so the wording is free to change.
+/// What an evicted picture leaves behind. Kept short, and kept *present*: a model that is told
+/// the screenshot is gone will ask for another one if it needs it, whereas a silently vanished
+/// image makes the surrounding conversation read as if it hallucinated looking at the screen.
 pub const EVICTED: &str = "[image removed to save context]";
 
-/// The rule that must outlive every compaction, restated verbatim inside the summary. Deliberately
-/// kind-independent: the per-kind list of terminal tools is regenerated at the bottom of every turn
-/// request by [`prompt::contract`](crate::llm::prompt::contract), so what the summary has to carry
-/// is the *rule*, not the list.
+/// The rule that must outlive every compaction, restated verbatim inside the summary.
+/// Deliberately kind-independent: the per-kind list of terminal tools is regenerated at the
+/// bottom of every turn request by [`prompt::contract`](crate::llm::prompt::contract), so what
+/// the summary has to carry is the *rule*, not the list.
 pub const CONTRACT_REMINDER: &str = "\
 Whatever else has changed, the rule for every turn is the same as it was: end each turn with \
 exactly one terminal tool call, chosen from the list at the bottom of the turn request. Read tools \
 do not end the turn, and a reply with no tool call at all does nothing in the game.";
 
-/// What stage 2 asks for. Written as an instruction to the model about its own history, and asking
-/// for the four things a future turn actually needs: where it is, what it has done, what it is
-/// trying to do next, and what it has learned that is not visible in the current situation.
+/// What stage 2 asks for. Written as an instruction to the model about its own history, and
+/// asking for the four things a future turn actually needs: where it is, what it has done, what
+/// it is trying to do next, and what it has learned that is not visible in the current situation.
 pub const SUMMARY_INSTRUCTION: &str = "\
 Your context is nearly full, so this conversation is about to be replaced by a summary of it.
 
@@ -65,9 +42,8 @@ Be specific — names, places, levels — and do not pad it. Nothing else from t
 kept, so anything you leave out is forgotten. Reply with the summary itself and nothing else; do \
 not call a tool.";
 
-/// **Stage 1.** Replace every image except the `keep` most recent with [`EVICTED`], keeping the
-/// caption that came with it so the conversation still reads in order. Returns how many were
-/// evicted.
+/// Stage 1. Replace every image except the `keep` most recent with [`EVICTED`], keeping the
+/// caption that came with it so the conversation still reads in order.
 pub fn evict_images(messages: &mut [Message], keep: usize) -> usize {
     let total = messages.iter().filter(|message| message.has_image()).count();
     let mut to_evict = total.saturating_sub(keep);
@@ -92,10 +68,6 @@ pub fn evict_images(messages: &mut [Message], keep: usize) -> usize {
 }
 
 /// The request that produces a summary: the whole history, plus [`SUMMARY_INSTRUCTION`].
-///
-/// ⚠️ **No tools, and therefore no `parallel_tool_calls`.** OpenAI rejects that field outright when
-/// `tools` is absent, and sending an empty tool array to a model that has been told to end every
-/// message with a tool call is asking for one here, where a tool call would be a dead turn.
 pub fn summary_request(config: &LlmConfig, messages: &[Message]) -> ChatRequest {
     let mut messages = messages.to_vec();
     messages.push(Message::user(SUMMARY_INSTRUCTION));
@@ -104,8 +76,8 @@ pub fn summary_request(config: &LlmConfig, messages: &[Message]) -> ChatRequest 
         messages,
         tools: Vec::new(),
         parallel_tool_calls: None,
-        // The cap applies here too: a summary that runs away is the same outage, and this request is
-        // the one that exists to stop the *next* one failing.
+        // The cap applies here too: a summary that runs away is the same outage, and this request
+        // is the one that exists to stop the *next* one failing.
         max_tokens: config.max_tokens,
         reasoning_effort: config.reasoning_effort.clone(),
         temperature: config.temperature,
@@ -117,39 +89,25 @@ pub fn summary_request(config: &LlmConfig, messages: &[Message]) -> ChatRequest 
 /// What [`summary_message`] opens with, and therefore how [`is_summary`] recognises one.
 pub const SUMMARY_HEADING: &str = "## The story so far";
 
-/// The summary as it goes into the history: a user message, headed so it is obviously not something
-/// that just happened, and ending in [`CONTRACT_REMINDER`].
+/// The summary as it goes into the history: a user message, headed so it is obviously not
+/// something that just happened, and ending in [`CONTRACT_REMINDER`].
 pub fn summary_message(summary: &str) -> Message {
     Message::user(format!("{SUMMARY_HEADING}\n\n{}\n\n{CONTRACT_REMINDER}", summary.trim()))
 }
 
 /// Whether this is a message [`summary_message`] produced.
-///
-/// ⚠️ **The summary is the one message a last-resort trim must not touch.** It sits at the front of
-/// the history, exactly where dropping "the oldest turn" would find it — and dropping it discards
-/// everything it was written to preserve, in exchange for the fifty tokens it costs.
 pub fn is_summary(message: &Message) -> bool {
     message.role == Role::User && message.text().is_some_and(|text| text.starts_with(SUMMARY_HEADING))
 }
 
 /// Whether stage 2 can achieve anything at all: there must be more in the history than the system
 /// prompt, a summary and the tail that would be kept.
-///
-/// ⚠️ Without this, a run configured with a context limit smaller than its own system prompt would
-/// summarise on **every turn**, paying for a completion each time to make the history one message
-/// longer.
 pub fn worth_summarising(messages: &[Message], keep: usize) -> bool {
     messages.len() > keep + 2
 }
 
-/// **Stage 2.** Keep the system prompt, the summary, and the tail of the conversation; drop
-/// everything in between. Returns how many messages were dropped.
-///
-/// ⚠️ **The tail cannot start just anywhere.** A `tool` message whose assistant message has been
-/// dropped is a 400 from the endpoint, not a slightly odd history — so the cut is moved *forward*
-/// from `len - keep` to the next turn boundary, which by construction begins a turn whose tool calls
-/// are all still with it. Forward rather than backward because backward can swallow an arbitrarily
-/// long turn, and the point of this is to bound the history.
+/// Stage 2. Keep the system prompt, the summary, and the tail of the conversation; drop
+/// everything in between.
 pub fn apply_summary(messages: &mut Vec<Message>, summary: &str, keep: usize) -> usize {
     let before = messages.len();
     let system = messages.first().filter(|first| first.role == Role::System).cloned();
@@ -161,7 +119,7 @@ pub fn apply_summary(messages: &mut Vec<Message>, summary: &str, keep: usize) ->
         .position(is_turn_start)
         .map(|offset| offset + from)
         // No boundary in the tail at all — everything left belongs to a turn that started further
-        // back than we are willing to keep. Keeping none of it is safe; keeping part of it is not.
+        // back than we are willing to keep.
         .unwrap_or(messages.len());
 
     let mut kept = Vec::with_capacity(keep + 2);
@@ -170,23 +128,12 @@ pub fn apply_summary(messages: &mut Vec<Message>, summary: &str, keep: usize) ->
     kept.extend_from_slice(&messages[tail..]);
     *messages = kept;
 
-    // The two added messages do not count as dropped: this is the number the UI shows as "before →
-    // after" and it should describe the conversation, not the bookkeeping.
+    // The two added messages do not count as dropped: this is the number the UI shows as "before
+    // → after" and it should describe the conversation, not the bookkeeping.
     before.saturating_sub(messages.len().saturating_sub(1))
 }
 
 /// Where the history may be cut: the `user` message that opens a turn.
-///
-/// ⚠️ **A picture is a `user` message and is not a boundary** (W5), and neither is what a picture
-/// becomes once [`evict_images`] has been over it — eviction turns an image into text, and without
-/// this second check a message in the *middle* of a turn would silently become a legal cut point the
-/// moment stage 1 ran.
-///
-/// ⚠️ **W6b's plan is a `user` message and is not a boundary either.** It sits immediately before
-/// the situation it belongs to, so a cut taken between the two keeps a turn whose plan has just been
-/// thrown away — and the plan is the one thing in the history that is *supposed* to outlive a
-/// compaction. Excluded here, it can only be dropped along with the turn that follows it, and
-/// `Worker::sync_plan` puts a fresh one back on the very next turn.
 pub fn is_turn_start(message: &Message) -> bool {
     message.role == Role::User
         && !message.has_image()
@@ -198,9 +145,9 @@ fn is_evicted_image(message: &Message) -> bool {
     message.text().is_some_and(|text| text.ends_with(EVICTED))
 }
 
-/// Whether a message is one of the multi-part ones, for a test that wants to be sure eviction left a
-/// plain string behind rather than a parts array with the picture taken out of it — several
-/// endpoints accept only the former on some roles.
+/// Whether a message is one of the multi-part ones, for a test that wants to be sure eviction
+/// left a plain string behind rather than a parts array with the picture taken out of it —
+/// several endpoints accept only the former on some roles.
 #[cfg(test)]
 fn is_multi_part(message: &Message) -> bool {
     matches!(message.content, Some(Content::Parts(_)))
@@ -226,8 +173,8 @@ mod tests {
         }
     }
 
-    /// One turn as the worker builds it: the situation, an assistant message with a read call, its
-    /// result, a picture, then the terminal call and its result.
+    /// One turn as the worker builds it: the situation, an assistant message with a read call,
+    /// its result, a picture, then the terminal call and its result.
     fn turn(n: usize, with_picture: bool) -> Vec<Message> {
         let mut messages = vec![
             Message::user(format!("## Decision: what to do next in the overworld\n\nturn {n}")),
@@ -271,8 +218,8 @@ mod tests {
         assert_eq!(survivors.len(), KEEP_IMAGES);
         assert!(survivors[0] > 3 * 6, "the survivors are the *recent* ones, not the first two: {survivors:?}");
 
-        // The caption is still there, so the conversation reads in order and the model can see that
-        // it did look, rather than being left with an unexplained gap.
+        // The caption is still there, so the conversation reads in order and the model can see
+        // that it did look, rather than being left with an unexplained gap.
         let evicted_message = messages.iter().find(|m| m.text().is_some_and(|t| t.ends_with(EVICTED)));
         let text = evicted_message.expect("something was evicted").text().unwrap();
         assert!(text.contains("Screenshot of the Game Boy screen (frame 0)"), "{text}");
@@ -288,8 +235,9 @@ mod tests {
         assert_eq!(evict_images(&mut messages, KEEP_IMAGES), 0);
     }
 
-    /// ⚠️ The trap eviction creates for stage 2: an evicted picture is a `user` message with a plain
-    /// string, which is exactly the shape of a turn boundary — and it sits in the *middle* of a turn.
+    /// The trap eviction creates for stage 2: an evicted picture is a `user` message with a plain
+    /// string, which is exactly the shape of a turn boundary — and it sits in the *middle* of a
+    /// turn.
     #[test]
     fn an_evicted_picture_is_never_a_cut_point() {
         let mut messages = history(3, true);
@@ -303,9 +251,9 @@ mod tests {
         assert!(messages.iter().filter(|m| is_turn_start(m)).count() == 3, "one per turn, no more");
     }
 
-    /// Stage 2: the system prompt and the tail survive, the summary lands between them, and what is
-    /// kept is a well-formed history — every `tool` message with the assistant message that asked
-    /// for it.
+    /// Stage 2: the system prompt and the tail survive, the summary lands between them, and what
+    /// is kept is a well-formed history — every `tool` message with the assistant message that
+    /// asked for it.
     #[test]
     fn a_summary_replaces_the_middle_and_leaves_a_well_formed_history() {
         let mut messages = history(6, false);
@@ -339,8 +287,8 @@ mod tests {
         assert!(messages.iter().any(|m| m.text().is_some_and(|t| t.contains("turn 5"))), "the newest turn is kept");
     }
 
-    /// The cut moves forward to a boundary, so a tail that would have started mid-turn starts at the
-    /// turn instead — even when that means keeping fewer messages than asked for.
+    /// The cut moves forward to a boundary, so a tail that would have started mid-turn starts at
+    /// the turn instead — even when that means keeping fewer messages than asked for.
     #[test]
     fn the_tail_starts_at_a_turn_and_never_in_the_middle_of_one() {
         for keep in 1..14 {
@@ -362,8 +310,8 @@ mod tests {
         }
     }
 
-    /// The two guards the worker's last resort depends on: it can recognise a summary, and it knows
-    /// when summarising would make the history *longer* rather than shorter.
+    /// The two guards the worker's last resort depends on: it can recognise a summary, and it
+    /// knows when summarising would make the history *longer* rather than shorter.
     #[test]
     fn a_summary_is_recognisable_and_a_short_history_is_not_worth_one() {
         let mut messages = history(6, false);
@@ -378,12 +326,10 @@ mod tests {
             "summarising a just-summarised history only adds a message",
         );
 
-        // ⚠️ The pathological configuration: a context limit smaller than the system prompt. Every
-        // turn is over the threshold and none of them can be helped by a summary.
+        // The pathological configuration: a context limit smaller than the system prompt.
         assert!(!worth_summarising(&history(1, false), KEEP_MESSAGES));
     }
 
-    /// §9's ⚠️. The contract is restated as fixed text, not left to the model to carry over.
     #[test]
     fn summary_restates_turn_contract() {
         let message = summary_message("I am somewhere doing something.");
@@ -405,9 +351,9 @@ mod tests {
         assert!(messages[0].text().unwrap().contains("do not end the turn"), "and so does the system prompt's copy");
     }
 
-    /// ⚠️ The summarisation request must not offer tools, and must not carry `parallel_tool_calls`
-    /// at all — OpenAI rejects that field when `tools` is absent, which would turn a compaction into
-    /// a 400 and a stalled run.
+    /// The summarisation request must not offer tools, and must not carry `parallel_tool_calls`
+    /// at all — OpenAI rejects that field when `tools` is absent, which would turn a compaction
+    /// into a 400 and a stalled run.
     #[test]
     fn a_summary_request_asks_for_prose_and_offers_no_tools() {
         let config = LlmConfig {
@@ -436,8 +382,8 @@ mod tests {
         assert!(json.get("parallel_tool_calls").is_none(), "illegal without tools");
     }
 
-    /// A history with no system message, and one shorter than the tail it is asked to keep: neither
-    /// is a thing the worker can produce, and neither may panic.
+    /// A history with no system message, and one shorter than the tail it is asked to keep:
+    /// neither is a thing the worker can produce, and neither may panic.
     #[test]
     fn degenerate_histories_survive_a_compaction() {
         let mut messages: Vec<Message> = Vec::new();

@@ -513,4 +513,3 @@ impl PokemonMetadata {
     pub const WEEPINBELL: Self = Self::new("Weepinbell",70, 65, 90, 50, 55, 85, ExperienceGroup::MediumSlow, PokemonType::Grass, Some(PokemonType::Poison));
     pub const VICTREEBEL: Self = Self::new("Victreebel",71, 80, 105, 65, 70, 100, ExperienceGroup::MediumSlow, PokemonType::Grass, Some(PokemonType::Poison));
 }
-

@@ -1,6 +1,6 @@
-/// Byte at header `0x134 + n` summed over 16 bytes, indexed against this table. 94 entries:
-/// the first 65 are unambiguous, the remaining 29 share checksums with an earlier
-/// entry and are disambiguated by the title's 4th letter.
+/// Byte at header `0x134 + n` summed over 16 bytes, indexed against this table. 94 entries: the
+/// first 65 are unambiguous, the remaining 29 share checksums with an earlier entry and are
+/// disambiguated by the title's 4th letter.
 pub(super) const TITLE_CHECKSUMS: [u8; 94] = [
     0x00, 0x88, 0x16, 0x36, 0xD1, 0xDB, 0xF2, 0x3C, 0x8C, 0x92, 0x3D, 0x5C,
     0x58, 0xC9, 0x3E, 0x70, 0x1D, 0x59, 0x69, 0x19, 0x35, 0xA8, 0x14, 0xAA,
@@ -18,8 +18,8 @@ pub(super) const FIRST_DUPLICATE: usize = 65;
 /// The 4th title letter that disambiguates each entry from [`FIRST_DUPLICATE`] onwards.
 pub(super) const DUPLICATE_4TH_LETTERS: &[u8; 29] = b"BEFAARBEKEK R-URAR INAILICE R";
 
-/// Palette-combination index for each [`TITLE_CHECKSUMS`] entry. SameBoy's `$80` flag
-/// ("game requires the DMG boot tilemap") is stripped: it selects boot *artwork*, not colour.
+/// Palette-combination index for each [`TITLE_CHECKSUMS`] entry. SameBoy's `$80` flag ("game
+/// requires the DMG boot tilemap") is stripped: it selects boot *artwork*, not colour.
 pub(super) const COMBINATION_PER_CHECKSUM: [u8; 94] = [
      0,  4,  5, 35, 34,  3, 31, 15, 10,  5, 19, 36,
      7, 37, 30, 44, 21, 32, 31, 20,  5, 33, 13, 14,
@@ -31,9 +31,9 @@ pub(super) const COMBINATION_PER_CHECKSUM: [u8; 94] = [
     47, 41, 41,  0,  0, 19, 34, 23, 18, 29,
 ];
 
-/// `(obj0, obj1, bg)` as **byte** offsets into [`PALETTES`]. Most are palette-aligned;
-/// a few (22, 34, 35, 36) deliberately start mid-palette and read across the boundary,
-/// which is why this is a flat colour array rather than a 2-D one.
+/// `(obj0, obj1, bg)` as byte offsets into [`PALETTES`]. Most are palette-aligned; a few (22, 34,
+/// 35, 36) deliberately start mid-palette and read across the boundary, which is why this is a
+/// flat colour array rather than a 2-D one.
 pub(super) const COMBINATIONS: [[u8; 3]; 51] = [
     [ 32,  32, 232], // 0
     [144, 144, 144], // 1

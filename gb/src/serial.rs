@@ -15,7 +15,7 @@ pub struct Serial {
 }
 
 /// The serialised shape of a [`Serial`]: field-for-field what the `timer` save-state section has
-/// always held. See [`crate::timer::TimerSnapshot`] for why C1 needed one.
+/// always held.
 #[derive(Debug, Clone, Decode, Encode)]
 pub struct SerialSnapshot {
     data: u8,
@@ -62,8 +62,6 @@ impl Serial {
         self.master = snapshot.master;
         self.started = match snapshot.state {
             SerialState::Idle => None,
-            // Saturating: a pre-C1 state restores against a clock that restarts at zero, so a
-            // transfer already part-way through has no room behind `now` to have started in.
             SerialState::Transferring { cycles } => Some(now.saturating_sub(cycles.m_cycles())),
         };
         self.buffer = snapshot.buffer;
@@ -82,21 +80,11 @@ impl Serial {
         self.data = data;
     }
 
-    /// **D9.** `SB` as the guest sees it *during* a transfer.
-    ///
-    /// The byte shifts out a bit at a time, and with no link cable attached a `1` shifts in behind
-    /// each one — so a guest that reads `SB` mid-transfer sees the top bits already replaced. `gb`
-    /// used to hold the written value flat and then jump to `0xFF` at completion, which is
-    /// observable to anything that polls.
-    ///
-    /// ⚠️ **This is a read-side view and must stay one.** [`Serial::complete_transfer`] still
-    /// buffers `self.data`, the byte the guest actually wrote — that is how blargg's output is
-    /// captured (`serial_console_test`), and shifting the stored copy would corrupt it.
+    /// D9. `SB` as the guest sees it *during* a transfer.
     pub fn data_at(&self, now: u64, fast: bool) -> u8 {
         let Some(started) = self.started else { return self.data };
         let bits = ((now.saturating_sub(started)) * 8 / Self::period(fast)).min(8) as u32;
-        // `(data + 1) << n - 1` fills the vacated low bits with ones in one step. Widened to u32
-        // because `0xFF` at eight bits shifted would overflow a u16.
+        // `(data + 1) << n - 1` fills the vacated low bits with ones in one step.
         (((self.data as u32 + 1) << bits).wrapping_sub(1)) as u8
     }
 
@@ -116,8 +104,7 @@ impl Serial {
         }
     }
 
-    /// `fast` is the CGB's `SC` bit 1: a 32x faster shift clock. It lives in the MMU rather than
-    /// here so the shipped `timer` save-state section keeps its shape — see `MMU::serial_fast`.
+    /// `fast` is the CGB's `SC` bit 1: a 32x faster shift clock.
     fn period(fast: bool) -> u64 {
         if fast {
             MachineCycles::PER_SERIAL_BYTE_TRANSFER.m_cycles() / 32
@@ -127,10 +114,6 @@ impl Serial {
     }
 
     /// Advance the shift clock to absolute m-cycle `now`.
-    ///
-    /// The transfer is timed from when it *started* rather than by accumulating a remainder, so
-    /// flipping `SC` bit 1 part-way through still retimes the byte in flight — which is what the
-    /// pre-C1 code did, since it recomputed the period on every call.
     #[inline]
     pub fn catch_up(&mut self, now: u64, fast: bool) {
         let Some(started) = self.started else { return };
@@ -141,8 +124,8 @@ impl Serial {
     }
 
     /// Out of line: `MMU::update` runs once per CPU instruction and a link cable completes a byte
-    /// roughly once every 512 of them, so this body is pure instruction-cache pressure on the path
-    /// that matters. Same reasoning as [`crate::ppu::PPU::draw_pixels_to`] — see `CLAUDE.md`.
+    /// roughly once every 512 of them, so this body is pure instruction-cache pressure on the
+    /// path that matters.
     #[cold]
     #[inline(never)]
     fn complete_transfer(&mut self) {
@@ -164,9 +147,7 @@ impl Serial {
     }
 }
 
-/// The serialised form of a transfer in flight: how far into it the shift clock has got. The live
-/// [`Serial`] stores the stamp it started at instead, which is the same thing against a known
-/// clock and one subtraction cheaper per instruction.
+/// The serialised form of a transfer in flight: how far into it the shift clock has got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Decode, Encode)]
 enum SerialState {
     #[default]

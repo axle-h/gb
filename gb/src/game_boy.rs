@@ -10,15 +10,15 @@ pub struct GameBoy {
 }
 
 impl GameBoy {
-    /// A Game Boy (DMG). **89 call sites depend on this behaving exactly as it always has** —
-    /// add constructors beside it rather than changing it.
+    /// A Game Boy (DMG). 89 call sites depend on this behaving exactly as it always has — add
+    /// constructors beside it rather than changing it.
     pub fn dmg(cart: &[u8]) -> Self {
         Self::new(cart, Model::Dmg)
     }
 
     /// A Game Boy Color. A cartridge with CGB header support gets the full colour hardware; a
-    /// DMG-only cartridge — Pokémon Red among them — runs in compatibility mode with the
-    /// boot ROM's title-derived palette. See [`crate::model::ColorMode`].
+    /// DMG-only cartridge — Pokémon Red among them — runs in compatibility mode with the boot
+    /// ROM's title-derived palette.
     pub fn cgb(cart: &[u8]) -> Self {
         Self::new(cart, Model::Cgb)
     }
@@ -29,9 +29,7 @@ impl GameBoy {
         }
     }
 
-    /// **D8.** The fallible constructor. [`GameBoy::dmg`] and friends panic, which is right for the
-    /// `include_bytes!`'d ROMs the tests use and wrong for anything that loads a file a user
-    /// chose — a bad cartridge should be a message, not a crash.
+    /// D8. The fallible constructor.
     pub fn try_new(cart: &[u8], model: Model) -> Result<Self, LoadError> {
         Ok(Self { core: Core::try_new(cart, model)? })
     }
@@ -56,8 +54,6 @@ impl GameBoy {
     pub fn run(&mut self, min_cycles: MachineCycles) -> MachineCycles {
         let mut cycles = MachineCycles::ZERO;
         while cycles < min_cycles {
-            // C2: HALT is 65% of the M-cycles a real game emulates. Stepping it one virtual `Nop`
-            // at a time is what made it cost full price — see [`Core::skip_halt`].
             if self.core.mode() == crate::core::CoreMode::Halt {
                 cycles += self.core.skip_halt(min_cycles - cycles);
             } else {
@@ -111,7 +107,6 @@ impl GameBoy {
         let reader = SectionReader::parse(data)?;
 
         // Applied to a copy so a failure part-way through cannot leave a half-loaded machine.
-        // The copy also carries the ROM image, which is never serialised.
         let mut candidate = self.clone();
         candidate.core.read_sections(&reader)?;
 
@@ -142,31 +137,11 @@ mod tests {
     use crate::roms::roms::parse_png;
     use super::*;
 
-    /// A9: throughput of the **emulator core alone**. The Pokémon agent, its policy and all
-    /// observation are excluded — this loop calls nothing but [`GameBoy::run`].
-    ///
-    /// The existing `pokemon::integration_tests::fixture::bench_emulation_throughput` measures a
-    /// full `agent.step()` instead, which is a different number and lives in the wrong module.
-    /// Phase C is scored against *this* one.
-    ///
-    /// ⭐ **The Pokémon workload presses no buttons, and that is not the weakness it looks like.**
-    /// A scripted joypad timeline was built to check exactly that — a 27-tile walking lap and a
-    /// loop through a doorway, both driven by absolute-time button presses against a bare
-    /// `GameBoy` — and the profile came out the same three ways: standing still, walking, and
-    /// changing map, within a couple of points on every source file, at 88-91x realtime. Walking
-    /// costs 2% more wall clock than standing still and a **map load is 5% cheaper**, because the
-    /// screen is off while it runs. The PPU draws 144 scanlines a frame whatever the player does,
-    /// and that is where the time goes; the rig was deleted once it had said so. See
-    /// [docs/emulator-performance.md](../docs/emulator-performance.md) for the numbers, the
-    /// ablation ceilings taken with it, and the ranked list of what to do about them.
-    ///
+    /// A9: throughput of the emulator core alone.
     /// ```text
     /// cargo test --release --features slow-tests --lib -- \
     ///   game_boy::tests::bench_core_throughput --exact --nocapture
     /// ```
-    ///
-    /// Behind a feature rather than `#[ignore]`d, so a benchmark never shows up in the ignored
-    /// count next to tests that are actually blocked.
     #[cfg(feature = "slow-tests")]
     #[test]
     fn bench_core_throughput() {
@@ -176,18 +151,11 @@ mod tests {
         const FRAME: MachineCycles = MachineCycles::from_t(70_224);
         const WARM_UP_FRAMES: usize = 60;
 
-        // Two knobs, for `perf` rather than for the benchmark itself. 600 frames is 10 s of game
-        // time, which at present speeds is ~0.1 s of wall clock — far too short to sample. And a
-        // profile of all three workloads at once is a profile of none of them.
-        //   BENCH_FRAMES=60000 BENCH_ONLY=pokemon perf record -F 999 -g -- <binary> …
+        // Two knobs, for `perf` rather than for the benchmark itself.
         let measured_frames: usize = std::env::var("BENCH_FRAMES")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(600);
         let only = std::env::var("BENCH_ONLY").unwrap_or_default();
         // A third knob, and this one changes what is being measured rather than how long for.
-        // `BENCH_AUDIO=off` gates the APU's output side, which is the state every agent test tier
-        // and the deployment actually run in — nothing has ever listened in either. The channels
-        // keep clocking either way, so this is the baseline any work on *them* has to be scored
-        // against; `docs/emulator-performance.md` §6 had to hand-edit this file to get it.
         let audio_output = std::env::var("BENCH_AUDIO").unwrap_or_default() != "off";
 
         fn pokemon_in_game() -> GameBoy {
@@ -195,10 +163,7 @@ mod tests {
             use crate::test_fixtures::symbols;
             let mut gb = GameBoy::dmg(crate::test_fixtures::POKERED);
             gb.load_state(crate::test_fixtures::AT_CELADON).expect("load fixture");
-            // ⚠️ **The claim below is "a real game, mid-play", and nothing else here checks it.**
-            // A fixture that had drifted into a battle or a menu would still produce a plausible
-            // number — a slower one, off a different code path — and every optimisation measured
-            // against it afterwards would be measured against the wrong thing.
+            // The claim below is "a real game, mid-play", and nothing else here checks it.
             let mmu = gb.core().mmu();
             assert_eq!(
                 (mmu.read(symbols::W_CUR_MAP), mmu.read(symbols::W_IS_IN_BATTLE)),
@@ -248,23 +213,12 @@ mod tests {
         println!();
     }
 
-    /// ⭐ **C2's correctness test, and the one that matters.** The HALT fast-path sleeps through
-    /// whole idle spans in a single [`MMU::update`]; this proves the machine it wakes up in is
-    /// bit-identical to the one that stepped every M-cycle of that span individually.
-    ///
-    /// The framebuffer is compared as well as the state, because [`PartialEq`] deliberately
-    /// excludes it (see the note on `PPU`) — and rendering is exactly where a skip that jumped an
-    /// event would show up first.
-    ///
-    /// It only means anything if the workload actually HALTs, so the ROMs here are a real game and
-    /// a PPU test that both idle heavily, and the assertion below fails if HALT is not reached.
     #[test]
     fn the_halt_fast_path_matches_stepping_cycle_by_cycle() {
         /// One frame: 154 scanlines x 456 T-cycles.
         const FRAME: MachineCycles = MachineCycles::from_t(70_224);
         const FRAMES: usize = 120;
 
-        /// The pre-C2 run loop, verbatim: fetch and execute, HALT included.
         fn run_stepped(gb: &mut GameBoy, min_cycles: MachineCycles) {
             let mut cycles = MachineCycles::ZERO;
             while cycles < min_cycles {
@@ -304,25 +258,7 @@ mod tests {
         }
     }
 
-    /// ⭐ **C5's correctness test.** With the output side gated the four channels are advanced to
-    /// the soonest moment any of them could move rather than once per instruction (see
-    /// [`crate::audio::Audio::update`]), and this is the ROM written to catch an APU that is even
-    /// slightly out: blargg's twelve `dmg_sound` sub-tests, run **batched**, against the same
-    /// reference frame `blargg_dmg_sound::all` checks unbatched.
-    ///
-    /// ⚠️ **Every other APU test in this file runs the un-batched path**, which is what
-    /// [`crate::audio::Audio::set_channel_batching`] exists to reach — so without this one the
-    /// whole hardware-accuracy suite says nothing about the batch. Registers, length counters,
-    /// triggers, sweep and all three wave-RAM aperture tests are in here, and the aperture is the
-    /// one thing the batch has to compensate for arithmetically rather than by flushing.
-    ///
-    /// A second machine runs beside it that never batches, and their APUs are compared every
-    /// slice: the screen answers "does the game still pass", the comparison answers "was it the
-    /// same machine that passed", and the two together are what the earlier bug needed — a batch
-    /// carried *into* a frame-sequencer event froze an idle noise channel 60 cycles late, which no
-    /// screen would ever have shown.
-    // Needs a control machine that never batches, which the `bench` build does not have —
-    // see `Audio::batching`. Runs in the default tier, which is where it matters.
+    /// C5's correctness test.
     #[cfg(not(feature = "slow-tests"))]
     #[test]
     fn deadline_driving_the_channels_is_invisible_to_the_game() {
@@ -330,9 +266,6 @@ mod tests {
         let mut batched = GameBoy::dmg(crate::roms::blargg_dmg_sound::ROM);
         let mut open = GameBoy::dmg(crate::roms::blargg_dmg_sound::ROM);
         batched.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
-        // ⚠️ The control has to be told not to batch. It used to get that for free by leaving the
-        // gate open, because a listener forced a flush every instruction; C6 took that away, and
-        // an open machine now batches exactly as a gated one does.
         open.core_mut().mmu_mut().audio_mut().set_channel_batching(false);
 
         let mut cycles = MachineCycles::ZERO;
@@ -364,28 +297,8 @@ mod tests {
         }
     }
 
-    /// ⭐ **C6's correctness test, and the only thing standing between a batching APU and music
-    /// that is quietly wrong.** With a listener attached the four channels are still advanced to a
-    /// deadline rather than per instruction, and the resampler is handed the skipped cycles as one
-    /// `end_frame` before the transition that ends them — see [`crate::audio::Audio::update`].
-    ///
-    /// ⚠️ **Nothing about this fails loudly.** The machine is bit-identical either way, so
-    /// `full_playthrough`, the blargg suites and every assertion in this file would all pass a
-    /// version that had merely moved every transition a few dozen cycles. So this compares what
-    /// comes *out*: two machines playing the same music, one batching and one forced onto the
-    /// per-instruction path, checked on both the amplitude transitions the synth is handed and the
-    /// `f32` frames a sink reads back.
-    ///
-    /// The transition stream is the sharper of the two — it is `(clocks, left, right)` runs, so a
-    /// transition landing one cycle late moves a `clocks` and fails here while the resampled
-    /// samples might still round to the same floats. The samples are checked as well because they
-    /// are what a listener actually gets, and because they cover the resampler itself.
-    ///
-    /// Only the **last** run of each stream is allowed to differ, and only in its length: the
-    /// batching machine is up to a deadline behind at the moment the capture is taken, so its
-    /// trailing silence is shorter. Everything before it is complete and must match exactly.
-    // Needs a control machine that never batches, which the `bench` build does not have —
-    // see `Audio::batching`. Runs in the default tier, which is where it matters.
+    /// C6's correctness test, and the only thing standing between a batching APU and music that
+    /// is quietly wrong.
     #[cfg(not(feature = "slow-tests"))]
     #[test]
     fn batching_the_channels_under_a_listener_is_inaudible() {
@@ -393,8 +306,8 @@ mod tests {
         const FRAME: MachineCycles = MachineCycles::from_t(70_224);
         const FRAMES: usize = 300;
 
-        // The same fixture the gating test uses: a real game mid-play with overworld music, so all
-        // four channels are moving and there is something to get wrong.
+        // The same fixture the gating test uses: a real game mid-play with overworld music, so
+        // all four channels are moving and there is something to get wrong.
         let build = || {
             let mut gb = GameBoy::dmg(crate::test_fixtures::POKERED);
             gb.load_state(crate::test_fixtures::AT_CELADON).expect("load fixture");
@@ -459,9 +372,7 @@ mod tests {
             "the final amplitude differs: batched {last_a:?}, control {last_b:?}",
         );
 
-        // The frames a sink reads back. The batching machine may be holding a few hundred cycles
-        // of silence it has not ended a frame on yet, so it can be a sample or two short; every
-        // sample they both produced has to be bit-for-bit the same one.
+        // The frames a sink reads back.
         let common = batched_pcm.len().min(control_pcm.len());
         assert!(
             control_pcm.len() - common < 16,
@@ -476,15 +387,8 @@ mod tests {
         }
     }
 
-    /// ⭐ **The APU's output side is skipped when nobody is listening, and the machine must not be
-    /// able to tell.** [`crate::audio::Audio::set_output_enabled`] stops the mixer, the resampler
-    /// and `end_frame`; it leaves the frame sequencer and the four channels running, because their
-    /// registers are CPU-visible and `Audio::next_event` is the HALT skip's bound. The saving is 9%
-    /// of the emulator, so the only question is whether it is free, and this is the answer: two
-    /// machines, one gated and one not, compared frame by frame.
-    ///
-    /// The framebuffer is compared for the same reason the HALT test compares it: [`PartialEq`]
-    /// excludes it, and a divergence in the *timing* of the APU's work would land there first.
+    /// The APU's output side is skipped when nobody is listening, and the machine must not be
+    /// able to tell.
     #[test]
     fn silencing_the_output_side_is_invisible_to_the_game() {
         /// One frame: 154 scanlines x 456 T-cycles.
@@ -519,8 +423,7 @@ mod tests {
         assert!(open_frames > 0, "the fixture produced no audio at all, so this proves nothing");
         assert_eq!(gated_frames, 0, "the gate is open: {gated_frames} frames came out of it");
 
-        // ⚠️ And it comes back. Not a resume — the resampler's clock stopped, so what it holds is
-        // dropped — but sound that starts again, which is what a listener arriving hears.
+        // And it comes back.
         gated.core_mut().mmu_mut().audio_mut().set_output_enabled(true);
         let mut resumed = 0usize;
         for _ in 0..FRAMES {
@@ -530,7 +433,6 @@ mod tests {
         assert!(resumed > 0, "the sound never came back after the gate reopened");
     }
 
-    /// A1: `reset()` used to be `todo!()`, so any caller panicked.
     #[test]
     fn reset_matches_fresh_construction() {
         let mut a = GameBoy::dmg(crate::roms::acid::ROM);
@@ -541,8 +443,8 @@ mod tests {
         assert_eq!(a, GameBoy::dmg(crate::roms::acid::ROM));
     }
 
-    /// A1's guarantee has to hold for a CGB too — including re-applying the boot palette, which
-    /// a fresh compatibility-mode machine has and a naively reset one would not.
+    /// A1's guarantee has to hold for a CGB too — including re-applying the boot palette, which a
+    /// fresh compatibility-mode machine has and a naively reset one would not.
     #[test]
     fn cgb_reset_matches_fresh_construction() {
         for cart in [crate::roms::cgb_acid::ROM, crate::test_fixtures::POKERED] {
@@ -568,10 +470,6 @@ mod tests {
         assert_eq!(gb.dump_sram(), sram);
     }
 
-    /// A2: the `Stop` and `Crash` arms of `Core::execute` return `MachineCycles::ZERO`, which was
-    /// reported as making `run()` livelock. It does not — that value is only one addend of what
-    /// `execute` returns, and the opcode's own cost is always at least one M-cycle. Kept as a
-    /// guard so that if anyone ever does make `execute` return zero, this fails instead of hanging.
     #[test]
     fn run_terminates_after_stop() {
         let mut gb = GameBoy::dmg_hello_world();
@@ -669,10 +567,6 @@ mod tests {
 
         /// The whole suite in one run, off the combined 64 KB ROM — so unlike the eleven
         /// sub-tests above, this one actually exercises MBC bank switching.
-        ///
-        /// It needs roughly **2.5x** the default budget: the sub-tests run back to back, and
-        /// `11-op a,(hl)` alone is most of it. Under a 40M budget it stops after `10:ok  11` and
-        /// looks exactly like a hang, which is what it was mistaken for once already.
         #[test]
         fn all() {
             serial_console_test_within("cpu-all", ROM, MachineCycles::from_m(60_000_000));
@@ -689,16 +583,7 @@ mod tests {
         use super::*;
 
         /// The whole suite in one run, off the combined 64 KB ROM — so unlike the twelve
-        /// sub-tests below, this one exercises MBC bank switching. **It is D1's acceptance test.**
-        ///
-        /// Blargg's runner selects each sub-test by writing its index to the bank register. On the
-        /// fourth write hardware *masks* `4` down to bank 0, where the runner's terminator lives;
-        /// gb used to *clamp* it to 3 and re-run bank 3's test forever, printing `NN:ok` past 12
-        /// and on past 99. D1 gave [`crate::mmu::MMU::set_rom_bank_register`] the per-mapper mask
-        /// (this cartridge is MBC1, five bits; pokered's MBC3 needs seven) and this went green.
-        ///
-        /// The reference is gambatte's own frame. The budget is ~50 s of emulated time, which is
-        /// what the ROM needs to finish.
+        /// sub-tests below, this one exercises MBC bank switching.
         #[test]
         fn all() {
             ppu_test_within("audio-all", ROM, EXPECTED_ALL, MachineCycles::from_m(60_000_000));
@@ -744,15 +629,11 @@ mod tests {
             ppu_test("audio-length-counter-during-power", LENGTH_COUNTER_DURING_POWER, EXPECTED_LENGTH_COUNTER_DURING_POWER);
         }
 
-        /// A16. Reading wave RAM while channel 3 plays: `0xFF` unless the read lands on the exact
-        /// tick the channel fetches its next sample.
         #[test]
         fn wave_read_while_on() {
             ppu_test("audio-wave-read-while-on", WAVE_READ_WHILE_ON, EXPECTED_WAVE_READ_WHILE_ON);
         }
 
-        /// A16. Retriggering channel 3 one tick before a sample fetch corrupts the start of wave
-        /// RAM — a DMG-only quirk.
         #[test]
         fn wave_trigger_while_on() {
             ppu_test("audio-wave-trigger-while-on", WAVE_TRIGGER_WHILE_ON, EXPECTED_WAVE_TRIGGER_WHILE_ON);
@@ -763,8 +644,6 @@ mod tests {
             ppu_test("audio-registers-after-power", REGISTERS_AFTER_POWER, EXPECTED_REGISTERS_AFTER_POWER);
         }
 
-        /// A16. Writing wave RAM while channel 3 plays, under the same one-tick aperture as
-        /// [`wave_read_while_on`].
         #[test]
         fn wave_write_while_on() {
             ppu_test("audio-wave-write-while-on", WAVE_WRITE_WHILE_ON, EXPECTED_WAVE_WRITE_WHILE_ON);
@@ -840,8 +719,6 @@ mod tests {
         }
     }
 
-
-
     mod ppu {
         use std::io::BufReader;
         use image::{ImageFormat, ImageReader};
@@ -864,22 +741,13 @@ mod tests {
             }
         }
 
-        /// B10 — Phase B's acceptance test. `cgb-acid2` on a Game Boy Color, against the
-        /// reference image that ships with the ROM (see [`crate::roms::cgb_acid`]).
         #[test]
         fn cgb_ppu() {
             cgb_ppu_test("cgb-acid2", crate::roms::cgb_acid::ROM, crate::roms::cgb_acid::EXPECTED);
         }
 
-        /// ⭐ B5, the headline deliverable: Pokémon Red is a DMG-only cartridge, so on a Game Boy
-        /// Color the **boot ROM** picks its palette from the title checksum. Booting it through
-        /// [`GameBoy::cgb`] must therefore come out red-tinted rather than grey, and the same ROM
-        /// through [`GameBoy::dmg`] must be untouched.
-        ///
-        /// The palette lookup itself is pinned in `boot_palette::tests`; what this adds is that
-        /// it reaches the screen — the *same picture*, shade for shade, recoloured. Several
-        /// checkpoints through the intro, because a single one can easily land on a fade frame
-        /// that is entirely black or entirely white and prove nothing.
+        /// B5, the headline deliverable: Pokémon Red is a DMG-only cartridge, so on a Game Boy
+        /// Color the boot ROM picks its palette from the title checksum.
         #[test]
         fn pokemon_red_boots_in_colour_on_a_cgb() {
             use crate::lcd_palette::LcdColor;
@@ -928,18 +796,14 @@ mod tests {
         }
 
         /// The checkpoints in [`pokemon_red_boots_in_colour_on_a_cgb`] are absolute, but `run`
-        /// takes a delta; this turns one into the other. `run` overshoots by at most one
-        /// instruction, and both machines execute the same instruction stream, so they stay in
-        /// lockstep.
+        /// takes a delta; this turns one into the other.
         fn cgb_elapsed(checkpoint: u64) -> MachineCycles {
             const CHECKPOINTS: [u64; 3] = [3_000_000, 8_000_000, 12_000_000];
             let index = CHECKPOINTS.iter().position(|&c| c == checkpoint).expect("a known checkpoint");
             MachineCycles::from_m(if index == 0 { 0 } else { CHECKPOINTS[index - 1] })
         }
 
-        /// The same ROM on a **DMG**, where it is supposed to say so and stop. It is a
-        /// CGB-exclusive cartridge (`0x143 = 0xC0`), and gb must not pretend otherwise: this
-        /// asserts `GameBoy::dmg` still reports a DMG in `A` and does not silently gain colour.
+        /// The same ROM on a DMG, where it is supposed to say so and stop.
         #[test]
         fn cgb_acid2_on_a_dmg_stays_monochrome() {
             use crate::model::ColorMode;
@@ -957,9 +821,7 @@ mod tests {
         }
     }
 
-    /// `interrupt_time` on a DMG. The reference image shows `Failed` and checksum `7F8F4AAF`,
-    /// which is what real DMG hardware prints: the ROM targets CGB double-speed behaviour. Matching
-    /// it byte for byte is the pass.
+    /// `interrupt_time` on a DMG.
     mod blargg_timing {
         use super::*;
         use crate::roms::blargg_timing::*;
@@ -973,8 +835,7 @@ mod tests {
     }
 
     /// [`serial_console_test`] with an explicit cycle budget, for ROMs that need longer than the
-    /// default. Only a *failing* run spends the whole budget — a pass returns as soon as the ROM
-    /// says so.
+    /// default.
     fn serial_console_test_within(name: &str, cart: &[u8], budget: MachineCycles) {
         let mut gb = GameBoy::dmg(cart);
         gb.core.mmu_mut().serial_mut().enable_buffer();
@@ -1003,7 +864,6 @@ mod tests {
         gb_test_failed(&gb, name, &serial_output);
     }
 
-
     fn ppu_test(name: &str, cart: &[u8], expected_screenshot: &[u8]) {
         ppu_test_within(name, cart, expected_screenshot, MachineCycles::from_m(20_000_000));
     }
@@ -1026,7 +886,6 @@ mod tests {
     }
 
     /// [`ppu_test`] with an explicit cycle budget, for ROMs that need longer than the default.
-    /// Only the budget for a *failing* run costs anything — a match returns immediately.
     fn ppu_test_within(name: &str, cart: &[u8], expected_screenshot: &[u8], max_cycles: MachineCycles) {
         let expected_screenshot = parse_png(expected_screenshot);
         let mut gb = GameBoy::dmg(cart);
@@ -1045,13 +904,6 @@ mod tests {
         gb_test_failed_with_screenshot(last_screenshot, name, "screenshot does not match");
     }
 
-    /// **D10.** The mooneye MBC suite, from `c-sp/game-boy-test-roms` v7.0 (MIT).
-    ///
-    /// A mooneye test signals its result by sending the Fibonacci bytes `3 5 8 13 21 34` over the
-    /// link port on success, or `0x42` six times on failure. `gb` already captures serial, so —
-    /// as the plan predicted — **no `LD B,B` CPU hook is needed at all**.
-    ///
-    /// The ROMs are committed lz4-compressed; see [`crate::roms::mooneye`].
     mod mooneye {
         use super::*;
 
@@ -1079,16 +931,11 @@ mod tests {
             Err("never reported a result".to_string())
         }
 
-        /// The one ROM `gb` is **not** expected to pass.
-        ///
-        /// MBC1 multicart is a separate mapper variant (gambatte's `Mbc1Multi64`) that reads the
-        /// bank register differently on a cartridge holding several games; the plan makes it
-        /// optional. ⚠️ **Skipping it is stated here rather than silently filtered** — a suite that
-        /// quietly drops a ROM reads as "27 passed" when it means "27 of 28 were run".
+        /// The one ROM `gb` is not expected to pass.
         const SKIPPED: &[&str] = &["mbc1-multicart_rom_8Mb"];
 
-        /// Run every ROM whose name starts with `mapper`, reporting **all** failures at once —
-        /// with 28 ROMs, stopping at the first one hides how much is broken.
+        /// Run every ROM whose name starts with `mapper`, reporting all failures at once — with
+        /// 28 ROMs, stopping at the first one hides how much is broken.
         fn suite(mapper: &str) {
             let roms: Vec<_> = crate::roms::mooneye::ALL
                 .iter()

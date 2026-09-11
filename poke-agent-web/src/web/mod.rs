@@ -1,29 +1,3 @@
-//! **W1.2 / W2** — the HTTP server.
-//!
-//! Read-only endpoints, and **three** that are not. Viewer controls are still out of scope by
-//! decision (§1.1 of `docs/llm-web-playthrough-plan.md`) — nothing here can press a button, choose a
-//! move or steer the run — and for everything except the admin routes that remains structural rather
-//! than editorial: this module can reach [`poke_agent::published::Published`] and nothing else.
-//!
-//! ⚠️ **The admin routes are the exception, and they are the only one.** They reach the emulator
-//! through [`crate::host::ControlRequests`], which carries a [`crate::host::ControlRequest`] — one
-//! of a closed set of two, with no payload — and is answered by the emulator thread between
-//! instructions. They are **off unless `GB_ADMIN_TOKEN` is set** — without it every route that
-//! offers one 404s exactly as if it had never been registered — because the deployment this exists
-//! for serves the public internet and neither starting the game over nor wiping the model's memory
-//! is something a passer-by should be able to do.
-//!
-//! Two of the three start the game over and differ only in how they ask for the token. `/reset-game`
-//! is the one a person uses: it answers an unauthenticated GET with `WWW-Authenticate: Basic`, so
-//! the *browser* collects the password in its own dialog and the page needs no token-handling code
-//! at all. `POST /api/new-run` is the one a script uses, and keeps its `X-GB-Token` header.
-//!
-//! The third is `POST /api/clear`, which is the opposite trade: it keeps the run and throws away
-//! what the *model* remembers of it — the conversation and the plan. It is script-only, because it
-//! is not a thing anybody needs from a browser address bar and every door onto the emulator is one
-//! more thing to get wrong. See [`crate::host::EmulatorHost::clear_conversation`] for what it does
-//! and does not touch.
-//!
 //! ```text
 //! GET  /                            the SPA (`web/dist`, embedded — see `assets.rs`)
 //! GET  /{*path}                     its assets
@@ -37,7 +11,7 @@
 //! GET  /api/badges.png              the eight gym badges, decoded from the cartridge
 //! GET  /api/pokemon/{dex}/front.png one Pokémon's front sprite, decompressed from the cartridge
 //! GET  /api/tool-image/{seq}/image.png  the picture a tool answered with, while it is still held
-//! GET  /api/history?since=          W7 — the transcript from a sequence number, for a fresh page
+//! GET  /api/history?since=          the transcript from a sequence number, for a fresh page
 //! GET  /api/leaderboard?limit=      the runs that have finished the game, fastest first
 //! POST /api/new-run                 the same reset, for a script; `X-GB-Token`
 //! POST /api/clear                   throw away the model's conversation and plan; `X-GB-Token`
@@ -76,53 +50,37 @@ use poke_agent::pokemon::policy::RandomPolicy;
 use poke_agent::run::{CurrentRun, Origin, RunDir, transcript};
 use poke_agent::published::{self, Published};
 
-/// Proxies close an idle connection. Every two seconds `/api/events` sends a comment and
-/// `/api/video` an empty message — neither is anything a client has to parse, and an idle screen
-/// under `--policy llm` is a long silence, not a rare one.
+/// Proxies close an idle connection.
 const KEEP_ALIVE: Duration = Duration::from_secs(2);
 
-/// How long the runtime is given to stop once the accept loop has been dropped. There is nothing
-/// to drain — see the ⚠️ in [`serve_http`] — so this only bounds the case where a task is wedged.
+/// How long the runtime is given to stop once the accept loop has been dropped.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The seed `--policy deterministic` plays under.
-///
-/// 42 because that is what `full_playthrough` and every leg fixture were tuned against: the route is
-/// deterministic only against the RNG stream it was written for, and a served run that picked its own
-/// seed would be a playthrough nothing has ever proved.
 const SCRIPTED_SEED: u64 = 42;
 
 /// The header the two JSON admin routes read their token from.
 const ADMIN_TOKEN_HEADER: &str = "x-gb-token";
 
-/// How long the handler waits for the emulator thread to act. It answers at the top of its next
-/// tick, which is a millisecond away — so reaching this at all means the thread is gone, and the
-/// only useful thing left to do is say so rather than hold the connection open.
+/// How long the handler waits for the emulator thread to act.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub(crate) struct AppState {
     published: Arc<Published>,
     started: Instant,
-    /// **W7** — the run directory, read through rather than copied out, because `POST /api/new-run`
-    /// can change it under a live server. `/api/history` and `/api/healthz` both ask it per request.
+    /// The run directory, read through rather than copied out, because `POST /api/new-run` can
+    /// change it under a live server.
     run: Arc<CurrentRun>,
-    /// The seam into the emulator thread. See [`ControlRequests`].
+    /// The seam into the emulator thread.
     control: Arc<ControlRequests>,
-    /// `GB_ADMIN_TOKEN`. `None` — the default — makes every admin route 404.
+    /// `GB_ADMIN_TOKEN`.
     admin_token: Option<String>,
     /// The header every `/api/audio` connection opens with, or `None` when audio is off.
-    ///
-    /// Computed once in [`run`] from the same `GB_AUDIO_BITRATE` that built the encoder, and handed
-    /// to both halves — so the two cannot disagree about the rate, which is the one thing a listener
-    /// would hear rather than read.
     audio: Option<[u8; audio::HEADER_LEN]>,
 }
 
 /// `gb serve`. Blocks until the process is interrupted.
-///
-/// Two threads: this one becomes the tokio runtime serving HTTP, and a plain `std::thread` runs the
-/// emulator. The runtime never touches the emulator and the emulator never enters the runtime.
 pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> {
     let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -132,18 +90,14 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         ServePolicy::Llm => Some(poke_agent::llm::LlmConfig::from_env()?),
         ServePolicy::Random | ServePolicy::Deterministic => None,
     };
-    // ⚠️ **`RunMeta::model` is the *policy's* name under anything but `--policy llm`**, and it is a
-    // model id only there. Everything that reports it filters on the policy rather than on this
-    // string (`EmulatorHost`, the leaderboard row, the status heartbeat), so a column that reads
-    // like a model name never carries `random` or `scripted` in it.
+    // `RunMeta::model` is the *policy's* name under anything but `--policy llm`, and it is a
+    // model id only there.
     let model = match policy {
         ServePolicy::Random => "random".to_string(),
         ServePolicy::Deterministic => "scripted".to_string(),
         ServePolicy::Llm => llm.as_ref().expect("built above").model.clone(),
     };
 
-    // **W7 / §11.** `GameBoy::load_state` applies to a clone, so a state that does not load leaves
-    // nothing behind — which is what makes it safe to use as the validity test for a resume.
     let root = std::env::var("GB_RUN_DIR")
         .ok()
         .map(PathBuf::from)
@@ -151,8 +105,8 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     let (run, origin, resumed) = RunDir::open(&root, new_run, &model, &|bytes| {
         GameBoy::dmg(poke_agent::pokemon::roms::POKERED).load_state(bytes).is_ok()
     })?;
-    // From here on nothing holds the `RunDir` directly: `POST /api/new-run` can replace it under a
-    // live process, and the checkpointer, the transcript thread, `/api/history` and the model's
+    // From here on nothing holds the `RunDir` directly: `POST /api/new-run` can replace it under
+    // a live process, and the checkpointer, the transcript thread, `/api/history` and the model's
     // notes all have to move together when it does.
     let current = Arc::new(CurrentRun::new(root, model.clone(), run));
     let run = current.get();
@@ -170,9 +124,9 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     );
     let starting_state = resumed.unwrap_or_else(|| poke_agent::pokemon::data::START_OF_GAME.to_vec());
 
-    // The transcript writer is started before the emulator, so the first event of the run is in it —
-    // and the event counter continues from where the last process left off, which is what makes
-    // `/api/history?since=` mean anything across a restart.
+    // The transcript writer is started before the emulator, so the first event of the run is in
+    // it — and the event counter continues from where the last process left off, which is what
+    // makes `/api/history?since=` mean anything across a restart.
     let transcript_path = run.transcript_path();
     let published = Published::resuming(transcript::last_seq(&transcript_path).map_or(0, |seq| seq + 1));
     let transcript =
@@ -188,24 +142,18 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         },
     });
 
-    // The policy is a **factory**, built on the emulator thread — `Policy` is not `Send` and
-    // `LlmPolicy` owns channel endpoints. The pieces it needs are assembled here, where a bad
-    // configuration is still a clean error before anything is listening.
+    // The policy is a factory, built on the emulator thread — `Policy` is not `Send` and
+    // `LlmPolicy` owns channel endpoints.
     let make_policy: Box<dyn FnOnce() -> Box<dyn poke_agent::pokemon::policy::Policy> + Send> = match policy
     {
         ServePolicy::Random => Box::new(|| Box::new(RandomPolicy::default())),
         // The same policy, the same seed and the same queue `full_playthrough` runs — it is that
-        // test with the page in front of it rather than a second route that could disagree with it.
-        // ⚠️ **It plays the game from the beginning**, so it wants a fresh run under it; see
-        // [`ServePolicy::Deterministic`], which carries that warning and where the route stops.
-        // ⚠️ **`resuming_in` is what makes a rollout survivable.** Without it this factory hands
-        // back a route at step 0 on every process start, while `run` resumes the save wherever it
-        // actually is — so a restart mid-playthrough does not pause the run, it desynchronises the
-        // route from the game and destroys it. See `DeterministicPolicy::resuming_in`.
+        // test with the page in front of it rather than a second route that could disagree with
+        // it.
         ServePolicy::Deterministic => {
             let run_dir = run.path().to_path_buf();
-            // ⚠️ **Only this knows a cursorless run from a new one**, and `resuming_in` parks
-            // rather than guessing — see its doc comment for the rollout that made the difference.
+            // Only this knows a cursorless run from a new one, and `resuming_in` parks rather
+            // than guessing — see its doc comment for the rollout that made the difference.
             let from_the_beginning = matches!(origin, Origin::Fresh);
             Box::new(move || {
                 use poke_agent::pokemon::policy::{DeterministicPolicy, PolicyStep};
@@ -220,30 +168,23 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             let config = llm.expect("built above");
             println!("gb serve — {} via {}", config.model, config.base_url);
             let endpoint = Box::new(OpenAiClient::new(&config));
-            // **W9** — read off before `config` is moved into the worker. The watchdog belongs to
-            // the policy (it is what the agent asks how long to wait), not to the turn loop.
+            // Read off before `config` is moved into the worker.
             let stuck_timeout = config.stuck_timeout;
-            // **W6b** — the model's own plan lives in the run directory, so it survives both a
-            // compaction and a restart.
+            // The model's own plan lives in the run directory, so it survives both a compaction
+            // and a restart.
             let todo = TodoList::open(Some(run.path()));
             // The battle script, beside the plan and for the same reason: it is a decision about
             // how to play that has to survive both a compaction and a restart.
             let battle_script = poke_agent::llm::battle_script::BattleScript::open(Some(run.path()));
-            // The conversation itself, beside the plan and for the same reason. ⚠️ **A constructor
-            // argument rather than `with_run`, unlike the incident records below**: this one is
-            // read at construction, so it has to be in hand before `Accounting` is built — the
-            // calibration comes back with it — and it belongs to *this* run for its whole life.
+            // The conversation itself, beside the plan and for the same reason.
             let history = poke_agent::llm::history::History::open(Some(run.path()));
             if let Some(restored) = history.restored() {
                 published.publish_event(published::UiEventBody::Notice {
                     level: "info",
                     message: format!("resumed the conversation: {} messages", restored.messages),
                 });
-                // ⚠️ **A changed system prompt is a `warn`, not an `info`, and it is deliberately
-                // loud.** Index 0 is always re-minted, so the new prompt takes effect on this
-                // restart while the conversation carries on underneath it — which is what was asked
-                // for and is also the one thing about a resumed run that a reader of the log would
-                // otherwise have to infer. It should be rare; when it is not, that is worth seeing.
+                // A changed system prompt is a `warn`, not an `info`, and it is deliberately
+                // loud.
                 if restored.system_prompt_changed {
                     published.publish_event(published::UiEventBody::Notice {
                         level: "warn",
@@ -254,12 +195,12 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
                 }
             }
             // `with_run` rather than a constructor argument: it is the one thing the worker does
-            // that is not part of answering a turn, and the records go to whichever run is current
-            // when the press happens rather than to this one — see `llm::incident`.
+            // that is not part of answering a turn, and the records go to whichever run is
+            // current when the press happens rather than to this one — see `llm::incident`.
             let (worker, handles) = worker::channels(endpoint, config, Arc::clone(&published), todo, battle_script, history);
             let worker = worker.with_run(Arc::clone(&current));
-            // The worker outlives this function; it ends when the policy is dropped and its channels
-            // close, which happens when the emulator thread stops.
+            // The worker outlives this function; it ends when the policy is dropped and its
+            // channels close, which happens when the emulator thread stops.
             worker.spawn()?;
             Box::new(move || Box::new(LlmPolicy::new(handles, stuck_timeout)))
         }
@@ -302,10 +243,8 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         audio_bitrate.map(|_| audio::header()),
     );
 
-    // ⚠️ The order matters: the emulator's last act is a checkpoint (`EmulatorHost::run`), so it is
-    // joined *before* the process is allowed to end. The transcript thread is woken by the next
-    // event after `shutdown`, which the checkpoint's own notices provide; it is not waited on
-    // indefinitely, because a run with nothing left to say would never wake it.
+    // The order matters: the emulator's last act is a checkpoint (`EmulatorHost::run`), so it is
+    // joined *before* the process is allowed to end.
     shutdown.store(true, Ordering::Relaxed);
     let _ = emulator.join();
     published.publish_event(published::UiEventBody::Notice {
@@ -317,11 +256,6 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
 }
 
 /// How often the game state is sampled for the heartbeat, from `GB_STATUS_HZ`.
-///
-/// An environment variable rather than a flag, for the reason `GB_RUN_DIR` is one: it is deployment
-/// configuration, and it applies to `--policy random` too. The default of 2 Hz is what the panel
-/// needs; the knob exists because "what a viewer needs" is a judgement, and someone watching the
-/// agent's state machine step through a menu may reasonably want 10.
 fn status_interval() -> Result<Duration, String> {
     let Some(value) = std::env::var("GB_STATUS_HZ").ok().filter(|value| !value.trim().is_empty()) else {
         return Ok(HostConfig::default().status_interval);
@@ -332,19 +266,7 @@ fn status_interval() -> Result<Duration, String> {
     }
 }
 
-/// Which Game Boy the cartridge runs on, from `GB_HARDWARE`. **`dmg` unless asked otherwise.**
-///
-/// `cgb` runs Pokémon Red the way a real Game Boy Color does: it is a DMG-only cartridge, so the
-/// boot ROM colours it from the title checksum and the same picture comes out red-tinted. The game
-/// itself is unaffected — `full_playthrough` ends on the same tile with the same party either way.
-///
-/// ⚠️ **The cost is on the wire, not in the emulator.** Six colours rather than four takes
-/// [`crate::web::video`] from 2 bits per pixel to 4, measured at **1.63×** the bytes against real
-/// footage. The format needed no change to carry it: `bits_per_pixel` has always been per message.
-///
-/// Unset or blank is the default rather than an error, because that is the shape a placeholder
-/// value takes in a Deployment. Anything else is refused: a container that quietly ignored
-/// `GB_HARDWARE=color` would serve the wrong picture and say nothing.
+/// Which Game Boy the cartridge runs on, from `GB_HARDWARE`.
 fn hardware_model(value: Option<&str>) -> Result<Model, String> {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
         None => Ok(HostConfig::default().model),
@@ -355,12 +277,6 @@ fn hardware_model(value: Option<&str>) -> Result<Model, String> {
 }
 
 /// The Opus stream's target rate, from `GB_AUDIO_BITRATE`, in bits per second.
-///
-/// **`0` turns audio off**, the way `0` turns off `GB_MAX_TOKENS` and `GB_STUCK_TIMEOUT_SECS` —
-/// one variable rather than a second flag whose only job is to contradict the first.
-///
-/// Refused rather than clamped, for `GB_HARDWARE`'s reason: a container quietly serving 8 kbit/s
-/// would be diagnosed by *listening* to it, which is the slowest route to a typo there is.
 fn audio_bitrate(value: Option<&str>) -> Result<Option<i32>, String> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(HostConfig::default().audio_bitrate);
@@ -394,28 +310,13 @@ fn serve_http(
             AppState { published, started: Instant::now(), run, control, admin_token, audio };
         let app = routes().with_state(state);
 
-        // 0.0.0.0: the container publishes the port. Every endpoint is read-only except the three
-        // admin routes, which are off unless `GB_ADMIN_TOKEN` is set and need it when it is.
+        // 0.0.0.0: the container publishes the port.
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
             .await
             .map_err(|e| format!("could not bind port {port}: {e}"))?;
         println!("gb serve — http://localhost:{port}");
 
-        // ⚠️ **SIGTERM as well as Ctrl-C.** `docker stop` sends the former, and a container that
-        // only handled the latter would lose every checkpoint-worth of play since the last
-        // periodic write — up to a minute — on every deploy.
-        //
-        // ⚠️ **And the signal drops the connections rather than draining them, which is what
-        // `with_graceful_shutdown` did and is the wrong end of this trade.** `/api/events` and
-        // `/api/video` never finish by construction — an SSE stream and a chunked binary one, each
-        // held open by its own keepalive precisely so that a quiet run is not mistaken for a dead
-        // one — so "wait for the requests in flight" means "wait for every viewer to close their
-        // tab". A rollout with a single browser on the page stopped accepting new connections, kept
-        // serving the old ones, and sat there until the kubelet's grace period ran out and SIGKILL
-        // took the checkpoint with it: exactly the loss the paragraph above exists to prevent, on
-        // exactly the deploy that causes it. Every endpoint here is read-only, so a dropped
-        // connection costs a viewer a reconnect and nothing else — and the page already reconnects,
-        // because a network that goes away looks the same from inside it.
+        // SIGTERM as well as Ctrl-C.
         tokio::select! {
             result = axum::serve(listener, app).into_future() => {
                 result.map_err(|e| format!("server failed: {e}"))
@@ -427,21 +328,12 @@ fn serve_http(
         }
     });
 
-    // ⚠️ **Dropping the `serve` future above ends the *accept* loop and nothing else.** Every
-    // connection axum has taken is a task of its own and outlives it, so this is what actually
-    // stops the streams. The timeout bounds a shutdown that has nothing left to wait for; it is
-    // not a drain.
+    // Dropping the `serve` future above ends the *accept* loop and nothing else.
     runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
     result
 }
 
 /// Every route, in one place — the module doc's table above says the same thing in prose.
-///
-/// ⚠️ **A path axum's router cannot parse is a panic when the router is *built*, i.e. at startup**,
-/// not a 404 at request time. `/api/pokemon/{dex}.png` is exactly that mistake: matchit does not
-/// support a static suffix after a parameter, so the sprite route gives the parameter a segment of
-/// its own. `every_route_pattern_is_one_axum_accepts` is the guard, and it can only be a guard
-/// because this list is not duplicated inside `serve_http`.
 fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/healthz", get(healthz))
@@ -488,51 +380,40 @@ async fn shutdown_signal() {
 async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
-        // Here rather than only in a run's record, so "which build is this?" is answerable against a
-        // live deployment without reading a file off the volume.
         "version": crate::cli::VERSION,
         "uptime_ms": state.started.elapsed().as_millis() as u64,
         "video_seq": state.published.latest_keyframe().map(|k| k.seq),
         // Read per request rather than captured: `POST /api/new-run` changes it, and a liveness
-        // endpoint reporting the run the process *started* with would be quietly wrong afterwards.
+        // endpoint reporting the run the process *started* with would be quietly wrong
+        // afterwards.
         "run_id": state.run.get().run_id(),
     }))
 }
 
 /// `GB_ADMIN_TOKEN`, or `None` if it is unset or blank.
-///
-/// An environment variable for the reason `GB_RUN_DIR` and `GB_STATUS_HZ` are: it is deployment
-/// configuration. Blank counts as unset so that a Kubernetes Secret with an empty value — the shape
-/// a placeholder usually takes — leaves the endpoint off rather than open to the empty string.
 fn admin_token() -> Option<String> {
     std::env::var("GB_ADMIN_TOKEN").ok().map(|token| token.trim().to_string()).filter(|token| !token.is_empty())
 }
 
-/// Compare without an early return, so the time taken says nothing about how much of the token was
-/// right. Overkill for a token nobody is going to grind over the internet, and cheaper than deciding
-/// that on a destructive endpoint reachable from it.
+/// Compare without an early return, so the time taken says nothing about how much of the token
+/// was right.
 fn tokens_match(offered: &str, expected: &str) -> bool {
-    // `expected` is this server's own configuration rather than anything a caller sent, so returning
-    // early on it leaks nothing — and it is what keeps the index below in bounds.
+    // `expected` is this server's own configuration rather than anything a caller sent, so
+    // returning early on it leaks nothing — and it is what keeps the index below in bounds.
     if expected.is_empty() {
         return false;
     }
     let (offered, expected) = (offered.as_bytes(), expected.as_bytes());
     let mut difference = offered.len() ^ expected.len();
     for (index, byte) in offered.iter().enumerate() {
-        // Index into `expected` cyclically, so a wrong *length* still walks the whole offered token.
+        // Index into `expected` cyclically, so a wrong *length* still walks the whole offered
+        // token.
         difference |= (byte ^ expected[index % expected.len()]) as usize;
     }
     difference == 0
 }
 
 /// The password out of an `Authorization: Basic` header, or `None` if there is not one to be had.
-///
-/// ⚠️ **The username is ignored.** Basic auth is `user:pass` and there is only one secret here, so
-/// whatever a viewer types in the first box is discarded and the second is compared against
-/// `GB_ADMIN_TOKEN`. ⚠️ And the split is on the **first** colon, not the last and not `split('=')`:
-/// a colon is a perfectly ordinary character in a generated token, and splitting wrongly would
-/// reject exactly the tokens most likely to be in use.
 fn basic_password(headers: &HeaderMap) -> Option<String> {
     use base64::Engine;
     let value = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
@@ -542,19 +423,7 @@ fn basic_password(headers: &HeaderMap) -> Option<String> {
     decoded.split_once(':').map(|(_, password)| password.to_string())
 }
 
-/// **Put one [`ControlRequest`] to the emulator thread** and wait for the run id it answers with.
-///
-/// The whole reason [`ControlRequests`] exists. What it is *not* is a general control channel: the
-/// commands are a closed enum with no payload, and the emulator thread decides when to act on them.
-///
-/// Nothing either command does deletes anything of the game. A new run checkpoints the old one
-/// before swapping, so it is left complete on the volume and can be resumed by pointing a process
-/// back at it; a clear leaves the run playing and takes only the model's own notes, and
-/// `conversation.jsonl` keeps every message it ever held.
-/// `refused` is what the emulator's own "no" means for this command, which is not the same thing
-/// twice: a new run fails on the server's disk (500), while a clear's likeliest failure by far is
-/// that nothing is thinking about this run at all (409), which is the caller asking for something
-/// this server is not doing rather than a fault.
+/// Put one [`ControlRequest`] to the emulator thread and wait for the run id it answers with.
 async fn ask(
     state: &AppState,
     what: ControlRequest,
@@ -563,10 +432,10 @@ async fn ask(
     let receiver = state.control.request(what).map_err(|failure| (StatusCode::CONFLICT, failure))?;
     match tokio::time::timeout(CONTROL_TIMEOUT, receiver).await {
         Ok(Ok(Ok(run_id))) => Ok(run_id),
-        // The emulator tried and could not. Its message is the useful one.
+        // The emulator tried and could not.
         Ok(Ok(Err(failure))) => Err((refused, failure)),
-        // The sender was dropped, or never taken: either way the emulator thread is not running, and
-        // `Obituary` will have said so on `/api/events` already.
+        // The sender was dropped, or never taken: either way the emulator thread is not running,
+        // and `Obituary` will have said so on `/api/events` already.
         Ok(Err(_)) | Err(_) => Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "the emulator thread did not answer — see /api/events".to_string(),
@@ -574,12 +443,8 @@ async fn ask(
     }
 }
 
-/// The `X-GB-Token` gate both JSON admin routes share: `Some(refusal)` to answer with, or `None` to
-/// carry on.
-///
-/// ⚠️ **One function rather than a copy in each, because the 404 is the load-bearing half.** An
-/// endpoint that resets the game answering 403 tells a scanner it is there; the second such endpoint,
-/// written from memory beside the first, is exactly where that becomes a 403.
+/// The `X-GB-Token` gate both JSON admin routes share: `Some(refusal)` to answer with, or `None`
+/// to carry on.
 fn admin_gate(state: &AppState, headers: &HeaderMap) -> Option<Response> {
     let Some(expected) = state.admin_token.as_deref() else {
         return Some((StatusCode::NOT_FOUND, Json(serde_json::json!({
@@ -596,11 +461,6 @@ fn admin_gate(state: &AppState, headers: &HeaderMap) -> Option<Response> {
 }
 
 /// `POST /api/new-run` — [`ask`] for a script, gated on the `X-GB-Token` header.
-///
-/// ⚠️ **404, not 403, when `GB_ADMIN_TOKEN` is unset.** The route is registered unconditionally
-/// because the router is built before the token is a question, so "off" has to be a response — and
-/// it should be the response a route that does not exist would give, rather than one advertising a
-/// reset endpoint to anyone who scans for it.
 async fn new_run(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(refusal) = admin_gate(&state, &headers) {
         return refusal;
@@ -612,16 +472,6 @@ async fn new_run(State(state): State<AppState>, headers: HeaderMap) -> Response 
 }
 
 /// `POST /api/clear` — throw away the model's conversation and its plan, and keep playing.
-///
-/// Gated exactly as [`new_run`] is, down to the 404 when `GB_ADMIN_TOKEN` is unset, and for the same
-/// reasons — the two share [`admin_gate`] so they cannot drift apart. It is the more dangerous of
-/// the two to leave open, if anything: a reset is loud and obvious from the page, while a cleared
-/// conversation looks from outside like a model that has simply started playing badly.
-///
-/// ⚠️ **It answers once the emulator has accepted it, not once the files are gone.** The run
-/// directory has one writer and it is the worker thread, so the deletion happens at the top of the
-/// model's next turn — seconds away while a run is playing, and not until the quota reopens on one
-/// that is parked. The body says so rather than implying the work is already finished.
 async fn clear(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(refusal) = admin_gate(&state, &headers) {
         return refusal;
@@ -636,19 +486,8 @@ async fn clear(State(state): State<AppState>, headers: HeaderMap) -> Response {
     }
 }
 
-/// `GET /reset-game` — [`ask`] for a person, gated on **HTTP Basic**, so the browser
-/// collects the password in its own dialog and the SPA needs no token-handling code at all. That is
-/// the whole reason it exists: the page used to carry a button, a `confirm`, a `prompt` and a
-/// `sessionStorage` key to do what `WWW-Authenticate` does natively.
-///
-/// ⚠️ **Nothing links here, and nothing should.** A GET that resets the game must not be reachable
-/// by a prefetch, a crawler or a middle-click; it is a URL somebody types. Once the browser has the
-/// credentials it will re-send them without asking, so a *refresh* of this page starts another run —
-/// which the response says, because a viewer who does not expect it has no other way to find out.
-///
-/// ⚠️ **404 when `GB_ADMIN_TOKEN` is unset, and byte-identical to the catch-all's** — challenging
-/// for a password would tell a scanner the endpoint is here, which is the same argument
-/// [`new_run`]'s 404 is making.
+/// `GET /reset-game` — [`ask`] for a person, gated on HTTP Basic, so the browser collects the
+/// password in its own dialog and the SPA needs no token-handling code at all.
 async fn reset_game(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(expected) = state.admin_token.as_deref() else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
@@ -680,8 +519,7 @@ async fn reset_game(State(state): State<AppState>, headers: HeaderMap) -> Respon
     (status, [(axum::http::header::CACHE_CONTROL, "no-store")], body).into_response()
 }
 
-/// The one page this server renders itself. Self-contained and in the SPA's palette, because it is
-/// reached by typing a URL and may well be the first thing a viewer sees.
+/// The one page this server renders itself.
 fn reset_page(heading: &str, detail: &str) -> Response {
     let html = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
@@ -703,7 +541,8 @@ fn reset_page(heading: &str, detail: &str) -> Response {
     ([(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
-/// Enough for the two things that reach the page: a run id and an error message from the emulator.
+/// Enough for the two things that reach the page: a run id and an error message from the
+/// emulator.
 fn html_escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
@@ -714,14 +553,8 @@ struct Since {
     since: u64,
 }
 
-/// **W7 / §11** — the backlog, so a page that has just loaded shows the run it joined rather than an
-/// empty log until the next thing happens.
-///
-/// ⚠️ **The client subscribes to `/api/events` first and calls this second**, exactly as the video
-/// path does (§5.2). The other order loses everything published in the gap, and loses it invisibly.
-/// Reading the file happens on a blocking thread, and [`transcript::read_since`] reads it from the
-/// end: a long run's transcript is hundreds of megabytes, and reading it whole is what OOM-killed
-/// the deployed pod on every page load.
+/// The backlog, so a page that has just loaded shows the run it joined rather than an empty log
+/// until the next thing happens.
 async fn history(State(state): State<AppState>, Query(query): Query<Since>) -> Json<serde_json::Value> {
     let path = state.run.get().transcript_path();
     let events = tokio::task::spawn_blocking(move || transcript::read_since(&path, query.since))
@@ -730,43 +563,22 @@ async fn history(State(state): State<AppState>, Query(query): Query<Since>) -> J
     Json(serde_json::Value::Array(events))
 }
 
-/// The conversation and status stream. One JSON object per message, exactly the shape W7 appends to
-/// `transcript.jsonl`.
-///
-/// ⚠️ **It opens with the most recent heartbeat and the model's current plan**, because the host
-/// only sends either when it has actually changed. Subscribe first, then read the latest —
-/// [`Published::join_events`], the same ordering and the same reason as the video keyframe (§5.2).
-/// Without it a page opened while the game is standing still shows an empty status panel until
-/// something moves, and one opened at any time at all shows no plan until the model next edits it.
+/// The conversation and status stream.
 async fn events(State(state): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (receiver, opening) = state.published.join_events();
     let opening = tokio_stream::iter(opening.into_iter().map(sse_event));
     let live = BroadcastStream::new(receiver).filter_map(|item| {
-        // A lagged client has missed events it cannot recover here. Dropping the notification is
-        // the right call — the alternative is tearing down a connection that is otherwise working,
-        // and the client treats every (re)connection as a reload of `/api/history` anyway
-        // (`useEventStream`'s `onOpen`), so a viewer that does drop and come back gets the lot.
+        // A lagged client has missed events it cannot recover here.
         Some(sse_event(item.ok()?))
     });
     Sse::new(opening.chain(live)).keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
 }
 
 /// The picture a tool answered with, by the seq of the `tool_result` event that named it.
-///
-/// ⚠️ **A 404 here is ordinary, not an error.** The pictures live in a small ring in
-/// [`Published`](published::Published) — a map render is a couple of hundred kilobytes and the run
-/// draws one most overworld turns — so anything older than the last handful is gone and the page
-/// shows the tool's caption on its own. That is the whole reason the image is fetched rather than
-/// carried on the event: `transcript.jsonl` would otherwise grow by a PNG per read, base64'd, for
-/// the length of the run.
-///
-/// ⚠️ **The path gives the parameter a segment of its own** — `{seq}/image.png`, not `{seq}.png` —
-/// for the reason [`routes`] gives: a static suffix after a parameter is a panic when the router is
-/// built, not a 404 when it is called.
 async fn tool_image(State(state): State<AppState>, Path(seq): Path<u64>) -> Response {
     match state.published.tool_image(seq) {
-        // Immutable: a seq is never reused within a process, so the one answer this URL has ever had
-        // is the one it will always have.
+        // Immutable: a seq is never reused within a process, so the one answer this URL has ever
+        // had is the one it will always have.
         Some(png) => (
             [
                 (header::CONTENT_TYPE, "image/png"),
@@ -783,43 +595,6 @@ fn sse_event(event: published::UiEvent) -> Result<Event, Infallible> {
     Ok(Event::default().json_data(event).expect("UiEvent serialises"))
 }
 
-/// The video stream, with §5.2's handshake: **subscribe first**, then take the keyframe, then
-/// forward deltas newer than it.
-///
-/// [`Published::join_video`] does the first two in that order and
-/// [`Published::publish_video`] stores the keyframe before broadcasting the delta, so the worst case
-/// here is a delta the keyframe already contains — which `seq` filters out. The opposite ordering
-/// loses a delta outright, and the loss is invisible: a stale eighth of the screen that never
-/// repairs.
-///
-/// ## Why this is not SSE any more
-///
-/// It was, for W2 through W9: one base64 line per message, read by an `EventSource`. `video/bench.rs`
-/// measured four minutes of real play through it at **565 kbit/s**, not the ~19 the README claimed
-/// — that number was an idle screen. Three things fixed it, and only the third needed the transport
-/// to change:
-///
-/// 1. the v2 wire format (see [`video`]) — 565 → 445 kbit/s;
-/// 2. **deflate across the connection rather than per message** — 445 → 21. A Game Boy screen is
-///    built of repeated 8×8 tiles, so the same payload bytes recur within a frame *and* across
-///    frames; a compressor with a window that spans the whole stream sees all of it. Per message
-///    it would be 54, so the shared window is worth 2.5× on its own;
-/// 3. **binary, because base64 costs far more after compression than before**. 33% before, but
-///    69–113% *after* — base64 shifts a repeating byte pattern into three alphabet phases and the
-///    LZ77 window stops recognising it. SSE cannot carry binary, so SSE had to go.
-///
-/// Not a WebSocket, though: nothing here is bidirectional and this module reaching the emulator is
-/// exactly the property the whole file is built to avoid. A chunked binary response needs no upgrade
-/// handshake, no ping/pong, and no second reconnection story — the client reads it with `fetch` and
-/// a `DecompressionStream`.
-///
-/// ⚠️ **The compression is `Content-Type`, not `Content-Encoding`.** A declared encoding is an
-/// invitation for a proxy to decompress and recompress it, which would buffer whole messages and
-/// hand a livestream a latency problem that only shows up in production. These are opaque bytes and
-/// the client inflates them itself.
-///
-/// The framing is a `u32` little-endian length before each message. Zero length is a keep-alive,
-/// which is also what keeps the deflate stream ticking over an idle screen.
 async fn video_stream(State(state): State<AppState>) -> Response {
     let (receiver, keyframe) = state.published.join_video();
     let mut floor = keyframe.as_ref().map_or(0, |k| k.seq);
@@ -828,12 +603,12 @@ async fn video_stream(State(state): State<AppState>) -> Response {
 
     let opening = keyframe.map(|keyframe| stream.frame(&keyframe.bytes)).unwrap_or_default();
 
-    // Merged rather than `Sse::keep_alive`d: the keep-alive has to go through the same compressor as
-    // everything else, since a deflate stream is a single ordered thing and not a sequence of
+    // Merged rather than `Sse::keep_alive`d: the keep-alive has to go through the same compressor
+    // as everything else, since a deflate stream is a single ordered thing and not a sequence of
     // messages that can be interleaved with something else.
     let mut interval = tokio::time::interval(KEEP_ALIVE);
-    // A starved task must not come back and fire every missed tick at once — the point is liveness,
-    // and a burst of keep-alives says nothing a single one does not.
+    // A starved task must not come back and fire every missed tick at once — the point is
+    // liveness, and a burst of keep-alives says nothing a single one does not.
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let beats = IntervalStream::new(interval).map(|_| None);
     let messages = BroadcastStream::new(receiver).map(Some);
@@ -845,8 +620,7 @@ async fn video_stream(State(state): State<AppState>) -> Response {
             // Already covered by the keyframe this connection opened with.
             Some(Ok(_)) => return None,
             // The client fell out of the ring buffer, so its palette and its screen are both
-            // suspect. A fresh keyframe repairs both; dropping the connection would work too, but
-            // re-syncing in place is invisible to the viewer.
+            // suspect.
             Some(Err(BroadcastStreamRecvError::Lagged(_))) => published.latest_keyframe()?,
         };
         floor = message.seq;
@@ -858,8 +632,8 @@ async fn video_stream(State(state): State<AppState>) -> Response {
         [
             (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
             (axum::http::header::CACHE_CONTROL, "no-store"),
-            // nginx-family proxies buffer an unknown-length body by default, which would turn a
-            // livestream into a slideshow. Traefik does not, but the header costs nothing.
+            // Nginx-family proxies buffer an unknown-length body by default, which would turn a
+            // livestream into a slideshow.
             (axum::http::HeaderName::from_static("x-accel-buffering"), "no"),
         ],
         axum::body::Body::from_stream(body),
@@ -868,25 +642,9 @@ async fn video_stream(State(state): State<AppState>) -> Response {
 }
 
 /// The audio stream: the header, then raw Opus packets, length-prefixed exactly as video's are.
-///
-/// ⚠️ **The one thing this must not copy from `/api/video` is the deflate**, and the section above
-/// spends a page explaining why deflate is worth 5× — so the next person to read both will be
-/// primed to apply that lesson here, where it is wrong twice over. Opus output is range-coded, so
-/// there is nothing left for LZ77 to find; and `VideoStream::frame` *has* to flush after every
-/// message, which would put a deflate block boundary around each ~60-byte packet and make the
-/// stream bigger. `bench_audio_deflate_is_not_worth_a_byte` measures both rather than asserting it.
-///
-/// ⚠️ **The first message is the header and the rest are bare packets, with nothing to tell them
-/// apart but position.** That is deliberate: the W3C WebCodecs Opus registration makes
-/// `AudioDecoderConfig.description` optional, and says that *supplying* one means the bitstream is
-/// Ogg-encapsulated. So an `OpusHead` here — the obvious "let us use the standard header" —
-/// would configure the page's decoder into the wrong mode entirely. Our twelve bytes carry the two
-/// numbers `configure()` needs and are never handed to the decoder.
 async fn audio_stream(State(state): State<AppState>) -> Response {
     let Some(header) = state.audio else {
-        // ⚠️ **503 and not 404, and the client tells them apart.** A 404 is a build older than
-        // audio, where the page should hide the control for ever; a 503 is `GB_AUDIO_BITRATE=0` on
-        // a build that has it. Both stop the client retrying, which a plain error would not.
+        // 503 and not 404, and the client tells them apart.
         return (StatusCode::SERVICE_UNAVAILABLE, "audio is off (GB_AUDIO_BITRATE=0)").into_response();
     };
     let receiver = state.published.join_audio();
@@ -899,16 +657,10 @@ async fn audio_stream(State(state): State<AppState>) -> Response {
     let beats = IntervalStream::new(interval).map(|_| None);
     let packets = BroadcastStream::new(receiver).map(Some);
     let live = packets.merge(beats).filter_map(move |item| match item {
-        // ⚠️ **The keep-alive is doing more work here than it does for video.** An idle screen is
-        // still a screen; a *parked* run produces no audio at all for hours, so this is the only
-        // traffic on the connection and the only thing keeping `STALE_MS` from firing.
+        // The keep-alive is doing more work here than it does for video.
         None => Some(Ok::<_, Infallible>(stream.frame(&[]))),
         Some(Ok(packet)) => Some(Ok(stream.frame(&packet))),
-        // ⚠️ **Skipped, and that is the whole of the handling.** A lagged video subscriber keeps a
-        // stale screen for ever unless it is handed a keyframe. A lagged audio subscriber has
-        // missed some sound, which is already gone and cannot be posted on. The client sees it as
-        // an underrun and re-anchors — the same path a `MAX_CATCHUP` gap and a park already take,
-        // so there is nothing here for a re-sync mechanism to repair.
+        // Skipped, and that is the whole of the handling.
         Some(Err(BroadcastStreamRecvError::Lagged(_))) => None,
     });
 
@@ -925,10 +677,6 @@ async fn audio_stream(State(state): State<AppState>) -> Response {
 }
 
 /// One connection's framing, and nothing else.
-///
-/// ⚠️ **A unit struct on purpose.** It exists so the *absence* of a compressor is a visible
-/// decision with a test on it (`nothing_compresses_the_audio_stream`) rather than an omission
-/// someone tidies away into consistency with [`VideoStream`].
 struct AudioStream;
 
 impl AudioStream {
@@ -941,15 +689,6 @@ impl AudioStream {
 }
 
 /// One connection's compressor: a single deflate stream, flushed after every message.
-///
-/// ⚠️ **The flush is the whole design and it is not free to forget.** Without it the encoder holds a
-/// message back until its internal buffer fills, which is right for a file and useless for a
-/// livestream — the screen would arrive in bursts seconds apart. Flushing per message costs a few
-/// bytes of block boundary and keeps the window, which is where the compression actually comes from.
-///
-/// Per connection, so two viewers cost two compressors. That is the price of the shared window: at
-/// 30 fps and ~3 kB a message it is well under a percent of a core each, and the alternative —
-/// compressing once for everyone — is the per-message case that measured 2.5× worse.
 struct VideoStream {
     deflate: flate2::write::ZlibEncoder<Vec<u8>>,
 }
@@ -963,8 +702,8 @@ impl Default for VideoStream {
 impl VideoStream {
     fn frame(&mut self, message: &[u8]) -> Vec<u8> {
         use std::io::Write;
-        // In-memory writes: the only way `write_all` fails here is an allocation failure, which is
-        // not something this connection can do anything about.
+        // In-memory writes: the only way `write_all` fails here is an allocation failure, which
+        // is not something this connection can do anything about.
         let _ = self.deflate.write_all(&(message.len() as u32).to_le_bytes());
         let _ = self.deflate.write_all(message);
         let _ = self.deflate.flush();
@@ -976,7 +715,8 @@ impl VideoStream {
 mod tests {
     use super::*;
 
-    // ── /api/audio ───────────────────────────────────────────────────────────────────────────────
+    // ── /api/audio
+    // ───────────────────────────────────────────────────────────────────────────────
 
     /// The framing is a `u32` length and then the bytes, and a reader has to be able to split a
     /// concatenation back into exactly what went in — including an empty message and a large one.
@@ -1000,9 +740,7 @@ mod tests {
         assert_eq!(read, sent);
     }
 
-    /// ⚠️ **The guard on the decision, not on the code.** It fails the moment someone wraps this in
-    /// a `ZlibEncoder` for consistency with `/api/video` — see `audio_stream`'s ⚠️ for why that
-    /// would cost bytes rather than save them.
+    /// The guard on the decision, not on the code.
     #[test]
     fn nothing_compresses_the_audio_stream() {
         let mut stream = AudioStream;
@@ -1011,9 +749,9 @@ mod tests {
         assert_eq!(&stream.frame(&packet)[4..], &packet[..], "the payload was transformed");
     }
 
-    /// The twin of `a_keepalive_puts_bytes_on_the_wire_and_no_message_in_the_stream`, and it matters
-    /// more here: a parked run produces no audio for hours, so this is the only thing between a
-    /// listening page and its `STALE_MS` watchdog.
+    /// The twin of `a_keepalive_puts_bytes_on_the_wire_and_no_message_in_the_stream`, and it
+    /// matters more here: a parked run produces no audio for hours, so this is the only thing
+    /// between a listening page and its `STALE_MS` watchdog.
     #[test]
     fn an_audio_keepalive_puts_bytes_on_the_wire_and_no_packet_in_the_stream() {
         let mut stream = AudioStream;
@@ -1021,7 +759,8 @@ mod tests {
         assert_eq!(beat, vec![0, 0, 0, 0], "a keep-alive is a zero length and nothing after it");
     }
 
-    /// `GB_AUDIO_BITRATE`: the default when nobody said, `0` for off, and a loud refusal otherwise.
+    /// `GB_AUDIO_BITRATE`: the default when nobody said, `0` for off, and a loud refusal
+    /// otherwise.
     #[test]
     fn the_audio_bitrate_variable_defaults_and_refuses_nonsense() {
         assert_eq!(audio_bitrate(None).unwrap(), Some(audio::DEFAULT_BITRATE));
@@ -1035,8 +774,9 @@ mod tests {
         }
     }
 
-    /// `GB_HARDWARE` picks the machine, and **the default is the DMG** — the whole test suite and
-    /// every committed fixture were captured on one, and the video bench asserts a four-shade screen.
+    /// `GB_HARDWARE` picks the machine, and the default is the DMG — the whole test suite and
+    /// every committed fixture were captured on one, and the video bench asserts a four-shade
+    /// screen.
     #[test]
     fn the_hardware_variable_defaults_to_a_dmg_and_refuses_anything_it_does_not_know() {
         assert_eq!(hardware_model(None), Ok(Model::Dmg));
@@ -1047,19 +787,14 @@ mod tests {
         assert_eq!(hardware_model(Some("cgb")), Ok(Model::Cgb));
         assert_eq!(hardware_model(Some(" CGB ")), Ok(Model::Cgb), "trimmed and case-insensitive");
 
-        // ⚠️ Refused rather than ignored: a container that silently served the wrong picture would
+        // Refused rather than ignored: a container that silently served the wrong picture would
         // be diagnosed by looking at the video codec, which is the wrong place entirely.
         let error = hardware_model(Some("color")).unwrap_err();
         assert!(error.contains("GB_HARDWARE") && error.contains("color"), "{error}");
     }
 
-    /// The transport contract, end to end without a socket: what `/api/video` writes must inflate as
-    /// **one** deflate stream and split back into exactly the messages that went in.
-    ///
-    /// ⚠️ The interesting half is the *incremental* read. A test that inflated the whole body at the
-    /// end would pass even if the encoder buffered everything until the connection closed, which is
-    /// the one failure mode that matters here — a livestream that arrives in bursts. So each
-    /// message's bytes are inflated as they are produced, and the message has to come out then.
+    /// The transport contract, end to end without a socket: what `/api/video` writes must inflate
+    /// as one deflate stream and split back into exactly the messages that went in.
     #[test]
     fn the_video_stream_is_one_deflate_stream_of_length_prefixed_messages() {
         use std::io::Write;
@@ -1092,8 +827,8 @@ mod tests {
         assert!(compressed < plain.len() / 2, "{compressed} B for {} B of input", plain.len());
     }
 
-    /// A zero-length message is the keep-alive, and it has to reach the wire — an idle screen that
-    /// sends nothing at all is a connection a proxy closes.
+    /// A zero-length message is the keep-alive, and it has to reach the wire — an idle screen
+    /// that sends nothing at all is a connection a proxy closes.
     #[test]
     fn a_keepalive_puts_bytes_on_the_wire_and_no_message_in_the_stream() {
         let mut stream = VideoStream::default();
@@ -1102,9 +837,7 @@ mod tests {
         assert!(!beat.is_empty(), "a keep-alive that produced no bytes keeps nothing alive");
     }
 
-    /// ⚠️ **The endpoint is off unless a token is set, and blank is not set.** A Kubernetes Secret
-    /// with a placeholder value is usually the empty string, and the failure mode of getting this
-    /// wrong is a reset endpoint open to the internet that looks configured.
+    /// The endpoint is off unless a token is set, and blank is not set.
     #[test]
     fn a_blank_admin_token_leaves_the_endpoint_off() {
         assert!(!tokens_match("", ""), "the empty token must never match, least of all itself");
@@ -1126,9 +859,7 @@ mod tests {
         headers
     }
 
-    /// `/reset-game`'s half of the token check. Everything that is not a well-formed `Basic`
-    /// credential has to come out as `None` rather than as a panic or an empty-string match —
-    /// [`tokens_match`] refuses the empty string, so `None` and "wrong" land in the same place.
+    /// `/reset-game`'s half of the token check.
     #[test]
     fn only_a_well_formed_basic_header_yields_a_password() {
         assert_eq!(basic_password(&HeaderMap::new()), None, "no header at all");
@@ -1138,9 +869,7 @@ mod tests {
         assert_eq!(basic_password(&authorization("Basic dXNlcg==")), None);
     }
 
-    /// ⚠️ **The username is ignored and the split is on the *first* colon.** A generated token may
-    /// well contain one, and splitting on the last would hand `tokens_match` a truncated password
-    /// that could never match — a failure that looks exactly like the operator mistyping it.
+    /// The username is ignored and the split is on the *first* colon.
     #[test]
     fn the_password_is_everything_after_the_first_colon() {
         use base64::Engine;
@@ -1155,9 +884,9 @@ mod tests {
         assert!(!tokens_match("", "s3cret"));
     }
 
-    /// ⚠️ **The router is built at startup and a bad path panics there**, so a route axum's matcher
-    /// rejects — `/api/pokemon/{dex}.png`, which needs a dynamic suffix it does not support — would
-    /// take the server down on boot rather than 404. Nothing else in the suite builds the router.
+    /// The router is built at startup and a bad path panics there, so a route axum's matcher
+    /// rejects — `/api/pokemon/{dex}.png`, which needs a dynamic suffix it does not support —
+    /// would take the server down on boot rather than 404.
     #[test]
     fn every_route_pattern_is_one_axum_accepts() {
         let _: Router<AppState> = routes();

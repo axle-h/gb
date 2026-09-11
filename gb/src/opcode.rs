@@ -1,7 +1,7 @@
 use std::fmt::Display;
 use crate::core::Fetch;
 
-/// https://gbdev.io/pandocs/CPU_Instruction_Set.html
+/// Https://gbdev.io/pandocs/CPU_Instruction_Set.html
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::Display, strum_macros::FromRepr)]
 #[repr(u8)]
@@ -97,454 +97,339 @@ impl JumpCondition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::Display)]
 pub enum OpCode {
-    // *** 8-bit Load instructions ***
+    // * 8-bit Load instructions *
 
-    /// LD r, r’: Load register (register)
-    /// Load to the 8-bit register r, data from the 8-bit register r'.
-    /// Opcode 0b01xxxyyy/various
-    /// Duration 1 machine cycle
+    /// LD r, r’: Load register (register) Load to the 8-bit register r, data from the 8-bit
+    /// register r'.
     #[strum(to_string = "LD {destination}, {source}")]
     Load { destination: Register, source: Register },
 
-    /// LD r, n: Load register (immediate)
-    /// Load to the 8-bit register r, the immediate data n.
+    /// LD r, n: Load register (immediate) Load to the 8-bit register r, the immediate data n.
     #[strum(to_string = "LD {register}, {value:#04x}")]
     LoadImmediate { register: Register, value: u8 },
 
-    /// LD (r16mem), A: Load from accumulator (indirect 16-bit register)
-    /// Load to the absolute address specified by the 16-bit register r16mem, data from the 8-bit A register.
+    /// LD (r16mem), A: Load from accumulator (indirect 16-bit register) Load to the absolute
+    /// address specified by the 16-bit register r16mem, data from the 8-bit A register.
     #[strum(to_string = "LD {register}, A")]
     LoadIndirectAccumulator { register: Register16Mem },
 
-    /// LD A, (r16mem): Load accumulator (indirect 16-bit register)
-    /// Load to the 8-bit A register, data from the absolute address specified by the 16-bit register r16mem.
+    /// LD A, (r16mem): Load accumulator (indirect 16-bit register) Load to the 8-bit A register,
+    /// data from the absolute address specified by the 16-bit register r16mem.
     #[strum(to_string = "LD A, {register}")]
     LoadAccumulatorIndirect { register: Register16Mem },
 
-    /// LD A, (nn): Load accumulator (direct)
-    /// Load to the 8-bit A register, data from the absolute address specified by the 16-bit operand nn.
+    /// LD A, (nn): Load accumulator (direct) Load to the 8-bit A register, data from the absolute
+    /// address specified by the 16-bit operand nn.
     #[strum(to_string = "LD A, ({address:#06x})")]
     LoadAccumulatorDirect { address: u16 },
 
-    /// LD (nn), A: Load from accumulator (direct)
-    /// Load to the absolute address specified by the 16-bit operand nn, data from the 8-bit A register.
+    /// LD (nn), A: Load from accumulator (direct) Load to the absolute address specified by the
+    /// 16-bit operand nn, data from the 8-bit A register.
     #[strum(to_string = "LD ({address:#06x}), A")]
     LoadDirectAccumulator { address: u16 },
 
-    /// LDH A, (C): Load accumulator (indirect 0xFF00+C)
-    /// Load to the 8-bit A register, data from the address specified by the 8-bit C register. The full
-    /// 16-bit absolute address is obtained by setting the most significant byte to 0xFF and the least
-    /// significant byte to the value of C, so the possible range is 0xFF00-0xFFFF.
+    /// LDH A, (C): Load accumulator (indirect 0xFF00+C) Load to the 8-bit A register, data from
+    /// the address specified by the 8-bit C register.
     #[strum(to_string = "LDH A, (C)")]
     LoadHighAccumulatorIndirect,
 
-    /// LDH (C), A: Load from accumulator (indirect 0xFF00+C)
-    /// Load to the address specified by the 8-bit C register, data from the 8-bit A register. The full
-    /// 16-bit absolute address is obtained by setting the most significant byte to 0xFF and the least
-    /// significant byte to the value of C, so the possible range is 0xFF00-0xFFFF.
+    /// LDH (C), A: Load from accumulator (indirect 0xFF00+C) Load to the address specified by the
+    /// 8-bit C register, data from the 8-bit A register.
     #[strum(to_string = "LDH (C), A")]
     LoadHighIndirectAccumulator,
 
-
-    /// LDH (n), A: Load from accumulator (direct 0xFF00+n)
-    /// Load to the address specified by the 8-bit immediate data n, data from the 8-bit A register. The
-    /// full 16-bit absolute address is obtained by setting the most significant byte to 0xFF and the
-    /// least significant byte to the value of n, so the possible range is 0xFF00-0xFFFF.
+    /// LDH (n), A: Load from accumulator (direct 0xFF00+n) Load to the address specified by the
+    /// 8-bit immediate data n, data from the 8-bit A register.
     #[strum(to_string = "LDH ({lsb:#04x}), A")]
     LoadHighDirectAccumulator { lsb: u8 },
 
-    /// LDH A, (n): Load accumulator (direct 0xFF00+n)
-    /// Load to the 8-bit A register, data from the address specified by the 8-bit immediate data n. The
-    /// full 16-bit absolute address is obtained by setting the most significant byte to 0xFF and the
-    /// least significant byte to the value of n, so the possible range is 0xFF00-0xFFFF.
+    /// LDH A, (n): Load accumulator (direct 0xFF00+n) Load to the 8-bit A register, data from the
+    /// address specified by the 8-bit immediate data n.
     #[strum(to_string = "LDH A, ({lsb:#04x})")]
     LoadHighAccumulatorDirect { lsb: u8 },
 
-    // *** 16-bit Load instructions ***
+    // * 16-bit Load instructions *
 
-    /// LD rr, nn: Load 16-bit register / register pair
-    /// Load to the 16-bit register rr, the immediate 16-bit data nn.
+    /// LD rr, nn: Load 16-bit register / register pair Load to the 16-bit register rr, the
+    /// immediate 16-bit data nn.
     #[strum(to_string = "LD {register}, {value:#06x}")]
     Load16Immediate { register: Register16, value: u16 },
 
-    /// LD (nn), SP: Load from stack pointer (direct)
-    /// Load to the absolute address specified by the 16-bit operand nn, data from the 16-bit SP register.
+    /// LD (nn), SP: Load from stack pointer (direct) Load to the absolute address specified by
+    /// the 16-bit operand nn, data from the 16-bit SP register.
     #[strum(to_string = "LD ({address:#06x}), SP")]
     LoadDirectStackPointer { address: u16 },
 
-    /// LD SP, HL: Load stack pointer from HL
-    /// Load to the 16-bit SP register, data from the 16-bit HL register
+    /// LD SP, HL: Load stack pointer from HL Load to the 16-bit SP register, data from the 16-bit
+    /// HL register
     #[strum(to_string = "LD SP, HL")]
     LoadStackPointerHL,
 
-    /// PUSH rr: Push to stack
-    /// Push to the stack memory, data from the 16-bit register rr.
+    /// PUSH rr: Push to stack Push to the stack memory, data from the 16-bit register rr.
     #[strum(to_string = "PUSH {register}")]
     Push { register: Register16Stack },
 
-    /// POP rr: Pop from stack
-    /// Pops to the 16-bit register rr, data from the stack memory.
-    /// This instruction does not do calculations that affect flags, but POP AF completely replaces the
-    /// F register value, so all flags are changed based on the 8-bit data that is read from memory.
+    /// POP rr: Pop from stack Pops to the 16-bit register rr, data from the stack memory.
     #[strum(to_string = "POP {register}")]
     Pop { register: Register16Stack },
 
-    /// LD HL, SP+e: Load HL from adjusted stack pointer
-    /// Load to the HL register, 16-bit data calculated by adding the signed 8-bit operand e to the 16-
-    /// bit value of the SP register.
-    /// Flags: Z = 0, N = 0, H = *, C = *
+    /// LD HL, SP+e: Load HL from adjusted stack pointer Load to the HL register, 16-bit data
+    /// calculated by adding the signed 8-bit operand e to the 16- bit value of the SP register.
     #[strum(to_string = "LD HL, SP{offset:+}")]
     LoadHLAdjustedStackPointer { offset: i8 },
 
-    // *** 8-bit arithmetic and logical instructions ***
+    // * 8-bit arithmetic and logical instructions *
 
-    /// ADD r: Add (register)
-    /// Adds to the 8-bit A register, the 8-bit register r, and stores the result back into the A register
-    /// Flags Z = *, N = 0, H = *, C = *
+    /// ADD r: Add (register) Adds to the 8-bit A register, the 8-bit register r, and stores the
+    /// result back into the A register Flags Z = *, N = 0, H = *, C = *
     #[strum(to_string = "ADD A, {register}")]
     Add { register: Register },
 
-    /// ADD n: Add (immediate)
-    /// Adds to the 8-bit A register, the immediate 8-bit data n, and stores the result back into the A register.
-    /// Flags Z = *, N = 0, H = *, C = *
+    /// ADD n: Add (immediate) Adds to the 8-bit A register, the immediate 8-bit data n, and
+    /// stores the result back into the A register.
     #[strum(to_string = "ADD A, {value:#04x}")]
     AddImmediate { value: u8 },
 
-    /// ADC r: Add with carry (register)
-    /// Adds to the 8-bit A register, the carry flag and the 8-bit register r, and stores the result back
-    /// into the A register.
-    /// Flags Z = *, N = 0, H = *, C = *
+    /// ADC r: Add with carry (register) Adds to the 8-bit A register, the carry flag and the
+    /// 8-bit register r, and stores the result back into the A register.
     #[strum(to_string = "ADC A, {register}")]
     AddWithCarry { register: Register },
 
-    /// ADC n: Add with carry (immediate)
-    /// Adds to the 8-bit A register, the carry flag and the immediate data n, and stores the result back
-    /// into the A register.
-    /// Flags Z = *, N = 0, H = *, C = *
+    /// ADC n: Add with carry (immediate) Adds to the 8-bit A register, the carry flag and the
+    /// immediate data n, and stores the result back into the A register.
     #[strum(to_string = "ADC A, {value:#04x}")]
     AddWithCarryImmediate { value: u8 },
 
-    /// SUB r: Subtract (register)
-    /// Subtracts from the 8-bit A register, the 8-bit register r, and stores the result back into the A
-    /// register.
-    /// Flags Z = *, N = 1, H = *, C = *
+    /// SUB r: Subtract (register) Subtracts from the 8-bit A register, the 8-bit register r, and
+    /// stores the result back into the A register.
     #[strum(to_string = "SUB A, {register}")]
     Subtract { register: Register },
 
-    /// SUB n: Subtract (immediate)
-    /// Subtracts from the 8-bit A register, the immediate data n, and stores the result back into the A
-    /// register
-    /// Flags Z = *, N = 1, H = *, C = *
     #[strum(to_string = "SUB A, {value:#04x}")]
     SubtractImmediate { value: u8 },
 
-    /// SBC r: Subtract with carry (register)
-    /// Subtracts from the 8-bit A register, the carry flag and the 8-bit register r, and stores the result
-    /// back into the A register.
-    /// Flags Z = *, N = 1, H = *, C = *
+    /// SBC r: Subtract with carry (register) Subtracts from the 8-bit A register, the carry flag
+    /// and the 8-bit register r, and stores the result back into the A register.
     #[strum(to_string = "SBC A, {register}")]
     SubtractWithCarry { register: Register },
 
-    /// SBC n: Subtract with carry (immediate)
-    /// Subtracts from the 8-bit A register, the carry flag and the immediate data n, and stores the
-    /// result back into the A register.
-    /// Flags Z = *, N = 1, H = *, C = *
+    /// SBC n: Subtract with carry (immediate) Subtracts from the 8-bit A register, the carry flag
+    /// and the immediate data n, and stores the result back into the A register.
     #[strum(to_string = "SBC A, {value:#04x}")]
     SubtractWithCarryImmediate { value: u8 },
 
-    /// CP r: Compare (register)
-    /// Subtracts from the 8-bit A register, the 8-bit register r, and updates flags based on the result.
-    /// This instruction is basically identical to SUB r, but does not update the A register.
-    /// Flags Z = *, N = 1, H = *, C = *
+    /// CP r: Compare (register) Subtracts from the 8-bit A register, the 8-bit register r, and
+    /// updates flags based on the result.
     #[strum(to_string = "CP A, {register}")]
     Compare { register: Register },
 
-    /// CP n: Compare (immediate)
-    /// Subtracts from the 8-bit A register, the immediate data n, and updates flags based on the result.
-    /// This instruction is basically identical to SUB n, but does not update the A register.
-    /// Flags Z = *, N = 1, H = *, C = *
+    /// CP n: Compare (immediate) Subtracts from the 8-bit A register, the immediate data n, and
+    /// updates flags based on the result.
     #[strum(to_string = "CP A, {value:#04x}")]
     CompareImmediate { value: u8 },
 
-    /// INC r: Increment (register)
-    /// Increments data in the 8-bit register r.
-    /// Flags Z = *, N = 0, H = *
+    /// INC r: Increment (register) Increments data in the 8-bit register r.
     #[strum(to_string = "INC {register}")]
     Increment { register: Register },
 
-    /// DEC r: Decrement (register)
-    /// Decrements data in the 8-bit register r
-    /// Flags Z = *, N = 1, H = *
+    /// DEC r: Decrement (register) Decrements data in the 8-bit register r Flags Z = *, N = 1, H
+    /// = *
     #[strum(to_string = "DEC {register}")]
     Decrement { register: Register },
 
-    /// AND r: Bitwise AND (register)
-    /// Performs a bitwise AND operation between the 8-bit A register and the 8-bit register r, and
-    /// stores the result back into the A register
-    /// Flags Z = *, N = 0, H = 1, C = 0
     #[strum(to_string = "AND A, {register}")]
     And { register: Register },
 
-    /// AND n: Bitwise AND (immediate)
-    /// Performs a bitwise AND operation between the 8-bit A register and immediate data n, and
-    /// stores the result back into the A register.
-    /// Flags Z = *, N = 0, H = 1, C = 0
+    /// AND n: Bitwise AND (immediate) Performs a bitwise AND operation between the 8-bit A
+    /// register and immediate data n, and stores the result back into the A register.
     #[strum(to_string = "AND A, {value:#04x}")]
     AndImmediate { value: u8 },
 
-    /// OR r: Bitwise OR (register)
-    /// Performs a bitwise OR operation between the 8-bit A register and the 8-bit register r, and stores
-    /// the result back into the A register.
-    /// Flags Z = *, N = 0, H = 0, C = 0
+    /// OR r: Bitwise OR (register) Performs a bitwise OR operation between the 8-bit A register
+    /// and the 8-bit register r, and stores the result back into the A register.
     #[strum(to_string = "OR A, {register}")]
     Or { register: Register },
 
-    /// OR n: Bitwise OR (immediate)
-    /// Performs a bitwise OR operation between the 8-bit A register and immediate data n, and stores
-    /// the result back into the A register.
-    /// Flags Z = *, N = 0, H = 0, C = 0
+    /// OR n: Bitwise OR (immediate) Performs a bitwise OR operation between the 8-bit A register
+    /// and immediate data n, and stores the result back into the A register.
     #[strum(to_string = "OR A, {value:#04x}")]
     OrImmediate { value: u8 },
 
-    /// XOR r: Bitwise XOR (register)
-    /// Performs a bitwise XOR operation between the 8-bit A register and the 8-bit register r, and
-    /// stores the result back into the A register.
-    /// Flags Z = *, N = 0, H = 0, C = 0
+    /// XOR r: Bitwise XOR (register) Performs a bitwise XOR operation between the 8-bit A
+    /// register and the 8-bit register r, and stores the result back into the A register.
     #[strum(to_string = "XOR A, {register}")]
     Xor { register: Register },
 
-    /// XOR n: Bitwise XOR (immediate)
-    /// Performs a bitwise XOR operation between the 8-bit A register and immediate data n, and
-    /// stores the result back into the A register
-    /// Flags Z = *, N = 0, H = 0, C = 0
     #[strum(to_string = "XOR A, {value:#04x}")]
     XorImmediate { value: u8 },
 
-    /// CCF: Complement carry flag
-    /// Flips the carry flag, and clears the N and H flags.
-    /// Flags N = 0, H = 0, C = *
+    /// CCF: Complement carry flag Flips the carry flag, and clears the N and H flags.
     #[strum(to_string = "CCF")]
     ComplementCarryFlag,
 
-    /// SCF: Set carry flag
-    /// Sets the carry flag, and clears the N and H flags.
-    /// Flags N = 0, H = 0, C = 1
+    /// SCF: Set carry flag Sets the carry flag, and clears the N and H flags.
     #[strum(to_string = "SCF")]
     SetCarryFlag,
 
-    /// DAA: Decimal adjust accumulator
-    /// Z = *, H = 0, C = *
+    /// DAA: Decimal adjust accumulator Z = *, H = 0, C = *
     #[strum(to_string = "DAA")]
     DecimalAdjustAccumulator,
 
-    /// CPL: Complement accumulator
-    /// Flips all the bits in the 8-bit A register, and sets the N and H flags.
-    /// N = 1, H = 1
+    /// CPL: Complement accumulator Flips all the bits in the 8-bit A register, and sets the N and
+    /// H flags.
     #[strum(to_string = "CPL")]
     ComplementAccumulator,
 
-    // *** 16-bit arithmetic instructions ***
+    // * 16-bit arithmetic instructions *
 
-    /// INC rr: Increment 16-bit register
-    /// Increments data in the 16-bit register rr
+    /// INC rr: Increment 16-bit register Increments data in the 16-bit register rr
     #[strum(to_string = "INC {register}")]
     Increment16 { register: Register16 },
 
-    /// DEC rr: Decrement 16-bit register
-    /// Decrements data in the 16-bit register rr.
+    /// DEC rr: Decrement 16-bit register Decrements data in the 16-bit register rr.
     #[strum(to_string = "DEC {register}")]
     Decrement16 { register: Register16 },
 
-    /// ADD HL, rr: Add (16-bit register)
-    /// Adds to the 16-bit HL register pair, the 16-bit register rr, and stores the result back into the HL
-    /// register pair.
-    /// Flags N = 0, H = *, C = *
+    /// ADD HL, rr: Add (16-bit register) Adds to the 16-bit HL register pair, the 16-bit register
+    /// rr, and stores the result back into the HL register pair.
     #[strum(to_string = "ADD HL, {register}")]
     Add16 { register: Register16 },
 
-    /// ADD SP, e: Add to stack pointer (relative)
-    /// Loads to the 16-bit SP register, 16-bit data calculated by adding the signed 8-bit operand e to
-    /// the 16-bit value of the SP register.
-    /// Flags Z = 0, N = 0, H = *, C = *
+    /// ADD SP, e: Add to stack pointer (relative) Loads to the 16-bit SP register, 16-bit data
+    /// calculated by adding the signed 8-bit operand e to the 16-bit value of the SP register.
     #[strum(to_string = "ADD SP, {offset}")]
     AddStackPointer { offset: i8 },
 
-    // *** Rotate, shift, and bit operation instructions ***
+    // * Rotate, shift, and bit operation instructions *
 
-    /// RLCA: Rotate left circular (accumulator)
-    /// Rotates the 8-bit A register value left in a circular manner (carry flag is updated but not used).
-    /// Every bit is shifted to the left (e.g. bit 1 value is copied from bit 0). Bit 7 is copied both to bit
-    /// 0 and the carry flag. Note that unlike the related RLC r  instruction, RLCA always sets the zero
-    /// flag to 0 without looking at the resulting value of the calculation.
-    /// Flags Z = 0, N = 0, H = 0, C = *
+    /// RLCA: Rotate left circular (accumulator) Rotates the 8-bit A register value left in a
+    /// circular manner (carry flag is updated but not used).
     #[strum(to_string = "RLCA")]
     RotateLeftCircularAccumulator,
 
-    /// RRCA: Rotate right circular (accumulator)
-    /// Rotates the 8-bit A register value right in a circular manner (carry flag is updated but not used).
-    /// Every bit is shifted to the right (e.g. bit 1 value is copied to bit 0). Bit 0 is copied both to bit 7
-    /// and the carry flag. Note that unlike the related RRC r  instruction, RRCA always sets the zero
-    /// flag to 0 without looking at the resulting value of the calculation.
-    /// Flags Z = 0, N = 0, H = 0, C = *
+    /// RRCA: Rotate right circular (accumulator) Rotates the 8-bit A register value right in a
+    /// circular manner (carry flag is updated but not used).
     #[strum(to_string = "RRCA")]
     RotateRightCircularAccumulator,
 
-    /// RLA: Rotate left (accumulator)
-    /// Rotates the 8-bit A register value left through the carry flag.
-    /// Every bit is shifted to the left (e.g. bit 1 value is copied from bit 0). The carry flag is copied to bit
-    /// 0, and bit 7 is copied to the carry flag. Note that unlike the related RL r  instruction, RLA always
-    /// sets the zero flag to 0 without looking at the resulting value of the calculation.
-    /// Flags Z = 0, N = 0, H = 0, C = *
+    /// RLA: Rotate left (accumulator) Rotates the 8-bit A register value left through the carry
+    /// flag.
     #[strum(to_string = "RLA")]
     RotateLeftAccumulator,
 
-    /// RRA: Rotate right (accumulator)
-    /// Rotates the 8-bit A register value right through the carry flag.
-    /// Every bit is shifted to the right (e.g. bit 1 value is copied to bit 0). The carry flag is copied to bit
-    /// 7, and bit 0 is copied to the carry flag. Note that unlike the related RR r  instruction, RRA always
-    /// sets the zero flag to 0 without looking at the resulting value of the calculation.
-    /// Flags Z = 0, N = 0, H = 0, C = *
+    /// RRA: Rotate right (accumulator) Rotates the 8-bit A register value right through the carry
+    /// flag.
     #[strum(to_string = "RRA")]
     RotateRightAccumulator,
 
-    /// RLC r: Rotate left circular (register)
-    /// Rotates the 8-bit register r value left in a circular manner (carry flag is updated but not used).
-    /// Every bit is shifted to the left (e.g. bit 1 value is copied from bit 0). Bit 7 is copied both to bit 0
-    /// and the carry flag.
-    /// Flags Z = *, N = 0, H = 0, C = *
+    /// RLC r: Rotate left circular (register) Rotates the 8-bit register r value left in a
+    /// circular manner (carry flag is updated but not used).
     #[strum(to_string = "RLC {register}")]
     RotateLeftCircular { register: Register },
 
-    /// RRC r: Rotate right circular (register)
-    /// Rotates the 8-bit register r value right in a circular manner (carry flag is updated but not used).
-    /// Every bit is shifted to the right (e.g. bit 1 value is copied to bit 0). Bit 0 is copied both to bit 7
-    /// and the carry flag.
-    /// Flags Z = *, N = 0, H = 0, C = *
+    /// RRC r: Rotate right circular (register) Rotates the 8-bit register r value right in a
+    /// circular manner (carry flag is updated but not used).
     #[strum(to_string = "RRC {register}")]
     RotateRightCircular { register: Register },
 
-    /// RL r: Rotate left (register)
-    /// Rotates the 8-bit register r value left through the carry flag.
-    /// Every bit is shifted to the left (e.g. bit 1 value is copied from bit 0). The carry flag is copied to bit
-    /// 0, and bit 7 is copied to the carry flag.
-    /// Flags Z = *, N = 0, H = 0, C = *
+    /// RL r: Rotate left (register) Rotates the 8-bit register r value left through the carry
+    /// flag.
     #[strum(to_string = "RL {register}")]
     RotateLeft { register: Register },
 
-    /// RR r: Rotate right (register)
-    /// Rotates the 8-bit register r value right through the carry flag.
-    /// Every bit is shifted to the right (e.g. bit 1 value is copied to bit 0). The carry flag is copied to bit
-    /// 7, and bit 0 is copied to the carry flag.
-    /// Flags Z = *, N = 0, H = 0, C = *
+    /// RR r: Rotate right (register) Rotates the 8-bit register r value right through the carry
+    /// flag.
     #[strum(to_string = "RR {register}")]
     RotateRight { register: Register },
 
-    /// SLA r: Shift left arithmetic (register)
-    /// Shifts the 8-bit register r value left by one bit using an arithmetic shift.
-    /// Bit 7 is shifted to the carry flag, and bit 0 is set to a fixed value of 0.
-    /// Flags Z = *, N = 0, H = 0, C = *
+    /// SLA r: Shift left arithmetic (register) Shifts the 8-bit register r value left by one bit
+    /// using an arithmetic shift.
     #[strum(to_string = "SLA {register}")]
     ShiftLeftArithmetic { register: Register },
 
-    /// SRA r: Shift right arithmetic (register)
-    /// Shifts the 8-bit register r value right by one bit using an arithmetic shift.
-    /// Bit 7 retains its value, and bit 0 is shifted to the carry flag.
-    /// Flags Z = *, N = 0, H = 0, C = *
+    /// SRA r: Shift right arithmetic (register) Shifts the 8-bit register r value right by one
+    /// bit using an arithmetic shift.
     #[strum(to_string = "SRA {register}")]
     ShiftRightArithmetic { register: Register },
 
-    /// SWAP r: Swap nibbles (register)
-    /// Swaps the high and low 4-bit nibbles of the 8-bit register r.
-    /// Flags Z = *, N = 0, H = 0, C = 0
+    /// SWAP r: Swap nibbles (register) Swaps the high and low 4-bit nibbles of the 8-bit register
+    /// r.
     #[strum(to_string = "SWAP {register}")]
     Swap { register: Register },
 
-    /// SRL r: Shift right logical (register)
-    /// Shifts the 8-bit register r value right by one bit using a logical shift.
-    /// Bit 7 is set to a fixed value of 0, and bit 0 is shifted to the carry flag.
-    /// Flags Z = *, N = 0, H = 0, C = *
+    /// SRL r: Shift right logical (register) Shifts the 8-bit register r value right by one bit
+    /// using a logical shift.
     #[strum(to_string = "SRL {register}")]
     ShiftRightLogical { register: Register },
 
-    /// BIT b, r: Test bit (register)
-    /// Tests the bit b of the 8-bit register r.
-    /// The zero flag is set to 1 if the chosen bit is 0, and 0 otherwise.
-    /// Flags Z = *, N = 0, H = 1
+    /// BIT b, r: Test bit (register) Tests the bit b of the 8-bit register r.
     #[strum(to_string = "BIT {bit}, {register}")]
     TestBit { register: Register, bit: u8 },
 
-    /// RES b, r: Reset bit (register)
-    /// Resets the bit b of the 8-bit register r to 0
+    /// RES b, r: Reset bit (register) Resets the bit b of the 8-bit register r to 0
     #[strum(to_string = "RES {bit}, {register}")]
     ResetBit { register: Register, bit: u8 },
 
-    /// SET b, r: Set bit (register)
-    /// Sets the bit b of the 8-bit register r to 1.
+    /// SET b, r: Set bit (register) Sets the bit b of the 8-bit register r to 1.
     #[strum(to_string = "SET {bit}, {register}")]
     SetBit { register: Register, bit: u8 },
 
-    // *** Control flow instructions ***
+    // * Control flow instructions *
 
-    /// JP nn: Jump
-    /// Unconditional jump to the absolute address specified by the 16-bit immediate operand nn.
+    /// JP nn: Jump Unconditional jump to the absolute address specified by the 16-bit immediate
+    /// operand nn.
     #[strum(to_string = "JP {address:#06x}")]
     Jump { address: u16 },
 
-    /// JP HL: Jump to HL
-    /// Unconditional jump to the absolute address specified by the 16-bit register HL
+    /// JP HL: Jump to HL Unconditional jump to the absolute address specified by the 16-bit
+    /// register HL
     #[strum(to_string = "JP HL")]
     JumpHL,
 
-    /// P cc, nn: Jump (conditional)
-    /// Conditional jump to the absolute address specified by the 16-bit operand nn, depending on the
-    /// condition cc.
+    /// P cc, nn: Jump (conditional) Conditional jump to the absolute address specified by the
+    /// 16-bit operand nn, depending on the condition cc.
     #[strum(to_string = "JP {condition}, {address:#06x}")]
     JumpConditional { condition: JumpCondition, address: u16 },
 
-    /// JR e: Relative jump
-    /// Unconditional jump to the relative address specified by the signed 8-bit operand e.
+    /// JR e: Relative jump Unconditional jump to the relative address specified by the signed
+    /// 8-bit operand e.
     #[strum(to_string = "JR {offset}")]
     JumpRelative { offset: i8 },
 
-    /// JR cc, e: Relative jump (conditional)
-    /// Conditional jump to the relative address specified by the signed 8-bit operand e, depending on
-    /// the condition cc.
+    /// JR cc, e: Relative jump (conditional) Conditional jump to the relative address specified
+    /// by the signed 8-bit operand e, depending on the condition cc.
     #[strum(to_string = "JR {condition}, {offset}")]
     JumpRelativeConditional { condition: JumpCondition, offset: i8 },
 
-    /// CALL nn: Call function
-    /// Unconditional call to the function at the absolute address specified by the 16-bit operand nn
+    /// CALL nn: Call function Unconditional call to the function at the absolute address
+    /// specified by the 16-bit operand nn
     #[strum(to_string = "CALL {address:#06x}")]
     Call { address: u16 },
 
-    /// CALL cc, nn: Call function (conditional)
-    /// Conditional function call to the absolute address specified by the 16-bit operand nn, depending
-    /// on the condition cc.
+    /// CALL cc, nn: Call function (conditional) Conditional function call to the absolute address
+    /// specified by the 16-bit operand nn, depending on the condition cc.
     #[strum(to_string = "CALL {condition}, {address:#06x}")]
     CallConditional { condition: JumpCondition, address: u16 },
 
-    /// RET: Return from function
-    /// Unconditional return from a function.
+    /// RET: Return from function Unconditional return from a function.
     #[strum(to_string = "RET")]
     Return,
 
-    /// RET cc: Return from function (conditional)
-    /// Conditional return from a function, depending on the condition cc.
+    /// RET cc: Return from function (conditional) Conditional return from a function, depending
+    /// on the condition cc.
     #[strum(to_string = "RET {condition}")]
     ReturnConditional { condition: JumpCondition },
 
-    /// RETI: Return from interrupt handler
-    /// Unconditional return from a function. Also enables interrupts by setting IME=1.
+    /// RETI: Return from interrupt handler Unconditional return from a function.
     #[strum(to_string = "RETI")]
     ReturnInterrupt,
 
-    /// RST n: Restart
-    /// Unconditional function call to the absolute fixed address defined by the opcode.
+    /// RST n: Restart Unconditional function call to the absolute fixed address defined by the
+    /// opcode.
     #[strum(to_string = "RST ${lsb:02X}")]
     Restart { lsb: u8 },
 
-    // *** Miscellaneous instructions ***
-    /// HALT: Halt system clock
+    // * Miscellaneous instructions * HALT: Halt system clock
     #[strum(serialize = "HALT")]
     Halt,
 
@@ -552,20 +437,17 @@ pub enum OpCode {
     #[strum(serialize = "STOP")]
     Stop,
 
-    /// NOP: No operation
-    /// No operation. This instruction doesn’t do anything, but can be used to add a delay of one
-    /// machine cycle and increment PC by one.
+    /// NOP: No operation No operation.
     #[strum(serialize = "NOP")]
     Nop,
 
-    /// DI: Disable interrupts
-    /// Disables interrupt handling by setting IME=0 and cancelling any scheduled effects of the EI
-    /// instruction if any.
+    /// DI: Disable interrupts Disables interrupt handling by setting IME=0 and cancelling any
+    /// scheduled effects of the EI instruction if any.
     #[strum(serialize = "DI")]
     DisableInterrupts,
 
-    /// EI: Enable interrupts
-    /// Schedules interrupt handling to be enabled after the next machine cycle.
+    /// EI: Enable interrupts Schedules interrupt handling to be enabled after the next machine
+    /// cycle.
     #[strum(serialize = "EI")]
     EnableInterrupts,
 
@@ -636,8 +518,8 @@ impl OpCode {
         let raw = RawOpCode(fetch.fetch_u8());
         match raw.0 {
             0xD3 | 0xDB | 0xDD | 0xE3 | 0xE4 | 0xEB | 0xEC | 0xED | 0xF4 | 0xFC | 0xFD => {
-                // These opcodes are not valid in the base instruction set, but are used in the extended
-                // instruction set (CB prefix) or other special cases.
+                // These opcodes are not valid in the base instruction set, but are used in the
+                // extended instruction set (CB prefix) or other special cases.
                 OpCode::Illegal { raw: raw.0 }
             }
             0x00 => OpCode::Nop, // 0x00 NOP
@@ -694,30 +576,30 @@ impl OpCode {
                         0b001 => {
                             let register = Register16::from_u8(raw.p());
                             if raw.q() {
-                                // add hl, r16
+                                // Add hl, r16
                                 OpCode::Add16 { register }
                             } else {
-                                // ld r16, imm16
+                                // Ld r16, imm16
                                 OpCode::Load16Immediate { register, value: fetch.fetch_u16() }
                             }
                         }
                         0b010 => {
                             let register = Register16Mem::from_u8(raw.p());
                             if raw.q() {
-                                // ld a, [r16mem]
+                                // Ld a, [r16mem]
                                 OpCode::LoadAccumulatorIndirect { register }
                             } else {
-                                // ld [r16mem], a
+                                // Ld [r16mem], a
                                 OpCode::LoadIndirectAccumulator { register }
                             }
                         }
                         0b011 => {
                             let register = Register16::from_u8(raw.p());
                             if raw.q() {
-                                // inc r16
+                                // Inc r16
                                 OpCode::Decrement16 { register }
                             } else {
-                                // dec r16
+                                // Dec r16
                                 OpCode::Increment16 { register }
                             }
                         }
@@ -870,11 +752,7 @@ mod tests {
     }
 
     /// Macro to generate tests for opcode parsing, string representation, and machine cycles
-    /// Usage: opcode_tests! {
-    ///     nop: 0x00 => "NOP", 1,
-    ///     ld_bc_n16: 0x01, 0x34, 0x12 => "LD BC, 0x1234", 3,
-    ///     ld_bc_a: 0x02 => "LD (BC), A", 2,
-    /// }
+    /// Usage: opcode_tests!
     macro_rules! opcode_tests {
         ($($test_name:ident: $($byte:expr),+ => $expected_string:expr, $expected_cycles:expr),*$(,)?) => {
             $(

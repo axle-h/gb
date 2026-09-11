@@ -1,23 +1,19 @@
-//! Tests for workstream `pc_box` — see `docs/postgame-coverage-plan.md` §6 and
-//! [`crate::pokemon::postgame::pc_box`].
 
 use super::super::*;
 
-/// Workstream A's entry fixture (§9): all 8 badges, party of 4, bag 14/20, `wBoxCount = 0`, and the
-/// player already standing in the Viridian Pokémon Center — one tile-walk from the PC at (13,3). Not
-/// `post-hall-of-fame.bin`, which is a cutscene; see the Phase 0 §11 entries.
 const PHASE0: &[u8] = include_bytes!("../../data/postgame-phase0.bin");
 
 /// The PC every test here uses, and the map it is on.
 const PC_MAP: Map = Map::ViridianPokecenter;
 
 /// Slowpoke, the party's fourth member and its only non-essential one: Articuno/Venusaur/Vaporeon
-/// carry Surf, Strength, Cut and every usable attack between them, so Slowpoke is what gets banked.
+/// carry Surf, Strength, Cut and every usable attack between them, so Slowpoke is what gets
+/// banked.
 const BANKED_SLOT: u8 = 3;
 const BANKED: PokemonSpecies = PokemonSpecies::Slowpoke;
 
-/// Screens the agent showed, deduplicated consecutively — the same "log every distinct screen" idiom
-/// task 0.4 used. Text draws a character at a time, so most captured frames are half-rendered.
+/// Screens the agent showed, deduplicated consecutively — the same "log every distinct screen"
+/// idiom task 0.4 used.
 fn screens_while(fixture: &mut TestFixture, ticks: u32, done: impl Fn(&mut TestFixture) -> bool) -> Vec<String> {
     let mut seen: Vec<String> = Vec::new();
     for _ in 0..ticks {
@@ -44,24 +40,9 @@ fn current_box(fixture: &mut TestFixture) -> u8 {
     crate::pokemon::postgame::pc_box::current_box_num(fixture.api().mmu())
 }
 
-// ⚠️ **Do not call `step_until_exhausted` in a test that checks intermediate states.** A `UsePcBox`
-// step pops the moment the driver takes over (like `UseItemPc` and `MovePokemonToFront`), so the queue
-// empties when the *last* step is issued — by which time every earlier operation has already run to
-// completion. A three-step chain therefore blows straight past the states in the middle. Chain
-// `run_until` instead: it checks its condition every tick while the policy keeps advancing.
+// Do not call `step_until_exhausted` in a test that checks intermediate states.
 
-/// **Task A2** — reach the `BILL's PC` submenu *deliberately*. Emulates ~2 min (≈5 s wall clock).
-///
-/// Task 0.4 already saw this submenu, but only because the agent's generic text-advance mashed A and
-/// fell into the parent menu's first entry. This proves the driver navigates there on purpose: the
-/// parent menu (`LOG OFF`) has to appear **before** the box submenu (`SEE YA!`), which is what tells
-/// a deliberate selection apart from a lucky one.
-///
-/// A2 warns — correctly — that the parent menu's entry list varies with progress, so the index must
-/// not be hard-coded. It is worth being precise about *which* index: `DisplayPCMainMenu` appends
-/// `PROF.OAK's PC` only with `EVENT_GOT_POKEDEX` and `<PKMN>LEAGUE` only with `wNumHoFTeams != 0`, and
-/// both come **after** the first two entries — so Bill's PC at 0 is safe and it is `LOG OFF` that
-/// moves. What is *not* safe is the label: without `EVENT_MET_BILL` entry 0 reads `SOMEONE's PC`.
+/// Task A2 — reach the `BILL's PC` submenu *deliberately*.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_open_bills_pc() {
@@ -90,7 +71,7 @@ fn can_open_bills_pc() {
     }
 }
 
-/// **Task A3** — deposit a party member into the box. Emulates ~2 min (≈5 s wall clock).
+/// Task A3 — deposit a party member into the box.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_deposit_a_pokemon() {
@@ -113,10 +94,7 @@ fn can_deposit_a_pokemon() {
         state.pokemon.len(), state.boxed_pokemon.len());
 }
 
-/// **Task A4** — the same mon round-trips back into the party. Emulates ~3 min (≈7 s wall clock).
-///
-/// A bare withdraw would prove much less than a round trip: the interesting property is that the two
-/// are inverses and the party comes back to where it started, carrying the same mon at the same level.
+/// Task A4 — the same mon round-trips back into the party.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn pokemon_round_trips_through_the_box() {
@@ -130,7 +108,7 @@ fn pokemon_round_trips_through_the_box() {
     assert_eq!(banked.pokemon.len(), 3);
     println!("deposited: party {} box {}", banked.pokemon.len(), banked.boxed_pokemon.len());
 
-    // …and back. The withdraw step is still queued; it is issued once the driver returns to `Idle`.
+    // …and back.
     let state = fixture.run_until(|s| s.boxed_pokemon.is_empty() && s.pokemon.len() == 4);
     let back = state.pokemon.get(3).expect("withdrawn mon should be appended to the party");
     assert_eq!(back.species, BANKED, "a different mon came back");
@@ -140,12 +118,7 @@ fn pokemon_round_trips_through_the_box() {
     println!("withdrew: {:?} lv{} {}/{}hp", back.species, back.level, back.current_hp, back.stats.hp);
 }
 
-/// **Task A5** — switch boxes. Emulates ~4 min (≈9 s wall clock).
-///
-/// ⚠️ The plan's warning is right and then some: `ChangeBox` (`engine/menus/save.asm:358`) prints a
-/// YES/NO, **saves the game**, and on the first change ever also calls `EmptyAllSRAMBoxes`. The mon
-/// deposited a moment earlier survives that — the wipe happens *before* the open box is copied out to
-/// SRAM — which is what the second half of this test checks by switching back and finding it again.
+/// Task A5 — switch boxes.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_change_box() {
@@ -159,25 +132,21 @@ fn can_change_box() {
 
     fixture.run_until(|s| s.boxed_pokemon.len() == 1);
 
-    // Box 2 is a different, empty box — and the deposit is no longer visible, because only the open
-    // box lives in WRAM.
+    // Box 2 is a different, empty box — and the deposit is no longer visible, because only the
+    // open box lives in WRAM.
     let state = fixture.run_until(|s| s.current_box == 1);
     assert!(state.boxed_pokemon.is_empty(), "box 2 should be empty, holds {:?}", state.boxed_pokemon);
     println!("switched to box {} — empty", state.current_box + 1);
 
-    // Back to box 1, and the banked mon is still there: the change wrote it out to SRAM rather than
-    // losing it, and `EmptyAllSRAMBoxes` ran before that copy, not after.
+    // Back to box 1, and the banked mon is still there: the change wrote it out to SRAM rather
+    // than losing it, and `EmptyAllSRAMBoxes` ran before that copy, not after.
     let state = fixture.run_until(|s| s.current_box == 0 && !s.boxed_pokemon.is_empty());
     assert_eq!(state.boxed_pokemon.len(), 1);
     assert_eq!(state.boxed_pokemon[0].species, BANKED, "box 1's contents did not survive the switch");
     println!("switched back to box {} — {:?} still banked", state.current_box + 1, BANKED);
 }
 
-/// **Task A6** — release a boxed Pokémon. Emulates ~3 min (≈7 s wall clock).
-///
-/// Release has no confirm-menu of its own: the mon list is followed straight by a YES/NO
-/// (`OnceReleasedText` → `YesNoChoice`), where the deposit/withdraw path gets a
-/// `DEPOSIT|WITHDRAW / STATS / CANCEL` box instead. Both are handled by the one driver.
+/// Task A6 — release a boxed Pokémon.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_release_a_pokemon() {
@@ -197,21 +166,8 @@ fn can_release_a_pokemon() {
     println!("released — party {}, box empty", state.pokemon.len());
 }
 
-/// **Task A7** — the full chain in one run, checking the counts at every stage, and the workstream's
-/// output fixture. Emulates ~6 min (≈14 s wall clock). Commit target: `postgame-pc-box.bin`.
-///
-/// Deposit → change box → change back → withdraw, with `(party, box, open box)` asserted between each.
-/// The interesting property is that the three operations compose: a mon banked in box 1 is still there
-/// after a detour through box 2, and comes back into the party unharmed.
-///
-/// **What the fixture is for.** It ends with the party *restored* — Slowpoke carries Strength and Dig,
-/// and nothing else in the party knows either — so this is `postgame-phase0.bin` plus two things a
-/// workstream can now rely on:
-///
-/// 1. **Box storage works and is initialised.** `BIT_HAS_CHANGED_BOXES` is set, so the SRAM boxes have
-///    already been emptied and no later `change_box` triggers the one-time `EmptyAllSRAMBoxes`.
-/// 2. **Party space is one step away.** `PolicyStep::deposit_pokemon(slot, map)` frees a slot at any
-///    Pokémon Center, so a stream that wants to hold more than six no longer has to arrange it here.
+/// Task A7 — the full chain in one run, checking the counts at every stage, and the workstream's
+/// output fixture.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_round_trip_a_pokemon_through_two_boxes() {
@@ -249,16 +205,7 @@ fn can_round_trip_a_pokemon_through_two_boxes() {
     fixture.save_state_named("src/pokemon/data/postgame-pc-box.bin").unwrap();
 }
 
-/// **Task A1** — the box reader decodes a `box_struct`, not just an empty box.
-///
-/// The probe printing `box1: empty` from every committed fixture is A1's stated observable, but an
-/// empty box is exactly what a reader with the offsets wrong would also print. So this plants two
-/// synthetic members in `wBoxMons` and reads them back.
-///
-/// The offsets under test are the ones a `box_struct` does *not* share with a `party_struct`: the
-/// level lives at **offset 3** (`BoxLevel`) where a party mon keeps a duplicate of its offset-33
-/// `Level`, and the struct stops after `PP` at 32 — read at a party mon's 44-byte stride, slot 1
-/// would land 11 bytes into slot 0's neighbour. Default tier: no emulation, only RAM.
+/// Task A1 — the box reader decodes a `box_struct`, not just an empty box.
 #[test]
 fn reads_a_boxed_pokemon_out_of_wram() {
     use crate::pokemon::move_name::PokemonMoveName;
@@ -310,8 +257,8 @@ fn reads_a_boxed_pokemon_out_of_wram() {
     assert_eq!(boxed[1].current_hp, 21);
     assert_eq!(boxed[1].moves[0].map(|m| m.name), Some(PokemonMoveName::WaterGun));
 
-    // `wBoxCount` is trusted only up to the box's capacity, so a corrupt count can't run off the end
-    // into `wBoxMonOT`. Fill the remaining slots first, or the read would stop at the first blank one.
+    // `wBoxCount` is trusted only up to the box's capacity, so a corrupt count can't run off the
+    // end into `wBoxMonOT`.
     for slot in 2..BOX_CAPACITY as u16 {
         write(&mut mmu, pokered_symbols::wBoxMons, slot * MON, PokemonSpecies::Omanyte as u8);
     }

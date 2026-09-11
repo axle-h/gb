@@ -1,29 +1,4 @@
 //! The CGB boot ROM's DMG-compatibility palettes.
-//!
-//! A cartridge whose header byte `0x143` has bit 7 clear is a DMG-only game. Run one on a Game Boy
-//! Color and the **boot ROM**, not the game, picks a three-palette set from the cartridge title and
-//! writes it into CGB palette RAM before handing over. That is the whole reason Pokémon Red is
-//! red-tinted on a CGB and greyscale on a DMG.
-//!
-//! # Where the tables come from
-//!
-//! [`tables`] is generated mechanically from **SameBoy's `BootROMs/cgb_boot.asm`** (`master`,
-//! fetched 2026-08-05) — a reimplementation of the boot ROM that assembles to the same data. It is
-//! the authoritative source the plan names; this gambatte checkout does **not** implement the
-//! feature at all (it renders DMG mode through a flat greyscale ramp, `video.cpp:126-128`), so it
-//! could not be used as a reference here.
-//!
-//! Two deliberate departures from that file, both noted where they occur: SameBoy's four
-//! "exclusive" palette combinations and two extra palettes are dropped, because they are SameBoy
-//! additions rather than boot-ROM data; and the `$80` flag on a combination index is stripped,
-//! because it selects boot *artwork*, not colour.
-//!
-//! # Not implemented: the button-combination overrides
-//!
-//! Holding a direction plus A/B during boot picks one of twelve alternate palettes
-//! (`KeyCombinationPalettes`). `gb` starts the cartridge directly rather than emulating the boot
-//! ROM, so there is no window during which a combination could be held. Skipped deliberately — it
-//! is a user-facing convenience, not accuracy, and nothing in the plan depends on it.
 
 mod tables;
 
@@ -44,10 +19,6 @@ pub struct BootPalettes {
 }
 
 /// The palette set a real CGB boot ROM would install for this cartridge.
-///
-/// Falls back to combination 0 — the boot ROM's own default — for a non-Nintendo cartridge or a
-/// title checksum that is not in the table, which is what the ROM does (`GetPaletteIndex`
-/// returns 0 from both `.notNintendo` and the end of `.searchLoop`).
 pub fn for_cartridge(rom: &[u8]) -> BootPalettes {
     let combination = combination_index(rom).unwrap_or(0);
     let [object0, object1, background] = COMBINATIONS[combination as usize];
@@ -59,21 +30,16 @@ pub fn for_cartridge(rom: &[u8]) -> BootPalettes {
     }
 }
 
-/// The title checksum: the low byte of the sum of header bytes `0x134..=0x143`. For
-/// `POKEMON RED` this is `0x14`.
+/// The title checksum: the low byte of the sum of header bytes `0x134..=0x143`. For `POKEMON RED`
+/// this is `0x14`.
 pub fn title_checksum(rom: &[u8]) -> u8 {
     rom.get(0x134..0x144)
         .map(|title| title.iter().fold(0u8, |sum, &b| sum.wrapping_add(b)))
         .unwrap_or(0)
 }
 
-/// What the boot ROM leaves in **`B`** when handing a DMG-only cartridge to CGB hardware: the
-/// title checksum for a first-party cartridge, `0x00` for anything else.
-///
-/// This is a register value rather than a palette, but it comes from the same two header checks
-/// — the checksum is computed by `GetPaletteIndex` and left in `hTitleChecksum`, which the boot
-/// ROM's last block loads into `B` (SameBoy `cgb_boot.asm`, `Preboot`). Keeping it here means the
-/// licensee rule lives in exactly one place. See [`crate::registers::RegisterSet::boot`].
+/// What the boot ROM leaves in `B` when handing a DMG-only cartridge to CGB hardware: the title
+/// checksum for a first-party cartridge, `0x00` for anything else.
 pub fn compatibility_b_register(rom: &[u8]) -> u8 {
     if is_nintendo(rom) { title_checksum(rom) } else { 0 }
 }
@@ -109,8 +75,7 @@ fn is_nintendo(rom: &[u8]) -> bool {
     }
 }
 
-/// Four consecutive colours starting at a **byte** offset into [`PALETTES`]. A handful of
-/// combinations start mid-palette on purpose and read across the boundary.
+/// Four consecutive colours starting at a byte offset into [`PALETTES`].
 fn colors_at(offset: u8) -> [u8; 8] {
     let first = offset as usize / 2;
     let mut bytes = [0u8; 8];
@@ -126,9 +91,7 @@ fn colors_at(offset: u8) -> [u8; 8] {
 mod tests {
     use super::*;
 
-    /// ⭐ The headline case. `POKEMON RED` has no CGB flag, so a real Game Boy Color colours it
-    /// from the title checksum alone. Every step is asserted, because the next agent should not
-    /// have to re-derive any of it.
+    /// The headline case.
     #[test]
     fn pokemon_red_resolves_to_combination_13() {
         let rom = crate::test_fixtures::POKERED;
@@ -154,7 +117,7 @@ mod tests {
     }
 
     /// The ambiguous tail: `TETRIS ATTACK` and `MOGURANYA` both check out at `0xB3`, and only the
-    /// 4th letter tells them apart. If the disambiguation is dropped, both land on the first match.
+    /// 4th letter tells them apart.
     #[test]
     fn the_fourth_letter_separates_duplicate_checksums() {
         fn resolve(title: &str, licensee_escape: bool) -> Option<u8> {

@@ -1,37 +1,5 @@
 //! Memory bank controllers — the cartridge hardware that decides which ROM bank sits at
 //! `0x4000..=0x7FFF` and what `0xA000..=0xBFFF` addresses.
-//!
-//! **D2.** Before this module `gb` had no MBC abstraction at all: [`crate::header::CartType`] was
-//! parsed and never dispatched on, and one hardcoded pseudo-mapper — MBC1's register layout with
-//! MBC3's 7-bit width — served every cartridge. It worked only because Pokémon Red is
-//! MBC3-no-RTC under 128 banks.
-//!
-//! # Why an enum and not `Box<dyn Mbc>`
-//!
-//! The plan specifies `Box<dyn Mbc>`. [`Mapper`] is an enum instead, and the reason is
-//! [`crate::mmu::MMU`]'s derives: it is `Clone + PartialEq`, and the save state needs
-//! `Encode + Decode`. A boxed trait object gives none of those — it would need a hand-written
-//! `Encode`/`Decode` (which the plan flags), plus `clone_box` and a snapshot-comparing
-//! `PartialEq`, all to buy an open set of mappers that a Game Boy emulator will never have. The
-//! enum derives all five. [`Mbc`] survives as the interface each mapper implements, which is what
-//! the trait was for.
-//!
-//! # The one rule worth internalising
-//!
-//! **Every mapper resolves its register to a physical bank differently, and the differences are
-//! not decoration.** Three of the six do something distinct with a bank-0 selection:
-//!
-//! | Mapper | register → bank | bank 0 reachable at `0x4000`? |
-//! |---|---|---|
-//! | MBC1 | `adjust(reg) & (n-1)`, `adjust(b) = b & 0x1F ? b : b\|1` | **yes**, by wrapping |
-//! | MBC3 | `max(reg & (n-1), 1)` | no — the remap is applied *after* the wrap |
-//! | MBC2 / MBC5 / HuC1 | `reg & (n-1)` | yes — no remap at all |
-//!
-//! ⚠️ MBC1 and MBC3 differ **only in the order of the same two operations**, and the order is
-//! observable. MBC1 remaps then wraps, so `4` on a four-bank cartridge is bank 0 — which is how
-//! blargg's combined `dmg_sound.gb` reaches the terminator in its bank 0 (plan task D1). MBC3
-//! wraps then remaps, so the same write is bank 1. Every one of these is gambatte's
-//! `setRombank()` for that mapper, `mem/cartridge.cpp`.
 
 use bincode::{Decode, Encode};
 
@@ -41,34 +9,25 @@ use crate::rtc::Rtc;
 /// What `0xA000..=0xBFFF` currently addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RamTarget {
-    /// Cartridge RAM, at this bank. Already wrapped against the banks that exist.
+    /// Cartridge RAM, at this bank.
     Bank(usize),
     /// One of MBC3's real-time-clock registers, selected by writing `0x08..=0x0C` to
-    /// `0x4000..=0x5FFF`. The clock is [`crate::rtc::Rtc`]; only the two cartridge types that
-    /// declare a timer ever report this, so on Pokémon Red it never occurs.
+    /// `0x4000..=0x5FFF`.
     Rtc(u8),
     /// Nothing is mapped: RAM is disabled, or the cartridge has none.
     None,
 }
 
 /// The interface every mapper implements. Deliberately narrow: a mapper sees writes to
-/// `0x0000..=0x7FFF` and answers two questions about the memory map. It never sees a read, because
-/// reads must stay on [`crate::mmu::MMU`]'s inlined fast path (C6) — the MMU caches the answers
-/// and refreshes them after each write.
+/// `0x0000..=0x7FFF` and answers two questions about the memory map.
 pub trait Mbc {
-    /// A guest write to `0x0000..=0x7FFF`. Address decoding is the mapper's own business:
-    /// ⚠️ five of the six decode `address >> 13 & 3`, but **MBC2 decodes `address & 0x6100`**,
-    /// because it looks at A8 as well.
+    /// A guest write to `0x0000..=0x7FFF`.
     fn rom_write(&mut self, address: u16, value: u8);
 
     /// The bank mapped at `0x4000..=0x7FFF`, already wrapped to a bank that exists.
     fn rom_bank(&self) -> usize;
 
-    /// The bank mapped at **`0x0000..=0x3FFF`**, which is not always 0.
-    ///
-    /// ⚠️ Only MBC1 moves it, and only in mode 1 on a cartridge big enough to use `BANK2` — but
-    /// that is exactly what mooneye's `mbc1/rom_8Mb` and `rom_16Mb` check, and gambatte does not
-    /// model it at all (`DefaultMbc::isAddressWithinAreaRombankCanBeMappedTo` hardcodes bank 0).
+    /// The bank mapped at `0x0000..=0x3FFF`, which is not always 0.
     fn rom_bank_low(&self) -> usize {
         0
     }
@@ -79,17 +38,16 @@ pub trait Mbc {
     /// Whether the guest has unlocked cartridge RAM by writing `0x?A` to `0x0000..=0x1FFF`.
     fn ram_enabled(&self) -> bool;
 
-    /// Whether cartridge RAM is MBC2's 512 half-bytes rather than ordinary 8-bit banks. The MMU
-    /// mirrors it every 512 bytes and returns the upper nibble as `1`s.
+    /// Whether cartridge RAM is MBC2's 512 half-bytes rather than ordinary 8-bit banks.
     fn ram_is_nibble_wide(&self) -> bool {
         false
     }
 
     /// Adopt the effective bank/enable state of a save state written before the `mbc` section
-    /// existed. See [`Mapper::restore_effective`].
+    /// existed.
     fn restore_effective(&mut self, rom_bank: usize, ram_bank: usize, ram_enabled: bool);
 
-    /// The cartridge's real-time clock, if it has one. Only MBC3's two timer types do (D5).
+    /// The cartridge's real-time clock, if it has one.
     fn rtc(&self) -> Option<&Rtc> {
         None
     }
@@ -100,7 +58,7 @@ pub trait Mbc {
 }
 
 /// How many banks a mapper wraps against. Always a power of two of at least 1, so the wrap is a
-/// mask — [`crate::mmu::pad_rom`] guarantees it for ROM, and every legal value of header byte
+/// mask — `crate::mmu::pad_rom` guarantees it for ROM, and every legal value of header byte
 /// `0x149` gives one for RAM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub struct BankCounts {
@@ -138,10 +96,6 @@ pub enum Mapper {
 
 impl Mapper {
     /// Select the mapper a cartridge header asks for.
-    ///
-    /// Cartridge types `gb` cannot emulate never reach here — [`CartHeader::parse`] rejects them
-    /// with [`crate::header::LoadError::UnsupportedMbc`] (D7/D8), rather than running them as
-    /// something else and looking like it worked.
     pub fn new(cart_type: CartType, banks: BankCounts) -> Self {
         use CartType::*;
         match cart_type {
@@ -180,13 +134,8 @@ impl Mapper {
         }
     }
 
-    /// Rebuild the mapper's registers from a save state that predates the `mbc` section — which is
-    /// all 91 committed fixtures.
-    ///
-    /// The `cart` section has always carried the **effective** bank numbers and the RAM-enable
-    /// flag, so this is exact for the mapper that matters (Pokémon Red's MBC3, whose register *is*
-    /// its effective bank below 64). It cannot recover an MBC1 mode bit or MBC5's ninth bank bit,
-    /// and it does not need to: no such state was ever written.
+    /// Rebuild the mapper's registers from a save state that predates the `mbc` section — which
+    /// is all 91 committed fixtures.
     pub fn restore_effective(&mut self, rom_bank: usize, ram_bank: usize, ram_enabled: bool) {
         self.as_mbc_mut().restore_effective(rom_bank, ram_bank, ram_enabled);
     }
@@ -231,21 +180,16 @@ impl Mbc for Mapper {
 }
 
 /// The four-way decode five of the six mappers share: `0x0000`, `0x2000`, `0x4000`, `0x6000`.
-/// Gambatte writes it `p >> 13 & 3` (`cartridge.cpp`), and so does this.
 fn region(address: u16) -> u8 {
     (address >> 13 & 3) as u8
 }
 
-/// Whether cartridge RAM is unlocked. Every mapper agrees on this one: the low nibble must be
-/// `0xA`, so `0x0A` and `0x1A` both unlock and `0x00` locks.
+/// Whether cartridge RAM is unlocked.
 fn unlocks_ram(value: u8) -> bool {
     value & 0x0F == 0x0A
 }
 
 /// No mapper at all: 32 KB of ROM, bank 1 permanently at `0x4000`.
-///
-/// Gambatte's `Mbc0` still honours the RAM-enable register, because a few `0x00` cartridges do
-/// carry RAM, so this does too.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct RomOnly {
     banks: BankCounts,
@@ -285,26 +229,12 @@ impl Mbc for RomOnly {
     }
 }
 
-/// **D3.** MBC1: a 5-bit `BANK1` register, a 2-bit `BANK2` register, and a mode bit that decides
-/// what `BANK2` is wired to.
-///
-/// ⚠️ **`BANK2` always supplies the top two bits of the bank at `0x4000`.** The mode bit does not
-/// take it away — it only decides whether `BANK2` *additionally* applies to `0x0000..=0x3FFF` and
-/// to the RAM bank:
-///
-/// | | `0x0000-0x3FFF` | `0x4000-0x7FFF` | RAM bank |
-/// |---|---|---|---|
-/// | mode 0 | bank 0 | `BANK2 << 5 \| BANK1` | 0 |
-/// | mode 1 | `BANK2 << 5` | `BANK2 << 5 \| BANK1` | `BANK2` |
-///
-/// ⚠️ **Gambatte models neither the low-bank mapping nor the mode-independence**: its mode-1 path
-/// is `rombank_ = data & 0x1F`, dropping `BANK2` from the high bank, and its `0x0000-0x3FFF` is
-/// always bank 0. Both are invisible below 512 KB and both fail mooneye's `rom_8Mb`/`rom_16Mb`.
-/// This follows Pan Docs, and those two ROMs are the adjudication.
+/// D3. MBC1: a 5-bit `BANK1` register, a 2-bit `BANK2` register, and a mode bit that decides what
+/// `BANK2` is wired to.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Mbc1 {
     banks: BankCounts,
-    /// The 5-bit register at `0x2000..=0x3FFF`. Stored raw; the 0-to-1 remap happens on use.
+    /// The 5-bit register at `0x2000..=0x3FFF`.
     bank1: usize,
     /// The 2-bit register at `0x4000..=0x5FFF`.
     bank2: usize,
@@ -323,8 +253,8 @@ impl Mbc for Mbc1 {
     fn rom_write(&mut self, address: u16, value: u8) {
         match region(address) {
             0 => self.ram_enabled = unlocks_ram(value),
-            // ⚠️ A zero write becomes 1 — and it is `BANK1` alone that is tested, which is why
-            // banks 0x00/0x20/0x40/0x60 are unreachable at 0x4000 on a large MBC1 cartridge.
+            // A zero write becomes 1 — and it is `BANK1` alone that is tested, which is why banks
+            // 0x00/0x20/0x40/0x60 are unreachable at 0x4000 on a large MBC1 cartridge.
             1 => self.bank1 = (value as usize & 0x1F).max(1),
             2 => self.bank2 = value as usize & 0x03,
             _ => self.ram_bank_mode = value & 1 != 0,
@@ -364,18 +294,7 @@ impl Mbc for Mbc1 {
     }
 }
 
-/// **D4.** MBC2: a 4-bit ROM-bank register and 512 **nibbles** of RAM built into the mapper.
-///
-/// ⚠️ **Two things here are unlike every other mapper.**
-///
-/// 1. **Only A8 decodes the register.** Within `0x0000..=0x3FFF`, A8 clear is the RAM-enable
-///    register and A8 set is the bank register — so `0x2000` enables RAM and `0x0100` selects a
-///    bank, which is the opposite of what the address ranges suggest. Gambatte's `p & 0x6100`
-///    catches only `0x0000` and `0x2100` and does nothing at all for the rest; mooneye's
-///    `mbc2/bits_romb` is the adjudication.
-/// 2. **The RAM is on the chip**: 512 half-bytes, mirrored throughout `0xA000..=0xBFFF`, with the
-///    upper nibble reading as `1`s. The header says zero banks, so [`crate::mmu::MMU`] allocates
-///    one regardless and masks through [`Mbc::ram_is_nibble_wide`].
+/// D4. MBC2: a 4-bit ROM-bank register and 512 nibbles of RAM built into the mapper.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Mbc2 {
     banks: BankCounts,
@@ -402,7 +321,7 @@ impl Mbc for Mbc2 {
     }
 
     fn rom_bank(&self) -> usize {
-        // Pan Docs: a zero selection is bank 1. Gambatte has no remap here at all.
+        // Pan Docs: a zero selection is bank 1.
         self.banks.wrap_rom(self.rom_bank.max(1))
     }
 
@@ -427,19 +346,14 @@ impl Mbc for Mbc2 {
     }
 }
 
-/// **D5.** MBC3: a 7-bit ROM-bank register, four RAM banks, and — on the `0x0F`/`0x10` cartridge
+/// D5. MBC3: a 7-bit ROM-bank register, four RAM banks, and — on the `0x0F`/`0x10` cartridge
 /// types — a real-time clock whose five registers replace RAM at `0xA000` when `0x08..=0x0C` is
-/// selected. The clock itself lives in [`crate::rtc::Rtc`].
-///
-/// ⭐ **This is Pokémon Red's mapper and therefore the live path.** `pokered.gbc` is `0x13`
-/// (MBC3+RAM+battery, *no* timer), 64 banks, 4 RAM banks — so `rtc` is `None` for it and none of
-/// the clock code runs.
+/// selected.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Mbc3 {
     banks: BankCounts,
     rom_bank: usize,
-    /// The raw `0x4000..=0x5FFF` register. Kept whole rather than masked, because `0x08..=0x0C`
-    /// selects a clock register rather than a RAM bank.
+    /// The raw `0x4000..=0x5FFF` register.
     ram_bank: usize,
     ram_enabled: bool,
     /// `Some` only for the two cartridge types that declare a timer.
@@ -473,7 +387,7 @@ impl Mbc for Mbc3 {
     }
 
     fn rom_bank(&self) -> usize {
-        // ⚠️ Wrap **then** remap — the opposite order to MBC1, so a wrap can never land on bank 0.
+        // Wrap then remap — the opposite order to MBC1, so a wrap can never land on bank 0.
         self.banks.wrap_rom(self.rom_bank).max(1)
     }
 
@@ -509,11 +423,8 @@ impl Mbc for Mbc3 {
     }
 }
 
-/// **D6.** MBC5: a **9-bit** ROM-bank register split across two halves of the `0x2000` range, and
-/// a 4-bit RAM-bank register.
-///
-/// ⚠️ **MBC5 does not remap bank 0**, so a game may legitimately map bank 0 at `0x4000` and see
-/// the same 16 KB twice. Every other mapper forces bank 1.
+/// D6. MBC5: a 9-bit ROM-bank register split across two halves of the `0x2000` range, and a 4-bit
+/// RAM-bank register.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Mbc5 {
     banks: BankCounts,
@@ -570,11 +481,7 @@ impl Mbc for Mbc5 {
     }
 }
 
-/// **D7.** HuC1: MBC1's shape with an infrared port where the RAM-enable register would be.
-///
-/// ⚠️ In mode 0 the 2-bit register is shifted **six** places into the ROM bank and *also* kept in
-/// the low bits (`bank << 6 | bank`), which is genuinely what gambatte does (`cartridge.cpp`
-/// `HuC1::setRombank`) — not a transcription slip. HuC1 cartridges are rare and untested here.
+/// D7. HuC1: MBC1's shape with an infrared port where the RAM-enable register would be.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct HuC1 {
     banks: BankCounts,
@@ -620,12 +527,7 @@ impl Mbc for HuC1 {
         }
     }
 
-    /// ⚠️ **Simplified, and the simplification is a known gap.** On a HuC1 the `0x0000..=0x1FFF`
-    /// register switches the *infrared port* in rather than switching RAM out, so gambatte keeps
-    /// reads enabled unconditionally and gates only writes. [`Mbc::ram_enabled`] is a single flag
-    /// that the MMU applies to both, so it cannot express that; this reports the real flag, which
-    /// keeps writes right and makes disabled *reads* return `0xFF` where hardware would return
-    /// data. No HuC1 cartridge is committed and nothing exercises it.
+    /// Simplified, and the simplification is a known gap.
     fn ram_enabled(&self) -> bool {
         self.ram_enabled
     }
@@ -645,9 +547,7 @@ mod tests {
         BankCounts { rom, ram }
     }
 
-    /// D1's acceptance trace, now owned by the mapper that actually has it. Blargg's combined
-    /// `dmg_sound.gb` is MBC1 with four banks, and its runner reaches its terminator by writing
-    /// `4` and landing on bank 0.
+    /// D1's acceptance trace, now owned by the mapper that actually has it.
     #[test]
     fn mbc1_wraps_a_bank_selection_onto_bank_zero() {
         let mut mbc = Mbc1::new(banks(4, 1));
@@ -657,7 +557,7 @@ mod tests {
         }
     }
 
-    /// ⚠️ The MBC1 hole: the aliasing tests the **low five bits**, so `0x20` is `0x21`, not `0x01`.
+    /// The MBC1 hole: the aliasing tests the low five bits, so `0x20` is `0x21`, not `0x01`.
     #[test]
     fn mbc1_aliases_bank_zero_of_each_thirty_two() {
         let mut mbc = Mbc1::new(banks(128, 0));
@@ -683,8 +583,8 @@ mod tests {
         assert_eq!(mbc.ram_target(), RamTarget::Bank(2), "mode 1: the register is the RAM bank");
     }
 
-    /// ⚠️ MBC3 applies its bank-0 remap **after** the wrap, so — unlike MBC1 — no selection can
-    /// reach bank 0. This is the live Pokémon Red path.
+    /// MBC3 applies its bank-0 remap after the wrap, so — unlike MBC1 — no selection can reach
+    /// bank 0.
     #[test]
     fn mbc3_can_never_select_bank_zero() {
         let mut mbc = Mbc3::new(banks(64, 4), false);
@@ -696,8 +596,7 @@ mod tests {
         assert_eq!(mbc.rom_bank(), 0x3F, "seven bits reach the register");
     }
 
-    /// The same write is bank 0 on MBC1 and bank 1 on MBC3. If this ever passes by accident, the
-    /// two orders have been collapsed into one.
+    /// The same write is bank 0 on MBC1 and bank 1 on MBC3.
     #[test]
     fn mbc1_and_mbc3_disagree_about_the_same_write() {
         let mut mbc1 = Mbc1::new(banks(4, 0));
@@ -723,7 +622,7 @@ mod tests {
         assert_eq!(with.ram_target(), RamTarget::Rtc(0x08));
     }
 
-    /// ⚠️ MBC2 decodes A8, so `0x2000` and `0x2100` do completely different things.
+    /// MBC2 decodes A8, so `0x2000` and `0x2100` do completely different things.
     #[test]
     fn mbc2_decodes_a8() {
         let mut mbc = Mbc2::new(banks(16, 1));
@@ -738,8 +637,8 @@ mod tests {
         assert!(mbc.ram_enabled());
     }
 
-    /// ⚠️ Divergence from gambatte, deliberate: Pan Docs says MBC2 treats a zero selection as 1,
-    /// gambatte has no remap at all. Phase D is scored against mooneye, which tests hardware.
+    /// Divergence from gambatte, deliberate: Pan Docs says MBC2 treats a zero selection as 1,
+    /// gambatte has no remap at all.
     #[test]
     fn mbc2_remaps_bank_zero() {
         let mut mbc = Mbc2::new(banks(16, 1));
@@ -747,8 +646,8 @@ mod tests {
         assert_eq!(mbc.rom_bank(), 1);
     }
 
-    /// ⚠️ The other deliberate divergence: MBC1's mode bit *routes* the 2-bit register, so
-    /// returning to mode 0 puts RAM back on bank 0. Gambatte leaves it where mode 1 left it.
+    /// The other deliberate divergence: MBC1's mode bit *routes* the 2-bit register, so returning
+    /// to mode 0 puts RAM back on bank 0.
     #[test]
     fn mbc1_mode_zero_puts_ram_back_on_bank_zero() {
         let mut mbc = Mbc1::new(banks(4, 4));

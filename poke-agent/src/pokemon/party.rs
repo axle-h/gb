@@ -35,8 +35,8 @@ impl PokemonParty {
         self.0.get_mut(index)
     }
 
-    /// Move the member at `index` to the front (slot 0), shifting the rest down one. No-op if out of
-    /// range or already at the front. Used to make a trained bench mon the battle lead.
+    /// Move the member at `index` to the front (slot 0), shifting the rest down one. No-op if out
+    /// of range or already at the front.
     pub fn move_to_front(&mut self, index: usize) {
         if index != 0 && index < self.0.len() {
             let m = self.0.remove(index);
@@ -76,4 +76,3 @@ impl<'a> IntoIterator for &'a PokemonParty {
         self.0.iter()
     }
 }
-

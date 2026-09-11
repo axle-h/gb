@@ -1,9 +1,4 @@
 //! Reading graphics straight out of the cartridge the binary already carries.
-//!
-//! The primitives [`crate::pokemon::badge_gfx`], [`crate::pokemon::mon_gfx`] and the favicon all
-//! sit on: where a ROM pointer's bytes actually are, and how to turn a rectangle of 2bpp tiles into
-//! shade indices. Nothing here knows what any of it looks like — colour is the caller's business,
-//! which is why `src/web/` is where the palettes live.
 
 use crate::pokemon::roms::POKERED;
 use crate::pokemon::symbols::{DmgBank, DmgPointer};
@@ -14,11 +9,6 @@ pub const TILE_BYTES: usize = 16;
 const BANK_SIZE: usize = 0x4000;
 
 /// A ROM pointer as a slice running to the end of its bank.
-///
-/// ⚠️ **Bank 0 lives at the bottom of the address space; every other bank is *windowed* at
-/// `0x4000`**, so its addresses need the window subtracted before they are offsets. Getting that
-/// wrong for a bank-0 pointer reads 16 KB past the data and produces a plausible-looking sprite of
-/// something else entirely.
 pub fn rom_slice(pointer: DmgPointer) -> &'static [u8] {
     let DmgBank::ROM { bank } = pointer.bank else {
         panic!("{pointer} is not a ROM pointer");
@@ -28,13 +18,8 @@ pub fn rom_slice(pointer: DmgPointer) -> &'static [u8] {
     &POKERED[bank * BANK_SIZE + (pointer.address as usize - window)..(bank + 1) * BANK_SIZE]
 }
 
-/// A `tiles_wide × tiles_high` rectangle of consecutive 2bpp tiles, as shade indices `0` (lightest)
-/// to `3` (darkest), row-major over the whole rectangle.
-///
-/// ⚠️ **Tiles are taken in row-major order** — left to right, then down — which is what `rgbgfx`
-/// emits unless pokered's Makefile passes it `--columns`, and it does not for either the badge sheet
-/// or the overworld sprites. The *decompressed* Pokémon pics are the exception and are column-major;
-/// see [`crate::pokemon::mon_gfx`].
+/// A `tiles_wide × tiles_high` rectangle of consecutive 2bpp tiles, as shade indices `0`
+/// (lightest) to `3` (darkest), row-major over the whole rectangle.
 pub fn tile_grid_shades(first_tile: DmgPointer, tiles_wide: usize, tiles_high: usize) -> Vec<u8> {
     let width = tiles_wide * 8;
     let bytes = rom_slice(first_tile);
@@ -51,13 +36,6 @@ pub fn tile_grid_shades(first_tile: DmgPointer, tiles_wide: usize, tiles_high: u
 }
 
 /// One 8×8 tile of 2bpp, as shade indices `0` (lightest) to `3` (darkest), row-major.
-///
-/// The inner loop of [`tile_grid_shades`], on its own because a **tileset** is not a rectangle of
-/// consecutive tiles: a map's blockset is an indirection, `block id → 16 tile ids → 16 tiles
-/// scattered through the sheet`, so the map renderer asks for one tile at a time by index.
-///
-/// # Panics
-/// If `tile` is not exactly [`TILE_BYTES`] long.
 pub fn decode_tile(tile: &[u8]) -> [u8; 64] {
     assert_eq!(tile.len(), TILE_BYTES, "a 2bpp tile is {TILE_BYTES} bytes");
     let mut pixels = [0u8; 64];
@@ -71,9 +49,9 @@ pub fn decode_tile(tile: &[u8]) -> [u8; 64] {
     pixels
 }
 
-/// The overworld Poké Ball — the sprite an item lying on the floor is drawn with, 2×2 uncompressed
-/// tiles. It is the favicon, for want of anything else on this cartridge that says "Pokémon" in
-/// sixteen pixels and is not a logo somebody owns.
+/// The overworld Poké Ball — the sprite an item lying on the floor is drawn with, 2×2
+/// uncompressed tiles. It is the favicon, for want of anything else on this cartridge that says
+/// "Pokémon" in sixteen pixels and is not a logo somebody owns.
 pub const BALL_PX: usize = 16;
 
 pub fn poke_ball_shades() -> Vec<u8> {
@@ -85,9 +63,7 @@ mod tests {
     use super::*;
     use crate::pokemon::symbols::pokered_symbols;
 
-    /// Bank 0 is the case the windowing gets wrong. Nothing in the crate reads a bank-0 pointer
-    /// today, so this checks the contract rather than a caller: a bank-0 address is a raw file
-    /// offset, and the same address in bank 1 is 16 KB further on than the naive arithmetic says.
+    /// Bank 0 is the case the windowing gets wrong.
     #[test]
     fn bank_zero_is_not_windowed_and_every_other_bank_is() {
         let bank_0 = DmgPointer { bank: DmgBank::ROM { bank: 0 }, address: 0x0100 };
@@ -122,8 +98,7 @@ mod tests {
     }
 
     /// The 2×2 assembly, checked without trusting the decoder: quadrant `n` must be tile `n`, in
-    /// reading order. Column-major would put the top-right quadrant where the bottom-left goes,
-    /// which on a symmetrical sprite like this one is invisible.
+    /// reading order.
     #[test]
     fn quadrants_are_four_consecutive_tiles_in_reading_order() {
         let shades = tile_grid_shades(pokered_symbols::PokeBallSprite, 2, 2);

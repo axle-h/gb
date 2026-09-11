@@ -105,7 +105,7 @@ impl PokemonEncoding for MMU {
             species_pointer += 1;
         }
 
-        // write list end
+        // Write list end
         self.write_pointer(&species_pointer, 0xFF)
     }
 
@@ -159,15 +159,6 @@ impl PokemonEncoding for MMU {
     fn read_game_mode(&self) -> GameMode {
         // Naming screen detection must come before the wIsInBattle check: in Pokémon Red the
         // nickname prompt is shown inside the catch routine while wIsInBattle is still 1.
-        // wNamingScreenType ($D07D) is aliased as wPartyMenuTypeOrMessageID and
-        // wTempTilesetNumTiles, so it can hold arbitrary values during battle/menu code.
-        // Four conditions together uniquely identify a freshly opened naming screen:
-        //   1. wNamingScreenType == 2  (NAME_MON_SCREEN exactly; rules out aliased junk)
-        //   2. wNamingScreenSubmitName == 0  (reset at screen open, set to 1 on submit)
-        //   3. wFontLoaded == 1  (set by the text box that led to the YES/NO choice)
-        //   4. wStringBuffer[0] == "@" (0x50)  (DisplayNamingScreen inits buffer empty)
-        //      — rules out the false positive when the agent has already written a name
-        //      into the buffer before the naming screen has been submitted.
         let font_loaded_byte = self.read_pointer(&pokered_symbols::wFontLoaded) & 0x01;
         if self.read_pointer(&pokered_symbols::wNamingScreenType) == 2
             && self.read_pointer(&pokered_symbols::wNamingScreenSubmitName) == 0
@@ -177,34 +168,12 @@ impl PokemonEncoding for MMU {
             return GameMode::NamingScreen;
         }
 
-        // ; lost battle, this is -1
-        // ; no battle, this is 0
-        // ; wild battle, this is 1
-        // ; trainer battle, this is 2
+        // ; lost battle, this is -1 ; no battle, this is 0 ; wild battle, this is 1 ; trainer
+        // battle, this is 2
         match self.read_pointer(&pokered_symbols::wIsInBattle) {
             1 => {
-                // The nickname screen appears inside the catch routine while wIsInBattle is
-                // still 1.  Conditions 3 (wFontLoaded) and 4 (wStringBuffer) are dropped:
-                // the naming screen's own render loop may reset wFontLoaded, and A-mashing
-                // from the battle state may have already changed wStringBuffer[0] before this
-                // tick runs.
-                //
-                // ⚠️ **Conditions 1+2 are NOT specific enough**, which is what the comment here used
-                // to claim. `wNamingScreenType` is aliased with `wPartyMenuTypeOrMessageID`, and
-                // `BATTLE_PARTY_MENU` is **`$02`** — the same value as `NAME_MON_SCREEN`
-                // (`constants/menu_constants.asm:70,92`). So *every* in-battle party menu — a
-                // voluntary switch, a potion's "use on which POKéMON?", the "Use next POKéMON?" after
-                // a faint — reads as a naming screen. The agent then writes a nickname for whatever
-                // is already out and pulses START at a battle waiting for a move, for ever.
-                //
-                // It was latent because it needs the agent to *sample* inside that window, and
-                // workstream J (battle animations off) shifted the frame timing enough to hit it:
-                // two previously-green legs died and the only clue in either log was `name:Venusaur`.
-                //
-                // The discriminator is the naming grid's own **geometry**. `DisplayNamingScreen`
-                // writes `wTopMenuItemY = 3`, `wTopMenuItemX = 1`
-                // (`engine/menus/naming_screen.asm:101-104`); `PartyMenuInit` writes (0,1). Unlike the
-                // aliased type byte, those two are not shared.
+                // The nickname screen appears inside the catch routine while wIsInBattle is still
+                // 1.
                 let naming_grid = self.read_pointer(&pokered_symbols::wTopMenuItemX) == 1
                     && self.read_pointer(&pokered_symbols::wTopMenuItemY) == 3;
                 if self.read_pointer(&pokered_symbols::wNamingScreenType) == 2
@@ -217,15 +186,13 @@ impl PokemonEncoding for MMU {
             },
             2 => GameMode::TrainerBattle,
             _ => {
-                // wFontLoaded infers a text box is open
-                // it is set in DisplayTextIDInit and reset in ReloadMapSpriteTilePatterns
+                // WFontLoaded infers a text box is open it is set in DisplayTextIDInit and reset
+                // in ReloadMapSpriteTilePatterns
                 let font_loaded = self.read_pointer(&pokered_symbols::wFontLoaded) & 0x01 == 1;
                 if font_loaded {
-                    // TODO menu vs dialogue
-                    // e.g. the game seems to set the textbox type like this for a message box
-                    // 	ld a, MESSAGE_BOX
-                    // 	ld [wTextBoxID], a
-                    // see TextBoxFunctionTable:
+                    // TODO menu vs dialogue e.g. the game seems to set the textbox type like this
+                    // for a message box ld a, MESSAGE_BOX ld [wTextBoxID], a see
+                    // TextBoxFunctionTable:
                     GameMode::TextBox
                 } else {
                     let flags5 = self.read_pointer(&pokered_symbols::wStatusFlags5);
@@ -235,28 +202,20 @@ impl PokemonEncoding for MMU {
                     let scripted_movement_active = flags5 & 0x80 != 0;
                     let joy_ignore = self.read_pointer(&pokered_symbols::wJoyIgnore);
 
-                    // wScriptedNPCWalkCounter is used by DoScriptedNPCMovement to pace NPC walk
-                    // animations. It cycles 8→1 and never resets to 0, so we require
-                    // BIT_SCRIPTED_MOVEMENT_STATE to be set to avoid false positives from its
-                    // leftover non-zero value after the movement has finished.
+                    // WScriptedNPCWalkCounter is used by DoScriptedNPCMovement to pace NPC walk
+                    // animations.
                     if self.read_pointer(&pokered_symbols::wScriptedNPCWalkCounter) != 0
                         && scripted_movement_active
                     {
                         return GameMode::Script;
                     }
                     // BIT_SCRIPTED_NPC_MOVEMENT (bit 0) is set by MoveSprite for scripted NPC
-                    // walks (e.g. Oak running toward the player in Pallet Town). It can remain
-                    // stuck after the player warps away mid-walk, so we also require that the
-                    // D-pad bits of wJoyIgnore (PAD_CTRL_PAD = 0xF0) are set — true when the
-                    // player is frozen by an active script, but 0 once they are free.
+                    // walks (e.g. Oak running toward the player in Pallet Town).
                     if flags5 & 0x01 != 0 && joy_ignore & 0xF0 != 0 {
                         return GameMode::Script;
                     }
-                    // wCurOpponent is set by trainer encounter scripts (e.g. rival in Oak's lab)
-                    // before InitBattle is called. For trainer battles wIsInBattle is only set to 2
-                    // *after* the transition animation, so this window would otherwise look like
-                    // Overworld. Treat it as Script so the agent doesn't request an action during
-                    // the animation.
+                    // WCurOpponent is set by trainer encounter scripts (e.g. rival in Oak's lab)
+                    // before InitBattle is called.
                     if self.read_pointer(&pokered_symbols::wCurOpponent) != 0 {
                         return GameMode::Script;
                     }
@@ -266,11 +225,7 @@ impl PokemonEncoding for MMU {
         }
     }
 
-
-
 }
-
-
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, strum_macros::Display, Default)]
 pub enum GameMode {
@@ -283,10 +238,8 @@ pub enum GameMode {
     #[strum(serialize = "Text Box")]
     TextBox,
     /// A map script or NPC scripted walk is running (`wCurrentMapScriptFlags` is non-zero).
-    /// The player is frozen; the agent should advance the script by pressing A.
     Script,
     /// The Pokémon nickname entry screen (`DisplayNamingScreen`) is active.
-    /// Detected when `wNamingScreenType > 0` and `wNamingScreenSubmitName == 0`.
     #[strum(serialize = "Naming Screen")]
     NamingScreen,
 }

@@ -1,6 +1,6 @@
 use bincode::{Decode, Encode};
 
-/// https://gbdev.io/pandocs/The_Cartridge_Header.html#0147--cartridge-type
+/// Https://gbdev.io/pandocs/The_Cartridge_Header.html#0147--cartridge-type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::FromRepr, Decode, Encode)]
 #[repr(u8)]
 pub enum CartType {
@@ -34,30 +34,17 @@ pub enum CartType {
 
 impl CartType {
     /// Whether the cartridge carries a real-time clock chip.
-    ///
-    /// Only two types declare one, and it matters because the clock's registers replace cartridge
-    /// RAM at `0xA000` when `0x08..=0x0C` is selected — so on a cartridge *without* a timer, that
-    /// same selection is an ordinary RAM-bank number and wraps. `pokered.gbc` is `0x13`, which has
-    /// no timer.
     pub fn has_rtc(self) -> bool {
         matches!(self, CartType::NBC3TimerBattery | CartType::MBC3TimerRamBattery)
     }
 
     /// Whether the RAM this cartridge addresses is built into the mapper rather than described by
     /// header byte `0x149`.
-    ///
-    /// MBC2 is the only one: it has 512 nibbles on the chip and declares **zero** banks, so a
-    /// bank has to be allocated for it regardless of what the header says.
     pub fn has_builtin_ram(self) -> bool {
         matches!(self, CartType::MBC2 | CartType::MBC2Battery)
     }
 
     /// Whether `gb` emulates this mapper at all.
-    ///
-    /// **D7.** The rejected set is gambatte's (`cartridge.cpp:592-615`): refusing to load is
-    /// honest, where running MMM01 as though it were MBC1 produces a machine that looks like it
-    /// works and is quietly wrong. `RomOnly`, MBC1, MBC2, MBC3, MBC5 and HuC1 are emulated; the
-    /// multi-game, sensor and camera mappers are not.
     pub fn is_emulated(self) -> bool {
         use CartType::*;
         !matches!(
@@ -91,19 +78,13 @@ pub struct CartHeader {
 }
 
 /// Why a cartridge could not be loaded.
-///
-/// **D8.** This replaces `Result<_, String>`. Only two things are genuinely fatal — the image is
-/// too small to hold a header, and the mapper is one `gb` does not emulate. Everything the old
-/// code rejected besides those was **a bug**: real cartridges hit those paths. See
-/// [`CartHeader::parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadError {
     /// Smaller than the 336-byte header, so there is nothing to parse.
     TooSmall { len: usize },
     /// Byte `0x147` is not a cartridge type this build knows at all.
     UnknownCartType(u8),
-    /// A mapper `gb` recognises but cannot emulate. Gambatte rejects these at load rather than
-    /// mis-emulating them (`cartridge.cpp:592-615`), and so does this.
+    /// A mapper `gb` recognises but cannot emulate.
     UnsupportedMbc(CartType),
 }
 
@@ -125,19 +106,6 @@ impl std::error::Error for LoadError {}
 
 impl CartHeader {
     /// Parse the cartridge header at `0x0134..=0x014F`.
-    ///
-    /// ⚠️ **Three things here used to reject perfectly valid cartridges**, and every one of them
-    /// was found by trying to run somebody else's test ROMs:
-    ///
-    /// 1. **The title was decoded as UTF-8.** Real headers put the manufacturer code and the CGB
-    ///    flag *inside* `0x134..=0x143`, so bytes like `0x80` and `0xC0` land in the slice and the
-    ///    decode fails. It is a fixed-width byte field, not a string; it is filtered, not decoded.
-    /// 2. **ROM-size bytes `0x52`, `0x53` and `0x54` were rejected.** They are legal. The value is
-    ///    now advisory anyway — [`crate::mmu::MMU`] derives the real bank count from the file
-    ///    length (D1), because cartridges lie about this field.
-    /// 3. **An unknown RAM size was rejected.** Now it defaults, because gambatte's own test ROMs
-    ///    declare `0x147 = 0x03` (MBC1+RAM) with `0x149 = 0x00`, and dropping every SRAM write is
-    ///    a far worse failure than allocating four banks nobody uses.
     pub fn parse(data: &[u8]) -> Result<Self, LoadError> {
         if data.len() < 0x0150 {
             return Err(LoadError::TooSmall { len: data.len() });
@@ -166,7 +134,7 @@ impl CartHeader {
             .trim_end()
             .to_string();
 
-        // Advisory only — see the doc comment. Anything out of range is reported as the minimum.
+        // Advisory only — see the doc comment.
         let rom_banks = match data[0x0148] {
             value @ 0x00..=0x08 => 1 << (value + 1),
             0x52 => 72,
@@ -185,8 +153,7 @@ impl CartHeader {
                 0x03 => 4,
                 0x04 => 16,
                 0x05 => 8,
-                // Unknown. Four banks is the common case and costs 32 KB; refusing to load, or
-                // allocating none and silently dropping every write, are both worse.
+                // Unknown.
                 _ => 4,
             }
         };
@@ -195,11 +162,6 @@ impl CartHeader {
     }
 
     /// Whether byte `0x14D` agrees with the header it covers.
-    ///
-    /// The boot ROM refuses to start a cartridge that fails this, but `gb` does not run a boot
-    /// ROM, so it is **advisory** — reported by [`CartHeader::parse`]'s caller as a warning rather
-    /// than enforced. Plenty of homebrew and test ROMs ship a wrong one and run fine on hardware
-    /// with a flash cart.
     pub fn checksum_valid(data: &[u8]) -> bool {
         let Some(slice) = data.get(0x0134..0x014D) else { return false };
         let sum = slice.iter().fold(0u8, |acc, &b| acc.wrapping_sub(b).wrapping_sub(1));
@@ -242,9 +204,7 @@ mod tests {
         assert_eq!(header.ram_banks(), 0); // No RAM
     }
 
-    /// A header with the bytes a real cartridge puts there. `0x134..=0x142` holds the title *and*
-    /// the manufacturer code, so high bytes land in it — and the old UTF-8 decode rejected the
-    /// whole cartridge for it.
+    /// A header with the bytes a real cartridge puts there.
     #[test]
     fn a_title_with_non_ascii_bytes_still_parses() {
         let mut rom = crate::test_fixtures::POKERED.to_vec();
@@ -254,7 +214,6 @@ mod tests {
         assert_eq!(header.title(), "POKEMON RED", "the title stops at the first non-printable");
     }
 
-    /// ⚠️ `0x52`, `0x53` and `0x54` are legal ROM sizes and used to be rejected outright.
     #[test]
     fn the_odd_rom_sizes_are_legal() {
         for (byte, expected) in [(0x52, 72), (0x53, 80), (0x54, 96)] {
@@ -265,8 +224,7 @@ mod tests {
         }
     }
 
-    /// An unknown RAM size defaults rather than failing. Gambatte's own test ROMs declare
-    /// `0x147 = 0x03` with `0x149 = 0x00`, and dropping every SRAM write is the worse failure.
+    /// An unknown RAM size defaults rather than failing.
     #[test]
     fn an_unknown_ram_size_defaults() {
         let mut rom = crate::test_fixtures::POKERED.to_vec();
@@ -283,7 +241,7 @@ mod tests {
         assert_eq!(CartHeader::parse(&rom).expect("loads").ram_banks(), 1);
     }
 
-    /// **D7.** A mapper `gb` cannot emulate is refused, not run as something else.
+    /// D7.
     #[test]
     fn an_unsupported_mapper_is_rejected() {
         let mut rom = crate::test_fixtures::POKERED.to_vec();
@@ -303,7 +261,7 @@ mod tests {
         assert_eq!(CartHeader::parse(&[0; 0x100]), Err(LoadError::TooSmall { len: 0x100 }));
     }
 
-    /// **D8.** The fallible constructor reports rather than panics.
+    /// D8.
     #[test]
     fn try_dmg_reports_a_bad_cartridge() {
         let mut rom = crate::test_fixtures::POKERED.to_vec();
@@ -314,7 +272,6 @@ mod tests {
     }
 
     /// Every committed ROM has a valid header checksum, so the load-time warning stays quiet.
-    /// This also pins the algorithm: five independent ROMs agreeing is not a coincidence.
     #[test]
     fn the_committed_roms_all_checksum() {
         for (name, rom) in [

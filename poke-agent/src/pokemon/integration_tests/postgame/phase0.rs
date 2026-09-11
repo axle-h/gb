@@ -1,21 +1,9 @@
-//! Phase 0 of `docs/postgame-coverage-plan.md` — the foundation every workstream builds on.
 
 use super::super::*;
 use crate::pokemon::encoding::GameMode;
 
-/// Drive `post-hall-of-fame.bin` forward until the player is standing in a playable overworld again,
-/// and return the state it lands in.
-///
-/// The Hall of Fame is **not** a playable state, which is the thing the plan got wrong: pokered's
-/// `HallOfFameResetEventsAndSaveScript` runs the ceremony and the credits, saves, then does
-/// `WaitForTextScrollButtonPress` → `jp Init` — a soft reset to the title screen. The player has to
-/// come back in through the main menu, and `main_menu.asm:116-125` special-cases exactly this: with
-/// `wNumHoFTeams != 0` and a saved `wCurMap == HALL_OF_FAME`, CONTINUE does a dungeon warp instead of
-/// restoring the saved position, which is how a Champion wakes up back home.
-///
-/// No title-screen or main-menu driver is needed for any of it: CONTINUE is the first entry, so a
-/// plain A-mash carries the whole sequence. Mashing stops the moment the overworld comes back on a
-/// map that isn't the Hall of Fame, so nothing gets talked to on arrival.
+/// Drive `post-hall-of-fame.bin` forward until the player is standing in a playable overworld
+/// again, and return the state it lands in.
 pub fn drive_out_of_hall_of_fame(fixture: &mut TestFixture) -> GameState {
     let mut tick = 0u32;
     loop {
@@ -37,29 +25,7 @@ pub fn drive_out_of_hall_of_fame(fixture: &mut TestFixture) -> GameState {
     }
 }
 
-/// **The end of the game is noticed, once, at the frame the ceremony starts.**
-///
-/// `post-hall-of-fame.bin` is captured on *arrival* at the map, and — this is the thing to know
-/// before reading the assertions — `wNumHoFTeams` is still **0** there. `scripts/HallOfFame.asm`
-/// puts three script stages between arriving and the counter moving: the walk-in
-/// (`HallOfFameDefaultScript`), Oak's congratulation, then `HallOfFameResetEventsAndSaveScript` →
-/// `predef HallOfFamePC` → `AnimateHallOfFame`, which increments it on its first frame. So the
-/// fixture is the *seed* for this test, a few emulated seconds short of the edge, and a version of
-/// this test that asserted against it as loaded would assert nothing at all.
-///
-/// What is pinned:
-///
-/// - the event fires, **before** the credits and while the map is still the Hall of Fame — the
-///   record has to be banked while the winning party is still in memory, not three minutes later
-///   after a soft reset has cleared WRAM;
-/// - it fires **once**, however long the ceremony runs;
-/// - and an agent seeded from a state that has already won says **nothing**, which is what stops a
-///   nightly resume from re-announcing a victory that happened last week.
-///
-/// **In the default tier**, unusually for anything in this module: measured at 1.7 s, against a tier
-/// that runs in about twenty. It buys the only proof against the real ROM that the one signal this
-/// whole feature hangs off is read from the right byte at the right frame, and a detector that is
-/// wrong here is wrong in a way no unit test can see.
+/// The end of the game is noticed, once, at the frame the ceremony starts.
 #[test]
 fn the_hall_of_fame_is_announced_once_when_the_ceremony_starts() {
     let mut fixture = TestFixture::new(
@@ -116,8 +82,7 @@ fn the_hall_of_fame_is_announced_once_when_the_ceremony_starts() {
         );
     }
 
-    // ⚠️ And a fresh agent seeded from a state that has already won is silent. This is the whole
-    // reason the baseline is `Option<u8>` seeded from RAM rather than a `u8` starting at zero.
+    // And a fresh agent seeded from a state that has already won is silent.
     let won = fixture.gb.save_state().expect("a state past the increment");
     let mut resumed = TestFixture::new(&won, Duration::from_mins(1), vec![]);
     for _ in 0..500 {
@@ -129,45 +94,11 @@ fn the_hall_of_fame_is_announced_once_when_the_ceremony_starts() {
     }
 }
 
-/// ⭐ **W1 — winning the game does not hand the world back, and the agent must stop playing it.**
-///
-/// `scripts/HallOfFame.asm` increments `wNumHoFTeams` on the ceremony's first frame and only then
-/// runs the parade, the credits, `SaveGameData`, `WaitForTextScrollButtonPress` and **`jp Init`** —
-/// a whole-cartridge reset. Measured from this fixture, that is **169 seconds of game time** in
-/// which `wCurMap` still reads `HallOfFame` and the player's coordinates still read (4, 2), so
-/// `actions()` happily mints the room's two exit warps for a player who is watching the credits.
-///
-/// Before `PokemonAgent::ending` existed the agent walked to them: **15 walks in 900 s** here, every
-/// one abandoned by the 60-second movement bound, and a C3 sweep that ran past the terminus spent
-/// **197 turns** on it — its busiest map of the whole run, the two exits tried 98 and 97 times.
-/// ⚠️ The watchdog cannot catch that: it fires on emulated *silence*, and an agent walking into a
-/// wall and giving up every minute is not silent.
-///
-/// ⚠️ **What is asserted is the reset, not the room.** The Hall of Fame is a legitimate place to
-/// stand — the scripted route walks into it, and the one action started before the announcement
-/// below is correct — so a `Map::HallOfFame` special case would be both wrong and unable to see the
-/// thing that is actually happening. The test therefore insists the run really reached the title
-/// screen (`a_game_is_loaded` goes false) before it believes the silence means anything.
-///
-/// ⚠️ **A bare `PokemonAgent`, driven through `agent.run`** — `host.rs` is what makes this
-/// survivable in the product, by archiving the run and starting the next one at the announcement,
-/// and this is the layer underneath that ordering rather than the one that depends on it.
-///
-/// ⚠️ **The A-mash is the harness, not the agent, and it is here because the ending will not finish
-/// without one.** `HallOfFameResetEventsAndSaveScript` ends on `WaitForTextScrollButtonPress`, which
-/// waits on A or B, so something has to press it — `drive_out_of_hall_of_fame` above does the same
-/// thing for the same reason. That was **already true before this change**: measured on the
-/// unmodified agent, 900 s of game time left alone with `RandomPolicy` never reached `jp Init`
-/// either, because a walk presses directions and never A. So going quiet costs the ceremony nothing
-/// it used to have. What the agent must *not* do is press A here of its own accord: the screen this
-/// lands on is the title menu, and an agent mashing at NEW GAME would erase the save it just wrote.
-///
-/// **In the default tier**, for the reason the announcement test above is: ~1 s, and it is the only
-/// proof against the real ROM that the agent goes quiet at the right moment.
+/// Winning the game does not hand the world back, and the agent must stop playing it.
 #[test]
 fn the_agent_stops_playing_a_world_the_cartridge_has_reset() {
-    // `RandomPolicy` answers every overworld turn it is offered, so a single quiet tick here is the
-    // agent declining to ask rather than a policy declining to answer.
+    // `RandomPolicy` answers every overworld turn it is offered, so a single quiet tick here is
+    // the agent declining to ask rather than a policy declining to answer.
     let mut fixture = TestFixture::with_policy(
         include_bytes!("../../data/post-hall-of-fame.bin"),
         Duration::from_mins(20),
@@ -177,9 +108,7 @@ fn the_agent_stops_playing_a_world_the_cartridge_has_reset() {
     let (mut won, mut reset) = (false, false);
     let (mut before, mut after) = (0usize, 0usize);
     let mut tick = 0u32;
-    // Until the world comes back: a real overworld on some map other than the one being left. That
-    // is `drive_out_of_hall_of_fame`'s own exit condition, and the window it closes is the whole of
-    // what this test is about — everything the agent does after it is ordinary play in Pallet Town.
+    // Until the world comes back: a real overworld on some map other than the one being left.
     loop {
         let (mode, map) = {
             let api = fixture.api();
@@ -193,14 +122,9 @@ fn the_agent_stops_playing_a_world_the_cartridge_has_reset() {
             if tick % 2 == 0 { api.press_button(JoypadButton::A); } else { api.release_all_buttons(); }
         }
         tick += 1;
-        // ⚠️ **Read before the step, and stated as the same two phases the agent uses**, because
-        // the window is not "after the announcement": it opens at the announcement and closes when
-        // the cartridge has reset *and* a game has been loaded again. `wCurMap` alone will not do
-        // it — CONTINUE restores the map the save was written on, which was the Hall of Fame, so for
-        // a few ticks after the load the old room is back in RAM legitimately while the special warp
-        // to Pallet Town runs. A walk issued there is the ordinary map-transition case (the agent
-        // abandons it when the map changes) and not the thing under test; before this change there
-        // were fifteen walks and none of them was that one.
+        // Read before the step, and stated as the same two phases the agent uses, because the
+        // window is not "after the announcement": it opens at the announcement and closes when
+        // the cartridge has reset *and* a game has been loaded again.
         let loaded = fixture.api().a_game_is_loaded();
         if won && !loaded { reset = true }
         let in_the_window = won && !(reset && loaded);
@@ -216,15 +140,12 @@ fn the_agent_stops_playing_a_world_the_cartridge_has_reset() {
     }
 
     assert!(won, "the ceremony never started, so this test proved nothing");
-    // ⚠️ Without this the test passes on a run that simply sat in the Hall of Fame for ten minutes.
+    // Without this the test passes on a run that simply sat in the Hall of Fame for ten minutes.
     assert!(reset, "the cartridge never reached `jp Init`, so the window under test never opened");
     assert!(before <= 2, "{before} walks before the announcement — the room is small");
     assert_eq!(after, 0, "the agent started {after} walks across a room the player had left");
 
-    // ⭐ **And it comes back.** The latch clears on the save being loaded, not on a `restart`, so an
-    // agent that drives its own way out of the credits is playing again on the other side — which is
-    // what `can_walk_out_of_the_hall_of_fame` depends on and what a latch that only `restart` could
-    // clear would have broken.
+    // And it comes back.
     let state = fixture.game_state();
     assert_eq!(state.map.map, Map::PalletTown, "the reset lands outside the player's own front door");
     let mut played = 0usize;
@@ -236,12 +157,7 @@ fn the_agent_stops_playing_a_world_the_cartridge_has_reset() {
     assert!(played > 0, "the agent never started playing again after the world came back");
 }
 
-/// **Task 0.35** — the postgame root fixture. Emulates ~3 min of game time (≈8 s wall clock).
-///
-/// `post-hall-of-fame.bin` is captured on *arrival* in the Hall of Fame, so it is three minutes of
-/// ceremony, credits and a soft reset away from anything a workstream can drive. This produces the
-/// state §4.2 of the plan assumed that file already was: the player standing in the overworld with
-/// everything won and nothing left to do. Commit target: `postgame-post-credits.bin`.
+/// Task 0.35 — the postgame root fixture.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_walk_out_of_the_hall_of_fame() {
@@ -265,22 +181,7 @@ fn can_walk_out_of_the_hall_of_fame() {
     fixture.save_state_named("src/pokemon/data/postgame-post-credits.bin").unwrap();
 }
 
-/// **Workstream J3** — the options the harness writes must survive a soft reset. Emulates ~3 min.
-///
-/// J2 writes `wOptions` once, at fixture load. That is not enough on its own and this is the test
-/// that says so: `wOptions` sits inside `wMainDataStart..wMainDataEnd`, the block
-/// `engine/menus/save.asm` copies to `sMainData` on a save and copies back on CONTINUE — and the
-/// Hall-of-Fame walk-out above is precisely a save followed by a soft reset and a CONTINUE. So the
-/// cartridge's own options come back over the harness's, silently, and every battle after that point
-/// pays for animations again.
-///
-/// The fix is to re-apply, which [`TestFixture::step`] does every tick. Poking the SRAM copy instead
-/// is not an option — `sMainDataCheckSum` is computed over the whole block, so a byte written into
-/// `sMainData` makes the game answer *"the file data is destroyed"* on the next load.
-///
-/// **`options_drifts > 0` is the load-bearing assertion.** Without it this test would pass on a
-/// harness that never needed to re-apply anything, and the day the drift became real nothing would
-/// notice.
+/// Workstream J3 — the options the harness writes must survive a soft reset.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn options_survive_the_hall_of_fame_reset() {
@@ -311,12 +212,7 @@ fn options_survive_the_hall_of_fame_reset() {
 /// The postgame root, for every Phase 0 test after 0.35.
 const POST_CREDITS: &[u8] = include_bytes!("../../data/postgame-post-credits.bin");
 
-/// **Task 0.4** — stand at a Pokémon Center PC and open it. Emulates ~4 min (≈11 s wall clock).
-///
-/// No storage logic yet: this only proves the agent can reach a PC now that
-/// [`crate::pokemon::tile_map::pc_locations_for`] knows where they are (task 0.3), and it pins down
-/// what the parent menu actually contains post-Champion — which 0.5 and workstream A both have to
-/// navigate, and which A2 correctly flags as *not* safe to hard-code an index into.
+/// Task 0.4 — stand at a Pokémon Center PC and open it.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_open_the_pokemon_center_pc() {
@@ -328,12 +224,11 @@ fn can_open_the_pokemon_center_pc() {
         PolicyStep::UsePc { map: Map::ViridianPokecenter },
     ]);
 
-    // `UsePc` pops the moment it issues the walk, so drive the queue dry and then watch the screen
-    // rather than the queue.
+    // `UsePc` pops the moment it issues the walk, so drive the queue dry and then watch the
+    // screen rather than the queue.
     fixture.step_until_exhausted();
 
-    // Log every distinct screen for the next 30 s of game time. This is the deliverable of 0.4: what
-    // the PC menu says, in this save's post-Champion configuration.
+    // Log every distinct screen for the next 30 s of game time.
     let mut seen: Vec<String> = Vec::new();
     for _ in 0..(30 * 50) {
         fixture.step();
@@ -345,12 +240,7 @@ fn can_open_the_pokemon_center_pc() {
         }
     }
 
-    // The parent menu, post-Champion, in full. `DisplayPCMainMenu` builds it conditionally:
-    // PROF.OAK's PC only once the Pokédex is owned, <PKMN>LEAGUE only once `wNumHoFTeams != 0` —
-    // which is exactly why A2 is right that the index must not be hard-coded. Here it is five
-    // entries, so PLAYER's PC (what 0.5/0.6 want) is index 1 and BILL's PC (workstream A) is index 0.
-    // Text draws a character at a time, so most captured frames are half-rendered menus; take the
-    // longest one that is still just the menu (no dialogue printed over it yet).
+    // The parent menu, post-Champion, in full.
     let main_menu = seen.iter()
         .filter(|t| t.contains("LOG OFF") && !t.contains("Acc"))
         .max_by_key(|t| t.len())
@@ -360,16 +250,6 @@ fn can_open_the_pokemon_center_pc() {
         assert!(main_menu.contains(entry), "{entry:?} missing from PC menu {main_menu:?}");
     }
 
-    // ⚠️ **This used to assert the opposite, and the comment called it harmless.** Task 0.4 recorded
-    // that "the agent's generic text-advance keeps mashing A once the menu is up, so it walks
-    // straight into the first entry", and took the free look at Bill's PC submenu that gave it. It
-    // was not harmless: every PC menu is a closed cycle under A — the first entry bounces off a
-    // refusal message back to the same menu with the cursor untouched — and it wedged the deployed
-    // run permanently. `ReadingTextBox` now presses B while `in_pc_menu` holds, so what this test
-    // pins is that the agent **leaves**.
-    //
-    // Nothing is lost by not transcribing the submenu here: workstream A drives it deliberately in
-    // `postgame::pc_box`, which is where a menu the agent opens on purpose belongs.
     assert!(
         !seen.iter().any(|t| t.contains("CHANGE BOX") && t.contains("SEE YA!")),
         "the agent walked into Bill's PC instead of logging off; screens seen: {seen:#?}"
@@ -379,12 +259,11 @@ fn can_open_the_pokemon_center_pc() {
                "it should have logged off and be standing in front of the PC again");
 }
 
-/// TM34 Bide — one of the six TMs sitting in the bag that no workstream has a plan for, and the one
-/// `item.rs` already calls "the bag's most useless item". See the §11 entry for 0.1: the bag is a
-/// quarter TMs, which is where Phase 0's slack comes from.
+/// TM34 Bide — one of the six TMs sitting in the bag that no workstream has a plan for, and the
+/// one `item.rs` already calls "the bag's most useless item".
 const SPARE_TM: ItemId = ItemId::Tm34Bide;
 
-/// **Task 0.5** — deposit an item into PC storage. Emulates ~5 min (≈13 s wall clock).
+/// Task 0.5 — deposit an item into PC storage.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_deposit_an_item() {
@@ -409,10 +288,7 @@ fn can_deposit_an_item() {
     println!("bag {before} → {}, PC storage now holds {SPARE_TM:?}", bag_count(&mut fixture));
 }
 
-/// **Task 0.6** — withdraw it again. Same driver, other branch. Emulates ~6 min (≈15 s wall clock).
-///
-/// A round trip rather than a bare withdraw, because a withdraw on its own proves much less: the
-/// interesting property is that the two are inverses and the bag count comes back to where it started.
+/// Task 0.6 — withdraw it again.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn item_round_trips_through_pc_storage() {
@@ -432,7 +308,7 @@ fn item_round_trips_through_pc_storage() {
     assert_eq!(fixture.api().pc_box_item_quantity(SPARE_TM), 1, "should be banked");
     println!("deposited: bag {before} → {}", before - 1);
 
-    // …and back. The withdraw step is still queued; it is issued once the driver returns to Idle.
+    // …and back.
     run_until_bag(&mut fixture, before);
     let api = fixture.api();
     assert_eq!(api.bag_item_quantity(SPARE_TM), 1, "{SPARE_TM:?} should be back in the bag");
@@ -440,25 +316,13 @@ fn item_round_trips_through_pc_storage() {
     println!("withdrew: bag back to {before}");
 }
 
-/// The six TMs the save arrives carrying that no workstream in the plan has any use for. Banking all
-/// six is where Phase 0's bag slack comes from: 20/20 → 14/20, without giving up a single item any
-/// workstream needs. (See the §11 entry for 0.1 — §2's bag listing omitted these entirely.)
+/// The six TMs the save arrives carrying that no workstream in the plan has any use for.
 const SPARE_TMS: [ItemId; 6] = [
     ItemId::Tm06Toxic, ItemId::Tm11Bubblebeam, ItemId::Tm21MegaDrain,
     ItemId::Tm24Thunderbolt, ItemId::Tm27Fissure, ItemId::Tm34Bide,
 ];
 
-/// **Task 0.9** — ship the entry fixture every workstream A–H starts from. Emulates ~12 min
-/// (≈32 s wall clock). Commit target: `postgame-phase0.bin`.
-///
-/// Two things happen here, and both matter to whoever picks up a workstream next:
-///
-/// 1. **Six bag slots are freed** by banking the six spare TMs, so items can actually be picked up.
-///    Nothing needed by any workstream is deposited, and anything banked can be fetched back with
-///    `PolicyStep::withdraw_item` from any Pokémon Center.
-/// 2. **The party is healed.** The credits leave Venusaur at 0 HP and Articuno with no usable attack
-///    (every offensive move at 0 PP), which would make the first battle any workstream started
-///    behave strangely. The nurse is in the same room as the PC.
+/// Task 0.9 — ship the entry fixture every workstream A–H starts from.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_ship_the_phase0_entry_fixture() {
@@ -478,8 +342,8 @@ fn can_ship_the_phase0_entry_fixture() {
     fixture.step_until_exhausted();
     run_until_bag(&mut fixture, before - SPARE_TMS.len() as u8);
 
-    // Then wait for the heal to land — `Interact` pops when it issues the walk, not when the nurse
-    // is done, so gate on the party actually being at full health.
+    // Then wait for the heal to land — `Interact` pops when it issues the walk, not when the
+    // nurse is done, so gate on the party actually being at full health.
     let state = fixture.run_until(|s| {
         s.mode == GameMode::Overworld && s.pokemon.iter().all(|p| p.current_hp == p.stats.hp)
     });
@@ -511,8 +375,7 @@ fn bag_count(fixture: &mut TestFixture) -> u8 {
     fixture.api().mmu().read_pointer(&pokered_symbols::wNumBagItems)
 }
 
-/// Drive until the bag holds exactly `target` items. No step cap — `TestFixture`'s cycle budget is the
-/// failsafe, and it fails with a screenshot instead of a bare assertion.
+/// Drive until the bag holds exactly `target` items.
 fn run_until_bag(fixture: &mut TestFixture, target: u8) {
     while bag_count(fixture) != target {
         fixture.step();

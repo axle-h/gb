@@ -8,11 +8,6 @@ use crate::audio::volume::{EnvelopeFunction, VolumeAndEnvelopeRegister};
 use crate::cycles::MachineCycles;
 
 /// Duty waveforms, one bitmask per duty setting: bit `n` is the output level at phase `n`.
-///
-/// These are gambatte's packed `0x7EE18180` (`duty_unit.cpp:28-30`) unpacked LSB-first. The
-/// previous hand-written comparisons were each **rotated one step**: duty 1 gave {6,7} instead of
-/// {7,0}, duty 2 {4,5,6,7} instead of {0,5,6,7}, and duty 3 {0..5} instead of {1..6}. Duty 0 was
-/// already correct.
 const DUTY_WAVEFORMS: [u8; 4] = [
     0b1000_0000, // 12.5% — high at phase 7
     0b1000_0001, // 25%   — high at phases 7, 0
@@ -25,24 +20,18 @@ pub struct SquareWaveChannel {
     /// NR10 (channel 1 only)
     sweep: Option<Sweep>,
 
-    /// NRx1  Length timer & duty cycle
-    /// bits 6-7 Duty cycle
-    /// Controls the output waveform as follows:
-    /// - 00: 12.5% duty cycle
-    /// - 01: 25% duty cycle
-    /// - 10: 50% duty cycle
-    /// - 11: 75% duty cycle
+    /// NRx1 Length timer & duty cycle bits 6-7 Duty cycle Controls the output waveform as
+    /// follows:
     wave_duty_cycle: u8,
-    /// bits 0-5 Initial length timer
-    /// The higher this field is, the shorter the time before the channel is cut.
+    /// Bits 0-5 Initial length timer The higher this field is, the shorter the time before the
+    /// channel is cut.
     initial_length_timer: u8,
     length_timer: LengthTimer,
 
     /// NRx2 Volume & envelope
     envelope_function: EnvelopeFunction,
 
-    /// NRx3 Period low
-    /// NRx4 Period high & control
+    /// NRx3 Period low NRx4 Period high & control
     period: u16, // 11 bits
 
     /// Internal state
@@ -66,7 +55,8 @@ impl SquareWaveChannel {
             // Starting `true` made the power-on quirk below dead code: duty clocking is disabled
             // until the first trigger, so this must start `false`.
             initialised: false,
-            // Just after powering on, the first duty step of the square waves after they are triggered for the first time is played as if it were 0
+            // Just after powering on, the first duty step of the square waves after they are
+            // triggered for the first time is played as if it were 0
             frequency_timer: PulseTimer::default(),
             output: 0,
         }
@@ -91,18 +81,18 @@ impl SquareWaveChannel {
     }
 
     pub fn nrx1_length_timer_duty_cycle(&self) -> u8 {
-        // write only bits 0-5 always read as 1
+        // Write only bits 0-5 always read as 1
         0x3F | ((self.wave_duty_cycle & 0x03) << 6) // Bits 6-7: Wave duty cycle
     }
 
     pub fn set_nrx1_length_timer_duty_cycle(&mut self, value: u8, apu_active: bool) {
         if apu_active {
-            // can only set the wave duty cycle when APU is active
+            // Can only set the wave duty cycle when APU is active
             self.wave_duty_cycle = (value >> 6) & 0x03; // Bits 6-7
         }
         self.initial_length_timer = value & 0x3F; // Bits 0-5
 
-        // the length timer can be reset at any time
+        // The length timer can be reset at any time
         self.length_timer.reset(self.initial_length_timer);
     }
 
@@ -139,7 +129,6 @@ impl SquareWaveChannel {
         }
     }
 
-
     pub fn is_active(&self) -> bool {
         self.active
     }
@@ -157,11 +146,6 @@ impl SquareWaveChannel {
 
     /// The level the DAC sees, or `None` when the DAC is disconnected and the channel really is
     /// out of the mixer.
-    ///
-    /// C4 compares this either side of an update to decide whether the mix needs recomputing —
-    /// which is why it is a small integer rather than the `f32` the mixer wants. DAC on but the
-    /// channel disabled holds the level for digital 0, which is *not* analogue zero; snapping to
-    /// 0.0 there put a full-scale step on every note-off.
     #[inline]
     pub fn digital_level(&self) -> Option<u8> {
         if !self.envelope_function.dac_enabled() {
@@ -171,7 +155,7 @@ impl SquareWaveChannel {
     }
 
     fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
-        // the length timer is still triggered even when the dac is disabled.
+        // The length timer is still triggered even when the dac is disabled.
         self.length_timer.trigger(frame_sequencer);
 
         if !self.envelope_function.dac_enabled() {
@@ -203,7 +187,7 @@ impl SquareWaveChannel {
             self.active = false;
         }
 
-        // disabled channels still clock the length counter
+        // Disabled channels still clock the length counter
         if events.is_length_counter() {
             self.length_timer.clock(&mut self.active);
         }
@@ -221,13 +205,13 @@ impl SquareWaveChannel {
             self.envelope_function.clock();
         }
 
-        // Obscure behavior: Just after powering on, the first duty step of the square waves after they are triggered for the first time is played as if it were 0.
-        // Obscure behavior: the square duty sequence clocking is disabled until the first trigger.
+        // Obscure behavior: Just after powering on, the first duty step of the square waves after
+        // they are triggered for the first time is played as if it were 0.
         if !self.initialised {
             return;
         }
 
-        // update wave duty
+        // Update wave duty
         if self.frequency_timer.update(delta) {
             self.output = if self.waveform_bit() {
                 self.envelope_function.current_volume()
@@ -235,7 +219,8 @@ impl SquareWaveChannel {
                 0
             };
 
-            // Period changes (written to NR13 or NR14) only take effect after the current “sample” ends
+            // Period changes (written to NR13 or NR14) only take effect after the current
+            // “sample” ends
             self.frequency_timer.set_frequency(self.period);
         }
     }
@@ -255,7 +240,7 @@ impl SquareWaveChannel {
     }
 
     fn update_sweep(&mut self) {
-        // channel 2 has no sweep
+        // Channel 2 has no sweep
         if let Some(sweep) = self.sweep.as_mut() {
             if let Some(next_sweep) = sweep.clock() {
                 if next_sweep.overflows {
@@ -273,9 +258,6 @@ impl SquareWaveChannel {
 mod tests {
     use super::*;
 
-    /// A12: the four duty rows, as phases at which the output is high. Each of these except duty
-    /// 0 used to be rotated one step. Values come from gambatte's packed `0x7EE18180`
-    /// (`duty_unit.cpp:28-30`).
     #[test]
     fn duty_waveforms_match_hardware() {
         let high_phases = |duty: usize| -> Vec<u8> {

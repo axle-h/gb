@@ -30,7 +30,8 @@ impl FrameSequencer {
     }
 
     pub fn current_events(&self) -> FrameSequencerEvent {
-        // see "FrameSequencer" in https://nightshade256.github.io/2021/03/27/gb-sound-emulation.html
+        // See "FrameSequencer" in
+        // https://nightshade256.github.io/2021/03/27/gb-sound-emulation.html
         let mut events = FrameSequencerEvent::empty();
         match self.value {
             0 | 4 => events |= FrameSequencerEvent::LengthCounter,

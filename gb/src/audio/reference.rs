@@ -1,16 +1,5 @@
 //! Capture harness for the resampler: pulls real Pokémon Red audio out of the emulator as the
 //! transition stream the Blip synth sees.
-//!
-//! One job, `#[ignore]`d because it is a fixture generator rather than an assertion:
-//! [`tests::capture_golden_input`] freezes 30 ms of real APU output as `data/apu_capture_in.bin`,
-//! already quantised to the synth's integer amplitude domain. That file is the realistic-signal
-//! input for both `tools/blip-golden/gen_golden.cpp` and the Rust test that checks against its
-//! output, so regenerating one means regenerating the other.
-//!
-//! A WAV "ear check" used to live here too — it rendered a few seconds for a listen against
-//! `rubato-reference.wav`. It was a listening aid, not an assertion, and the invariant tests in
-//! `blip/tests.rs` are the real regression net, so it was removed rather than left in the ignored
-//! list pretending to be a test.
 
 #[cfg(feature = "slow-tests")]
 use std::path::Path;
@@ -39,10 +28,6 @@ fn load_fixture(save_state: &[u8]) -> GameBoy {
 
 #[cfg(feature = "slow-tests")]
 /// Run the emulator and log every amplitude transition the synth is handed, run-length merged.
-///
-/// The runs are the instruction boundaries the APU actually changes level on — a few tens of
-/// thousands per second rather than the full 1 048 576 Hz, which is exactly why the band-limited
-/// approach is cheap.
 pub fn capture_transitions(save_state: &[u8], game_time: Duration) -> Vec<(u16, i16, i16)> {
     let mut gb = load_fixture(save_state);
     gb.core_mut().mmu_mut().audio_mut().output.start_capture();
@@ -91,19 +76,14 @@ mod tests {
     use crate::audio::blip::AMP_SCALE;
 
     /// Freeze 30 ms of real APU output as the golden test's input signal.
-    ///
-    /// Writes `src/audio/data/apu_capture_in.bin`. After running this, regenerate the matching
-    /// output goldens with `tools/blip-golden/build.sh` — they are computed from this file.
-    ///
-    /// `cargo test --release -- audio::reference::tests::capture_golden_input --exact --ignored --nocapture`
     #[test]
     #[cfg(feature = "slow-tests")]
     #[ignore = "fixture generator, not a test; run with --ignored"]
     fn capture_golden_input() {
         let runs = capture_transitions(CAPTURE_FIXTURE, Duration::from_millis(GOLDEN_INPUT_MILLIS));
 
-        // A capture that is silent, or stuck on a handful of levels, would let the golden test look
-        // like it passes while exercising almost nothing.
+        // A capture that is silent, or stuck on a handful of levels, would let the golden test
+        // look like it passes while exercising almost nothing.
         let levels: std::collections::BTreeSet<i16> = runs.iter().flat_map(|(_, l, r)| [*l, *r]).collect();
         let peak = levels.iter().map(|v| v.unsigned_abs()).max().unwrap_or(0);
         let clocks: u32 = runs.iter().map(|(c, ..)| *c as u32).sum();

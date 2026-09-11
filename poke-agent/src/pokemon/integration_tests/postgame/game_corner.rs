@@ -1,22 +1,9 @@
-//! Tests for workstream `game_corner` — see `docs/postgame-coverage-plan.md` §6-F and
-//! [`crate::pokemon::postgame::game_corner`].
-//!
-//! The chain is `postgame-fly-bike.bin` → `-coin-case` → `-coins` → `postgame-game-corner.bin`. It is
-//! rooted on **B's** output rather than `postgame-phase0.bin` because the Diner, the Game Corner and
-//! the prize room are all in Celadon and Fly turns that trip into one step — the same reasoning C's
-//! row gives for the three fishing rods.
 
 use super::super::*;
 
-/// Workstream B's output (§9): Fuchsia City, Fly on Articuno, the Bicycle in the bag (16/20), party
-/// Venusaur / Articuno / Vaporeon / Slowpoke, ¥41,209, dex 7 owned / 112 seen.
 const FLY_BIKE: &[u8] = include_bytes!("../../data/postgame-fly-bike.bin");
 
-/// **Task F1** — the Coin Case, from the gym guide in the Celadon Diner.
-///
-/// Every coin operation in the game is gated on holding it: the counter clerk, the NPC who hands out
-/// ten free coins, and the prize vendors all begin with `ld b, COIN_CASE / call IsItemInBag` and bail
-/// out with "you don't have a COIN CASE" otherwise. So this is F's Phase 0.
+/// Task F1 — the Coin Case, from the gym guide in the Celadon Diner.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_the_coin_case() {
@@ -26,8 +13,8 @@ fn can_get_the_coin_case() {
         "entry fixture already has the Coin Case");
 
     let state = fixture.run_leg(|s| s.bag.iter().any(|i| i.id == ItemId::CoinCase));
-    // Outdoors, not in the Diner: the leg's last step walks back out so the next leg's `Fly` is not
-    // refused for being indoors. See `postgame::fishing::rod_pickup`.
+    // Outdoors, not in the Diner: the leg's last step walks back out so the next leg's `Fly` is
+    // not refused for being indoors.
     assert_eq!(state.map.map, Map::CeladonCity);
     println!("Coin Case in the bag — bag now {} entries", state.bag.len());
 
@@ -37,12 +24,7 @@ fn can_get_the_coin_case() {
 /// F1's output: Celadon City, outside the Diner, with the Coin Case in the bag (17/20).
 const COIN_CASE: &[u8] = include_bytes!("../../data/postgame-coin-case.bin");
 
-/// **Task F2** — buy coins at the counter: ¥1000 → 50, one conversation each.
-///
-/// 200 coins is four purchases, which is what makes this a *test* rather than a demonstration: the
-/// step re-polls after every conversation and stops on the coin count, so a driver that only landed
-/// one purchase (or that answered the clerk's YES/NO with NO) would end on 50 or 0 and the money
-/// assertion would catch it either way.
+/// Task F2 — buy coins at the counter: ¥1000 → 50, one conversation each.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_buy_game_coins() {
@@ -65,13 +47,7 @@ fn can_buy_game_coins() {
 /// F2's output: Celadon City with the Coin Case and 200 coins, ¥37,209.
 const COINS: &[u8] = include_bytes!("../../data/postgame-coins.bin");
 
-/// **Task F3** — sell to a mart. The other half of the shop the agent has never opened.
-///
-/// Three junk TMs out of PC storage and over the Viridian Mart counter. Selling is a different menu
-/// chain from buying, not a mirror of it: the list is the **bag** rather than the shop's stock, the
-/// prices are halved, and a completed sale drops back to the bag list instead of the Buy/Sell/Quit
-/// menu, so nothing about "done" is visible on screen. Money is the assertion, at exactly half list
-/// price: Mega Drain ¥5000, Fissure ¥5000, Bide ¥2000 → ¥6,000.
+/// Task F3 — sell to a mart.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_sell_junk_to_a_mart() {
@@ -90,19 +66,7 @@ fn can_sell_junk_to_a_mart() {
 /// F3's output: Viridian City, ¥43,209, 200 coins, three junk TMs sold.
 const SOLD: &[u8] = include_bytes!("../../data/postgame-sold.bin");
 
-/// **Task F4** — redeem a prize: an **Abra** from the first vendor, 180 coins.
-///
-/// Abra rather than something rarer for two reasons beyond the price. It is dex-new here, so the
-/// prize genuinely lands rather than silently overwriting nothing; and it is the give-species for
-/// the Abra → Mr. Mime trade in `Route2TradeHouse`, one of the five species obtainable *only* by
-/// trading, so workstream G gains a row it could not otherwise fill.
-///
-/// ⚠️ A prize mon **is** offered a nickname, and the naming screen is the load-bearing part of this
-/// leg. `_GivePokemon` → `AddPartyMon` names the mon whenever `wMonDataLocation` is 0, which nothing
-/// on this path sets otherwise (`engine/pokemon/add_mon.asm:43-52`) — so the run goes through the
-/// same screen a catch does, and the agent's generic naming handler answers it. With a **full**
-/// party the prize goes to the box via `SendNewMonToBox` instead, which skips the naming entirely;
-/// see the §11 entry, because that is the opposite of the boxed-*catch* wedge D recorded.
+/// Task F4 — redeem a prize: an Abra from the first vendor, 180 coins.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_redeem_a_prize_pokemon() {
@@ -132,33 +96,11 @@ fn can_redeem_a_prize_pokemon() {
 /// F4's output: Celadon City, an Abra in the party, 20 coins, ¥43,209.
 const GAME_CORNER: &[u8] = include_bytes!("../../data/postgame-game-corner.bin");
 
-/// Seed money from the **debug tier** (§3 of the plan) so a test can reach the expensive half of the
-/// prize room.
-///
-/// Same technique, and the same reasoning, as `legendaries::seed_master_ball`: it separates two
-/// independent questions that were hiding each other. *Can the agent drive a TM prize?* is a menu
-/// question with a real answer. *Can it earn ¥66,000?* is an economy question whose only in-scope
-/// answer is grinding the Elite Four, several minutes of emulated time a lap, and it tells you
-/// nothing about the mechanism. `debug_set_money` lives in the **test tree**, which the guard
-/// `play_path_contains_no_debug_ram_writes` deliberately does not scan (it reads `policy.rs`,
-/// `agent.rs` and `postgame/*.rs`), so nothing a `Policy` can reach knows about it.
 fn seed_money(fixture: &mut TestFixture, amount: u32) {
     fixture.api().debug_set_money(amount);
 }
 
-/// **Task F4, second branch** — a prize **TM**, which is a different code path from a prize mon.
-///
-/// `HandlePrizeChoice` forks on `wWhichPrizeWindow == 2`: the TM vendor calls `GetItemName` +
-/// `GiveItem`, the mon vendors call `GetMonName` + `GivePokemon`. So this exercises the third vendor
-/// tile, the item-name menu, the bag-full refusal path, and — the part that actually differs for the
-/// driver — a purchase where **no party count moves**, which is why [`prize_tick`] reads completion
-/// from the coins rather than from the party.
-///
-/// ⚠️ **Debug-money-seeded** ([`seed_money`]). 3300 coins is 66 trips through the counter clerk at
-/// ¥1000 each, and the entry fixture holds ¥43,209. What is seeded is the *money*; the 66 purchases
-/// and the redemption are driven normally, so nothing about the mechanism is short-circuited. The
-/// fixture is deliberately **not** committed — F's chain ends at `postgame-game-corner.bin`, which is
-/// honestly earned.
+/// Task F4, second branch — a prize TM, which is a different code path from a prize mon.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_redeem_a_prize_tm() {

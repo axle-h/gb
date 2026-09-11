@@ -2,13 +2,6 @@ use bincode::{Decode, Encode};
 use crate::cycles::MachineCycles;
 
 /// OAM DMA controller (`FF46`).
-///
-/// The transfer is **incremental**: one byte every 4 T-cycles, 160 bytes over 160 M-cycles, and
-/// [`LcdDma::is_active`] stays true for the whole of it. The previous implementation cleared its
-/// state *before* the copy ran, so the copy went through the ordinary mode-gated `write_oam` using
-/// the PPU mode from the *previous* step — and silently discarded all 160 bytes whenever that mode
-/// happened to be 2 or 3. Pokémon Red only ever DMAs during VBlank, which is the sole reason that
-/// never showed up.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Decode, Encode)]
 pub struct LcdDma {
     state: Option<LcdDmaState>,
@@ -86,7 +79,7 @@ pub const OAM_BYTES: usize = 0xA0;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Decode, Encode)]
 pub struct LcdDmaState {
-    /// The raw `FF46` value. Kept unmapped so the classification lives in one place.
+    /// The raw `FF46` value.
     page: u8,
     cycles: MachineCycles,
     /// Bytes copied so far.
@@ -94,11 +87,6 @@ pub struct LcdDmaState {
 }
 
 impl LcdDmaState {
-    /// Map the source page to a real region, mirroring gambatte's `oamDmaInitSetup`
-    /// (`memory.cpp:516-523`): `00-7F` ROM, `80-9F` VRAM, `A0-BF` SRAM, `C0-FF` WRAM with the
-    /// echo-RAM wrap. The old code masked the page with `0xDF`, which cleared bit 5 and so turned
-    /// `0x20`→`0x00`, `0x60`→`0x40` and — the damaging one — **`0xA0`→`0x80`, sending an
-    /// SRAM-sourced transfer to VRAM**.
     fn source_base(&self) -> u16 {
         let page = if self.page >= 0xE0 {
             // Above 0xDF the bus wraps into echo RAM, which mirrors WRAM.
@@ -112,7 +100,7 @@ impl LcdDmaState {
 
 /// The `dma` save-state section as written by version 1 — before A7 replaced the whole-transfer
 /// model with an incremental one. Kept only to decode states written by that build; the section
-/// version tells the two apart. See the rules at the top of `src/savestate/mod.rs`.
+/// version tells the two apart.
 #[derive(Debug, Clone, Decode, Encode)]
 pub struct LcdDmaV1 {
     state: Option<LcdDmaStateV1>,
@@ -127,9 +115,8 @@ pub struct LcdDmaStateV1 {
 impl From<LcdDmaV1> for LcdDma {
     fn from(old: LcdDmaV1) -> Self {
         match old.state {
-            // v1 copied all 160 bytes in one go at the end of the transfer, so nothing had been
-            // copied yet at any point where it recorded `Some`. `pos` therefore starts at 0, and
-            // v1 stored the source as a full address rather than a page.
+            // V1 copied all 160 bytes in one go at the end of the transfer, so nothing had been
+            // copied yet at any point where it recorded `Some`.
             Some(state) => Self {
                 register: (state.address >> 8) as u8,
                 state: Some(LcdDmaState {
@@ -194,8 +181,7 @@ mod tests {
         assert!(dma.update(MachineCycles::ONE).is_none());
     }
 
-    /// The old `& 0xDF` mask corrupted three source ranges. `0xA0` is the damaging one: an
-    /// SRAM-sourced transfer became a VRAM-sourced one.
+    /// The old `& 0xDF` mask corrupted three source ranges.
     #[test]
     fn source_pages_are_not_masked() {
         for (page, expected) in [

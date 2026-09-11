@@ -1,25 +1,8 @@
-//! Tests for workstream `aides` — see `docs/postgame-coverage-plan.md` §6-H and
-//! [`crate::pokemon::postgame::aides`].
-//!
-//! Rooted on **G-trades' output**, which is where the dex count comes from: the three aides are gated
-//! at **10 / 30 / 50 owned**, and this chain sits at 19.
 
 use super::super::*;
 
-/// G-trades' output (§9): Cinnabar Island, party Venusaur / Articuno / Vaporeon / Tangela, eight mons
-/// in box 1, **dex 19 owned**, bag 20/20.
 const TANGELA: &[u8] = include_bytes!("../../data/postgame-tangela.bin");
 
-/// **Tasks H1 + H2** — **HM05 Flash** from the Route 2 Gate aide, taught, and used to light a cave.
-///
-/// H1's gate is dex **10 owned** and this chain has 19, so the aide hands it over on sight — G-gifts
-/// and G-trades are what unblocked this row. The three things that actually needed care are in
-/// [`PolicyStep::flash_steps`]; the one worth repeating is that **only Slowpoke and Mr. Mime** can
-/// learn Flash out of everything this save has owned, and Slowpoke is in the box.
-///
-/// H2's observable is the plan's own — "a dark cave renders lit" — read where the ROM keeps it:
-/// entering Rock Tunnel 1F sets `wMapPalOffset = 6` and the Flash field move is the only thing that
-/// clears it, so `GameState::map_is_dark` flipping is exactly the assertion.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_hm05_and_light_rock_tunnel() {
@@ -59,21 +42,13 @@ fn can_get_hm05_and_light_rock_tunnel() {
     fixture.save_state_named("src/pokemon/data/postgame-flash.bin").unwrap();
 }
 
-/// E's output (§9): Fuchsia City, party 6, box 1 holding 18, **dex 31 owned / 116 seen** — which is
-/// what takes H3 past the Itemfinder aide's gate of 30. Bag is 20/20, so H3 has to shed first.
 const SAFARI: &[u8] = include_bytes!("../../data/postgame-safari.bin");
 
-/// **Task H3** — the **Itemfinder** from the `Route11Gate2F` aide, at a dex gate of 30 owned.
-///
-/// This is the row **E** unblocked: the gate wants 30 species and the chain sat at 19 until the
-/// Safari sweep took it to 31. Nothing here is conditional beyond arriving with a free bag slot —
-/// which is the one thing that would fail *silently*, since `OaksAideScript` refuses a full bag with
-/// a single text box and an ordinary goodbye. See [`PolicyStep::itemfinder_steps`].
+/// Task H3 — the Itemfinder from the `Route11Gate2F` aide, at a dex gate of 30 owned.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_the_itemfinder() {
     /// Two vitamins: the least useful things in a 20/20 bag whose party is already at level 71+.
-    /// Two rather than one because H4 used to inherit a free slot; H5 inherits both now.
     const SHED: &[ItemId] = &[ItemId::Calcium, ItemId::Carbos];
 
     let mut fixture = TestFixture::new(SAFARI, Duration::from_mins(60),
@@ -88,44 +63,25 @@ fn can_get_the_itemfinder() {
         assert!(!state.bag.iter().any(|i| i.id == *shed), "{shed:?} should have gone to the PC");
     }
     assert_eq!(state.map.map, Map::Route11, "the leg ends outdoors so the next Fly is allowed");
-    // Not a bag *occupancy* count — `GameState::bag` drops every id `ItemId` cannot name (§10), so it
-    // under-reports against the 20-slot ceiling. `probe_coverage` reads `wNumBagItems` for that.
     println!("Itemfinder in the bag · dex owned {} · named bag items {}",
         state.pokedex_owned.species().len(), state.bag.iter().count());
 
     fixture.save_state_named("src/pokemon/data/postgame-itemfinder.bin").unwrap();
 }
 
-/// H3's output: Route 11 at (50,8), just outside the gate's west door, Itemfinder in the bag and one
-/// free bag slot. Also H5's entry, since H4 was removed — see below.
+/// H3's output: Route 11 at (50,8), just outside the gate's west door, Itemfinder in the bag and
+/// one free bag slot.
 const ITEMFINDER: &[u8] = include_bytes!("../../data/postgame-itemfinder.bin");
 
-// ⚠️ **`can_collect_a_hidden_item` was here, and H4 is gone** (2026-09-03). It collected Route 11's
-// hidden Escape Rope, and it worked; what removed it is that hidden-item collection is gone from the
-// crate entirely, because the only other caller of the mechanic was the `use_field_move interact`
-// tool and a deployed run spent 85 minutes pressing A at empty squares with it. Nothing in the game
-// is gated behind a hidden item. See `crate::pokemon::postgame::aides`' module docs.
-//
-// ⚠️ **H5 now roots on H3's output instead**, and `postgame-hidden-item.bin` is deleted. The two
-// fixtures differ by one Escape Rope in the bag and a few tiles of Route 11, and H3's is the more
-// generous of the two: it ends with a **free bag slot** where H4's ended full, and
-// `dex_sweep_outfit_steps` opens by shedding for exactly that room.
-
-/// The share floor every H5 leg sweeps at: chase a map's fat slots, take anything rarer that happens
-/// to turn up, and move on. See [`PolicyStep::dex_sweep_steps`]'s reasoning.
+/// The share floor every H5 leg sweeps at: chase a map's fat slots, take anything rarer that
+/// happens to turn up, and move on.
 const MIN_SHARE: u8 = 20;
 
-/// **Task H5a** — the sweep's outfitting, then the two grounds either side of Route 11.
-///
-/// Three species (Ekans, Drowzee, Diglett) for almost no travel, which makes this the leg to prove
-/// the mechanism on before the ones that cross Kanto. It also does the shopping the rest of H5 needs:
-/// a hundred Poké Balls and, less obviously, **an empty box** — the party is full, so every catch goes
-/// to the PC, and a full box turns the sweep into an infinite retry.
+/// Task H5a — the sweep's outfitting, then the two grounds either side of Route 11.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_sweep_the_vermilion_grounds() {
-    /// One bag slot for the balls. The Rare Candy is the least useful thing in a 20/20 bag whose
-    /// party is level 71.
+    /// One bag slot for the balls.
     const SHED: &[ItemId] = &[ItemId::RareCandy];
     /// Box 1 already holds 18 of E's Safari catches; box 2 is empty.
     const BOX: u8 = 1;
@@ -158,7 +114,7 @@ fn can_sweep_the_vermilion_grounds() {
 /// H5a's output: Route 11, box 2 open with the leg's catches in it, Poké Balls in the bag.
 const SWEEP_VERMILION: &[u8] = include_bytes!("../../data/postgame-sweep-vermilion.bin");
 
-/// **Task H5b** — Route 1 and Viridian Forest: the cheapest seven species in the game.
+/// Task H5b — Route 1 and Viridian Forest: the cheapest seven species in the game.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_sweep_the_viridian_grounds() {
@@ -178,11 +134,10 @@ fn can_sweep_the_viridian_grounds() {
     fixture.save_state_named("src/pokemon/data/postgame-sweep-viridian.bin").unwrap();
 }
 
-
 /// H5b's output.
 const SWEEP_VIRIDIAN: &[u8] = include_bytes!("../../data/postgame-sweep-viridian.bin");
 
-/// **Task H5c** — the three Lavender grounds: Route 8, Pokémon Tower 7F, and Rock Tunnel.
+/// Task H5c — the three Lavender grounds: Route 8, Pokémon Tower 7F, and Rock Tunnel.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_sweep_the_lavender_grounds() {
@@ -202,30 +157,16 @@ fn can_sweep_the_lavender_grounds() {
     fixture.save_state_named("src/pokemon/data/postgame-sweep-lavender.bin").unwrap();
 }
 
-
 /// H5c's output.
 const SWEEP_LAVENDER: &[u8] = include_bytes!("../../data/postgame-sweep-lavender.bin");
 
-/// **Task H5d/H5e** — Route 7's Oddish and the Pokémon Mansion, then the **Exp.All** aide.
-///
-/// The sweep's last leg and H5's observable in one: this is where the count is meant to cross 50, so
-/// it takes Route 7 for the species the earlier legs did not reach, then the Mansion — the densest
-/// ground a Fly lands next to — for as much margin as it needs, and finally walks into
-/// `Route15Gate2F`.
+/// Task H5d/H5e — Route 7's Oddish and the Pokémon Mansion, then the Exp.All aide.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_the_exp_all() {
     /// Box 2 is carrying the first three legs' catches; the Mansion's would overflow it.
     const BOX: u8 = 2;
-    /// ⚠️ **Free bag slots, or the aide refuses.** Exactly H3's trap, walked into again: the run
-    /// reached 52 owned, the aide said *"You have caught 52 kinds of POKéMON! Congratulations!"* — and
-    /// then *"Oh! I see you don't have any room for the EXP.ALL."* and said goodbye.
-    ///
-    /// **Two** slots, not one, and the second is the interesting one: an indoor `SweepDex` wanders by
-    /// walking to the farthest reachable *sprite*, and arriving at a sprite presses A — so a floor with
-    /// item balls on it, like Pokémon Mansion 1F, **collects one** as a side effect. Shedding a single
-    /// slot was exactly cancelled out by that pickup, and the aide refused a second time. The Silph
-    /// Scope goes back now that H5c's tower climb is done.
+    /// Free bag slots, or the aide refuses.
     const SHED: &[ItemId] = &[ItemId::MaxRevive, ItemId::SilphScope];
 
     let mut steps = PolicyStep::dex_sweep_outfit_steps(SHED, 57, BOX);
@@ -247,5 +188,3 @@ fn can_get_the_exp_all() {
 
     fixture.save_state_named("src/pokemon/data/postgame-aides.bin").unwrap();
 }
-
-

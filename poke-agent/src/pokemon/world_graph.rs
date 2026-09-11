@@ -10,7 +10,6 @@ use crate::pokemon::tile_map::MetaTileMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeKind {
     /// Seamless walking transition (N/S/E/W map border strip).
-    /// Direction is not stored because `MetaTile::Connection` does not carry it.
     Connection,
     /// Instantaneous teleport (door, cave entrance, warp tile, etc.).
     Warp,
@@ -37,8 +36,8 @@ impl MapCoordinates {
 /// A directed edge in the world graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Edge {
-    /// The tile the player steps on to trigger the transition, in the source map's
-    /// expanded tile coordinates (raw wXCoord/wYCoord + connection-strip offsets).
+    /// The tile the player steps on to trigger the transition, in the source map's expanded tile
+    /// coordinates (raw wXCoord/wYCoord + connection-strip offsets).
     pub from: MapCoordinates,
     /// The position the player lands on in the destination map (raw wXCoord/wYCoord).
     pub to: MapCoordinates,
@@ -57,23 +56,12 @@ pub struct MapStep {
     pub map: Map,
     /// How the player arrived at this map. `None` for the starting map.
     pub via: Option<EdgeKind>,
-    /// The tile on the **previous** map that `via` leaves from, in that map's action-id
-    /// coordinates — which warp to choose there. `None` with `via`.
+    /// The tile on the previous map that `via` leaves from, in that map's action-id coordinates —
+    /// which warp to choose there. `None` with `via`.
     pub via_at: Option<Point8>,
 }
 
 /// Connected graph of reachable Pokémon Red maps built by BFS over the tile layer.
-///
-/// Unlike a header-derived graph, edges here only exist where `MetaTileMap::actions()`
-/// finds a physically traversable path from the current entry position — cut trees,
-/// ledges, water, and other obstacles are respected so the graph never routes the
-/// player through impassable tiles.
-///
-/// The adjacency is keyed by `(Map, Point8)` — the map plus the raw entry position
-/// (wXCoord/wYCoord value) used when the section was explored.  This correctly handles
-/// maps that are physically split into disconnected sections (e.g. Route 2 is cut in
-/// two by Viridian Forest): the south-section edges and north-section edges live under
-/// separate keys and are never conflated during pathfinding.
 #[derive(Debug, Clone, Default)]
 pub struct WorldGraph {
     adjacency: HashMap<(Map, Point8), Vec<Edge>>,
@@ -82,17 +70,11 @@ pub struct WorldGraph {
 }
 
 /// Where the player came into the map they are on, and from where.
-///
-/// Recorded by [`WorldGraph::observe`], which runs exactly once per map arrival. It exists for the
-/// model: on a multi-floor map every ladder is `to MtMoonB1F` and nothing else in the turn says
-/// which one the player has just climbed, so the deployed run took the same ladder up and down
-/// fifty times each way with the summary "continue eastward" on every one. The turn now says where
-/// the player entered, and the menu row for that warp says it is the way back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Arrival {
     pub map: Map,
-    /// In the tile map's own coordinates — the ones the action ids and the ruler use — not the raw
-    /// `wXCoord`/`wYCoord` the graph keys its sections on.
+    /// In the tile map's own coordinates — the ones the action ids and the ruler use — not the
+    /// raw `wXCoord`/`wYCoord` the graph keys its sections on.
     pub at: Point8,
     /// The map the player was on before this one. `None` for the first map seen by this process.
     pub from: Option<Map>,
@@ -100,29 +82,18 @@ pub struct Arrival {
 
 impl WorldGraph {
     /// A new, empty world graph.
-    ///
-    /// The graph is built **incrementally** as the agent physically traverses the world:
-    /// each time the player lands in a map section, [`observe`] records that section's
-    /// *live, sprite-resolved* reachable warps/connections. This avoids the phantom edges of
-    /// an exhaustively pre-resolved graph (which, lacking runtime sprite state, routes through
-    /// NPC-blocked cave paths). The trade-off is that deterministic navigation cannot rely on
-    /// routing to a not-yet-visited map — forward map transitions must be specified explicitly.
     pub fn new() -> Self {
         Self { adjacency: HashMap::new(), arrival: None }
     }
 
     /// Derive the warp/connection edges reachable by BFS from the player position in `tile_map`.
-    ///
-    /// This is the single source of truth for edge construction, used by [`observe`], which
-    /// records a node from the agent's *live* map — whose sprite overlay reflects the truly
-    /// visible NPCs and so excludes phantom connections through NPC-blocked paths.
     fn edges_from_reachable(tile_map: &MetaTileMap, map: Map) -> Vec<Edge> {
         tile_map
             .all_reachable_warps_and_connections()
             .into_iter()
             .filter_map(|(src_pos, tile)| {
-                // Both warp and connection `to_position` are already in raw
-                // (wXCoord/wYCoord) space — no conversion needed.
+                // Both warp and connection `to_position` are already in raw (wXCoord/wYCoord)
+                // space — no conversion needed.
                 let (to_map, raw_entry, kind) = match tile {
                     MetaTile::Warp { to_map, to_position } => (to_map, to_position, EdgeKind::Warp),
                     MetaTile::Connection { to_map, to_position } => (to_map, to_position, EdgeKind::Connection),
@@ -137,19 +108,7 @@ impl WorldGraph {
             .collect()
     }
 
-
     /// Refine the graph node `(map, entry)` from the agent's *live* map view.
-    ///
-    /// The initial graph is built without sprites, so it can contain phantom warp/connection
-    /// edges through paths that are actually blocked by NPCs at runtime (e.g. the Rocket
-    /// trainers on Mt Moon B2F). When the agent is physically standing in a map section, its
-    /// `MetaTileMap` includes the real visible-sprite overlay, so the reachable warps/connections
-    /// it observes are the ground truth. Overwriting the node with those edges lets the systematic
-    /// maze solver score visited sections accurately (and recognise dead-ends). Unvisited nodes
-    /// keep their optimistic edges, so connectivity toward the goal is never lost.
-    ///
-    /// `entry` must be the raw landing position the section is keyed under (equal to the agent's
-    /// coordinates on maps without connection strips, e.g. all cave maps).
     pub fn observe(&mut self, map: Map, entry: Point8, tile_map: &MetaTileMap) {
         let edges = Self::edges_from_reachable(tile_map, map);
         self.adjacency.insert((map, entry), edges);
@@ -177,13 +136,8 @@ impl WorldGraph {
         self.adjacency.keys().map(|(m, _)| *m).collect::<HashSet<_>>().len()
     }
 
-    /// BFS on the `(Map, Point8)` graph from a set of start nodes to the first node
-    /// whose map equals `to`.
-    ///
-    /// Returns the reconstructed `MapStep` path, or `None` if `to` is unreachable.
-    /// The same physical map may appear more than once in the path when it has multiple
-    /// disconnected sections (e.g. Route 2 south then Route 2 north); consecutive
-    /// occurrences are never the same section because no map has a self-edge.
+    /// BFS on the `(Map, Point8)` graph from a set of start nodes to the first node whose map
+    /// equals `to`.
     fn bfs_to_map(&self, starts: &[(Map, Point8)], to: Map) -> Option<Vec<MapStep>> {
         self.bfs_nodes(starts, to)
             .map(|nodes| nodes.into_iter().map(|((m, _), via)| MapStep {
@@ -191,22 +145,13 @@ impl WorldGraph {
             }).collect())
     }
 
-    /// Like [`bfs_to_map`] but keeps the full `(map, raw_entry)` node per step (with the
-    /// `EdgeKind` used to enter it). The entry positions are exactly the raw `to_position`s
-    /// needed to encode explicit [`PolicyStep::EnterMap`] transitions.
     fn bfs_nodes(&self, starts: &[(Map, Point8)], to: Map) -> Option<Vec<((Map, Point8), Option<(EdgeKind, Point8)>)>> {
         type Node = (Map, Point8);
         let mut dist: HashMap<Node, u32> = HashMap::new();
         let mut came_from: HashMap<Node, (Node, (EdgeKind, Point8))> = HashMap::new();
         let mut queue: VecDeque<Node> = VecDeque::new();
 
-        // Resolve a (map, position) reference to an actually-observed node. A map *connection*
-        // edge records its destination as the geometric border `to_position`, which differs by a
-        // tile or two from the raw coordinate the game actually settles the player on (the value
-        // the node is keyed under). Snap such references to the nearest observed node of the same
-        // map so intermediate connection hops don't dead-end on a dangling target. The snap
-        // threshold is deliberately small so distinct, far-apart sections of one map (e.g. Route 2's
-        // northern and southern halves, joined only through Viridian Forest) are never conflated.
+        // Resolve a (map, position) reference to an actually-observed node.
         let resolve = |map: Map, pos: Point8| -> Point8 {
             if self.adjacency.contains_key(&(map, pos)) {
                 return pos;
@@ -219,10 +164,7 @@ impl WorldGraph {
                 .filter(|(_, d)| *d <= SNAP_THRESHOLD)
                 .min_by_key(|(_, d)| *d)
                 .map(|(p, _)| p)
-                // No nearby observed node: keep the raw position. It carries no outgoing edges
-                // (so it can't be routed *through* — a dangling intermediate correctly dead-ends),
-                // but it stays discoverable as a goal (dead-end destination maps observed only as an
-                // edge target, never entered, must still be found by the goal search below).
+                // No nearby observed node: keep the raw position.
                 .unwrap_or(pos)
         };
 
@@ -239,9 +181,10 @@ impl WorldGraph {
         while let Some((m, p)) = queue.pop_front() {
             let cost = dist[&(m, p)];
             for edge in self.adjacency.get(&(m, p)).map(Vec::as_slice).unwrap_or(&[]) {
-                // Snap the edge target to the nearest observed node so intermediate connection hops
-                // (whose geometric `to_position` is a tile or two off the keyed raw landing) don't
-                // dead-end; falls back to the raw position when nothing is near (see `resolve`).
+                // Snap the edge target to the nearest observed node so intermediate connection
+                // hops (whose geometric `to_position` is a tile or two off the keyed raw landing)
+                // don't dead-end; falls back to the raw position when nothing is near (see
+                // `resolve`).
                 let next = (edge.to.map, resolve(edge.to.map, edge.to.location));
                 if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(next) {
                     e.insert(cost + 1);
@@ -252,8 +195,6 @@ impl WorldGraph {
         }
 
         // Among all entry-points of `to` that were reached by the BFS, pick the closest.
-        // We search `dist` (all reached nodes) not `adjacency.keys()` so that dead-end
-        // destination maps (no outgoing edges, hence absent from adjacency) are found too.
         let goal = dist.keys()
             .filter(|(m, _)| *m == to)
             .min_by_key(|n| dist[n])
@@ -280,10 +221,6 @@ impl WorldGraph {
     }
 
     /// Shortest path from `from` to `to`, considering all entry sections of `from`.
-    ///
-    /// Returns `None` when no path exists (unreachable or absent from the graph).
-    /// The first `MapStep` is always the starting map (`via = None`); every subsequent
-    /// step records how the player enters that map.
     pub fn shortest_path(&self, from: Map, to: Map) -> Option<Vec<MapStep>> {
         if from == to {
             return Some(vec![MapStep { map: from, via: None, via_at: None }]);
@@ -295,12 +232,7 @@ impl WorldGraph {
         self.bfs_to_map(&starts, to)
     }
 
-    /// Hop count from a **specific entry point** of `from` to `to`.
-    ///
-    /// Unlike `shortest_path`, this starts BFS only from the given raw entry position,
-    /// so edges belonging to a different disconnected section of the same map are never
-    /// considered.  Used by `pick_shortest_path_action` to avoid false short-cuts through
-    /// map sections that are not physically reachable from the current player position.
+    /// Hop count from a specific entry point of `from` to `to`.
     pub fn shortest_path_from_entry(&self, from: Map, from_entry: Point8, to: Map) -> Option<usize> {
         if from == to {
             return Some(1);
@@ -309,11 +241,6 @@ impl WorldGraph {
     }
 
     /// Pick the action from `actions` that leads most directly toward `target`.
-    ///
-    /// Uses entry-point-aware pathfinding: for each candidate action the BFS starts
-    /// from the exact raw landing position in the destination map, ensuring that edges
-    /// from a different disconnected section of that map (e.g. Route 2 north vs. south)
-    /// are not considered.
     pub fn pick_shortest_path_action(&self, actions: &[OverworldAction], target: Map) -> Option<OverworldAction> {
         actions.iter()
             .filter_map(|a| {
@@ -324,9 +251,7 @@ impl WorldGraph {
                 };
                 // Entry-aware routing: start the BFS from the exact raw landing section so
                 // disconnected sections of `to_map` (e.g. Route 2 north vs south, or a maze) are
-                // never falsely short-cut. The BFS snaps connection landings (whose geometric
-                // `to_position` is a tile or two off from the keyed raw coordinate) to the nearest
-                // observed node, so this resolves correctly for connections too.
+                // never falsely short-cut.
                 let d = self.shortest_path_from_entry(to_map, to_position, target)?;
                 Some((d, a.clone()))
             })
@@ -337,9 +262,8 @@ impl WorldGraph {
 
 #[cfg(test)]
 impl WorldGraph {
-    /// Test-only: record a section `(map, entry)` with a fixed set of outgoing edges,
-    /// mimicking what `observe` derives from a live map. `edges` is
-    /// `(from_tile, to_map, to_landing, kind)`.
+    /// Test-only: record a section `(map, entry)` with a fixed set of outgoing edges, mimicking
+    /// what `observe` derives from a live map.
     fn observe_edges(&mut self, map: Map, entry: Point8, edges: &[(Point8, Map, Point8, EdgeKind)]) {
         let edges = edges
             .iter()
@@ -359,8 +283,8 @@ mod tests {
 
     fn p(x: u8, y: u8) -> Point8 { Point8 { x, y } }
 
-    /// `observe` runs once per arrival, so it is where the arrival is remembered: where the player
-    /// landed, and which map they were on before. A resumed process knows neither until it moves.
+    /// `observe` runs once per arrival, so it is where the arrival is remembered: where the
+    /// player landed, and which map they were on before.
     #[test]
     fn an_arrival_remembers_where_it_came_from() {
         use crate::pokemon::integration_tests::fixture::TestFixture;
@@ -375,9 +299,9 @@ mod tests {
         assert_eq!(g.arrival().map(|a| (a.map, a.from)), Some((Map::PalletTown, Some(Map::Route1))));
     }
 
-    /// A small synthetic world observed incrementally, mirroring how the agent would build it
-    /// as it walks:  PalletTown ⇄ Route1 ⇄ ViridianCity, PalletTown ⇄ OaksLab (warp),
-    /// RedsHouse1F ⇄ RedsHouse2F (warp-only), and PalletTown → Route21 (dead-end).
+    /// A small synthetic world observed incrementally, mirroring how the agent would build it as
+    /// it walks: PalletTown ⇄ Route1 ⇄ ViridianCity, PalletTown ⇄ OaksLab (warp), RedsHouse1F ⇄
+    /// RedsHouse2F (warp-only), and PalletTown → Route21 (dead-end).
     fn small_world() -> WorldGraph {
         use EdgeKind::*;
         let mut g = WorldGraph::new();
@@ -411,7 +335,7 @@ mod tests {
     fn empty_graph_has_no_paths() {
         let g = WorldGraph::new();
         assert!(g.shortest_path(Map::PalletTown, Map::Route1).is_none());
-        // trivial same-map path is always available
+        // Trivial same-map path is always available
         assert_eq!(g.shortest_path(Map::Route1, Map::Route1).unwrap().len(), 1);
     }
 
@@ -476,8 +400,8 @@ mod tests {
     #[test]
     fn no_path_to_unobserved_map() {
         let g = small_world();
-        // We never observed anything reaching CeruleanCity — so it is unreachable, the
-        // "hard fail" signal that a deterministic policy is under-specified.
+        // We never observed anything reaching CeruleanCity — so it is unreachable, the "hard
+        // fail" signal that a deterministic policy is under-specified.
         assert!(g.shortest_path(Map::PalletTown, Map::CeruleanCity).is_none());
         // Route21 is observed but a dead-end; still no path onward.
         assert!(g.shortest_path(Map::Route21, Map::Route1).is_none());
@@ -502,8 +426,8 @@ mod tests {
     fn pick_shortest_path_action_routes_toward_target() {
         use crate::pokemon::tile::MetaTile;
         let g = small_world();
-        // On PalletTown, two candidate warps/connections: toward Route1 (leads to Viridian)
-        // and toward OaksLab (dead-endish). Target ViridianCity → should pick the Route1 one.
+        // On PalletTown, two candidate warps/connections: toward Route1 (leads to Viridian) and
+        // toward OaksLab (dead-endish).
         let mk = |to_map: Map, to: Point8| OverworldAction {
             map: Map::PalletTown,
             origin: p(9, 7),

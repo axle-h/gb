@@ -137,8 +137,8 @@ impl DmgPointerRead for MMU {
             DmgBank::VRAM | DmgBank::WRAM | DmgBank::HRAM => {
                 let mut bytes = vec![];
                 for i in 0..u16::MAX {
-                    // Wrapping, because a scan that starts near the top of the address space runs off it
-                    // and the release build has always wrapped here.
+                    // Wrapping, because a scan that starts near the top of the address space runs
+                    // off it and the release build has always wrapped here.
                     let byte = self.read(pointer.address.wrapping_add(i));
                     bytes.push(byte);
                     if byte == PokemonString::TERMINATOR {
@@ -170,7 +170,6 @@ impl DmgPointerRead for MMU {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

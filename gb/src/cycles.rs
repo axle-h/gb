@@ -2,9 +2,7 @@ use std::ops::{Add, AddAssign, Mul, Sub, SubAssign};
 use std::time::Duration;
 use bincode::{Decode, Encode};
 
-/// A count of machine (M-) cycles. **`u64`, not `usize`** — C1 made the emulator's clock absolute,
-/// and an absolute m-cycle count has to be the same width on every host: a 32-bit `usize` wraps
-/// after 34 minutes of emulated time.
+/// A count of machine (M-) cycles.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Ord, PartialOrd, Decode, Encode)]
 pub struct MachineCycles(u64);
 
@@ -42,28 +40,21 @@ impl MachineCycles {
         Self(ticks / 4) // 4 tick = 1 machine cycle
     }
 
-    /// ⚠️ **The multiply is done in `u128`, and that is not defensive — `u64` overflows here after
-    /// about 73 minutes of emulated time.** `self.0 * 4_000_000_000` passes `u64::MAX` once `self.0`
-    /// reaches ~4.6e9 m-cycles, and in release builds that wraps silently rather than panicking: the
-    /// figure just becomes nonsense partway through a long run. It surfaced in `soak`, whose progress
-    /// line stopped appearing after 3600 s and looked like a bug in the test's own bookkeeping.
-    ///
-    /// Anything that reports emulated time over a long run was affected — `meta.json`'s `emulated_ms`
-    /// and the status heartbeat both go through here, so a deployed run's clock silently wrapped
-    /// every 73 minutes. `from_duration` already used `u128` for the same reason in the other
-    /// direction.
+    /// The multiply is done in `u128`, and that is not defensive — `u64` overflows here after
+    /// about 73 minutes of emulated time. `self.0 * 4_000_000_000` passes `u64::MAX` once
+    /// `self.0` reaches ~4.6e9 m-cycles, and in release builds that wraps silently rather than
+    /// panicking: the figure just becomes nonsense partway through a long run.
     pub const fn to_duration(self) -> Duration {
         let nanos = (self.0 as u128 * 4_000_000_000) / Self::CPU_FREQ as u128;
         Duration::from_nanos(nanos as u64)
     }
 
-    /// Subtraction that clamps at zero. The plain [`Sub`] impl deliberately does **not** do this —
+    /// Subtraction that clamps at zero. The plain [`Sub`] impl deliberately does not do this —
     /// see its comment — so the two callers that genuinely want a floor ask for it by name.
     pub const fn saturating_sub(self, other: Self) -> Self {
         Self(self.0.saturating_sub(other.0))
     }
 }
-
 
 impl From<u64> for MachineCycles {
     fn from(cycles: u64) -> Self {
@@ -85,10 +76,7 @@ impl AddAssign for MachineCycles {
     }
 }
 
-/// ⚠️ **Not saturating.** It used to be, which silently turned every cycle-ordering bug into a
-/// timing skew instead of a panic (finding F11). A `debug_assert` catches the ordering bug in the
-/// test suite while release builds keep the wrapping-free single `sub`; callers that legitimately
-/// want a floor use [`MachineCycles::saturating_sub`].
+/// Not saturating.
 impl Sub for MachineCycles {
     type Output = Self;
 
@@ -112,7 +100,6 @@ impl Mul<u64> for MachineCycles {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,8 +121,8 @@ mod tests {
         assert_eq!(one_second, MachineCycles::from_m(MachineCycles::CPU_FREQ / 4));
     }
 
-    /// ⚠️ `to_duration` multiplied by 4e9 in `u64`, which wraps past ~73 minutes — silently, in
-    /// release. A five-hour run's clock read as nonsense and nothing complained.
+    /// `to_duration` multiplied by 4e9 in `u64`, which wraps past ~73 minutes — silently, in
+    /// release.
     #[test]
     fn to_duration_survives_a_long_run() {
         for hours in [1u64, 2, 5, 24] {

@@ -61,7 +61,7 @@ impl Pokemon {
             }
         }
 
-        // revalidate types against pokedex
+        // Revalidate types against pokedex
         self.types[0] = metadata.type1;
         self.types[1] = metadata.type2.unwrap_or(metadata.type1);
     }
@@ -78,7 +78,7 @@ impl Pokemon {
     }
 
     fn stat0(&self, base_stat: u16, iv: u16, ev: u16) -> u16 {
-        //floor((((B + I) × 2 + floor(ceil(sqrt(E)) ÷ 4)) × L) ÷ 100)
+        // Floor((((B + I) × 2 + floor(ceil(sqrt(E)) ÷ 4)) × L) ÷ 100)
         ((2 * (base_stat + iv) + (ev as f64).sqrt().ceil() as u16 / 4) * self.level as u16) / 100
     }
 
@@ -206,8 +206,9 @@ impl PokemonStats {
     }
 
     fn recalculate_hp_iv(&mut self) {
-        // The HP IV is calculated by taking the least significant bit (the final binary digit) of the Attack, Defense, Speed, and Special IVs,
-        // then creating a binary string by placing them in that order.
+        // The HP IV is calculated by taking the least significant bit (the final binary digit) of
+        // the Attack, Defense, Speed, and Special IVs, then creating a binary string by placing
+        // them in that order.
         self.hp = ((self.attack & 0x1) << 3) | ((self.defense & 0x1) << 2) | ((self.speed & 0x1) << 1) | (self.special & 0x1);
     }
 }
@@ -238,7 +239,7 @@ pub enum PokemonType {
     Poison,
     Ground,
     Rock,
-    /// unused https://bulbapedia.bulbagarden.net/wiki/Bird_(type)
+    /// Unused: <https://bulbapedia.bulbagarden.net/wiki/Bird_(type)>
     Bird,
     Bug,
     Ghost,
@@ -251,7 +252,6 @@ pub enum PokemonType {
     Dragon,
 }
 
-
 impl PokemonType {
     pub fn category(&self) -> PokemonTypeCategory {
         use PokemonType::*;
@@ -262,7 +262,7 @@ impl PokemonType {
     }
 
     pub fn attack_effectiveness(&self, defending: PokemonType) -> MoveEffectiveness {
-        // https://pokemondb.net/type/old
+        // Https://pokemondb.net/type/old
         use PokemonType::*;
         match self {
             Normal => match defending {

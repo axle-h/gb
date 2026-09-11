@@ -57,7 +57,6 @@ impl Pokedex {
 
 }
 
-
 pub trait PokedexReader {
     fn read_has_pokedex(&self) -> bool;
     fn read_pokedex(&self, base_pointer: &DmgPointer) -> Result<Pokedex, String>;
@@ -66,7 +65,6 @@ pub trait PokedexReader {
 impl PokedexReader for MMU {
     fn read_has_pokedex(&self) -> bool {
         // EVENT_GOT_POKEDEX = event bit 37 (counted from pokedex_constants.asm).
-        // byte = 37 / 8 = 4,  bit = 37 % 8 = 5,  mask = 0x20
         self.read(pokered_symbols::wEventFlags.address + 4) & 0x20 != 0
     }
 

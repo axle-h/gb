@@ -72,10 +72,7 @@ impl LcdControl {
         self.obj_enabled
     }
 
-    /// LCDC bit 0. **Its meaning depends on the machine.** On DMG, clear means the background and
-    /// window are not drawn at all. On CGB it is a *master priority* bit: the background is always
-    /// drawn, but when this is clear every sprite pixel wins over it regardless of the per-tile
-    /// and per-sprite priority flags (gambatte `video/ppu.cpp`, `bgEnable`).
+    /// LCDC bit 0. Its meaning depends on the machine.
     pub fn background_enabled(&self) -> bool {
         self.bg_window_enabled
     }
@@ -133,7 +130,7 @@ impl TileDataMode {
     }
     
     pub fn is_valid_tile_address(address: u16) -> bool {
-        // tile addresses must be in the range 0x8000-0x97FF and must be aligned to 0x10
+        // Tile addresses must be in the range 0x8000-0x97FF and must be aligned to 0x10
         address >= 0x8000 && address < 0x9800 && (address & 0x0F) == 0
     }
 
@@ -146,8 +143,7 @@ impl TileDataMode {
 
         match self {
             Self::Lower => {
-                // Block 0: 0x8000-0x87FF -> tiles 0-127
-                // Block 1: 0x8800-0x8FFF -> tiles 128-255
+                // Block 0: 0x8000-0x87FF -> tiles 0-127 Block 1: 0x8800-0x8FFF -> tiles 128-255
                 if tile_offset < 256 {
                     Some(tile_offset as u8)
                 } else {
@@ -155,8 +151,8 @@ impl TileDataMode {
                 }
             }
             Self::Upper => {
-                // Block 1: 0x8800-0x8FFF -> tiles 128-255 (tile_offset 128-255)
-                // Block 2: 0x9000-0x97FF -> tiles 0-127 (tile_offset 256-383)
+                // Block 1: 0x8800-0x8FFF -> tiles 128-255 (tile_offset 128-255) Block 2:
+                // 0x9000-0x97FF -> tiles 0-127 (tile_offset 256-383)
                 if tile_offset >= 256 && tile_offset < 384 {
                     // Block 2: map tile_offset 256-383 to tile index 0-127
                     Some((tile_offset - 256) as u8)

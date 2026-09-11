@@ -1,19 +1,4 @@
 //! Verification for the Blip_Buffer port.
-//!
-//! Two independent layers, because they fail in different ways:
-//!
-//! **Golden vectors.** Blip_Buffer ships no test suite — only interactive SDL demos — so the
-//! reference behaviour is produced by linking the real C++ in `tools/blip-golden/` and freezing its
-//! output into `../data/blip_*.bin`. Those comparisons are bit-exact. Regenerate with
-//! `tools/blip-golden/build.sh` after any deliberate change.
-//!
-//! **Invariants.** Properties the algorithm must hold whatever the reference did — every phase's
-//! taps summing to `kernel_unit`, a step depositing exactly its own amplitude of DC, no sample-rate
-//! drift, no aliasing. These are what catch a change that is self-consistently wrong, and they need
-//! no C++ toolchain to run.
-//!
-//! Everything below mirrors `tools/blip-golden/gen_golden.cpp` case for case. If you change a setup
-//! here, change it there.
 
 use super::buffer::BlipBuffer;
 use super::eq::BlipEq;
@@ -28,8 +13,7 @@ const FULL_SCALE: i32 = SYNTH_RANGE / 2; // amplitude at mixed == +1.0
 const GB_BASS_HZ: u32 = 28;
 
 /// The equalisation the fixtures were generated at, spelled out rather than read from
-/// [`DEFAULT_TREBLE_DB`]. The two happen to be equal today, but tone is a taste knob and the port's
-/// correctness is not: changing what the emulator ships should not silently invalidate the goldens.
+/// [`DEFAULT_TREBLE_DB`].
 const GOLDEN_TREBLE_DB: f64 = -8.0;
 
 const GOLDEN_IMPULSES: &[u8] = include_bytes!("../data/blip_impulses.bin");
@@ -41,10 +25,6 @@ const GOLDEN_BASS461: &[u8] = include_bytes!("../data/blip_bass461.bin");
 const GOLDEN_LCG: &[u8] = include_bytes!("../data/blip_lcg.bin");
 const GOLDEN_APU: &[u8] = include_bytes!("../data/blip_apu.bin");
 const APU_CAPTURE: &[u8] = include_bytes!("../data/apu_capture_in.bin");
-
-// ---------------------------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------------------------
 
 /// Golden file format: `u32` count, then that many little-endian `i16`.
 fn parse_golden(bytes: &[u8]) -> Vec<i16> {
@@ -113,16 +93,7 @@ fn drain(buf: &mut BlipBuffer, out: &mut Vec<i16>) {
     buf.read_i16(&mut out[at..]);
 }
 
-// ---------------------------------------------------------------------------------------------
-// (a) The impulse table
-// ---------------------------------------------------------------------------------------------
-
 /// The canary for every other golden test.
-///
-/// This is the only place floating point enters the pipeline, and the only place where this
-/// platform's libm could disagree with the one that built the fixtures. If this passes, the integer
-/// path below is being fed an identical table and any failure there is a real porting bug; if this
-/// is the *only* failure, see `step_response_matches_cpp_with_cpp_table`.
 #[test]
 fn impulse_table_matches_cpp() {
     let golden = parse_golden(GOLDEN_IMPULSES);
@@ -139,8 +110,7 @@ fn impulse_table_matches_cpp() {
 }
 
 /// The property `adjust_impulse` exists to guarantee: whatever phase a transition lands on, its
-/// taps sum to exactly `kernel_unit`. Without this a step deposits slightly the wrong amount of DC
-/// and the error accumulates over a playthrough.
+/// taps sum to exactly `kernel_unit`.
 #[test]
 fn every_phase_sums_to_kernel_unit() {
     let synth = gb_synth();
@@ -155,10 +125,6 @@ fn every_phase_sums_to_kernel_unit() {
         assert_eq!(sum, synth.kernel_unit(), "phase {phase} taps sum to {sum}");
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// (b) Step response at all 64 sub-sample phases
-// ---------------------------------------------------------------------------------------------
 
 fn step_response(synth: &BlipSynth<QUALITY>) -> Vec<i16> {
     const SAMPLES_PER_PHASE: usize = 32;
@@ -183,11 +149,6 @@ fn step_response_matches_cpp() {
 }
 
 /// The libm escape hatch.
-///
-/// Loads the C++-generated impulse table straight into the Rust synth, so this exercises the
-/// integer DSP — the phase-symmetry indexing, the scatter-add, the reader integration and the
-/// clamp — with the floating-point kernel generator taken out of the picture entirely. It holds
-/// bit-exactly whether or not this platform's `cos`/`pow` agree with the fixture host's.
 #[test]
 fn step_response_matches_cpp_with_cpp_table() {
     let golden = parse_golden(GOLDEN_IMPULSES);
@@ -197,10 +158,6 @@ fn step_response_matches_cpp_with_cpp_table() {
     synth.set_raw_impulses(taps, half_kernel_unit as i64 * 2, 2);
     assert_matches_golden("step_cpp_table", &step_response(&synth), &parse_golden(GOLDEN_STEP));
 }
-
-// ---------------------------------------------------------------------------------------------
-// (c) / (f) Square wave, read back at irregular sizes, across bass settings
-// ---------------------------------------------------------------------------------------------
 
 fn square_wave(bass_hz: u32) -> Vec<i16> {
     const READ_SIZES: [usize; 5] = [37, 512, 1, 4096, 129];
@@ -221,8 +178,8 @@ fn square_wave(bass_hz: u32) -> Vec<i16> {
         }
         buf.end_frame(FRAME_CLOCKS);
 
-        // Awkward read sizes on purpose: they leave a partial backlog, which is what exercises the
-        // slide-down in remove_samples and the reader accumulator carrying across calls.
+        // Awkward read sizes on purpose: they leave a partial backlog, which is what exercises
+        // the slide-down in remove_samples and the reader accumulator carrying across calls.
         let want = READ_SIZES[frame as usize].min(buf.samples_avail());
         let at = out.len();
         out.resize(at + want, 0);
@@ -237,7 +194,8 @@ fn square_matches_cpp() {
     assert_matches_golden("square", &square_wave(GB_BASS_HZ), &parse_golden(GOLDEN_SQUARE));
 }
 
-/// Pins the shift-search in `set_bass_freq`, which quantises the requested corner to a power of two.
+/// Pins the shift-search in `set_bass_freq`, which quantises the requested corner to a power of
+/// two.
 #[test]
 fn bass_variants_match_cpp() {
     for (hz, golden) in [(0u32, GOLDEN_BASS0), (16, GOLDEN_BASS16), (461, GOLDEN_BASS461)] {
@@ -245,12 +203,7 @@ fn bass_variants_match_cpp() {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// (d) Pseudo-random amplitude storm
-// ---------------------------------------------------------------------------------------------
-
-/// The same Numerical Recipes LCG gen_golden.cpp runs. Deliberately not `rand`: libc's generator
-/// differs between platforms, and the fixtures have to be reproducible.
+/// The same Numerical Recipes LCG gen_golden.cpp runs.
 struct Lcg(u32);
 
 impl Lcg {
@@ -260,8 +213,8 @@ impl Lcg {
     }
 }
 
-/// Amplitudes span the full ±SYNTH_RANGE, i.e. twice full scale, so the i16 clamp in the reader is
-/// driven into saturation in both directions.
+/// Amplitudes span the full ±SYNTH_RANGE, i.e. twice full scale, so the i16 clamp in the reader
+/// is driven into saturation in both directions.
 #[test]
 fn lcg_matches_cpp() {
     const FRAME_CLOCKS: u32 = 20000;
@@ -292,15 +245,8 @@ fn lcg_matches_cpp() {
     assert_matches_golden("lcg", &out, &golden);
 }
 
-// ---------------------------------------------------------------------------------------------
-// (e) Real captured APU output, end to end through BlipStereo
-// ---------------------------------------------------------------------------------------------
-
-/// The integration proof: 30 ms of actual Pokémon Red audio, driven through exactly the
-/// `update` + `end_frame` pattern `Audio::push_sample` uses.
-///
-/// The capture is stored already quantised to the synth's integer amplitude domain, so this
-/// compares the resampler alone and is not perturbed by the `f32` mixing path.
+/// The integration proof: 30 ms of actual Pokémon Red audio, driven through exactly the `update`
+/// + `end_frame` pattern `Audio::push_sample` uses.
 #[test]
 fn apu_capture_matches_cpp() {
     let runs = rle_decode(APU_CAPTURE);
@@ -355,12 +301,7 @@ fn blip_stereo_matches_raw_buffers() {
     assert_matches_golden("apu_stereo", &out, &parse_golden(GOLDEN_APU));
 }
 
-// ---------------------------------------------------------------------------------------------
-// Invariants — no C++ toolchain required
-// ---------------------------------------------------------------------------------------------
-
 /// A step up followed by an equal step down must leave the integrator exactly where it started.
-/// Any asymmetry here would show up as DC drift over a long session.
 #[test]
 fn step_up_then_down_is_dc_neutral() {
     let mut buf = gb_buffer(0); // no leak, so the accumulator must return to precisely zero
@@ -376,8 +317,8 @@ fn step_up_then_down_is_dc_neutral() {
     assert!(tail.iter().all(|s| *s == 0), "settled back to {:?}, not silence", &tail[..8]);
 }
 
-/// A step of amplitude `a` must settle at exactly `a * delta_factor * kernel_unit >> 14`, which for
-/// this configuration is `a * 4`. This is the gain contract the amplitude domain is built on.
+/// A step of amplitude `a` must settle at exactly `a * delta_factor * kernel_unit >> 14`, which
+/// for this configuration is `a * 4`.
 #[test]
 fn step_settles_at_unity_gain() {
     let mut buf = gb_buffer(0);
@@ -397,10 +338,6 @@ fn step_settles_at_unity_gain() {
 /// The resampling ratio is inexact by design — it is rounded to 1/65536 — but it must be *exact*
 /// with respect to whatever it rounded to: the fractional cursor has to carry across every frame
 /// boundary and every partial read, with no accumulating loss.
-///
-/// So this asserts two separate things. First, that the realised rate is close enough to the
-/// requested one to be inaudible. Second, and much more strictly, that the sample count is
-/// *precisely* what the rounded ratio predicts after ten minutes — not merely close to it.
 #[test]
 fn sample_count_does_not_drift() {
     let mut buf = gb_buffer(GB_BASS_HZ);
@@ -409,7 +346,6 @@ fn sample_count_does_not_drift() {
     let clocks_per_frame = 17556u32; // one Game Boy video frame
 
     // 44100/1048576 * 65536 = 2756.25, which rounds to 2756 — an actual output rate of 44096 Hz.
-    // That is 4 Hz low, about 1.6 cents of pitch, and it never gets any worse.
     let realised_rate = buf.factor() as f64 * CLOCK_RATE as f64 / (1u64 << BLIP_BUFFER_ACCURACY) as f64;
     let error = (realised_rate - SAMPLE_RATE as f64).abs() / SAMPLE_RATE as f64;
     assert!(error < 1e-4, "realised rate {realised_rate} is {:.4}% off nominal", error * 100.0);
@@ -448,8 +384,8 @@ fn no_panic_across_phases_and_qualities() {
     sweep::<16>();
 }
 
-/// The headless integration tests run up to twenty minutes of emulated time with no audio consumer
-/// at all. That must neither panic nor grow without bound.
+/// The headless integration tests run up to twenty minutes of emulated time with no audio
+/// consumer at all.
 #[test]
 fn survives_a_minute_with_no_reader() {
     let mut stereo = BlipStereo::new(CLOCK_RATE, SAMPLE_RATE);
@@ -516,8 +452,8 @@ fn render_square(stereo: &mut BlipStereo, freq: f64, seconds: f64) -> Vec<f32> {
     let (mut k, mut elapsed) = (1u32, 0u32);
 
     while elapsed < total_clocks {
-        // BlipStereo only reports level changes at frame starts, so step one half-period per frame
-        // when the period is longer than a frame, and otherwise sub-divide.
+        // BlipStereo only reports level changes at frame starts, so step one half-period per
+        // frame when the period is longer than a frame, and otherwise sub-divide.
         let mut within = 0u32;
         while within < FRAME_CLOCKS {
             let t = (k as f64 * half_period).round() as u32;
@@ -539,8 +475,7 @@ fn render_square(stereo: &mut BlipStereo, freq: f64, seconds: f64) -> Vec<f32> {
     out
 }
 
-/// The tuning knobs have to actually do something, and `clear` has to actually clear. Cheaper to
-/// assert that here than to discover a no-op setter while chasing a tone problem by ear.
+/// The tuning knobs have to actually do something, and `clear` has to actually clear.
 #[test]
 fn stereo_knobs_take_effect() {
     let mut stereo = BlipStereo::new(CLOCK_RATE, SAMPLE_RATE);
@@ -584,10 +519,7 @@ fn stereo_knobs_take_effect() {
 }
 
 /// Fast-forward contract: however fast the emulator runs, the *wall-clock* output rate must stay
-/// at the sink's rate. That is what stops a sped-up emulator out-running the audio device.
-///
-/// Concretely — at N× speed one wall second contains N seconds of game time, so N seconds of game
-/// time has to yield exactly one sink-second of samples.
+/// at the sink's rate.
 #[test]
 fn speed_keeps_the_wall_clock_output_rate_constant() {
     for speed in [1.0, 2.0, 3.006, 5.016, 0.5] {
@@ -629,12 +561,8 @@ fn speed_change_preserves_buffered_audio() {
 
 // ---------------------------------------------------------------------------------------------
 // Spectral behaviour — is this actually a good resampler, independent of the reference?
-// ---------------------------------------------------------------------------------------------
 
 /// Magnitude of `signal` at `freq`, via a Hann-windowed single-bin DFT.
-///
-/// A whole FFT would need a crate, and this crate has no dev-dependencies. Evaluating the two bins
-/// the test cares about directly is cheaper anyway.
 fn magnitude_at(signal: &[f32], sample_rate: f32, freq: f32) -> f32 {
     let n = signal.len();
     let (mut re, mut im) = (0.0f64, 0.0f64);
@@ -650,10 +578,6 @@ fn magnitude_at(signal: &[f32], sample_rate: f32, freq: f32) -> f32 {
 
 /// The whole point of band-limited synthesis: a square wave whose harmonics all sit above Nyquist
 /// must come out as a clean tone, not a mess of folded-back images.
-///
-/// A 15 kHz square at the Game Boy clock has its next harmonic at 45 kHz. Naive decimation would
-/// fold that to |44100 - 45000| = 900 Hz — an audible whistle nowhere near the source frequency.
-/// A correct band-limited synth leaves essentially nothing there.
 #[test]
 fn high_frequency_square_does_not_alias() {
     const FUNDAMENTAL: f32 = 15000.0;
@@ -662,9 +586,6 @@ fn high_frequency_square_does_not_alias() {
 
     // Toggle at exact fractional half-periods so the wave is genuinely 15 kHz rather than snapped
     // to a whole number of clocks — snapping would itself be a source of spurious tones.
-    //
-    // Synthesised in 20 ms frames: the buffer holds 100 ms, and a transition landing past its end
-    // is a hard error rather than something to discover from a bounds check.
     let half_period = CLOCK_RATE as f64 / (2.0 * FUNDAMENTAL as f64);
     const FRAME_CLOCKS: u32 = 20000;
     let total_clocks = CLOCK_RATE / 4; // 0.25 s

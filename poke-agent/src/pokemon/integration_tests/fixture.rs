@@ -1,17 +1,15 @@
-//! The shared harness every test in this module drives: a `GameBoy` restored from a snapshot, wired
-//! to a `PokemonAgent` running a `DeterministicPolicy`, plus the stall/budget guards that turn a wedged
-//! agent into a fast failure with a screenshot instead of a test that runs to the cycle cap.
+//! The shared harness every test in this module drives: a `GameBoy` restored from a snapshot,
+//! wired to a `PokemonAgent` running a `DeterministicPolicy`, plus the stall/budget guards that
+//! turn a wedged agent into a fast failure with a screenshot instead of a test that runs to the
+//! cycle cap.
 
 use super::*;
 
-/// Why a run stopped early. Carries the message `step` would have panicked with, so the panicking
-/// and non-panicking paths report identically.
+/// Why a run stopped early.
 struct RunFailure(String);
 
 impl RunFailure {
-    /// Which `target/test-artifacts/` pair to write. A stall and a timeout are debugged
-    /// differently, so they are kept apart — `probe_stall_artifact` and `probe_timeout_artifact`
-    /// each read one of them.
+    /// Which `target/test-artifacts/` pair to write.
     fn artifact_name(&self) -> &'static str {
         if self.0.starts_with("policy stalled") { "test_stall" } else { "test_timeout" }
     }
@@ -30,23 +28,20 @@ pub struct TestFixture {
     stall_threshold: MachineCycles,
     /// False until the first [`Self::step`], so the load-time write is not reported as a drift.
     options_reapplied: bool,
-    /// **J3** — how many times the game has restored its own `wOptions` over the harness's, i.e. how
-    /// many save/reload boundaries this run has crossed. `> 0` is the evidence that re-applying every
-    /// tick is load-bearing rather than belt-and-braces; see `options_survive_the_hall_of_fame_reset`.
+    /// J3 — how many times the game has restored its own `wOptions` over the harness's, i.e. how
+    /// many save/reload boundaries this run has crossed. `> 0` is the evidence that re-applying
+    /// every tick is load-bearing rather than belt-and-braces; see
+    /// `options_survive_the_hall_of_fame_reset`.
     pub options_drifts: u32,
-    /// The options this fixture holds the game to. Normally
-    /// [`crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS`]; a leg pinned to the *original*
-    /// battle timing swaps it with [`Self::with_original_battle_timing`].
+    /// The options this fixture holds the game to.
     options: GameOptions,
     /// How many policy steps the run was handed, so a failure can report how far it got.
     steps_at_start: Option<usize>,
-    /// **C3** — what this run touched, and whether the agent could carry it out. `None` unless
-    /// [`Self::with_coverage`] asked for it.
     pub coverage: Option<super::coverage::CoverageLog>,
 }
 
-/// Whether this run may overwrite the fixtures it snapshots. Off by default: a test run must leave
-/// the working tree clean, or every run silently changes the next run's inputs.
+/// Whether this run may overwrite the fixtures it snapshots. Off by default: a test run must
+/// leave the working tree clean, or every run silently changes the next run's inputs.
 pub fn regenerating_fixtures() -> bool {
     std::env::var_os("GB_REGEN_FIXTURES").is_some_and(|v| v != "0" && v != "")
 }
@@ -56,23 +51,20 @@ impl TestFixture {
         Self::with_policy(save_state, max_game_time, Box::new(DeterministicPolicy::new(42, policy_steps)))
     }
 
-    /// [`Self::new`] with the policy supplied rather than built. Everything else — the options pin,
-    /// the stall detector, the cycle budget — is identical, so a test that needs to observe what the
-    /// agent asks its policy gets the whole harness rather than hand-rolling a `GameBoy` beside it.
+    /// [`Self::new`] with the policy supplied rather than built. Everything else — the options
+    /// pin, the stall detector, the cycle budget — is identical, so a test that needs to observe
+    /// what the agent asks its policy gets the whole harness rather than hand-rolling a `GameBoy`
+    /// beside it.
     pub fn with_policy(save_state: &[u8], max_game_time: Duration, policy: Box<dyn crate::pokemon::policy::Policy>) -> Self {
         // `GB_TEST_MODEL=cgb` runs the same fixture on a Game Boy Color, which for this DMG-only
-        // cartridge means compatibility mode. An experiment, not a supported tier: every committed
-        // fixture is a DMG capture, so its `cgb` section overwrites the boot ROM's title-derived
-        // palette with the DMG machine's empty one and the picture comes out uncoloured. Nothing the
-        // agent reads is a colour, so a playthrough still says what it is meant to say — whether the
-        // CGB core plays the game, and how far the re-rolled RNG stream moves the scripted route.
+        // cartridge means compatibility mode.
         let cgb = matches!(std::env::var("GB_TEST_MODEL").as_deref(), Ok("cgb"));
         let mut gb = if cgb { GameBoy::cgb(roms::POKERED) } else { GameBoy::dmg(roms::POKERED) };
         gb.load_state(save_state).expect("failed to load save state");
         if cgb {
             // The load is the part that could quietly undo the switch: a fixture carries a `cart`
-            // section and a `cgb` section written by a DMG machine, so this asserts the machine is
-            // still the one that was asked for rather than trusting it.
+            // section and a `cgb` section written by a DMG machine, so this asserts the machine
+            // is still the one that was asked for rather than trusting it.
             assert_eq!(gb.core().mmu().color_mode(), gb::model::ColorMode::CgbCompat,
                 "GB_TEST_MODEL=cgb, so the loaded state must still be a CGB in compatibility mode");
         }
@@ -80,19 +72,11 @@ impl TestFixture {
         // The agent builds its world graph incrementally as it traverses.
         let steps_at_start = policy.steps_remaining();
 
-        // **Workstream J2.** Applied here rather than by regenerating the 27 committed `.bin`s: one
-        // place, every tier, and no chance of a half-regenerated chain. See
-        // [`crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS`] for what the three bits are and
-        // why the plan's proposed byte was wrong.
+        // Workstream J2.
         let options = crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS;
         PokemonApi::new(&mut gb).debug_set_options(&options);
 
-        // ⭐ **Nothing in this harness ever listens, so the APU does not mix or resample.** The
-        // bench measures the mechanism at +10.2%; this tier was not A/B'd separately, so read that
-        // as the shape of the saving rather than as this test's number. The four
-        // channels keep clocking, so the machine is bit-identical either way — that is asserted
-        // directly by `game_boy::tests::silencing_the_output_side_is_invisible_to_the_game`, which
-        // is what makes this safe to do to a golden RNG replay like `full_playthrough`.
+        // Nothing in this harness ever listens, so the APU does not mix or resample.
         gb.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
 
         Self {
@@ -113,42 +97,13 @@ impl TestFixture {
         }
     }
 
-    /// **C3** — keep a [`CoverageLog`](super::coverage::CoverageLog) of everything this run does.
-    ///
-    /// ⚠️ **A driver that opts in must read its events from `self.coverage` rather than from
-    /// `agent.drain_events()`.** The agent's buffer is drained, not peeked — and it is capped at a
-    /// hundred, so a fixture that only peeked would silently lose events on any run longer than a
-    /// few seconds. Opt-in for exactly that reason: it changes who owns the events, and no existing
-    /// test wants that.
     pub fn with_coverage(mut self) -> Self {
         self.coverage = Some(super::coverage::CoverageLog::new());
         self
     }
 
-    /// **J, opt-out** — hold this fixture to the options the suite used *before* workstream J, i.e.
-    /// with battle animations **on**.
-    ///
-    /// ⚠️ This is not a preference, it is a **pin to an RNG stream**. Fewer frames per battle means
-    /// the ROM samples `hRandomAdd`/`hRandomSub` at different moments, so turning animations off
-    /// changes every encounter roll and every catch roll downstream — and a leg whose *route* was
-    /// tuned against one stream can land on the wrong side of a map on another. Four mainline legs do
-    /// exactly that (`celadon::can_reach_lavender` stalls at Route 10 (12,20), unable to reach
-    /// Lavender because a differently-timed wild battle left it in the route's southern pocket; the
-    /// same shape for `saffron::can_enter_saffron`, `cinnabar::can_get_volcano_badge` and
-    /// `endgame::can_beat_elite_four`).
-    ///
-    /// Re-cutting them is not the answer: §4.2 of the plan **freezes** `complete_game_steps` and
-    /// `full_playthrough`, and §3 puts battle tactics out of scope on the grounds that in deployment
-    /// they are the LLM's decisions. So the mainline chain keeps the stream it was cut against and
-    /// the postgame chain — all 66 legs of it, cut after J — gets the 20 % .
-    /// Give one step longer than the default ten game-minutes before it counts as a stall.
-    ///
-    /// ⚠️ **For a step that is *slow*, never for one that is stuck**, and the difference is whether
-    /// the player is moving. `victory_road_1f_approach_steps` crosses the whole of Route 22's grass
-    /// in a single `EnterMap`, and every wild encounter aborts the walk and re-issues it from wherever
-    /// it stopped — measured, about fifteen battles and eleven game-minutes to cross, against a
-    /// detector that fires at ten. The mainline clears the same walk because its queue is moving
-    /// elsewhere; a leg seeded on top of it has nothing else to change.
+    /// J, opt-out — hold this fixture to the options the suite used *before* workstream J, i.e.
+    /// with battle animations on.
     pub fn with_stall_tolerance(mut self, tolerance: Duration) -> Self {
         self.stall_threshold = MachineCycles::from_duration(tolerance);
         self
@@ -169,19 +124,12 @@ impl TestFixture {
         }
     }
 
-    /// [`Self::step`] without the panic. Diagnostics that sweep several targets use this so that
-    /// one unreachable target reports itself and the sweep carries on, instead of taking the whole
-    /// probe down with it.
+    /// [`Self::step`] without the panic.
     fn try_step(&mut self) -> Result<(), RunFailure> {
         let cycles = self.gb.run(AGENT_RESOLUTION);
 
         let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
-        // **Workstream J3.** `wOptions` is inside the block the game copies to SRAM on a save and
-        // copies back on CONTINUE, so a soft reset — which Phase 0's Hall-of-Fame walk-out performs,
-        // and `change_box` sets up — restores the cartridge's own options over the ones J2 wrote.
-        // Re-applying is a byte compare per tick and it cannot be undone by anything the game does;
-        // poking the SRAM copy instead would fail `sMainDataCheckSum`. `probe_fixture_options` is the
-        // proof.
+        // Workstream J3.
         if api.debug_set_options(&self.options) && self.options_reapplied {
             self.options_drifts += 1;
             println!("[fixture] wOptions drifted (a save/reload restored the cartridge's) — re-applied");
@@ -192,12 +140,8 @@ impl TestFixture {
 
         self.total_cycles += cycles;
 
-        // Stall detection: GrindUntilLevel and CatchPokemon legitimately sit on the
-        // same step for long stretches — exempt them regardless of queue length. A battle gets a
-        // *longer leash* rather than an exemption: the queue cannot advance mid-fight, so a six-mon
-        // rival or an Elite Four room needs far more than the usual threshold — but a fight can also
-        // deadlock outright (an attacker out of PP, healing itself forever against a mon it cannot KO),
-        // and that has to keep failing fast instead of running to the cycle cap.
+        // Stall detection: GrindUntilLevel and CatchPokemon legitimately sit on the same step for
+        // long stretches — exempt them regardless of queue length.
         const BATTLE_STALL_FACTOR: u64 = 8;
         let steps = self.agent.policy_steps_remaining();
         let long_running = self.agent.policy_current_step_is_long_running();
@@ -226,10 +170,6 @@ impl TestFixture {
     }
 
     /// How far the run got, appended to every failure panic.
-    ///
-    /// A bare "policy stalled" says nothing about whether the run died on its first step or its last,
-    /// and for a long run that is the difference between a typo and a regression. `full_playthrough`
-    /// sat broken for a long time partly because its failure looked identical at 40 % and at 99 %.
     fn progress_note(&self) -> String {
         match (self.steps_at_start, self.agent.policy_steps_remaining()) {
             (Some(total), Some(left)) if total > 0 => format!(
@@ -241,15 +181,6 @@ impl TestFixture {
 
     /// Fold this tick's events into the [`CoverageLog`](super::coverage::CoverageLog), and drop a
     /// save state wherever one of them was a defect.
-    ///
-    /// ⚠️ **The state has to be taken *here*, not at the end of the run.** `docs/coverage-plan.md`
-    /// §5.5 asks a coverage run to fail "naming the id and dropping a save state", and §5.4 says why
-    /// nothing later can: exploration is destructive and mostly one-shot, so a sprite talked to is
-    /// gone and an item picked up is gone, and by the time a ninety-second walk ends the square that
-    /// failed cannot be stood on again. This is the one moment the emulator is still there.
-    ///
-    /// The id becomes the file name, with `:` and `,` turned into `-` — a colon is legal on Linux
-    /// and not worth relying on.
     fn observe_coverage(&mut self) {
         let Some(log) = self.coverage.as_mut() else { return };
         for event in self.agent.drain_events() {
@@ -274,10 +205,7 @@ impl TestFixture {
         let dir = std::path::Path::new("target/test-artifacts");
         let state = dir.join(format!("{name}_state.bin"));
         let shot = dir.join(format!("{name}_screenshot.png"));
-        // ⚠️ **The file's parent, not the artifacts root.** `name` may carry a subdirectory —
-        // `observe_coverage` writes `coverage/defect-…` — and `save_state_to_file` answers a missing
-        // directory with an error this function deliberately swallows, so creating only the root
-        // would lose exactly the artifact that is hardest to reproduce.
+        // The file's parent, not the artifacts root.
         for path in [&state, &shot] {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).ok();
@@ -288,15 +216,8 @@ impl TestFixture {
         println!("saved failure artifacts: {}, {}", state.display(), shot.display());
     }
 
-    /// One iteration of a **host** loop that is `min_cycles` behind the clock, rather than one agent
+    /// One iteration of a host loop that is `min_cycles` behind the clock, rather than one agent
     /// tick.
-    ///
-    /// [`Self::step`] is the harness's own pacing — `gb.run(AGENT_RESOLUTION)` and one
-    /// `agent.update` in lockstep — and it is the reason the resolution defect of 2026-09-03 could
-    /// not be seen from any test, `soak` included: no test had ever handed the agent more than one
-    /// tick's worth of emulated time, and both real drivers (`host.rs`, `sdl/render.rs`) do it on
-    /// every iteration. This routes through [`PokemonAgent::run`] exactly as they do, so a test can
-    /// pick the tick a loaded server would have achieved and watch the agent play at it.
     pub fn step_coarse(&mut self, min_cycles: MachineCycles) {
         PokemonApi::with_cache(&mut self.gb, &mut self.map_cache).debug_set_options(&self.options);
         let (ran, _) = self.agent.run(&mut self.gb, &mut self.map_cache, min_cycles);
@@ -313,13 +234,6 @@ impl TestFixture {
     }
 
     /// Drive until `done` is satisfied, tracing each map the run passes through.
-    ///
-    /// There is deliberately no step cap: the cycle budget in [`Self::step`] is the failsafe, and it
-    /// fails with a screenshot and a saved state instead of silently falling out of a `for` loop with
-    /// an assertion that then reports the wrong thing.
-    ///
-    /// Use this for steps that never pop on their own — `DefeatGymLeader` runs until the badge is in
-    /// hand, so waiting for the queue to empty would wait forever.
     pub fn run_until(&mut self, done: impl Fn(&GameState) -> bool) -> GameState {
         let mut last_map = None;
         loop {
@@ -341,9 +255,6 @@ impl TestFixture {
 
     /// [`Self::run_until`] without the panic: `None` means the run stalled or ran out of budget
     /// before `done` was satisfied, and the reason has already been printed.
-    ///
-    /// For diagnostics only. A *test* wants `run_until`, so that a route that stops working fails
-    /// loudly instead of quietly reporting nothing.
     pub fn try_run_until(&mut self, done: impl Fn(&GameState) -> bool) -> Option<GameState> {
         let mut last_map = None;
         loop {
@@ -368,20 +279,6 @@ impl TestFixture {
     }
 
     /// Drive the queued policy to exhaustion, then keep going until `done` is satisfied.
-    ///
-    /// `Interact` and `CollectItem` pop the moment they *issue* the walk, so the queue routinely
-    /// empties while the effect it was queued for — an item landing in the bag, an NPC's text box —
-    /// is still in flight. This is the "exhaust, then wait for the effect" idiom.
-    ///
-    /// ⚠️ **This is the one harness call that can hide a mainline bug**, so it reports its own slack.
-    /// A leg test ends when the queue empties; `complete_game_steps` does not — it moves straight on to
-    /// the next leg's steps. So a leg that only reaches `done` because the agent kept acting *after*
-    /// exhaustion is green here and wedges in [`super::playthrough::full_playthrough`], which is
-    /// exactly what happened with the Poké Flute: `Interact(MRFUJISHOUSE_MR_FUJI)` popped before the
-    /// conversation, `run_leg` waited and the agent finished it unprompted, and the mainline instead
-    /// walked away without the Flute and stalled 200 steps later. The slack is printed rather than
-    /// asserted because a handful of ticks is the normal in-flight case; a *large* number means the
-    /// step list is leaning on the agent's autonomy and will not survive composition.
     pub fn run_leg(&mut self, done: impl Fn(&GameState) -> bool) -> GameState {
         self.step_until_exhausted();
         let before = self.total_cycles;
@@ -408,18 +305,14 @@ impl TestFixture {
         self.api().game_state().unwrap()
     }
 
-    /// As [`Self::game_state`], for a caller sweeping *every* committed fixture — some are captured
-    /// mid-transition or in a battle, where `game_state` legitimately has no map to report.
+    /// As [`Self::game_state`], for a caller sweeping *every* committed fixture — some are
+    /// captured mid-transition or in a battle, where `game_state` legitimately has no map to
+    /// report.
     pub fn try_game_state(&mut self) -> Result<GameState, String> {
         self.api().game_state()
     }
 
-    /// Rewrite a committed fixture — **only** under `GB_REGEN_FIXTURES=1`.
-    ///
-    /// Every leg test snapshots its end state for the next leg to start from, which is how the chain
-    /// is maintained. Doing that on an ordinary run means each run silently changes the next run's
-    /// inputs, so a leg can "fail" purely because an earlier one re-saved its fixture slightly
-    /// differently. Off by default; the call sites stay as documentation of the chain.
+    /// Rewrite a committed fixture — only under `GB_REGEN_FIXTURES=1`.
     pub fn save_state_named(&mut self, path: &str) -> Result<(), String> {
         if regenerating_fixtures() {
             println!("regenerating fixture {path}");
@@ -431,11 +324,8 @@ impl TestFixture {
     }
 }
 
-/// Diagnostic, not a test: print where each committed fixture stands — map, badges, money, party and
-/// bag. When a leg test fails, this is the first thing to look at, because the usual cause is that its
-/// input snapshot no longer matches what the leg's `PolicyStep`s assume (a party member in a different
-/// slot, a missing HM, an empty wallet). Run with
-/// `cargo test --release -- dump_fixture_states --exact --ignored --nocapture`.
+/// Diagnostic, not a test: print where each committed fixture stands — map, badges, money, party
+/// and bag.
 #[test]
 #[cfg(feature = "slow-tests")]
 #[ignore = "diagnostic, not a test; run with --ignored --nocapture"]
@@ -487,14 +377,7 @@ fn dump_fixture_states() {
 }
 
 /// Micro-benchmark, not a test: raw emulation throughput vs. the full agent step, from a mid-game
-/// fixture. Establishes which half of the loop to optimise — re-measured 2026-08-05 on a Ryzen 9
-/// 7900X at **33.6× realtime raw and 28.3× with the agent**, i.e. the emulator is the cost and the
-/// agent's observe/policy/input work is only ~16% on top.
-///
-/// For the emulator core measured *alone*, which is what Phase C of
-/// `docs/compatibility/10-implementation-plan.md` is scored against, see
-/// `game_boy::tests::bench_core_throughput`.
-///
+/// fixture.
 /// ```text
 /// cargo test --release --features slow-tests --lib -- \
 ///   pokemon::integration_tests::fixture::bench_emulation_throughput --exact --ignored --nocapture

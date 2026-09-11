@@ -29,7 +29,8 @@ impl LengthTimer {
         // Triggering resets the counter to max value if it has expired
         if self.value == 0 {
             self.reset(0x00);
-            // Quirk: Immediately clock if enabled during trigger and this is a length counter cycle
+            // Quirk: Immediately clock if enabled during trigger and this is a length counter
+            // cycle
             if self.enabled && frame_sequencer.current_events().is_length_counter() {
                 self.value = self.value.saturating_sub(1);
             }
@@ -59,7 +60,7 @@ impl LengthTimer {
             self.value -= 1;
         }
         if self.value == 0 {
-            // length overflowed, disable the channel
+            // Length overflowed, disable the channel
             *channel_active = false;
         }
     }

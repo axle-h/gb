@@ -33,72 +33,26 @@ impl TextBoxId {
 }
 
 /// True when `on_screen_text` is the level-up "Which move should be forgotten?" prompt.
-///
-/// The forget-move menu shares the `(5,8)` cursor geometry with whatever menu previously wrote
-/// `wTopMenuItemX/Y`, and those bytes persist in RAM, so geometry alone can misfire on a stale
-/// value. The prompt (`_WhichMoveToForgetText`, pokered `data/text/text_4.asm`) is printed with
-/// `done` (no button wait) and sits in the bottom message box while the move list is drawn above
-/// it, so it stays readable via `on_screen_text(only_message_box=true)` for the whole menu. Match
-/// the distinctive "forgotten" so the agent only drives the forget menu when it is genuinely shown.
 pub fn is_forget_move_prompt(on_screen_text: &str) -> bool {
     on_screen_text.contains("forgotten")
 }
 
-/// The cursor origin `DrawStartMenu` writes on every redraw: `wTopMenuItemY = 2`,
-/// `wTopMenuItemX = $0b` (`engine/menus/draw_start_menu.asm`). Shared rather than copied, because
-/// four hand-copies of the field-move test drifted apart the first time anything was learned about
-/// it — see [`MenuState::is_field_move_menu`].
+/// The cursor origin `DrawStartMenu` writes on every redraw: `wTopMenuItemY = 2`, `wTopMenuItemX
+/// = $0b` (`engine/menus/draw_start_menu.asm`). Shared rather than copied, because four
+/// hand-copies of the field-move test drifted apart the first time anything was learned about it
+/// — see [`MenuState::is_field_move_menu`].
 pub const START_MENU_ORIGIN: (u8, u8) = (11, 2);
 
 /// True when the game's own START menu is what is on screen.
-///
-/// ⚠️ **This cannot be a [`MenuState`] method, and that is the whole reason the START menu was
-/// invisible to the agent.** `DrawStartMenu` calls `TextBoxBorder` **directly** and never writes
-/// `wTextBoxID`, so the byte still names whatever box was last *drawn* — and
-/// [`MmuExt::read_menu_state`] answers `None` outright when that stale byte decodes to nothing.
-/// A `MenuState` predicate would therefore be unreachable in exactly the case it is needed. The
-/// raw geometry from `PokemonApiTrait::menu_geometry` is the only way in.
-///
-/// Both halves are required, for the reason [`MenuState::is_field_move_menu`] needs both:
-///
-/// - `wTopMenuItemX/Y` **linger**, so geometry alone keeps reporting the START menu for as long as
-///   whatever it opened is up. The screen that matters here is the trainer card, which writes no
-///   text of its own that we match, so the anchor answers *no* there — and that is fine rather than
-///   a gap: the caller latches, and the card falls back to the START menu on the next press either
-///   way.
-/// - `EXIT` is the anchor because `draw_start_menu.asm` is its **only** occurrence in the ROM, and
-///   it is present in both the six-row and the seven-row menu. The SAVE row is no use — it reads
-///   `RESET` on a link cable.
-///
-/// Nothing where B is the wrong answer can match. `ld a, 11` into `wTopMenuItemX` happens three
-/// times in the ROM — here at Y=2, `DisplayChangeBoxMenu` at Y=1, and the link cable club — so only
-/// the START menu writes (11, 2); and every two-option menu rewrites both bytes from its own
-/// `b`/`c` and shows no `EXIT`, which is what keeps "never B on a yes/no" true for this way in.
 pub fn is_start_menu(top_menu_item_x: u8, top_menu_item_y: u8, on_screen_text: &str) -> bool {
     (top_menu_item_x, top_menu_item_y) == START_MENU_ORIGIN && on_screen_text.contains("EXIT")
 }
 
 /// Where `PartyMenuInit` puts the party list: `wTopMenuItemX`/`Y` of (0, 1)
-/// (`engine/menus/party_menu.asm`). Shared with the **battle** PKMN list, which is the same menu.
+/// (`engine/menus/party_menu.asm`). Shared with the battle PKMN list, which is the same menu.
 pub const PARTY_MENU_ORIGIN: (u8, u8) = (0, 1);
 
 /// True when the ordinary (`NORMAL_PARTY_MENU`) party list is on screen right now.
-///
-/// Both halves are required, for [`is_start_menu`]'s reason, and here the geometry half is the
-/// dangerous one: (0, 1) is written by every party menu the game has ever drawn and **lingers for
-/// the rest of the run**. Measured on an in-game trade: the party list closes, the player walks two
-/// rooms, talks to the trader again, and `wTopMenuItemX/Y` still read (0, 1) on the first tick of
-/// the greeting — so geometry alone would answer yes to a text box with no menu in it at all.
-///
-/// `Choose a POKéMON.` is the anchor because it is `_PartyMenuNormalText`, the message
-/// `PartyMenuMessagePointers` prints for `NORMAL_PARTY_MENU` and only for it: an item use says
-/// "Use item on which #MON?", a TM says its own thing, and the battle list says "Bring out which
-/// #MON?". So the pair is exactly "the list a *conversation* opened", which is the one a caller can
-/// answer for the player — a trade, the Day Care, the Name Rater.
-///
-/// ⚠️ **Matched from the front and without the `é`.** The screen reader renders `#` as `POKéMON`
-/// and a caller comparing the whole sentence is comparing against a charmap; a caller matching the
-/// tail is comparing against a full stop that arrives a tick after the rest of the line.
 pub fn is_normal_party_menu(top_menu_item_x: u8, top_menu_item_y: u8, on_screen_text: &str) -> bool {
     (top_menu_item_x, top_menu_item_y) == PARTY_MENU_ORIGIN && on_screen_text.contains("Choose a POK")
 }
@@ -112,8 +66,6 @@ pub enum BattleMenuState {
     Pokemon,
     PokemonList { index: u8 }, // 0-based
     Run,
-    /// The level-up "Which move should be forgotten?" menu (a 4-move list opened by
-    /// `LearnMove`/`TryingToLearn`). Distinct geometry from the battle move list.
     ForgetMoveList { index: u8 }, // 0-based move slot the cursor is on
     // ── Safari Zone battle menu (BALL/BAIT/ROCK/RUN 2×2) ──
     SafariBall,
@@ -187,8 +139,6 @@ impl MenuState {
     }
 
     /// True only when the 2×2 main battle menu grid is showing.
-    /// False when a sub-menu (move list, bag, party) is open, even though
-    /// text_box_id remains BattleMenuTemplate throughout.
     fn is_main_battle_menu(&self) -> bool {
         match self.text_box_id {
             TextBoxId::BattleMenuTemplate =>
@@ -199,7 +149,7 @@ impl MenuState {
         }
     }
 
-    /// True when a scrolling **list** menu is what is on screen — the bag, a mart's stock, a lift's
+    /// True when a scrolling list menu is what is on screen — the bag, a mart's stock, a lift's
     /// floors, the badge descriptions. All of them are left with B, and several are closed loops
     /// under A, which is why the agent's text reader asks.
     pub fn is_list_menu(&self) -> bool {
@@ -210,32 +160,16 @@ impl MenuState {
         matches!(self.text_box_id, TextBoxId::BuySellQuitMenu | TextBoxId::BuySellQuitMenuTemplate)
     }
 
-    /// True when the mart's item-purchase list (PRICEDITEMLISTMENU) is visible.
-    /// Distinct from the battle item list by topMenuItemY == 3 vs 4.
+    /// True when the mart's item-purchase list (PRICEDITEMLISTMENU) is visible. Distinct from the
+    /// battle item list by topMenuItemY == 3 vs 4.
     pub fn is_mart_item_list(&self) -> bool {
         self.text_box_id == TextBoxId::ListMenuBox
             && self.top_menu_item_x == 5
             && self.top_menu_item_y == 4
     }
 
-    /// True when the party menu's **field-move box** is the live menu — the little
+    /// True when the party menu's field-move box is the live menu — the little
     /// CUT/SURF/STRENGTH/FLY list opened by choosing a mon from the party screen.
-    ///
-    /// Needs both halves, because each is wrong on its own and each was wrong in this codebase:
-    ///
-    /// - `top_menu_item_y` counts **down from 12 by two per field move** the mon knows
-    ///   (`engine/menus/start_sub_menus.asm:36-47`), so it is 10 for one field move, 8 for two, 6 for
-    ///   three and 4 for four. Testing `== 10` silently misses every mon that knows more than one, which
-    ///   is how a Strength/Dig HM-slave gets driven into the wrong menu entry. `top_menu_item_x` is no
-    ///   help at all: it is `wFieldMovesLeftmostXCoord`, pulled left to fit the longest move name, so it
-    ///   is 12 for `CUT` and 10 for `STRENGTH` (`engine/menus/text_box.asm:382-492`).
-    /// - `text_box_id` is only written when a text box is **drawn**, so it lingers on
-    ///   `FieldMoveMonMenu` long after the menu is gone — a Fly leaves it set for the whole flight — and
-    ///   a driver that trusts it alone presses A into whatever menu is really open (in practice: the
-    ///   START menu, selecting POKéDEX).
-    ///
-    /// Together they are exact: the geometry says a box of that shape is configured, the id says it is
-    /// what is on screen right now rather than a message box drawn over it.
     pub fn is_field_move_menu(&self) -> bool {
         self.text_box_id == TextBoxId::FieldMoveMonMenu
             && matches!(self.top_menu_item_y, 4 | 6 | 8 | 10)
@@ -245,9 +179,9 @@ impl MenuState {
         self.text_box_id == TextBoxId::TwoOptionMenu
     }
 
-    /// True when the party-mon SWITCH / STATS / CANCEL sub-menu is showing — opened after selecting a
-    /// party member from the battle PKMN list for a *voluntary* switch. (A forced switch after a faint
-    /// skips this menu.) `current_item` is 0=SWITCH, 1=STATS, 2=CANCEL.
+    /// True when the party-mon SWITCH / STATS / CANCEL sub-menu is showing — opened after
+    /// selecting a party member from the battle PKMN list for a *voluntary* switch. (A forced
+    /// switch after a faint skips this menu.) `current_item` is 0=SWITCH, 1=STATS, 2=CANCEL.
     pub fn is_switch_stats_cancel_menu(&self) -> bool {
         self.text_box_id == TextBoxId::SwitchStatsCancelMenuTemplate
     }
@@ -258,18 +192,13 @@ impl MenuState {
     }
 
     pub fn battle_menu_state(&self) -> Option<BattleMenuState> {
-        // The level-up move-forget menu ("Which move should be forgotten?") is opened by
-        // `LearnMove`/`TryingToLearn` with a unique top-left of (5,8) and a 0-indexed move cursor
-        // (`wCurrentMenuItem`). This is distinct from the battle move list (top-left 5,12) and the
-        // disabled-move list (5,12), so match it by geometry before anything else. Without this the
-        // agent A-mashes through and forgets slot 0 (losing a good move like Tackle).
         if self.top_menu_item_x == 5 && self.top_menu_item_y == 8 {
             return Some(BattleMenuState::ForgetMoveList { index: self.current_item });
         }
         if self.text_box_id.is_battle_menu() {
             if self.is_main_battle_menu() {
-                // Safari menu is BALL/BAIT/ROCK/RUN; `battle_menu_item` returns 0=BALL 1=ROCK 2=BAIT
-                // 3=RUN (left column BALL/ROCK, right column BAIT/RUN).
+                // Safari menu is BALL/BAIT/ROCK/RUN; `battle_menu_item` returns 0=BALL 1=ROCK
+                // 2=BAIT 3=RUN (left column BALL/ROCK, right column BAIT/RUN).
                 if self.text_box_id == TextBoxId::SafariBattleMenuTemplate {
                     return Some(match self.battle_menu_item() {
                         0 => BattleMenuState::SafariBall,
@@ -296,17 +225,13 @@ impl MenuState {
                 index: self.current_item.saturating_add(self.scroll_offset),
             });
         } else if self.text_box_id == TextBoxId::MessageBox && self.top_menu_item_x == 0 && self.top_menu_item_y == 1 {
-            // on the pokemon list top x is always 0 & top y is always 1 see pokemon.asm::PartyMenuInit
+            // On the pokemon list top x is always 0 & top y is always 1 see
+            // pokemon.asm::PartyMenuInit
             return Some(BattleMenuState::PokemonList {
                 index: self.current_item,
             });
         }
 
-        // The FIGHT move list can linger with text_box_id == MessageBox rather than
-        // BattleMenuTemplate — e.g. while a "… is disabled!" / "no PP left" message from a bounced
-        // move selection is still on screen. Recognize it by its distinctive geometry (top-left
-        // corner at 5,12, unique among battle menus) so the agent can navigate to a usable move
-        // instead of hanging on an unrecognized menu.
         if self.top_menu_item_x == 5 && self.top_menu_item_y == 12 {
             return Some(BattleMenuState::MoveList { index: self.current_item.saturating_sub(1) });
         }
@@ -320,11 +245,7 @@ mod tests {
     use super::*;
     use TextBoxId::*;
 
-    /// The START menu is recognised on **both** halves, and each half is wrong alone.
-    ///
-    /// The strings are the real thing, read off the tile map with the menu actually open — six rows
-    /// because the fixture predates the Pokédex, and `LLM` because that is what the trainer is
-    /// called there. `on_screen_text` joins the rows with spaces, which is why they read as one line.
+    /// The START menu is recognised on both halves, and each half is wrong alone.
     #[test]
     fn the_start_menu_is_matched_on_geometry_and_its_own_word() {
         const OPEN: &str = "POKéMON ITEM LLM SAVE OPTION EXIT";
@@ -333,21 +254,21 @@ mod tests {
         assert!(is_start_menu(11, 2, "POKéDEX POKéMON ITEM LLM SAVE OPTION EXIT"),
                 "seven rows once the Pokédex is owned, same origin, same word");
 
-        // ⚠️ Geometry alone is not enough: `wTopMenuItemX/Y` linger, so (11, 2) keeps being reported
-        // for as long as whatever the menu opened is still up. The bag is the common case.
+        // Geometry alone is not enough: `wTopMenuItemX/Y` linger, so (11, 2) keeps being reported
+        // for as long as whatever the menu opened is still up.
         assert!(!is_start_menu(11, 2, "POTION ANTIDOTE CANCEL"),
                 "stale geometry under the bag the START menu opened");
 
-        // ⚠️ And the word alone is not enough either, or any screen quoting it would match.
+        // And the word alone is not enough either, or any screen quoting it would match.
         assert!(!is_start_menu(5, 4, OPEN), "a list menu's origin is not the START menu's");
         assert!(!is_start_menu(0, 1, OPEN), "the party list's origin is not either");
 
-        // A two-option menu writes its own origin and shows no EXIT, which is what keeps "never B on
-        // a yes/no" true for this way in.
+        // A two-option menu writes its own origin and shows no EXIT, which is what keeps "never B
+        // on a yes/no" true for this way in.
         assert!(!is_start_menu(15, 8, "YES NO"), "a yes/no can never match");
     }
 
-    /// The party list a **conversation** opened, on both halves — and the strings are the real thing,
+    /// The party list a conversation opened, on both halves — and the strings are the real thing,
     /// read off the tile map during an in-game trade and at the Day Care.
     #[test]
     fn a_conversation_s_party_list_is_matched_on_geometry_and_its_own_sentence() {
@@ -355,16 +276,13 @@ mod tests {
 
         assert!(is_normal_party_menu(0, 1, TRADE), "the list's own origin and its own sentence");
 
-        // ⚠️ **Geometry alone is not enough, and here it is the dangerous half.** (0, 1) is written
-        // by every party menu the game has ever drawn and lingers for the rest of the run: measured
-        // on an in-game trade, the list closes, the player walks two rooms, talks to the trader
-        // again, and it still reads (0, 1) on the first tick of the greeting.
+        // Geometry alone is not enough, and here it is the dangerous half.
         assert!(!is_normal_party_menu(0, 1, "Hello there! Do you want to trade your POLIWHIRL for JYNX?"),
                 "stale geometry under the trader's greeting");
         assert!(!is_normal_party_menu(0, 1, "Hmmm? This isn't POLIWHIRL. Think of me when you get one."),
                 "stale geometry under the trader's reply");
 
-        // ⚠️ And the sentence alone is not enough either, or a quoted line would match.
+        // And the sentence alone is not enough either, or a quoted line would match.
         assert!(!is_normal_party_menu(11, 2, TRADE), "the START menu's origin is not the list's");
 
         // The other party menus say something else, which is what keeps this to the three
@@ -411,8 +329,7 @@ mod tests {
     #[test]
     fn forget_move_menu() {
         // The level-up move-forget menu (top-left 5,8) is recognized with a 0-indexed cursor,
-        // distinct from the battle move list (5,12). wTextBoxID is TwoOptionMenu (leftover from the
-        // "delete a move?" YES/NO), which must NOT be mistaken for the move-forget menu by geometry.
+        // distinct from the battle move list (5,12).
         for index in 0..4 {
             assert_eq!(
                 MenuState::new(TwoOptionMenu, index, 0, 100, 5, 8).battle_menu_state(),

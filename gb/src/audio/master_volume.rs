@@ -1,12 +1,9 @@
 use bincode::{Decode, Encode};
 use crate::audio::sample::AudioSample;
 
-/// FF24 — NR50: Master volume & VIN panning
-/// VIN left/right: Set to 0 if external sound hardware is not being used.
-/// Left/right volume: These specify the master volume, i.e. how much each output should be scaled.
-///                    A value of 0 is treated as a volume of 1 (very quiet),
-///                    and a value of 7 is treated as a volume of 8 (no volume reduction).
-///                    Importantly, the amplifier never mutes a non-silent input.
+/// FF24 — NR50: Master volume & VIN panning VIN left/right: Set to 0 if external sound hardware
+/// is not being used. Left/right volume: These specify the master volume, i.e. how much each
+/// output should be scaled.
 #[derive(Debug, Clone, Default, Eq, PartialEq, Decode, Encode)]
 pub struct MasterVolume {
     vin_left: bool, // bit 7

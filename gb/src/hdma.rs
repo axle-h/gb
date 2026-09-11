@@ -1,20 +1,6 @@
 use bincode::{Decode, Encode};
 
 /// The CGB's VRAM DMA controller — `HDMA1`-`HDMA5` (`FF51`-`FF55`).
-///
-/// Two transfer modes share one register set:
-///
-/// * **GDMA** (general purpose) copies the whole block at once, with the CPU stopped.
-/// * **HDMA** copies `0x10` bytes at the start of each HBlank until the block is done.
-///
-/// # Accuracy caveat
-///
-/// `gb` renders mode 3 as a fixed 172 ticks, so it has no accurate mode-0 boundary to hang HDMA
-/// off. A block is transferred **at the mode-3 to mode-0 transition** — correct in ordering and in
-/// how many blocks land per frame, approximate in cycle placement. GDMA's CPU stall (8 M-cycles
-/// per block in single speed) is likewise not modelled: the copy is instantaneous and the guest
-/// loses no time. Both need the M-cycle work the plan defers in §0.2. Interleaving with OAM DMA is
-/// out of scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Decode, Encode)]
 pub struct Hdma {
     source: u16,
@@ -41,7 +27,7 @@ impl HdmaBlock {
 pub enum HdmaRequest {
     /// Copy this many `0x10`-byte blocks immediately.
     General(u8),
-    /// An HBlank-paced transfer was started, or a running one cancelled. Nothing to do now.
+    /// An HBlank-paced transfer was started, or a running one cancelled.
     None,
 }
 
@@ -80,8 +66,7 @@ impl Hdma {
         let blocks = value & 0x7F;
         if value & 0x80 == 0 {
             if self.active {
-                // Writing bit 7 clear during an HBlank transfer cancels it. The length left is
-                // preserved and bit 7 now reads 1, which is how a guest detects the cancellation.
+                // Writing bit 7 clear during an HBlank transfer cancels it.
                 self.active = false;
                 return HdmaRequest::None;
             }

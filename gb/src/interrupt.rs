@@ -1,14 +1,6 @@
 use bincode::{Decode, Encode};
 use strum::IntoEnumIterator;
 
-/// The five interrupt bits, in hardware's own layout: bit 0 VBlank … bit 4 Joypad.
-/// <https://gbdev.io/pandocs/Interrupts.html#ffff--ie-interrupt-enable>
-///
-/// **A bitmask, not five `bool`s (C7).** `MMU::update` polls this once per CPU instruction and
-/// `Core::interrupt` reads it again; as separate fields, "is anything pending?" was five field
-/// reads and five branches each time. As a mask it is one `and`, and picking the winner is
-/// `trailing_zeros` — with the priority order falling out of the bit order for free, because
-/// hardware numbers them highest-priority-first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct InterruptFlags(u8);
 
@@ -77,9 +69,6 @@ impl InterruptFlags {
     }
 
     /// The highest-priority interrupt that is both requested (`self`) and enabled (`enabled`).
-    ///
-    /// One `and` and a `trailing_zeros`, replacing a five-iteration scan that ran once per
-    /// instruction. Lowest set bit wins, which *is* the hardware priority order.
     #[inline]
     pub fn highest_priority(&self, enabled: InterruptFlags) -> Option<InterruptType> {
         InterruptType::from_bit(self.0 & enabled.0)
@@ -159,7 +148,7 @@ mod tests {
 
     /// C7: `highest_priority` replaced a scan in `InterruptType::all()` order, so it has to agree
     /// with that scan on every one of the 1024 (request, enable) combinations — not just the easy
-    /// ones. VBlank outranks everything; an interrupt that is requested but not enabled loses.
+    /// ones.
     #[test]
     fn highest_priority_matches_a_scan_in_priority_order() {
         for request in 0..=0x1Fu8 {
