@@ -13,6 +13,7 @@ use gb::lcd_control::{TileDataMode, TileMapMode};
 use poke_agent::pokemon::agent::PokemonAgent;
 use poke_agent::pokemon::{PokemonApi, PokemonApiTrait};
 use poke_agent::pokemon::map_metadata::MapMetadataCache;
+use poke_agent::pokemon::options::{SERVED_OPTIONS, keep_game_options};
 use poke_agent::pokemon::policy::ConsolePolicy;
 use crate::sdl::frame_rate::FrameRate;
 use gb::ppu::{LCD_HEIGHT, LCD_WIDTH};
@@ -242,7 +243,7 @@ pub fn render() -> Result<(), String> {
                 // `agent.run`, not `gb.run` and one `update` — one agent tick per
                 // `AGENT_RESOLUTION` of emulated time rather than one per rendered frame.
                 let result;
-                (actual_cycles, result) = pokemon_agent.run(&mut gb, &mut map_cache, min_cycles);
+                (actual_cycles, result) = agent_slice(&mut pokemon_agent, &mut gb, &mut map_cache, min_cycles);
                 if let Err(agent_error) = result {
                     println!("agent failed: {:?}", agent_error);
                 }
@@ -318,4 +319,35 @@ pub fn render() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// One slice of the agent's play, on [`SERVED_OPTIONS`]. Only while the agent drives: a human at
+/// the keyboard may set the OPTION menu however they like, and the agent still copes with SHIFT.
+fn agent_slice(
+    agent: &mut PokemonAgent,
+    gb: &mut GameBoy,
+    map_cache: &mut MapMetadataCache,
+    min_cycles: MachineCycles,
+) -> (MachineCycles, Result<(), String>) {
+    keep_game_options(gb.core_mut().mmu_mut(), &SERVED_OPTIONS);
+    agent.run(gb, map_cache, min_cycles)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use poke_agent::pokemon::options::{BattleStyle, GameOptions, GameOptionsReader, GameOptionsWriter, TextSpeed};
+    use poke_agent::pokemon::policy::RandomPolicy;
+
+    #[test]
+    fn the_agent_plays_on_the_served_options() {
+        let mut gb = GameBoy::dmg(poke_agent::pokemon::roms::POKERED);
+        gb.load_state(poke_agent::pokemon::data::START_OF_GAME).expect("the start state loads");
+        let shift = GameOptions { battle_animations_on: true, battle_style: BattleStyle::Shift, text_speed: TextSpeed::Medium };
+        gb.core_mut().mmu_mut().write_game_options(&shift).expect("writable");
+
+        let mut agent = PokemonAgent::new(Box::new(RandomPolicy::default()));
+        agent_slice(&mut agent, &mut gb, &mut MapMetadataCache::default(), MachineCycles::ONE);
+        assert_eq!(gb.core().mmu().read_game_options(), Ok(SERVED_OPTIONS));
+    }
 }

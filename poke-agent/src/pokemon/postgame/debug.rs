@@ -22,13 +22,6 @@ fn to_bcd(mut value: u32, bytes: usize) -> Vec<u8> {
         .collect()
 }
 
-/// The options every test fixture is loaded with.
-pub const FAST_FIXTURE_OPTIONS: crate::pokemon::options::GameOptions = crate::pokemon::options::GameOptions {
-    battle_animations_on: false,
-    battle_style: crate::pokemon::options::BattleStyle::Set,
-    text_speed: crate::pokemon::options::TextSpeed::Fast,
-};
-
 impl<'a> PokemonApi<'a> {
     /// Overwrite the player's money (capped at the game's ¥999,999).
     pub fn debug_set_money(&mut self, amount: u32) {
@@ -190,13 +183,7 @@ impl<'a> PokemonApi<'a> {
 
     /// Force the OPTION menu's settings by writing `wOptions`, answering whether they had drifted.
     pub fn debug_set_options(&mut self, options: &crate::pokemon::options::GameOptions) -> bool {
-        use crate::pokemon::options::{GameOptionsReader, GameOptionsWriter};
-        // An unreadable byte, which a fresh boot leaves, counts as drifted.
-        let drifted = self.mmu().read_game_options().map_or(true, |live| live != *options);
-        if drifted {
-            self.mmu_mut().write_game_options(options).ok();
-        }
-        drifted
+        crate::pokemon::options::keep_game_options(self.mmu_mut(), options)
     }
 }
 

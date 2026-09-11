@@ -181,6 +181,44 @@ fn full_playthrough() {
     fixture.save_state_named("src/pokemon/data/post-victory-road-1f.bin").unwrap();
 }
 
+/// The scripted route from a fresh save to the Boulder Badge on `options`, and the game time it took.
+#[cfg(feature = "slow-tests")]
+fn play_to_the_boulder_badge(options: crate::pokemon::options::GameOptions) -> Duration {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/start-of-game-state.bin"),
+        Duration::from_mins(240),
+        PolicyStep::complete_game_steps(),
+    ).with_options(options);
+    let started = std::time::Instant::now();
+    let state = fixture.run_until(|state| state.badges.contains(Badge::BoulderBadge));
+    let played = fixture.total_cycles.to_duration();
+    println!("\nBoulder Badge after {played:?} of game time, {:?} of wall clock; party {:?}",
+             started.elapsed(), state.pokemon.iter().map(|p| (p.species, p.level)).collect::<Vec<_>>());
+    played
+}
+
+/// [`full_playthrough`]'s opening with battle animations on, exactly what `--policy deterministic`
+/// serves, from the fresh save to Brock.
+#[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "the route to Brock; run with --features slow-tests")]
+fn full_playthrough_animated() {
+    #[cfg(feature = "slow-tests")]
+    play_to_the_boulder_badge(crate::pokemon::options::SERVED_OPTIONS);
+}
+
+/// What the served options save on the route to Brock against the cartridge's own.
+#[test]
+#[cfg(feature = "slow-tests")]
+#[ignore = "measurement — run with --ignored --nocapture"]
+fn probe_served_options_to_brock() {
+    use crate::pokemon::options::{BattleStyle, GameOptions, SERVED_OPTIONS, TextSpeed};
+    let cartridge = GameOptions { battle_style: BattleStyle::Shift, text_speed: TextSpeed::Medium, ..SERVED_OPTIONS };
+    let slow = play_to_the_boulder_badge(cartridge);
+    let fast = play_to_the_boulder_badge(SERVED_OPTIONS);
+    println!("MEDIUM/SHIFT {slow:?}, FAST/SET {fast:?}: {:.0}% less game time",
+             100.0 * (1.0 - fast.as_secs_f64() / slow.as_secs_f64()));
+}
+
 /// [`PolicyStep::complete_game_steps`] to the Hall of Fame, as `--policy deterministic` plays it.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "~26 min — run with --features slow-tests")]

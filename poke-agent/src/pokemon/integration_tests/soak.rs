@@ -2,7 +2,7 @@
 //! asking the policy anything.
 
 use super::*;
-use crate::pokemon::options::{BattleStyle, GameOptions, TextSpeed};
+use crate::pokemon::options::SERVED_OPTIONS;
 use crate::pokemon::policy::RandomPolicy;
 use super::playthrough::SOAK_CHECKPOINTS;
 
@@ -22,14 +22,6 @@ const EVENT_TAIL: usize = 12;
 /// done
 /// ```
 const DEFAULT_SEED: u64 = 1;
-
-/// The options `poke-agent-web` plays on, pokered's `InitOptions`: animations on and SHIFT style, which
-/// no other tier sees.
-const DEPLOYMENT_OPTIONS: GameOptions = GameOptions {
-    battle_animations_on: true,
-    battle_style: BattleStyle::Shift,
-    text_speed: TextSpeed::Medium,
-};
 
 /// One place the fuzzer is turned loose from.
 struct SoakState {
@@ -237,8 +229,8 @@ fn soak(state: &SoakState) {
     // Nobody listens to a jam hunt, so the APU does not mix or resample.
     gb.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
     let mut cache = MapMetadataCache::default();
-    // The deployment's options, not `FAST_FIXTURE_OPTIONS`.
-    PokemonApi::with_cache(&mut gb, &mut cache).debug_set_options(&DEPLOYMENT_OPTIONS);
+    // What is deployed, animations and all, not `HEADLESS_OPTIONS`.
+    PokemonApi::with_cache(&mut gb, &mut cache).debug_set_options(&SERVED_OPTIONS);
     if let Some(want) = state.expect_map {
         let on = PokemonApi::with_cache(&mut gb, &mut cache).game_state().map(|s| s.map.map);
         assert_eq!(on.ok(), Some(want),

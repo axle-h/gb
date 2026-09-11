@@ -14,15 +14,19 @@ pub struct GameOptions {
     pub text_speed: TextSpeed,
 }
 
-impl Default for GameOptions {
-    fn default() -> Self {
-        Self {
-            battle_animations_on: true,
-            battle_style: BattleStyle::Set,
-            text_speed: TextSpeed::Fast,
-        }
-    }
-}
+/// What a served run plays on, the web UI and the SDL window: fast text and no switch prompt,
+/// with the animations kept because somebody is watching.
+pub const SERVED_OPTIONS: GameOptions = GameOptions {
+    battle_animations_on: true,
+    battle_style: BattleStyle::Set,
+    text_speed: TextSpeed::Fast,
+};
+
+/// What a headless run plays on, every test fixture: [`SERVED_OPTIONS`] without the animations.
+pub const HEADLESS_OPTIONS: GameOptions = GameOptions {
+    battle_animations_on: false,
+    ..SERVED_OPTIONS
+};
 
 pub trait GameOptionsReader {
     fn read_game_options(&self) -> Result<GameOptions, String>;
@@ -71,6 +75,17 @@ impl GameOptionsWriter for MMU {
 
         self.write_pointer(&pokered_symbols::wOptions, options_byte)
     }
+}
+
+/// Write `options` if `wOptions` says anything else, answering whether it did. Cheap enough to
+/// call every tick, which a host has to: Continue restores the options the save was written with.
+pub fn keep_game_options(mmu: &mut MMU, options: &GameOptions) -> bool {
+    // An unreadable byte, which a fresh boot leaves, counts as drifted.
+    let drifted = mmu.read_game_options().map_or(true, |live| live != *options);
+    if drifted {
+        mmu.write_game_options(options).ok();
+    }
+    drifted
 }
 
 #[cfg(test)]

@@ -181,7 +181,7 @@ fn can_walk_out_of_the_hall_of_fame() {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn options_survive_the_hall_of_fame_reset() {
-    use crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS;
+    use crate::pokemon::options::HEADLESS_OPTIONS;
 
     let mut fixture = TestFixture::new(
         include_bytes!("../../data/post-hall-of-fame.bin"),
@@ -189,8 +189,8 @@ fn options_survive_the_hall_of_fame_reset() {
         vec![],
     );
 
-    assert_eq!(fixture.api().read_game_options().unwrap(), FAST_FIXTURE_OPTIONS,
-        "TestFixture::new should have written FAST_FIXTURE_OPTIONS (no battle animations, SET style, \
+    assert_eq!(fixture.api().read_game_options().unwrap(), HEADLESS_OPTIONS,
+        "TestFixture::new should have written HEADLESS_OPTIONS (no battle animations, SET style, \
          fast text) into wOptions at load");
 
     let state = drive_out_of_hall_of_fame(&mut fixture);
@@ -200,7 +200,7 @@ fn options_survive_the_hall_of_fame_reset() {
         "the credits' save/soft-reset/CONTINUE should have restored the cartridge's own wOptions at \
          least once. If this ever reads 0, the per-tick re-apply in TestFixture::step is dead code: \
          nothing in a fixture's life would put the cartridge's options back");
-    assert_eq!(fixture.api().read_game_options().unwrap(), FAST_FIXTURE_OPTIONS,
+    assert_eq!(fixture.api().read_game_options().unwrap(), HEADLESS_OPTIONS,
         "…and the re-apply should have put them back");
     println!("wOptions drifted {} times across the credits and was re-applied each time",
         fixture.options_drifts);

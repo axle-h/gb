@@ -239,6 +239,9 @@ All environment variables, never flags — the API key has to be one, so the res
 | `GB_ADMIN_TOKEN` | enables the three admin endpoints; unset means all three 404 |
 | `GB_REGEN_FIXTURES` | let a test overwrite the fixture it snapshots; off by default |
 
+The game's own OPTION menu is held by the host rather than configured: a served run plays fast text
+and SET style with battle animations on, a headless test the same with them off.
+
 ## Deployment
 
 The `Dockerfile` builds everything from a bare checkout in four stages — rgbds and the cartridge, the
