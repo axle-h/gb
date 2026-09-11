@@ -163,6 +163,8 @@ in_both_animation_modes!(
     the_last_safari_ball_ends_the_game_around_the_battle_it_was_thrown_in,
     a_ball_that_catches_ends_the_battle_with_the_catch_in_the_party,
     a_potion_in_battle_heals_the_active_pokemon,
+    a_revive_brings_back_a_fainted_pokemon_on_the_bench,
+    a_heal_goes_to_the_pokemon_on_the_bench_it_was_chosen_for,
     a_switch_puts_the_chosen_pokemon_out,
     a_faint_brings_the_next_pokemon_out,
     a_trainers_last_pokemon_ends_the_battle,
@@ -427,7 +429,7 @@ fn a_ball_that_catches_ends_the_battle_with_the_catch_in_the_party(options: Game
 
 /// A Potion in battle heals the Pokémon that is out and costs the turn, not the battle.
 fn a_potion_in_battle_heals_the_active_pokemon(options: GameOptions) {
-    let (mut run, seen) = run_on(WILD, "battle-potion", vec![choose("item:Potion")], options);
+    let (mut run, seen) = run_on(WILD, "battle-potion", vec![choose("item:Potion@0")], options);
     run.fixture().api().debug_give_item(ItemId::Potion, 1).expect("a bag with a slot free");
     // Out of reach, so the enemy's reply cannot undo the heal before it is read.
     run.fixture().api().debug_set_hp(0, 20);
@@ -440,6 +442,47 @@ fn a_potion_in_battle_heals_the_active_pokemon(options: GameOptions) {
     assert_eq!(held(&mut run, ItemId::Potion), 0, "the Potion was not used");
     // A resisted Absorb from a lv13 Oddish cannot take back what a Potion gives.
     assert!(run.fixture().game_state().pokemon[0].current_hp > 20, "the Ivysaur was not healed");
+    let seen = seen.lock().expect("not poisoned");
+    assert!(seen.battle_said("recovered by"), "the model was never told the heal worked:\n{}", seen.battle_turns[1]);
+    assert!(seen.battle_said("Enemy ODDISH"), "the Oddish's reply went unreported:\n{}", seen.battle_turns[1]);
+}
+
+/// A Revive goes to the fainted Pokémon on the bench it was chosen for.
+fn a_revive_brings_back_a_fainted_pokemon_on_the_bench(options: GameOptions) {
+    let (mut run, seen) = run_on(TRAINER, "battle-revive", vec![choose("item:Revive@1")], options);
+    run.fixture().api().debug_set_hp(1, 0);
+    let before = held(&mut run, ItemId::Revive);
+
+    let asked_twice = run.tick_until(PATIENCE, |run| {
+        run.drain_events();
+        seen.lock().expect("not poisoned").battle_turns.len() >= 2
+    });
+    let seen = seen.lock().expect("not poisoned");
+    assert!(asked_twice, "no second battle turn after the Revive.\n  tool results: {:?}", seen.tool_results);
+    assert!(seen.battle_menu(0).contains(&"item:Revive@1".to_string()), "no Revive row for the fainted Venusaur");
+    assert!(!seen.battle_menu(0).contains(&"item:Revive@0".to_string()), "a Revive offered for a Pokémon standing");
+    let state = run.fixture().game_state();
+    assert_eq!(held(&mut run, ItemId::Revive), before - 1, "the Revive was not used");
+    assert!(state.pokemon[1].current_hp > 0, "the Venusaur is still fainted");
+    assert_eq!(state.battle.map(|battle| battle.active_party_slot), Some(0), "the Articuno should still be out");
+    assert!(seen.battle_said("revitalized"), "the model was never told the Revive worked:\n{}", seen.battle_turns[1]);
+}
+
+/// A heal goes to the hurt Pokémon on the bench it was chosen for, not to the one out.
+fn a_heal_goes_to_the_pokemon_on_the_bench_it_was_chosen_for(options: GameOptions) {
+    let (mut run, seen) = run_on(TRAINER, "battle-heal-bench", vec![choose("item:FullRestore@2")], options);
+    run.fixture().api().debug_set_hp(2, 40);
+
+    let asked_twice = run.tick_until(PATIENCE, |run| {
+        run.drain_events();
+        seen.lock().expect("not poisoned").battle_turns.len() >= 2
+    });
+    let seen = seen.lock().expect("not poisoned");
+    assert!(asked_twice, "no second battle turn after the heal.\n  tool results: {:?}", seen.tool_results);
+    let state = run.fixture().game_state();
+    assert_eq!(state.pokemon[2].current_hp, state.pokemon[2].stats.hp, "the Vaporeon was not healed");
+    assert_eq!(state.battle.map(|battle| battle.active_party_slot), Some(0), "the Articuno should still be out");
+    assert!(seen.battle_said("recovered"), "the model was never told the heal worked:\n{}", seen.battle_turns[1]);
 }
 
 /// A switch puts the chosen Pokémon out and asks again.

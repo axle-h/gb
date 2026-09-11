@@ -872,6 +872,7 @@ mod tests {
         report.decided(&third, &BattleAction::UseItem {
             slot: 0,
             item: crate::pokemon::bag::BagItem::new(ItemId::PokeBall, 4),
+            target: None,
         }, vec!["8/25 HP, worth a ball".to_string()]);
         report.said("Darn! The POKéMON broke free!");
 

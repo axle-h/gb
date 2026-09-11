@@ -36,7 +36,8 @@ pub struct BattleState {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum BattleAction {
     Fight { slot: u8, battle_move: PokemonMove },
-    UseItem { slot: u8, item: BagItem },
+    /// `target` is the party slot for an item that asks which Pokémon; see [`crate::pokemon::item_use::helps_in_battle`].
+    UseItem { slot: u8, item: BagItem, target: Option<u8> },
     SwitchPokemon { slot: u8, pokemon: PokemonSummary },
     /// Wild battles only.
     Run,
@@ -50,7 +51,9 @@ impl Display for BattleAction {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             BattleAction::Fight { battle_move, .. } => write!(f, "FIGHT  {}  PP {}", battle_move.name, battle_move.pp),
-            BattleAction::UseItem { item, .. } => write!(f, "ITEM   {} ×{}", item.id, item.quantity),
+            BattleAction::UseItem { item, target: None, .. } => write!(f, "ITEM   {} ×{}", item.id, item.quantity),
+            BattleAction::UseItem { item, target: Some(target), .. } =>
+                write!(f, "ITEM   {} ×{} on party slot {target}", item.id, item.quantity),
             BattleAction::SwitchPokemon { pokemon, .. } => {
                 write!(f, "PKMN   {} Lv{} — {}/{} HP",
                        pokemon.species, pokemon.level, pokemon.current_hp, pokemon.stats.hp)?;

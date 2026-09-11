@@ -444,8 +444,26 @@ pub(crate) fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
             .filter_map(|(i, m)| m.map(|battle_move| BattleAction::Fight { slot: i as u8, battle_move })));
     }
 
+    // One row per Pokémon an item would help, the one out first, and none for an item that would
+    // help nobody: the cartridge answers that with "It won't have any effect." and the same menu.
+    let active = battle_state.active_party_slot;
+    let party_order = std::iter::once(active as usize)
+        .chain((0..state.pokemon.len()).filter(|&i| i != active as usize));
+    let party_order: Vec<usize> = party_order.collect();
     for (i, item) in state.bag.iter().enumerate() {
-        opts.push(BattleAction::UseItem { slot: i as u8, item: item.clone() });
+        let slot = i as u8;
+        let helps = |member: usize| state.pokemon.get(member).and_then(|mon| {
+            crate::pokemon::item_use::helps_in_battle(item.id, mon.current_hp, mon.stats.hp, mon.status)
+        });
+        if helps(active as usize).is_none() {
+            opts.push(BattleAction::UseItem { slot, item: item.clone(), target: None });
+            continue;
+        }
+        for &member in &party_order {
+            if helps(member) == Some(true) {
+                opts.push(BattleAction::UseItem { slot, item: item.clone(), target: Some(member as u8) });
+            }
+        }
     }
 
     for (i, pokemon) in state.pokemon.iter().enumerate() {
@@ -3000,8 +3018,10 @@ impl Policy for DeterministicPolicy {
                 ItemId::FullRestore => 4, ItemId::MaxPotion => 3, ItemId::HyperPotion => 2,
                 ItemId::SuperPotion => 1, ItemId::Potion => 0, _ => -1,
             };
+            let active = Some(battle_state.active_party_slot);
             let heal = actions.iter()
-                .filter(|a| matches!(a, BattleAction::UseItem { item, .. } if potion_rank(item.id) >= 0))
+                .filter(|a| matches!(a, BattleAction::UseItem { item, target, .. }
+                    if potion_rank(item.id) >= 0 && *target == active))
                 .max_by_key(|a| match a { BattleAction::UseItem { item, .. } => potion_rank(item.id), _ => -1 });
             if let Some(heal_action) = heal {
                 println!("[policy] HP critical ({:.0}%) — using healing item", battle_state.player.remaining_hp() * 100.0);
