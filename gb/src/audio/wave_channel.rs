@@ -327,7 +327,7 @@ mod tests {
         let channel = playing(2, 0); // counter = 5
         assert_eq!(channel.wave_ram(0, 4), 0xFF, "one tick early");
         assert_eq!(channel.wave_ram(0, 6), 0xFF, "between fetches");
-        // Fetch 1 advances the phase 0 -> 1, so it reads byte 0; fetch 2 reads byte 1.
+        // Fetch 1 advances the phase from 0 to 1, so it reads byte 0; fetch 2 reads byte 1.
         assert_eq!(channel.wave_ram(0, 5), 0x00, "on the first fetch");
         assert_eq!(channel.wave_ram(9, 7), 0x11, "on the second fetch — and not byte 9");
     }

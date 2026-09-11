@@ -202,13 +202,13 @@ pub const AWKWARD_SET: &[(Map, &str)] = &[
     (Map::SafariZoneNorthRestHouse,  "skip_tour: costs a paid trip"),
     (Map::SafariZoneWestRestHouse,   "skip_tour: costs a paid trip"),
     (Map::Museum2F,                  "unreachable: behind a paid receptionist"),
-    (Map::Route19,                   "outside the hub tours: water, reached by Surf (workstream B/C)"),
-    (Map::Route20,                   "outside the hub tours: water, reached by Surf (workstream B/C)"),
+    (Map::Route19,                   "outside the hub tours: water, reached by Surf"),
+    (Map::Route20,                   "outside the hub tours: water, reached by Surf"),
     (Map::Route8Gate,                "outside the hub tours: it sits on Route 8, which skip_tour drops"),
     (Map::CeruleanBadgeHouse,        "toured, from Cerulean"),
     (Map::CinnabarLab,               "toured, from Cinnabar Island"),
     (Map::CinnabarLabTradeRoom,      "toured, from Cinnabar Island"),
-    (Map::CinnabarLabFossilRoom,     "toured, from Cinnabar Island — and workstream K trades there"),
+    (Map::CinnabarLabFossilRoom,     "toured, from Cinnabar Island, and an in-game trade is made there"),
     (Map::CinnabarLabMetronomeRoom,  "toured, from Cinnabar Island"),
     (Map::SSAnne1F,                  "unreachable: the ship has sailed"),
     (Map::VermilionDock,             "unreachable: the ship has sailed, and the pier is sealed with it"),
@@ -401,6 +401,7 @@ mod tests {
             println!("   {map}: {}", known_unreachable(*map).unwrap().why());
         }
         assert_eq!(unreachable.len(), 32,
-            "the known-unreachable set changed — update the workstream's archive entry with why");
+            "the known-unreachable set changed: update this count, and give a new map its reason \
+             in `known_unreachable`");
     }
 }

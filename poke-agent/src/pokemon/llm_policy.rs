@@ -1654,7 +1654,8 @@ mod tests {
         compaction::apply_summary(&mut messages, "I am in Pallet Town.", compaction::KEEP_MESSAGES);
         assert_eq!(messages[0].role, Role::System, "and the system prompt is never compacted");
         assert!(!messages.iter().any(crate::llm::prompt::is_plan),
-                "this history is long enough that the plan is inside the dropped middle — otherwise                  the test proves nothing");
+                "this history is long enough that the plan is inside the dropped middle — otherwise \
+                 the test proves nothing");
 
         // The repair is `sync_plan`'s "there is no copy" arm, which is what the next turn runs.
         assert!(messages.iter().position(|m| crate::llm::prompt::is_plan(m)).is_none());
@@ -1754,7 +1755,7 @@ mod tests {
         assert!(policy.take_manual_input().is_empty(),
                 "a press decided for a jam that has cleared must not be delivered afterwards");
         assert!(rig.drained_events().iter().any(|event| matches!(event, UiEventBody::TurnCancelled { .. })),
-                "a cancelled turn is an event, never a silence (§17 risk 2b)");
+                "a cancelled turn is an event, never a silence");
     }
 
     /// Reasoning reaches the page as its own event, and never reaches the endpoint again.
@@ -2402,7 +2403,7 @@ mod tests {
         );
         assert!(
             last.messages[1].text().unwrap_or_default().contains("exactly one terminal tool call"),
-            "§9's ⚠️ — the contract has to survive the compaction",
+            "the one-terminal-call contract has to survive the compaction",
         );
         // The tail is kept, so the turn that filled the window is still there.
         assert!(

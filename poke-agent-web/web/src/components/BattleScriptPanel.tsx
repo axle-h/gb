@@ -137,8 +137,7 @@ function highlight(source: string): Token[][] {
       if (part.length > 0) lines[lines.length - 1].push({ cls: token.cls, text: part });
     });
   }
-  // A trailing newline does not add a numbered blank row.
-  if (lines.length > 1 && lines[lines.length - 1].length === 0) lines.pop();
+  // A trailing newline keeps the numbered blank row after it, as an editor shows one.
   return lines;
 }
 

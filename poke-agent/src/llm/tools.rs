@@ -967,7 +967,9 @@ fn use_field_move_spec() -> ToolSpec {
                     "properties": { "x": { "type": "integer" }, "y": { "type": "integer" } },
                     "required": ["x", "y"],
                     "additionalProperties": false,
-                    "description": "A tile on the current map, in the coordinates `read_map` uses.                                     For `use_item`, the square the *thing* is on; omit it for an                                     item used on nobody.",
+                    "description": "A tile on the current map, in the coordinates `read_map` uses. \
+                                    For `use_item`, the square the *thing* is on; omit it for an \
+                                    item used on nobody.",
                 },
                 "op": {
                     "type": "string",
@@ -1182,7 +1184,8 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
         // Named with the reason, like a read from the wrong kind above.
         if !offers_battle_script(kind) {
             return CallKind::Rejected(format!(
-                "`{name}` is only offered on an overworld turn: mid-battle is not the moment to be                  writing one. Decide this turn, and set the script when you are back outside.",
+                "`{name}` is only offered on an overworld turn: mid-battle is not the moment to be \
+                 writing one. Decide this turn, and set the script when you are back outside.",
             ));
         }
         if let Some(call) = classify_battle_script(name, &arguments) {
@@ -2360,6 +2363,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn no_tool_text_carries_a_run_of_spaces() {
+        fn walk(value: &Value, path: &str, kind: DecisionKind) {
+            match value {
+                Value::String(text) => assert!(
+                    !text.contains("  "),
+                    "{kind:?}: {path} has a run of spaces, a literal continued without `\\`: {text:?}",
+                ),
+                Value::Array(items) => {
+                    items.iter().enumerate().for_each(|(i, item)| walk(item, &format!("{path}[{i}]"), kind))
+                }
+                Value::Object(fields) => {
+                    fields.iter().for_each(|(key, field)| walk(field, &format!("{path}.{key}"), kind))
+                }
+                _ => {}
+            }
+        }
+        for kind in [
+            DecisionKind::Overworld,
+            DecisionKind::Battle,
+            DecisionKind::Nickname,
+            DecisionKind::MartPurchase,
+            DecisionKind::ForgetMove,
+            DecisionKind::Stuck,
+        ] {
+            walk(&serde_json::to_value(for_kind(kind)).expect("the specs serialise"), "tools", kind);
+        }
+    }
+
     /// [`READ_ROUTE`]'s four answers, each a different next step for the model.
     #[test]
     fn a_route_answers_the_four_questions_and_never_bluffs() {
@@ -3272,6 +3304,22 @@ mod tests {
         let refusal = resolve_field_move(&indoors, &ride).expect_err("a bike indoors is refused");
         assert!(refusal.contains("cycling is not allowed"), "{refusal}");
         assert!(refusal.contains("OaksLab"), "it names where it is refusing: {refusal}");
+    }
+
+    /// `ItemUseBicycle` turns water down before it asks whether the map allows cycling.
+    #[test]
+    fn the_bicycle_is_refused_while_surfing() {
+        let mut gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(include_bytes!("../pokemon/data/route21-islands.bin")).expect("the committed fixture loads");
+        let state = { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }
+            .expect("a readable state");
+        assert!(state.map.surfing, "the fixture has to be on the water or this proves nothing");
+        assert!(state.bag.iter().any(|item| item.id == ItemId::Bicycle), "and carrying the bike");
+        assert!(crate::pokemon::postgame::items::bike_riding_allowed(&state), "on a map that allows it");
+
+        let ride = FieldMoveRequest::UseItem { item: ItemId::Bicycle, target: None, slot: None };
+        let refusal = resolve_field_move(&state, &ride).expect_err("a bike on water is refused");
+        assert!(refusal.contains("surfing"), "{refusal}");
     }
 
     /// A field item aimed at nothing is refused, and told what is beside it.

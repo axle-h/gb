@@ -211,7 +211,7 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
     assert!(situation.contains("## Decision: the game is stuck"), "{situation:.300}");
     assert!(situation.contains("bug in the agent"), "{situation:.600}");
 
-    assert!(reported, "a firing has to be reported — §14: every one of them is a bug report");
+    assert!(reported, "a firing has to be reported: every one of them is a bug report");
     assert!(delivered, "the model's press never reached the joypad");
 
     // The press left a record: the model's reason, the screen and the conversation.

@@ -23,7 +23,7 @@ const EVENT_TAIL: usize = 12;
 /// ```
 const DEFAULT_SEED: u64 = 1;
 
-/// The options `gb serve` plays on, pokered's `InitOptions`: animations on and SHIFT style, which
+/// The options `poke-agent-web` plays on, pokered's `InitOptions`: animations on and SHIFT style, which
 /// no other tier sees.
 const DEPLOYMENT_OPTIONS: GameOptions = GameOptions {
     battle_animations_on: true,
@@ -337,7 +337,7 @@ fn soak(state: &SoakState) {
     assert!(worst < limit, "checked in the loop above");
 }
 
-/// A fresh save, the state `gb serve` starts a new run in.
+/// A fresh save, the state `poke-agent-web` starts a new run in.
 #[test]
 fn random_play_from_a_fresh_save_never_goes_quiet() {
     soak(state("start-of-game"));

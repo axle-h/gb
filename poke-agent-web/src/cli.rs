@@ -16,18 +16,26 @@ OPTIONS:
                                   llm            a model over an OpenAI-compatible API
                                   random         random legal choices; no API key, no spend
                                   deterministic  the scripted route the full_playthrough test
-                                                 plays, from the start of the game to Victory
-                                                 Road 2F, at whatever speed the emulator is
-                                                 running. Needs no API key either
+                                                 plays, from a fresh save to the Hall of Fame,
+                                                 at whatever speed the emulator is running.
+                                                 Needs no API key either
     --new-run                   Start the game from the beginning, in a new run directory,
                                 instead of resuming the newest resumable run
 
 ENVIRONMENT (--policy llm):
     OPENAI_API_KEY, GB_MODEL    Required
     OPENAI_BASE_URL             Any OpenAI-compatible endpoint [default: api.openai.com/v1]
-    GB_CONTEXT_LIMIT, GB_TEMPERATURE, GB_MAX_TOOL_STEPS
+    GB_CONTEXT_LIMIT            The model's context window, in tokens [default: 128000]
+    GB_COMPACT_ABOVE            How full the context gets before the history is compacted
+                                [default: 0.85]
+    GB_TEMPERATURE, GB_MAX_TOOL_STEPS
+    GB_REQUEST_TIMEOUT_SECS     How long the endpoint may take to answer [default: 180]
+    GB_MAX_TOKENS               Ceiling on one completion [default: 8192; 0 removes it]
+    GB_REASONING_EFFORT         Sent as reasoning_effort when set; none turns thinking off
     GB_STUCK_TIMEOUT_SECS       Emulated seconds with the agent asking nothing at all before
                                 the watchdog asks on its behalf [default: 300; 0 turns it off]
+    GB_RESTORE_HISTORY          Resume a run's conversation as well as its save [default: 1;
+                                0 starts the conversation over]
 
 ENVIRONMENT (any policy):
     GB_PORT                     Port to listen on; --port wins
@@ -43,15 +51,16 @@ ENVIRONMENT (any policy):
                                 viewer turns the page's speaker on
     GB_BUILD_DATE, GB_GIT_BRANCH, GB_GIT_SHA
                                 Set by the container image, not by you: the build date, branch
-                                and short commit that GET /version serves and `gb serve` prints
-                                on the way up. Unset outside an image, and reported as null
+                                and short commit that GET /version serves and poke-agent-web
+                                prints on the way up. Unset outside an image, and reported as null
                                 rather than guessed at
-    GB_ADMIN_TOKEN              Enables the two admin endpoints, both of which take it as the
-                                X-GB-Token header. POST /api/new-run starts the game over in a
-                                fresh run directory without restarting the process; POST
-                                /api/clear keeps the run and throws away what the model
-                                remembers of it, the conversation and the plan. Unset — the
-                                default — and both 404
+    GB_ADMIN_TOKEN              Enables the three admin endpoints. /reset-game and POST
+                                /api/new-run start the game over in a fresh run directory
+                                without restarting the process; POST /api/clear keeps the run
+                                and throws away what the model remembers of it, the
+                                conversation and the plan. /reset-game takes the token as an
+                                HTTP Basic password, the other two as the X-GB-Token header.
+                                Unset — the default — and all three 404
 ";
 
 /// What the process was asked to do.

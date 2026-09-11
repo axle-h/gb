@@ -342,8 +342,8 @@ mod tests {
         assert_eq!(names.len(), COVERAGE_STARTS.len(), "two starts share a name: {names:?}");
         assert_eq!(
             COVERAGE_STARTS.first().map(|start| start.name),
-            Some("phase0"),
-            "`phase0` is the default and every figure in the plan was taken from it",
+            Some("entry"),
+            "`entry` is the default start, and the table leads with it",
         );
 
         let mut maps = std::collections::BTreeSet::new();
@@ -359,8 +359,8 @@ mod tests {
             match start.before_the_credits {
                 None => assert!(
                     state.hall_of_fame_teams > 0,
-                    "the {} start is not a finished game, so the event gates §5.2.5 is about are \
-                     shut. If that is deliberate, `before_the_credits` is where the reason goes",
+                    "the {} start is not a finished game, so the event gates only a finished game \
+                     opens are shut. If that is deliberate, `before_the_credits` is where the reason goes",
                     start.name,
                 ),
                 Some(why) => assert!(
@@ -867,11 +867,11 @@ pub struct Start {
     pub before_the_credits: Option<&'static str>,
 }
 
-/// The regional starts, one per region the `phase0` walk never reaches, plus `phase0` itself.
+/// The regional starts, one per region the `entry` walk never reaches, plus `entry` itself.
 pub const COVERAGE_STARTS: &[Start] = &[
     Start {
-        name: "phase0",
-        state: include_bytes!("../data/postgame-phase0.bin"),
+        name: "entry",
+        state: include_bytes!("../data/postgame-entry.bin"),
         map: crate::pokemon::map::Map::ViridianPokecenter,
         before_the_credits: None,
     },
@@ -972,7 +972,7 @@ fn coverage_walk_of_the_finished_game() {
         .unwrap_or(60 + minutes * 3);
 
     // An unknown name fails rather than falling back to the default.
-    let wanted = std::env::var("GB_COVERAGE_START").unwrap_or_else(|_| "phase0".to_string());
+    let wanted = std::env::var("GB_COVERAGE_START").unwrap_or_else(|_| "entry".to_string());
     let starts: Vec<&Start> = match wanted.as_str() {
         "all" => COVERAGE_STARTS.iter().collect(),
         name => vec![COVERAGE_STARTS
@@ -1009,8 +1009,8 @@ fn coverage_walk_of_the_finished_game() {
             })
             .collect();
         println!(
-            "\n════ C3: the regional sweep ════\n{}\n\
-             union      ⭐ {} maps, {} ids, over {} walks\n\
+            "\n════ the regional sweep ════\n{}\n\
+             union      {} maps, {} ids, over {} walks\n\
              only here  {}\n\
              cost       {:?} of game time, {:?} of wall clock in total\n\
              {}\n",
@@ -1038,7 +1038,7 @@ fn coverage_walk_of_the_finished_game() {
         let mut ranked: Vec<(String, usize)> = by_kind.into_iter().collect();
         ranked.sort_by_key(|(kind, n)| (std::cmp::Reverse(*n), kind.clone()));
         println!(
-            "unreached  ⭐ {} of {} ids were offered somewhere and chosen nowhere ({:.0}%)\n\
+            "unreached  {} of {} ids were offered somewhere and chosen nowhere ({:.0}%)\n\
              by kind    {}\n",
             never.len(), ids.len(),
             100.0 * never.len() as f64 / ids.len().max(1) as f64,
@@ -1052,7 +1052,7 @@ fn coverage_walk_of_the_finished_game() {
                 "the sweep was never offered {} kind(s) of row the game has:\n  {}",
                 kind_failures.len(), kind_failures.join("\n  ")),
             false => println!(
-                "           ⚠️ not asserted: {minutes} game-minutes per walk is below the \
+                "           not asserted: {minutes} game-minutes per walk is below the \
                  {COVERAGE_BUDGET_MINUTES} a coverage sweep spends, and a short walk cannot be \
                  expected to have seen every kind"),
         }
@@ -1092,7 +1092,7 @@ fn unreached_report(entered: &std::collections::BTreeSet<&String>) -> String {
     real.sort();
     // Wrapped rather than one per line, to scan for a cluster.
     let mut lines: Vec<String> = vec![format!(
-        "unreached  ⭐ {} of {reachable} reachable maps, plus {padding} UnusedMap*, \
+        "unreached  {} of {reachable} reachable maps, plus {padding} UnusedMap*, \
          {cable} link-cable rooms and {duplicates} unreachable duplicates",
         real.len())];
     for chunk in real.chunks(6) {
@@ -1212,7 +1212,7 @@ fn kind_cross_check(offered: &std::collections::BTreeSet<&String>, pc_ops: usize
             Expect::Terrain => {}
             Expect::Absent(why) => lines.push(format!(
                 "  {kind:<24} {} — expected: {why}",
-                if seen { "offered ⭐ (and it was not expected to be)" } else { "never offered" })),
+                if seen { "offered (and it was not expected to be)" } else { "never offered" })),
             Expect::Row => {
                 expected += 1;
                 if seen { covered += 1; continue }
@@ -1228,7 +1228,7 @@ fn kind_cross_check(offered: &std::collections::BTreeSet<&String>, pc_ops: usize
                        allow-listed on the grounds that the walk covers it that way instead".into());
     }
     let report = format!(
-        "\n──── step 1.5: every kind of row, against what was offered ────\n\
+        "\n──── every kind of row, against what was offered ────\n\
          kinds      {covered} of {expected} offered somewhere in the sweep; {pc_ops} PC operations\n\
          {}\n",
         if lines.is_empty() { "  every kind was offered".to_string() } else { lines.join("\n") });
@@ -1292,7 +1292,7 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
             let wall = started.elapsed();
             // `turns/min` spots a livelock: a wedged walk still discovers rows and burns game time.
             let per_min = (turns - beat_turns) as u64 * 60 / BEAT_SECS;
-            let warn = if turns - beat_turns <= 2 { "  ⚠️ NOT MOVING" } else { "" };
+            let warn = if turns - beat_turns <= 2 { "  NOT MOVING" } else { "" };
             println!("[walk:{name}] {wall:>5.0}s wall {game:>6.0}s game ({rate:>4.1}x) | {turns} turns \
                       (+{per_min}/min) | {visited} chosen (+{new_ids}) | {maps} maps | on {here}{warn}",
                 wall = wall.as_secs_f64(), game = game.as_secs_f64(),
@@ -1312,7 +1312,7 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
         }
         if won && checkpointed && rewound < MAX_REWINDS {
             let game = run.fixture().total_cycles.to_duration();
-            println!("[walk:{name}] ⭐ the Hall of Fame, at {:.0}% of the {budget:?} budget — \
+            println!("[walk:{name}] the Hall of Fame, at {:.0}% of the {budget:?} budget — \
                       rewinding to the lobby and spending the rest of it walking",
                      100.0 * game.as_secs_f64() / budget.as_secs_f64());
             run.restart_from_last_checkpoint();
@@ -1355,8 +1355,8 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
     let bag = match refused.is_empty() {
         true => format!("every key item fit the bag; {} shed to make room: {}",
             shed.len(), shed.join(", ")),
-        false => format!("⚠️ the bag was full and refused {} — whatever they gate is unreachable: {} \
-                          (⚠️ and {} were shed to make room, so this is not the junk: {})",
+        false => format!("the bag was full and refused {} — whatever they gate is unreachable: {} \
+                          (and {} were shed to make room, so this is not the junk: {})",
             refused.len(), refused.join(", "), shed.len(), shed.join(", ")),
     };
     {
@@ -1372,7 +1372,7 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
     // Three ways to stop, and they are not interchangeable.
     let stopped = match (settled, spent_the_budget) {
         _ if brain.0.lock().expect("not poisoned").reached_the_end => format!(
-            "⭐ the walk played the game to the **Hall of Fame** and stopped there, which is a \
+            "the walk played the game to the Hall of Fame and stopped there, which is a \
              terminus rather than a fault: the cartridge saves and soft-resets to the title \
              screen, and there is no world left to walk. {:.0}% of the {budget:?} game-time \
              budget was spent getting there",
@@ -1380,14 +1380,14 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
         (true, _) => format!("{patience} turns with nothing new"),
         (false, true) => format!("stopped on the {budget:?} game-time budget with the frontier still open"),
         (false, false) => format!(
-            "⚠️ CUT OFF after {elapsed:?} of WALL CLOCK with only {:.0}% of the {budget:?} \
+            "CUT OFF after {elapsed:?} of WALL CLOCK with only {:.0}% of the {budget:?} \
              game-time budget spent — raise GB_COVERAGE_WALL_SECS, or find out what is running \
              this slowly",
             100.0 * game_time.as_secs_f64() / budget.as_secs_f64()),
     };
 
     println!(
-        "\n════ C3: a walk of the finished game, from {name} ({:?}) ════\n\
+        "\n════ a walk of the finished game, from {name} ({:?}) ════\n\
          frontier   {discovered} ids offered, {visited} chosen, across {maps} maps in {turns} turns\n\
          cost       {game_time:?} of game time, {elapsed:?} of wall clock\n\
          rate       {:.1} ids discovered per game-minute\n\
@@ -1503,7 +1503,7 @@ pub fn rom_cross_check(
                     said.push(format!("({mx}, {my}) → {}: no walkable sub-tile, so it is not on the grid at all",
                                       warp.destination_map)) }
                 (None, _) => said.push(format!(
-                    "({mx}, {my}) → {}: ⚠️ **on the grid, no sibling, and never a row**",
+                    "({mx}, {my}) → {}: on the grid, no sibling, and never a row",
                     warp.destination_map)),
             }
         }
@@ -1520,7 +1520,7 @@ pub fn rom_cross_check(
                 // belongs in this check.
                 None if sprite.name.starts_with("Boulder") => boulders_missing += 1,
                 None => { npcs_missing += 1;
-                    said.push(format!("{:?}: ⚠️ **a person on this map who was never a row**", sprite.name)) }
+                    said.push(format!("{:?}: a person on this map who was never a row", sprite.name)) }
             }
         }
 
@@ -1537,7 +1537,7 @@ pub fn rom_cross_check(
             said.push(format!("connections: {rows} row(s) for {neighbours} neighbour(s) in the header"));
         } else if rows > neighbours {
             said.push(format!("connections: {rows} ids for {neighbours} neighbour(s) — the crossing \
-                               coordinate is moving with the player (§5.2.8)"));
+                               coordinate is moving with the player"));
         }
 
         if !said.is_empty() {
@@ -1546,7 +1546,7 @@ pub fn rom_cross_check(
     }
 
     format!(
-        "\n──── §5.3: the ROM's tables against what was offered ────\n\
+        "\n──── the ROM's tables against what was offered ────\n\
          scope      {} maps the walk entered, of {} in the game\n\
          warps      {warps} in those headers; {warps_missing} never a row \
          ({same_door} the same door as one that was, {impassable} not on the grid)\n\

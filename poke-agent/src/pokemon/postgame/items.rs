@@ -149,7 +149,10 @@ pub fn blocked(state: &GameState, item: ItemId, target: UseTarget) -> Option<Str
                 _ => None,
             }
         }
-        // A refusal consumes nothing, so an unchecked one is an endless retry.
+        // A refusal consumes nothing, so an unchecked one is an endless retry. `ItemUseBicycle`
+        // turns down water before it asks where you are.
+        ItemId::Bicycle if state.map.surfing =>
+            Some("the Bicycle cannot be ridden while surfing; get back on land first".into()),
         ItemId::Bicycle if !bike_riding_allowed(state) =>
             Some(format!("cycling is not allowed on {} (tileset {:?})", state.map.map, state.map.tileset)),
         _ => None,
@@ -475,6 +478,20 @@ mod tests {
                      ItemId::GuardSpec, ItemId::DireHit] {
             assert!(!party_items.contains(&item), "{item:?} should NOT open the party menu");
         }
+    }
+
+    #[test]
+    fn the_bicycle_is_refused_on_water() {
+        let mut state = GameState::default();
+        state.bag.push(crate::pokemon::bag::BagItem { id: ItemId::Bicycle, quantity: 1 }).expect("room");
+        state.map.map = Map::Route11;
+        state.map.tileset = crate::pokemon::map_header::TileSetId::Overworld;
+        assert!(bike_riding_allowed(&state), "the refusal has to be the water's, not the map's");
+        assert_eq!(blocked(&state, ItemId::Bicycle, UseTarget::Nothing), None, "on land it rides");
+
+        state.map.surfing = true;
+        let refusal = blocked(&state, ItemId::Bicycle, UseTarget::Nothing).expect("refused on water");
+        assert!(refusal.contains("surfing"), "{refusal}");
     }
 
     /// The Poké Doll ends the battle, so it is never in `STAT_ITEMS`.

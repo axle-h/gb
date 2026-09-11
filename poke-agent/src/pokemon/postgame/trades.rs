@@ -257,8 +257,8 @@ mod tests {
                     "{:?} is listed as evolution-only but the ROM has it wild on {map}", trade.give)),
                 (None, None) => wrong.push(format!(
                     "{:?} (traded for {:?} on {}) has no wild encounter anywhere and no recorded way \
-                     to obtain it — §8-K's claim that the give-species was the only obstacle no \
-                     longer holds", trade.give, trade.get, trade.at)),
+                     to obtain it, so getting the give-species is no longer the only thing between \
+                     a finished save and every in-game trade", trade.give, trade.get, trade.at)),
                 _ => {}
             }
         }

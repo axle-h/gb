@@ -67,8 +67,8 @@ fn the_packets_are_ones_a_browser_can_decode() {
         assert!(
             (went_in - came_out).abs() < 3.0,
             "{tone} Hz went in at {went_in:.1} dB and came out at {came_out:.1} dB. \
-             A gap this size is not lossy coding, it is the wrong bitstream — check SAMPLE_RATE \
-             against the ⚠️ in the module docs before believing anything else.",
+             A gap this size is not lossy coding, it is the wrong bitstream: check SAMPLE_RATE \
+             is 48 kHz, since `opus-rs` keeps the loudness and destroys the spectrum at 24 kHz.",
         );
     }
 }
@@ -163,7 +163,7 @@ fn the_header_says_what_the_page_needs_to_configure_a_decoder() {
 /// Pins the one rate the encoder is known good at; the round-trip test above is the alarm.
 #[test]
 fn the_sample_rate_is_one_the_encoder_is_known_good_at() {
-    assert_eq!(SAMPLE_RATE, 48_000, "see the ⚠️ in the module docs — 24 kHz is measurably broken");
+    assert_eq!(SAMPLE_RATE, 48_000, "the decoder is fed 48 kHz; `opus-rs` at 24 kHz keeps the loudness and destroys the spectrum");
     assert_eq!(FRAME_SAMPLES, 960);
 }
 

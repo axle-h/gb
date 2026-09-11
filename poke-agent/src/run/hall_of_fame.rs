@@ -375,7 +375,7 @@ mod tests {
 
         let candidates = resumable(&scratch.0);
         assert_eq!(candidates, vec![run.path().to_path_buf()],
-            "hall-of-fame/ must be invisible to the resume scan, or gb serve resumes a finished game");
+            "hall-of-fame/ must be invisible to the resume scan, or poke-agent-web resumes a finished game");
     }
 
     /// Fastest first, and a clock that gave up ranks behind every honest one.

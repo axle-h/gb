@@ -1,12 +1,12 @@
 use super::super::*;
 
-const PHASE0: &[u8] = include_bytes!("../../data/postgame-phase0.bin");
+const ENTRY: &[u8] = include_bytes!("../../data/postgame-entry.bin");
 
 /// The Bike Voucher from the Pokémon Fan Club chairman in Vermilion.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_the_bike_voucher() {
-    let mut fixture = TestFixture::new(PHASE0, Duration::from_mins(45), PolicyStep::bike_voucher_steps());
+    let mut fixture = TestFixture::new(ENTRY, Duration::from_mins(45), PolicyStep::bike_voucher_steps());
 
     let state = fixture.game_state();
     assert!(!state.bag.iter().any(|i| i.id == ItemId::BikeVoucher), "entry fixture already has a voucher");

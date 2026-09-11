@@ -57,7 +57,10 @@ pub fn teach_refusal(state: &GameState, item: ItemId, slot: u8) -> String {
         .collect();
     match takers.as_slice() {
         [] => format!(
-            "{subject} cannot learn {taught}, and nor can anything else in the party. Every machine              works on a fixed list of Pokémon and the game refuses the rest, so teaching this one              needs a party member that is on that list; nothing you own is. Catching or swapping in              a Pokémon that can learn it is the only way past."),
+            "{subject} cannot learn {taught}, and nor can anything else in the party. Every machine \
+             works on a fixed list of Pokémon and the game refuses the rest, so teaching this one \
+             needs a party member that is on that list; nothing you own is. Catching or swapping in \
+             a Pokémon that can learn it is the only way past."),
         _ => format!("{subject} cannot learn {taught}. In the party, {} can.", takers.join(", ")),
     }
 }
@@ -98,6 +101,14 @@ mod tests {
                      ItemId::Hm05Flash, ItemId::Tm06Toxic, ItemId::Tm34Bide] {
             assert!(can_learn(PokemonSpecies::Mew, item), "Mew learns {item}");
         }
+    }
+
+    #[test]
+    fn a_refusal_with_no_taker_reads_as_one_sentence() {
+        let refusal = teach_refusal(&GameState::default(), ItemId::Hm03Surf, 0);
+        assert!(refusal.contains("nor can anything else in the party"), "the no-taker arm: {refusal}");
+        assert!(!refusal.contains('—'), "no em dashes in what the agent writes: {refusal}");
+        assert!(!refusal.contains("  "), "a `\\` was eaten out of a continued literal: {refusal}");
     }
 
     /// A stone or the Rare Candy is not refused by the machine check.

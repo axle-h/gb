@@ -102,11 +102,11 @@ const NOT_BUILT: &str = r#"<!doctype html>
 <link rel="icon" type="image/png" href="/favicon.png">
 <body style="background:#0f1115;color:#d7dae0;font:14px/1.6 ui-monospace,monospace;padding:40px">
 <h1 style="font-size:16px">The web UI was not built into this binary.</h1>
-<p>The SPA is compiled into <code>gb</code> from <code>web/dist</code>, which was empty when the
-binary was built. Build it and rebuild:</p>
-<pre style="background:#161920;border:1px solid #262b34;border-radius:4px;padding:12px">cd web &amp;&amp; pnpm install &amp;&amp; pnpm run build
-cargo build --release</pre>
-<p>Or run <code>GB_WEB_DEV=1 gb serve</code> to read <code>web/dist</code> from disk instead.
+<p>The SPA is compiled into <code>poke-agent-web</code> from <code>web/dist</code>, which was empty
+when the binary was built. Build it and rebuild:</p>
+<pre style="background:#161920;border:1px solid #262b34;border-radius:4px;padding:12px">cd poke-agent-web/web &amp;&amp; pnpm install &amp;&amp; pnpm run build &amp;&amp; cd ../..
+cargo build --release -p poke-agent-web</pre>
+<p>Or run <code>GB_WEB_DEV=1 poke-agent-web</code> to read <code>web/dist</code> from disk instead.
 The API is up either way — <code>/api/events</code>, <code>/api/video</code>,
 <code>/api/healthz</code>.</p>
 </body>

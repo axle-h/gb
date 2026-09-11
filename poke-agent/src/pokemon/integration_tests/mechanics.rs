@@ -2419,7 +2419,7 @@ fn an_impossible_warp_is_one_the_cartridge_really_will_not_open() {
     const KNOWN: &[(Map, u8, u8, &str)] = &[
         (Map::Route7, 19, 9, "Route 7's gate: raw $23, and (19, 10) beside it is the door"),
         (Map::Route8, 2, 9, "Route 8's west gate: raw $39, sibling at (2, 10)"),
-        (Map::Route8, 9, 9, "Route 8's east gate: raw $2c, sibling at (9, 10) — W5's case"),
+        (Map::Route8, 9, 9, "Route 8's east gate: raw $2c, sibling at (9, 10)"),
         (Map::SilphCo1F, 16, 10, "`warp_event 16, 10, SILPH_CO_3F, 7 ; inaccessible` — plain floor"),
     ];
 
@@ -2615,6 +2615,6 @@ fn a_duplicate_map_is_not_a_coverage_gap() {
     println!("interiors no warp anywhere targets: {orphans:?}");
     assert!(orphans.iter().all(|map| DUPLICATES.contains(map)),
         "an interior nothing warps to that is not one of the known duplicates: {orphans:?} — \
-         coverage::UNREACHABLE_DUPLICATES and every map count in docs/coverage-plan.md are \
-         derived from that list");
+         coverage::UNREACHABLE_DUPLICATES and the coverage report's map counts are derived from \
+         that list");
 }
