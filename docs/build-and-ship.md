@@ -20,10 +20,9 @@ Read when a build fails before it reaches Rust, and before touching the `Dockerf
   leaves `pokered/gfx/pics_red.o` in the context, and a stale object from a newer rgbds stops the
   build inside the container.
 - The build stage copies each crate's manifest and `src/` rather than the crate directories whole, so
-  an edit to a doc does not invalidate the cargo layer. `poke-agent-sdl` needs its manifest *and* its
-  `poke-agent-web/src/main.rs`, because cargo refuses to load a workspace member with no target at all — the file only
-  has to exist. Its `src/sdl/` is not copied, and nothing asks for `-p poke-agent-sdl`, so `sdl2` is
-  never built.
+  an edit to a doc does not invalidate the cargo layer. `poke-agent-sdl` is never built but must still
+  load: its real manifest keeps `Cargo.lock` exact, and a generated `fn main() {}` stands in for its
+  source, because cargo refuses a workspace member with no target at all.
 - `CMD` is exec form so the binary is PID 1 and receives SIGTERM itself. That signal is what
   checkpoints the run; a shell in between loses everything since the last periodic checkpoint.
 - Shutdown must not be axum's graceful one: the three streaming endpoints never finish, so it would
