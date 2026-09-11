@@ -176,8 +176,8 @@ fn bench_audio_the_shipped_stack_and_what_it_beat() {
     const LABELS: [&str; 7] = [
         "raw f32 stereo (what the APU makes) ",
         "raw i16 stereo                     ",
-        "raw i16 mono (= §12's 24 kHz stereo)",
-        "IMA ADPCM mono (§12's fallback)     ",
+        "raw i16 mono (= 24 kHz stereo)      ",
+        "IMA ADPCM mono (the fallback)       ",
         "Opus mono @16k                      ",
         "OPUS MONO @24k — WHAT SHIPS         ",
         "Opus mono @32k                      ",

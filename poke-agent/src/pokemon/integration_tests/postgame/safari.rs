@@ -95,8 +95,7 @@ fn can_catch_a_safari_exclusive() {
 
 /// All four areas swept for every species the Safari Zone adds.
 #[test]
-#[cfg_attr(not(feature = "slow-tests"), ignore = "very slow (381 s, 6× the leg tier's next \
-    slowest) — run with --features slow-tests")]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "very slow — run with --features slow-tests")]
 fn can_sweep_the_safari_zone() {
     /// Per area; the centre's Scyther is the binding one.
     const MAX_TRIPS: u32 = 15;

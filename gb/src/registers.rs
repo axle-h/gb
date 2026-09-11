@@ -220,7 +220,7 @@ mod tests {
         }
 
         assert_eq!(flags_for(0x00), 0x80, "zero checksum: Z only");
-        assert_eq!(flags_for(0x20), 0x90, "⭐ pokered — non-zero multiple of 0x10, so H stays clear");
+        assert_eq!(flags_for(0x20), 0x90, "pokered — non-zero multiple of 0x10, so H stays clear");
         assert_eq!(flags_for(0x10), 0x90);
         assert_eq!(flags_for(0x3B), 0xB0, "cpu_instrs");
         assert_eq!(flags_for(0x9F), 0xB0, "dmg-acid2");

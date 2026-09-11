@@ -1,6 +1,6 @@
 use super::super::*;
 
-const PHASE0: &[u8] = include_bytes!("../../data/postgame-phase0.bin");
+const ENTRY: &[u8] = include_bytes!("../../data/postgame-entry.bin");
 
 /// The PC every test here uses, and the map it is on.
 const PC_MAP: Map = Map::ViridianPokecenter;
@@ -40,7 +40,7 @@ fn current_box(fixture: &mut TestFixture) -> u8 {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_open_bills_pc() {
-    let mut fixture = TestFixture::new(PHASE0, Duration::from_mins(10), vec![
+    let mut fixture = TestFixture::new(ENTRY, Duration::from_mins(10), vec![
         PolicyStep::deposit_pokemon(BANKED_SLOT, PC_MAP),
     ]);
 
@@ -69,7 +69,7 @@ fn can_open_bills_pc() {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_deposit_a_pokemon() {
-    let mut fixture = TestFixture::new(PHASE0, Duration::from_mins(10), vec![
+    let mut fixture = TestFixture::new(ENTRY, Duration::from_mins(10), vec![
         PolicyStep::deposit_pokemon(BANKED_SLOT, PC_MAP),
     ]);
 
@@ -92,7 +92,7 @@ fn can_deposit_a_pokemon() {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn pokemon_round_trips_through_the_box() {
-    let mut fixture = TestFixture::new(PHASE0, Duration::from_mins(15), vec![
+    let mut fixture = TestFixture::new(ENTRY, Duration::from_mins(15), vec![
         PolicyStep::deposit_pokemon(BANKED_SLOT, PC_MAP),
         PolicyStep::withdraw_pokemon(0, PC_MAP),
     ]);
@@ -116,7 +116,7 @@ fn pokemon_round_trips_through_the_box() {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_change_box() {
-    let mut fixture = TestFixture::new(PHASE0, Duration::from_mins(20), vec![
+    let mut fixture = TestFixture::new(ENTRY, Duration::from_mins(20), vec![
         PolicyStep::deposit_pokemon(BANKED_SLOT, PC_MAP),
         PolicyStep::change_box(1, PC_MAP),
         PolicyStep::change_box(0, PC_MAP),
@@ -143,7 +143,7 @@ fn can_change_box() {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_release_a_pokemon() {
-    let mut fixture = TestFixture::new(PHASE0, Duration::from_mins(15), vec![
+    let mut fixture = TestFixture::new(ENTRY, Duration::from_mins(15), vec![
         PolicyStep::deposit_pokemon(BANKED_SLOT, PC_MAP),
         PolicyStep::release_pokemon(0, PC_MAP),
     ]);
@@ -163,7 +163,7 @@ fn can_release_a_pokemon() {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_round_trip_a_pokemon_through_two_boxes() {
-    let mut fixture = TestFixture::new(PHASE0, Duration::from_mins(25), vec![
+    let mut fixture = TestFixture::new(ENTRY, Duration::from_mins(25), vec![
         PolicyStep::deposit_pokemon(BANKED_SLOT, PC_MAP),
         PolicyStep::change_box(1, PC_MAP),
         PolicyStep::change_box(0, PC_MAP),

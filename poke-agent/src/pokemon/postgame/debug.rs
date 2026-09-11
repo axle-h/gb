@@ -230,8 +230,9 @@ fn play_path_contains_no_debug_ram_writes() {
     }
     assert!(
         offenders.is_empty(),
-        "RAM-write debug helpers must not be reachable from the play path \
-         (docs/postgame-coverage-plan.md §3). Found:\n{}",
+        "RAM-write debug helpers must not be reachable from the play path: it plays on button \
+         input only, and a RAM write desynchronises the game's scripts from its map objects. \
+         Found:\n{}",
         offenders.join("\n")
     );
 }

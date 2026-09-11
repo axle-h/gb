@@ -231,7 +231,7 @@ impl PolicyStep {
         ]
     }
 
-    /// The Bike Voucher, from `postgame-phase0.bin` (the Viridian Pokémon Center).
+    /// The Bike Voucher, from `postgame-entry.bin` (the Viridian Pokémon Center).
     pub fn bike_voucher_steps() -> Vec<Self> {
         let mut s = Self::viridian_to_vermilion();
         s.push(Self::enter(Map::PokemonFanClub));

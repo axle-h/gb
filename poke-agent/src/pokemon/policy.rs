@@ -1836,7 +1836,7 @@ impl DeterministicPolicy {
                 println!("[policy] no scripted progress on disk — starting the route from the beginning"),
             None => {
                 println!(
-                    "[policy] ⚠️ this run is being resumed but recorded no scripted progress, so \
+                    "[policy] this run is being resumed but recorded no scripted progress, so \
                      there is no telling how much of the {total}-step route its save has already \
                      played. Parking rather than replaying the route over a game that may be \
                      part-way through it. Start a new run to play this one.",
@@ -1849,7 +1849,7 @@ impl DeterministicPolicy {
             }
             Some((completed, saved_total, saved_route)) => {
                 println!(
-                    "[policy] ⚠️ the scripted route has changed under this run ({saved_total} steps \
+                    "[policy] the scripted route has changed under this run ({saved_total} steps \
                      / {saved_route:016x} recorded, {total} / {route:016x} now), so step \
                      {completed} means nothing here. Parking rather than replaying a different \
                      route over a game that is already part-way through it. Start a new run to play \

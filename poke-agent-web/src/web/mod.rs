@@ -91,7 +91,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     let current = Arc::new(CurrentRun::new(root, model.clone(), run));
     let run = current.get();
     println!(
-        "gb serve {} — {} run {} in {}",
+        "poke-agent-web {} — {} run {} in {}",
         version::BuildInfo::current().summary(),
         match origin {
             Origin::Fresh => "new",
@@ -138,7 +138,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             use poke_agent::pokemon::llm_policy::LlmPolicy;
 
             let config = llm.expect("built above");
-            println!("gb serve — {} via {}", config.model, config.base_url);
+            println!("poke-agent-web — {} via {}", config.model, config.base_url);
             let endpoint = Box::new(OpenAiClient::new(&config));
             let stuck_timeout = config.stuck_timeout;
             // The plan, the battle script and the conversation live in the run directory, so they
@@ -191,7 +191,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     )?;
 
     println!(
-        "gb serve — the admin routes (/reset-game, POST /api/new-run, POST /api/clear) are {}",
+        "poke-agent-web — the admin routes (/reset-game, POST /api/new-run, POST /api/clear) are {}",
         match admin_token {
             Some(_) => "enabled (GB_ADMIN_TOKEN is set)",
             None => "off — set GB_ADMIN_TOKEN to enable them",
@@ -276,7 +276,7 @@ fn serve_http(
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
             .await
             .map_err(|e| format!("could not bind port {port}: {e}"))?;
-        println!("gb serve — http://localhost:{port}");
+        println!("poke-agent-web — http://localhost:{port}");
 
         // SIGTERM as well as Ctrl-C.
         tokio::select! {

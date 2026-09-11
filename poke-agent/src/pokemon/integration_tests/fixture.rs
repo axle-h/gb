@@ -262,7 +262,7 @@ impl TestFixture {
         let state = self.run_until(done);
         let slack = (self.total_cycles - before).to_duration();
         if slack > Duration::from_secs(5) {
-            println!("[fixture] ⚠️  run_leg waited {slack:?} of game time AFTER the queue emptied — \
+            println!("[fixture] run_leg waited {slack:?} of game time AFTER the queue emptied — \
                       the step list does not actually finish this leg, and `complete_game_steps` \
                       will not wait. See the run_leg doc comment.");
         }

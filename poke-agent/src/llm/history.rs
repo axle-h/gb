@@ -32,7 +32,8 @@ pub struct CompactionNote {
     pub before: u64,
     pub after: u64,
     pub images_evicted: usize,
-    /// How many messages the summary replaced. Zero when stage 1 was the whole compaction.
+    /// How many messages left the history, to the summary or a last resort; the summary itself is
+    /// not counted. Zero when stage 1 was the whole compaction.
     pub dropped: usize,
     /// The prose stage 2 wrote, when it ran.
     pub summary: Option<String>,
@@ -546,13 +547,12 @@ mod tests {
         }
         history.checkpoint(1, 1.0, 0);
 
-        let before = history.len();
-        compaction::apply_summary(&mut history, "the story so far", 2);
+        let dropped = compaction::apply_summary(&mut history, "the story so far", 2);
         history.note_compaction(8, &CompactionNote {
             before: 900,
             after: 100,
             images_evicted: 0,
-            dropped: before - history.len(),
+            dropped,
             summary: Some("the story so far".into()),
         });
         history.checkpoint(8, 1.0, 0);
@@ -709,7 +709,7 @@ mod tests {
         let history = History::open(Some(&scratch.0));
         let restored = history.restored().expect("the conversation is kept");
         assert!(restored.system_prompt_changed, "and the change is reported");
-        assert_eq!(restored.messages, 1, "⚠️ kept, not discarded — a new prompt is not a new run");
+        assert_eq!(restored.messages, 1, "kept, not discarded — a new prompt is not a new run");
         assert_eq!(history[0], prompt::system_message(), "the new prompt is in force");
 
         // It is in the log too, so a reader of the archive can see where it changed.

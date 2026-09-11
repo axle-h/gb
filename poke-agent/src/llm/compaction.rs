@@ -95,6 +95,7 @@ pub fn worth_summarising(messages: &[Message], keep: usize) -> bool {
 }
 
 /// Stage 2: keep the system prompt, the summary and the tail, and drop everything between.
+/// Returns how many messages were dropped; the summary replacing them is not counted.
 pub fn apply_summary(messages: &mut Vec<Message>, summary: &str, keep: usize) -> usize {
     let before = messages.len();
     let system = messages.first().filter(|first| first.role == Role::System).cloned();
@@ -114,7 +115,6 @@ pub fn apply_summary(messages: &mut Vec<Message>, summary: &str, keep: usize) ->
     kept.extend_from_slice(&messages[tail..]);
     *messages = kept;
 
-    // The UI shows this as "before → after", so the two added messages do not count.
     before.saturating_sub(messages.len().saturating_sub(1))
 }
 

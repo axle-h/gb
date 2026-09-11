@@ -345,7 +345,7 @@ mod tests {
             checked += 1;
         }
         if checked == 0 {
-            println!("no .2bpp files — run `make -C pokered` to give this test its oracle");
+            println!("no .2bpp files — run `make -C vendor/pokered` to give this test its oracle");
             return;
         }
         assert_eq!(checked, 151, "some .2bpp files were found but not all of them");

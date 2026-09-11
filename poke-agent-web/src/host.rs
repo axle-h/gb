@@ -241,7 +241,7 @@ impl EmulatorHost {
             api.write_player_name(&name)
         };
         match written {
-            Ok(()) => println!("gb — the player is called {name}"),
+            Ok(()) => println!("poke-agent-web — the player is called {name}"),
             Err(error) => {
                 self.published.publish_event(UiEventBody::Notice {
                     level: "warn",
@@ -424,10 +424,10 @@ impl EmulatorHost {
                 poke_agent::run::files::HALL_OF_FAME,
             ),
         });
-        println!("gb serve — {} finished the game, filed as {archived}", run.run_id());
+        println!("poke-agent-web — {} finished the game, filed as {archived}", run.run_id());
 
         match self.start_new_run() {
-            Ok(run_id) => println!("gb serve — playing again as {run_id}"),
+            Ok(run_id) => println!("poke-agent-web — playing again as {run_id}"),
             Err(failure) => self.complain(format!("could not start the next run: {failure}")),
         }
     }
@@ -459,7 +459,7 @@ impl EmulatorHost {
 
     /// Publish an error notice and print it.
     fn complain(&self, message: String) {
-        eprintln!("gb serve — {message}");
+        eprintln!("poke-agent-web — {message}");
         self.published.publish_event(UiEventBody::Notice { level: "error", message });
     }
 
@@ -513,7 +513,7 @@ impl EmulatorHost {
             level: "info",
             message: format!("new run {run_id}. {previous} was checkpointed and left where it is"),
         });
-        println!("gb serve — new run {run_id} (was {previous})");
+        println!("poke-agent-web — new run {run_id} (was {previous})");
         Ok(run_id)
     }
 
@@ -529,7 +529,7 @@ impl EmulatorHost {
                       untouched"
                 .to_string(),
         });
-        println!("gb serve — cleared the conversation and the plan for {run_id}");
+        println!("poke-agent-web — cleared the conversation and the plan for {run_id}");
         Ok(run_id)
     }
 

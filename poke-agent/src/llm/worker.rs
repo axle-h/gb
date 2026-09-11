@@ -940,25 +940,25 @@ impl Worker {
         let resume = self.published.run_status();
         self.published.set_status(RunStatus::Compacting);
         let before = self.accounting.tokens_in(&self.history);
-        let was = self.history.len();
+        let mut dropped = 0;
 
         let images_evicted = compaction::evict_images(&mut self.history, compaction::KEEP_IMAGES);
         let mut summary = None;
         let still_over = self.accounting.occupancy(&self.history) >= self.config.compact_above;
         if still_over && compaction::worth_summarising(&self.history, compaction::KEEP_MESSAGES) {
             if let Some(prose) = self.summarise() {
-                compaction::apply_summary(&mut self.history, &prose, compaction::KEEP_MESSAGES);
+                dropped += compaction::apply_summary(&mut self.history, &prose, compaction::KEEP_MESSAGES);
                 summary = Some(prose);
             }
             // A summary could not be had — the endpoint is down, or the model returned nothing.
         }
         // Still over: the summary was refused, or what it kept is itself too big.
         if self.accounting.occupancy(&self.history) >= self.config.compact_above {
-            self.trim_history();
+            dropped += self.trim_history();
         }
         // And the last resort has a last resort, because a history can hold no turns to drop.
         if self.accounting.occupancy(&self.history) >= self.config.compact_above {
-            self.drop_unanswered();
+            dropped += self.drop_unanswered();
         }
 
         let after = self.accounting.tokens_in(&self.history);
@@ -969,7 +969,9 @@ impl Worker {
             self.published.publish_event(UiEventBody::Notice {
                 level: "error",
                 message: format!(
-                    "compaction reclaimed nothing: the history is still {after} tokens against a                      limit of {}, and there is nothing left in it that can be dropped safely. Every                      request from here will be over the window.",
+                    "compaction reclaimed nothing: the history is still {after} tokens against a \
+                     limit of {}, and there is nothing left in it that can be dropped safely. Every \
+                     request from here will be over the window.",
                     self.accounting.limit(),
                 ),
             });
@@ -979,8 +981,7 @@ impl Worker {
             before,
             after,
             images_evicted,
-            // Net of the summary message `apply_summary` adds back.
-            dropped: was.saturating_sub(self.history.len()),
+            dropped,
             summary,
         })
     }
@@ -1030,11 +1031,13 @@ impl Worker {
     }
 
     /// The last resort: drop whole turns from the front until the history is under [`TRIM_TO`].
-    fn trim_history(&mut self) {
+    /// Returns how many messages went.
+    fn trim_history(&mut self) -> usize {
         let target = (self.accounting.limit() as f64 * TRIM_TO) as u64;
         // Index 0 is the system prompt; index 1 is the summary, if a stage 2 has ever run.
         let first = 1 + usize::from(self.history.get(1).is_some_and(compaction::is_summary));
         let mut dropped = 0;
+        let mut messages = 0;
         while self.accounting.tokens_in(&self.history) > target {
             let Some(boundary) =
                 self.history.iter().skip(first).position(compaction::is_turn_start).map(|i| i + first)
@@ -1052,6 +1055,7 @@ impl Worker {
             };
             self.history.drain(boundary..next);
             dropped += 1;
+            messages += next - boundary;
         }
         if dropped > 0 {
             self.published.publish_event(UiEventBody::Notice {
@@ -1059,6 +1063,7 @@ impl Worker {
                 message: format!("context is full; dropped the {dropped} oldest turns"),
             });
         }
+        messages
     }
 
     /// The last resort's last resort: drop `user` messages that were never answered.
@@ -1162,5 +1167,78 @@ mod tests {
             [None, None, Some(60), Some(120), Some(240), Some(480), Some(960), Some(1800), Some(1800), Some(1800)],
         );
         assert_eq!(park.window(u32::MAX), Some(park.max), "a long enough streak must not overflow");
+    }
+
+    struct Summarises;
+
+    impl ChatEndpoint for Summarises {
+        fn stream_completion(
+            &self,
+            _: &ChatRequest,
+            _: &mut dyn FnMut(Fragment<'_>),
+            _: &dyn Fn() -> bool,
+        ) -> Result<Completion, LlmError> {
+            Ok(Completion { content: "I am in Pallet Town.".into(), ..Completion::default() })
+        }
+    }
+
+    fn worker(context_limit: u64, compact_above: f64) -> Worker {
+        let config = LlmConfig {
+            base_url: "http://x".into(),
+            api_key: "k".into(),
+            model: "m".into(),
+            context_limit,
+            compact_above,
+            temperature: 1.0,
+            max_tool_steps: 4,
+            request_timeout: Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
+            max_tokens: None,
+            reasoning_effort: None,
+            stuck_timeout: None,
+        };
+        let (worker, _) = channels(
+            Box::new(Summarises),
+            config,
+            Published::new(),
+            TodoList::open(None),
+            BattleScript::open(None),
+            History::open(None),
+        );
+        worker
+    }
+
+    #[test]
+    fn a_compaction_counts_every_message_that_left_and_not_the_summary() {
+        let bulk = "a long turn. ".repeat(600);
+        let mut probe = worker(1, 1.0);
+        for turn in 1..=40 {
+            probe.history.push(Message::user(format!("### Turn {turn}\n{bulk}")));
+            probe.history.push(Message::assistant("done".into(), vec![]));
+        }
+        let full = probe.accounting.tokens_in(&probe.history);
+
+        let mut worker = worker(full, 0.5);
+        *worker.history = probe.history.to_vec();
+        let was = worker.history.len();
+        let note = worker.compact_if_needed().expect("a history at its limit compacts");
+
+        assert!(note.summary.is_some(), "stage 2 ran");
+        assert!(note.after < note.before);
+        assert_eq!(note.dropped, was - (worker.history.len() - 1), "every message that left, and not the summary");
+    }
+
+    #[test]
+    fn a_compaction_that_reclaims_nothing_says_so_in_one_sentence() {
+        let mut worker = worker(1, 0.5);
+        let mut notices = worker.published.subscribe_events();
+        worker.compact_if_needed().expect("a system prompt alone is over a one-token limit");
+        let said: Vec<String> = std::iter::from_fn(|| notices.try_recv().ok())
+            .filter_map(|event| match event.body {
+                UiEventBody::Notice { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
+        let notice = said.iter().find(|m| m.starts_with("compaction reclaimed nothing")).expect("the notice");
+        assert!(!notice.contains("  "), "a `\\` was eaten out of a continued literal: {notice}");
     }
 }

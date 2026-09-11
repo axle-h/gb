@@ -64,7 +64,7 @@ impl AudioEncoder {
     fn build(&self) -> Option<OpusEncoder> {
         // `Audio`, not `Voip`: the voice model at a low bitrate makes a chiptune sound like a modem.
         let mut opus = OpusEncoder::new(SAMPLE_RATE as i32, CHANNELS as usize, Application::Audio)
-            .map_err(|failure| eprintln!("gb serve — the Opus encoder would not start: {failure}"))
+            .map_err(|failure| eprintln!("poke-agent-web — the Opus encoder would not start: {failure}"))
             .ok()?;
         opus.bitrate_bps = self.bitrate;
         opus.complexity = 9;
@@ -115,12 +115,12 @@ impl AudioEncoder {
                     out.push(Arc::from(&self.packet[..length]));
                 }
                 Ok(Err(failure)) => {
-                    eprintln!("gb serve — the Opus encoder refused a frame: {failure}");
+                    eprintln!("poke-agent-web — the Opus encoder refused a frame: {failure}");
                     self.opus = None;
                     break;
                 }
                 Err(_) => {
-                    eprintln!("gb serve — the Opus encoder panicked; audio is off for this process");
+                    eprintln!("poke-agent-web — the Opus encoder panicked; audio is off for this process");
                     self.opus = None;
                     break;
                 }

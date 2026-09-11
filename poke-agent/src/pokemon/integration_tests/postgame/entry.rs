@@ -190,15 +190,16 @@ fn options_survive_the_hall_of_fame_reset() {
     );
 
     assert_eq!(fixture.api().read_game_options().unwrap(), FAST_FIXTURE_OPTIONS,
-        "J2 should have applied the options at load");
+        "TestFixture::new should have written FAST_FIXTURE_OPTIONS (no battle animations, SET style, \
+         fast text) into wOptions at load");
 
     let state = drive_out_of_hall_of_fame(&mut fixture);
     assert_eq!(state.map.map, Map::PalletTown);
 
     assert!(fixture.options_drifts > 0,
         "the credits' save/soft-reset/CONTINUE should have restored the cartridge's own wOptions at \
-         least once — if this ever reads 0, the per-tick re-apply in TestFixture::step is dead code \
-         and J3's whole premise is wrong");
+         least once. If this ever reads 0, the per-tick re-apply in TestFixture::step is dead code: \
+         nothing in a fixture's life would put the cartridge's options back");
     assert_eq!(fixture.api().read_game_options().unwrap(), FAST_FIXTURE_OPTIONS,
         "…and the re-apply should have put them back");
     println!("wOptions drifted {} times across the credits and was re-applied each time",
@@ -316,10 +317,10 @@ const SPARE_TMS: [ItemId; 6] = [
     ItemId::Tm24Thunderbolt, ItemId::Tm27Fissure, ItemId::Tm34Bide,
 ];
 
-/// Cuts `postgame-phase0.bin`: six spare TMs banked, the key items kept, the party healed.
+/// Cuts `postgame-entry.bin`: six spare TMs banked, the key items kept, the party healed.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
-fn can_ship_the_phase0_entry_fixture() {
+fn can_ship_the_postgame_entry_fixture() {
     let mut steps = vec![
         PolicyStep::enter(Map::Route1),
         PolicyStep::enter(Map::ViridianCity),
@@ -354,11 +355,11 @@ fn can_ship_the_phase0_entry_fixture() {
     assert_eq!(state.badges.bits(), 255);
 
     let after = bag_count(&mut fixture);
-    println!("phase 0 entry fixture: bag {before} → {after}, party healed, at {} @ {}",
+    println!("postgame entry fixture: bag {before} → {after}, party healed, at {} @ {}",
         state.map.map, state.map.player_position);
     assert!(after <= 14, "bag should be well under 20, is {after}");
 
-    fixture.save_state_named("src/pokemon/data/postgame-phase0.bin").unwrap();
+    fixture.save_state_named("src/pokemon/data/postgame-entry.bin").unwrap();
 }
 
 /// Raw `wNumBagItems`, since `GameState::bag` drops ids `ItemId` cannot name and under-reports
