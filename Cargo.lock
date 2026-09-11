@@ -1139,6 +1139,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
+ "strum",
 ]
 
 [[package]]

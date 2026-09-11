@@ -4,6 +4,7 @@ pub mod gfx;
 pub mod input;
 pub mod mode;
 pub mod modes;
+pub mod party;
 pub mod rng;
 pub mod sequence;
 pub mod systems;
