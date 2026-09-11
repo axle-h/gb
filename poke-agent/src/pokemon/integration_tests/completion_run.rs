@@ -204,6 +204,10 @@ pub struct CompletionBrain {
     /// [`Step::Collect`] is on, and the box has room.
     collecting: bool,
     box_full: bool,
+    /// How often the current step has run from each species: what blocks the way is fought.
+    ran: std::collections::HashMap<String, usize>,
+    /// The step the run counts belong to.
+    running_at: usize,
     /// How the next nickname prompt's Pokémon came.
     came: Came,
     /// Every nickname prompt alternates between a name and the species name.
@@ -242,6 +246,8 @@ pub struct CompletionBrain {
     taught: Option<(u8, String)>,
     /// The last row chosen, and how many turns running it has been.
     repeated: (String, usize),
+    /// A [`Step::UseItemOn`] has been sent at least once.
+    used_on: bool,
     /// A prize Pokémon was bought and its nickname prompt not yet seen.
     prize_pending: bool,
     /// The party slot a stone was used on.
@@ -263,10 +269,11 @@ impl CompletionBrain {
     pub fn new(steps: Vec<Step>, ledger: Arc<Mutex<Ledger>>) -> Self {
         Self {
             steps, at: 0, armed: false, chosen: Default::default(), unresolved: 0, reissued: 0,
-            orders: VecDeque::new(), thrown: None, caught: HashSet::new(), collecting: false, box_full: false, came: Came::Given, named: 0, party_was_full: false,
+            orders: VecDeque::new(), thrown: None, caught: HashSet::new(), collecting: false, box_full: false,
+            ran: Default::default(), running_at: 0, came: Came::Given, named: 0, party_was_full: false,
             graph: Default::default(), travelled: Default::default(), offered: HashSet::new(), barren: 0,
             last_walk: None, here: String::new(), pockets: Default::default(), pocket_edges: Default::default(), left_by: None,
-            exploring: 0, tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), day_care_sent: None, prize_pending: false, evolving: None, repeated: (String::new(), 0), ledger,
+            exploring: 0, tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), day_care_sent: None, used_on: false, prize_pending: false, evolving: None, repeated: (String::new(), 0), ledger,
             stuck: Arc::new(Mutex::new(None)), turns: Arc::new(Mutex::new(0)),
         }
     }
@@ -301,9 +308,11 @@ impl CompletionBrain {
             Some(Step::Hunt { species, ball, .. }) => ((*species == "*" && new) || same_species(&foe, species), *ball),
             _ => (false, "MasterBall"),
         };
-        if hunted || (self.collecting && new && !self.box_full) {
-            // The Safari Zone's menu has one ball and no bag.
-            let throw = if ids.iter().any(|id| id == "ball") { "ball".to_string() } else { format!("item:{ball}") };
+        // One ball a battle, unless it is a Safari Ball: a Master Ball that did not catch was
+        // refused, as the tower's ghost refuses everything, and throwing again refuses again.
+        let safari = ids.iter().any(|id| id == "ball");
+        if (hunted || (self.collecting && new && !self.box_full)) && (safari || self.thrown.is_none()) {
+            let throw = if safari { "ball".to_string() } else { format!("item:{ball}") };
             if ids.contains(&throw) {
                 self.thrown = Some(foe);
                 self.came = Came::Caught;
@@ -314,8 +323,14 @@ impl CompletionBrain {
             Some(Step::Train { flee, .. }) => !flee.iter().any(|species| foe.eq_ignore_ascii_case(species)),
             _ => false,
         };
+        // Three goes: a wild Pokémon that keeps interrupting the same step is standing in the way,
+        // as the tower's Marowak stands on the stairs, and running from it again changes nothing.
         if !training && ids.iter().any(|id| id == "run") {
-            return choose("run");
+            let ran = self.ran.entry(plain(&foe)).or_default();
+            *ran += 1;
+            if *ran <= 3 {
+                return choose("run");
+            }
         }
         match ids.iter().find(|id| id.starts_with("fight:")) {
             Some(id) => choose(id),
@@ -527,9 +542,11 @@ impl CompletionBrain {
     fn tidy(&mut self, request: &TurnRequest) -> Option<Reply> {
         match self.tidying.as_mut()? {
             None => {
-                let bag = request.messages.iter().rev().filter(|m| m.role == "tool")
-                    .find_map(|m| serde_json::from_str::<serde_json::Value>(&m.text).ok()
-                        .filter(|value| value.get("slots_used").is_some() && value.get("items").is_some()));
+                // The answer to the read just sent, never an older one: a second tidy built from
+                // the first tidy's bag tosses what is no longer there and frees nothing.
+                let bag = request.messages.last().filter(|m| m.role == "tool")
+                    .and_then(|m| serde_json::from_str::<serde_json::Value>(&m.text).ok())
+                    .filter(|value| value.get("slots_used").is_some() && value.get("items").is_some());
                 // On its own, so the turn carries on with the answer rather than ending.
                 let Some(bag) = bag else {
                     return Some(Reply::Calls(vec![Call::new("read_bag", serde_json::json!({}))]));
@@ -601,6 +618,10 @@ impl CompletionBrain {
     }
 
     fn overworld(&mut self, request: &TurnRequest) -> Reply {
+        if self.running_at != self.at {
+            self.running_at = self.at;
+            self.ran.clear();
+        }
         self.teaching = false;
         self.thrown = None;
         let text = request.situation().to_string();
@@ -626,7 +647,7 @@ impl CompletionBrain {
         let full = text.contains("No more room");
         // A gift the bag had no room for: talk again once there is some.
         if let Some((map, id, _, _)) = self.last_walk.as_ref()
-            && text.contains("have any room for this")
+            && (text.contains("have any room for this") || text.contains("make room for this"))
         {
             if let Some(chosen) = self.chosen.get_mut(map) {
                 chosen.remove(id);
@@ -756,16 +777,27 @@ impl CompletionBrain {
                     rows.iter().map(|(id, _)| id).find(|id| id.ends_with(":Clerk1")).cloned()
                 }
                 Step::UseItemOn { item, row } => {
+                    // Done when what the item was used on is no longer a row: a trainer's battle
+                    // can interrupt the walk to it, and then nothing happened at all.
                     let at = rows.iter().find(|(id, _)| id.ends_with(&format!(":{row}")))
                         .and_then(|(_, what)| bin_at(what));
                     let Some((x, y)) = at else {
+                        if self.used_on {
+                            self.used_on = false;
+                            self.at += 1;
+                            continue;
+                        }
                         self.unresolved += 1;
                         if self.unresolved >= Self::PATIENCE {
                             self.stuck(format!("step {} ({step:?}) had no {row} on {map}:\n{text}", self.at + 1));
                         }
                         return Reply::Calls(vec![Call::wait(20)]);
                     };
-                    self.at += 1;
+                    self.used_on = true;
+                    self.unresolved += 1;
+                    if self.unresolved >= Self::PATIENCE {
+                        self.stuck(format!("step {} ({step:?}): the {row} on {map} is still there", self.at + 1));
+                    }
                     return Reply::call("use_field_move", serde_json::json!({
                         "move": "use_item", "item": item, "target": { "x": x, "y": y }, "summary": "waking it" }));
                 }
@@ -1426,25 +1458,35 @@ pub fn to_the_poke_flute() -> Vec<Step> {
         // half of that floor, so the lift is both the ride and the route.
         GoTo("RocketHideoutB4F"), GoTo("RocketHideoutElevator"),
         Field(r#"{"move":"elevator","map":"RocketHideoutB1F"}"#),
-        Field(r#"{"move":"elevator","map":"RocketHideoutB4F"}"#),
+        // The lobby has a Rocket in it, and beating him is what opens its door.
+        Talk("Rocket5"),
+        // The ride ends outside the lift, so the next one starts by walking back in.
+        GoTo("RocketHideoutElevator"), Field(r#"{"move":"elevator","map":"RocketHideoutB4F"}"#),
         Explore { maps: &["RocketHideoutB1F", "RocketHideoutB2F", "RocketHideoutB3F", "RocketHideoutB4F"],
                   patience: 900 },
         GoTo("RocketHideoutElevator"), Field(r#"{"move":"elevator","map":"RocketHideoutB2F"}"#),
         GoTo("RocketHideoutB1F"), GoTo("GameCorner"), GoTo("CeladonCity"),
         Field(r#"{"move":"fly","map":"LavenderTown"}"#), GoTo("LavenderTown"),
+        // The tower fills the bag, and Mr Fuji hands over nothing it has no room for.
+        Tidy,
         GoTo("PokemonTower1F"),
         Explore { maps: &["PokemonTower1F", "PokemonTower2F", "PokemonTower3F", "PokemonTower4F",
                           "PokemonTower5F", "PokemonTower6F", "PokemonTower7F"], patience: 900 },
         // Mr Fuji's thanks puts the player in his house, with the flute.
-        GoTo("LavenderTown"), GoTo("MrFujisHouse"), Clear(&[]), GoTo("LavenderTown"),
-        GoTo("Route12"), UseItemOn { item: "PokeFlute", row: "Snorlax" },
+        GoTo("LavenderTown"), Tidy, GoTo("MrFujisHouse"), Clear(&[]), GoTo("LavenderTown"),
+        // Route 12 is two halves either side of its gate, and the Snorlax sleeps on the south one.
+        GoTo("Route12"), GoTo("Route12Gate1F"), Take("Route12, arriving at (11, 2"),
+        UseItemOn { item: "PokeFlute", row: "Snorlax" },
         Explore { maps: &["Route12"], patience: 400 },
         GoTo("Route12SuperRodHouse"), Clear(&[]), GoTo("Route12"),
         Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"),
         GoTo("Route16"), UseItemOn { item: "PokeFlute", row: "Snorlax" },
         // The gate's stairs are in its lower hall, past where the Snorlax slept.
-        GoTo("Route16Gate1F"), GoTo("Route16Gate2F"), Clear(&[]), GoTo("Route16Gate1F"),
-        GoTo("Route16"), GoTo("CeladonCity"),
+        GoTo("Route16Gate1F"), GoTo("Route16Gate2F"), Clear(&[]), GoTo("Route16Gate1F"), Clear(&[]),
+        // Out of the gate's lower hall onto the cycling road's side, where the bikers are.
+        Take("Route16, arriving at (17, 1"), Clear(&[]),
+        // That side leads on to Route 17, and Fly is refused indoors, so fly from here.
+        Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"),
     ]
 }
 
@@ -1463,5 +1505,8 @@ fn completion_phase_poke_flute() {
          Entry::KeyItem(vec![ItemId::SilphScope as u8]), Entry::KeyItem(vec![ItemId::PokeFlute as u8]),
          Entry::KeyItem(vec![ItemId::LiftKey as u8]), Entry::KeyItem(vec![ItemId::SuperRod as u8])]);
     cut(&mut played, "completion-flute");
+    // South of the gate on Route 12, on the stretch the Fuchsia phase walks.
+    let later = [Entry::ItemBall { map: Map::Route12, object: 9, item: ItemId::Tm16PayDay as u8 }];
+    let missing: Vec<Entry> = missing.into_iter().filter(|entry| !later.contains(entry)).collect();
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
