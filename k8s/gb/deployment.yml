@@ -78,13 +78,13 @@ spec:
           # erroring at every turn. ⚠️ **The model is paid now, so a wedged run costs money rather
           # than a quota**: that is also the right answer while an agent bug is being fixed.
           #
-          # `gb serve` RESUMES the newest run under $GB_RUN_DIR, which is what makes a pod restart
+          # It RESUMES the newest run under $GB_RUN_DIR, which is what makes a pod restart
           # continue the playthrough instead of starting a new one. **To start the game over, do not
           # edit this** — `POST /api/new-run` does it in place, with no rollout and nothing to undo
           # (see ../README.md). `--new-run` here is the fallback for a process that is not answering,
           # and ⚠️ left in place it would wipe the run on *every* restart, which is why it is not the
           # first thing this comment offers any more.
-          args: ["gb", "serve"]
+          args: ["poke-agent-web"]
           envFrom:
             - configMapRef:
                 name: gb

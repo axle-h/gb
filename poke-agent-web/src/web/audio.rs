@@ -157,6 +157,7 @@ impl AudioEncoder {
         self.packets
     }
 
+    #[cfg(feature = "slow-tests")]
     /// Payload bytes emitted, before the wire's `u32` length prefix.
     pub fn bytes(&self) -> u64 {
         self.bytes
@@ -235,5 +236,5 @@ impl AudioEncoder {
 #[cfg(test)]
 mod tests;
 
-#[cfg(all(test, feature = "bench"))]
+#[cfg(all(test, feature = "slow-tests"))]
 mod bench;

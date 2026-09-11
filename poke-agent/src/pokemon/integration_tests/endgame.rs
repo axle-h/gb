@@ -272,19 +272,13 @@ fn seed_gauntlet_levels(fixture: &mut TestFixture) {
 /// four maps from a Pokémon Centre, and a cave whose door has a man standing in it — are all things
 /// this can show in minutes. See [`PolicyStep::gauntlet_grind_steps`].
 ///
-/// ⚠️ **`hall-of-fame`, not `slow-tests`, and the wrong gate showed up immediately**: the leg chain
-/// runs in about 55 seconds and this is **20 minutes**, so one careless attribute turned the whole
-/// tier into something nobody would run. It shares a flag with `hall_of_fame_playthrough` because it
-/// is the same subject — the grind is most of that test — and the flag does *not* imply `slow-tests`,
-/// so both are named in the message.
-///
-/// It is also the number to watch when anything touches how a grind battle is fought: **1552 wild
-/// battles in 1229 s**, twelve heal round trips and no black-outs. It was 2306 battles in 2829 s
-/// until the trainee stopped being switched in and started leading — half the experience per
-/// knockout and a wasted turn in every one of them, which is 2.3× of this test.
+/// It is also the number to watch when anything touches how a grind battle is fought: the wild
+/// battle count and the wall clock both come straight off how much experience a knockout is worth
+/// and how many turns it takes, and the trainee leading rather than being switched in was worth 2.3x
+/// of this test on its own.
 #[test]
-#[cfg_attr(not(feature = "hall-of-fame"), ignore = "20 min, the slowest test in the repo but one — \
-    run with --features slow-tests,hall-of-fame")]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "20 min, the slowest test in the repo but one — \
+    run with --features slow-tests")]
 fn can_grind_for_the_gauntlet() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/post-articuno.bin"),
@@ -299,12 +293,12 @@ fn can_grind_for_the_gauntlet() {
     fixture.step_until_exhausted();
     let s = fixture.game_state();
     for p in s.pokemon.iter() { println!("  {:?} lv{}", p.species, p.level); }
-    for species in [PokemonSpecies::Venusaur, PokemonSpecies::Articuno, PokemonSpecies::Vaporeon] {
-        let mon = s.pokemon.iter().find(|p| p.species == species)
-            .unwrap_or_else(|| panic!("the party should carry a {species:?}"));
-        assert!(mon.level >= PolicyStep::GAUNTLET_LEVEL,
-            "{species:?} only reached lv{}", mon.level);
-    }
+    // One fighter, not three: the route grinds `STARTER_LINE` alone, and by the Mansion it is a
+    // Blastoise. The bench carries HMs and never battles, so nothing else gains a level here.
+    let fighter = s.pokemon.iter().find(|p| p.species == PokemonSpecies::Blastoise)
+        .expect("the grind's target is the starter line, which is a Blastoise by the Mansion");
+    assert!(fighter.level >= PolicyStep::GAUNTLET_LEVEL,
+        "the fighter only reached lv{}", fighter.level);
 }
 
 /// Hold a plan of buttons against a dropped save state and print the map, the position, the game
@@ -319,10 +313,10 @@ fn can_grind_for_the_gauntlet() {
 ///
 /// ```text
 /// GB_PROBE_STATE=target/test-artifacts/coverage/defect-X_state.bin GB_PROBE_BUTTONS=down:60,up:40,down:120 \
-/// cargo test --release --features diagnostics --bin gb -- probe_button_at_state --ignored --nocapture
+/// cargo test --release --features slow-tests --lib -- probe_button_at_state --ignored --nocapture
 /// ```
 #[test]
-#[cfg(feature = "diagnostics")]
+#[cfg(feature = "slow-tests")]
 #[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
 fn probe_button_at_state() {
     use gb::joypad::JoypadButton;
@@ -371,10 +365,10 @@ fn probe_button_at_state() {
 ///
 /// ```text
 /// GB_PROBE_STATE=src/pokemon/data/post-articuno.bin \
-/// cargo test --release --features diagnostics --bin gb -- probe_stall_actions --ignored --nocapture
+/// cargo test --release --features slow-tests --lib -- probe_stall_actions --ignored --nocapture
 /// ```
 #[test]
-#[cfg(feature = "diagnostics")]
+#[cfg(feature = "slow-tests")]
 #[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
 fn probe_stall_actions() {
     let path = std::env::var("GB_PROBE_STATE")

@@ -1458,8 +1458,10 @@ impl MapRomReader for MMU {
                     }
                 } else {
                     Point8 {
-                        x: self.read(pokered_symbols::wSpritePlayerStateData2MapX.address | offset) - 4,
-                        y: self.read(pokered_symbols::wSpritePlayerStateData2MapY.address | offset) - 4
+                        // Wrapping: a sprite slot that has not been filled in yet reads below the
+                        // 4-tile border, and the release build has always wrapped here.
+                        x: self.read(pokered_symbols::wSpritePlayerStateData2MapX.address | offset).wrapping_sub(4),
+                        y: self.read(pokered_symbols::wSpritePlayerStateData2MapY.address | offset).wrapping_sub(4)
                     }
                 },
                 on_screen: sprite_image_index != 0xFF,

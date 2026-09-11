@@ -185,8 +185,8 @@ fn can_catch_a_safari_exclusive() {
 ///
 /// It is bounded three ways — `max_trips` per area, the wallet, and the test's own cycle cap.
 #[test]
-#[cfg_attr(not(feature = "very-slow-tests"), ignore = "very slow (381 s, 6× the leg tier's next \
-    slowest) — run with --features very-slow-tests")]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "very slow (381 s, 6× the leg tier's next \
+    slowest) — run with --features slow-tests")]
 fn can_sweep_the_safari_zone() {
     /// Per area, not for the sweep — and the binding one is the centre's, where **Scyther** took ten
     /// (4.3 % of encounters, 21 % per encounter). Sixty trips would be ¥30,000 of a ~¥44,000 wallet;

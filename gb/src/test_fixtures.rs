@@ -13,6 +13,7 @@ pub fn fixture_dir() -> &'static str {
     concat!(env!("CARGO_MANIFEST_DIR"), "/../poke-agent/src/pokemon/data")
 }
 
+#[cfg(feature = "slow-tests")]
 /// Three values read out of `pokered.sym`, so the benchmark fixture can be checked for being the
 /// game it claims to be without `gb` depending on the agent's generated symbol table.
 pub mod symbols {

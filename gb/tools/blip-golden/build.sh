@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# Regenerate the Blip_Buffer golden vectors in src/audio/data/.
+# Regenerate the Blip_Buffer golden vectors in gb/src/audio/data/.
 #
 # Run from the repo root. Never invoked by cargo — the C++ here is a reference implementation used
 # once to produce fixtures, not a build dependency of the emulator.
 #
-#   tools/blip-golden/build.sh
+#   gb/tools/blip-golden/build.sh
 #
-# Depends on src/audio/data/apu_capture_in.bin, which comes from the Rust side:
-#   cargo test --release --bin gb -- audio::reference::tests::capture_golden_input --exact --ignored
+# Depends on gb/src/audio/data/apu_capture_in.bin, which comes from the Rust side:
+#   cargo test --release -p gb --features slow-tests -- capture_golden_input --exact --ignored
 set -euo pipefail
 
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../.."   # the gb crate root
 
 if [[ ! -f src/audio/data/apu_capture_in.bin ]]; then
-    echo "missing src/audio/data/apu_capture_in.bin — generate it first:" >&2
-    echo "  cargo test --release --bin gb -- audio::reference::tests::capture_golden_input --exact --ignored" >&2
+    echo "missing gb/src/audio/data/apu_capture_in.bin — generate it first:" >&2
+    echo "  cargo test --release -p gb --features slow-tests -- capture_golden_input --exact --ignored" >&2
     exit 1
 fi
 
-out=target/blip-golden
+out=../target/blip-golden
 mkdir -p "$out" src/audio/data
 
 # -DNDEBUG would drop the library's internal assertions; keep them on so a fixture that overruns the

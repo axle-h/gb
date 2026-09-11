@@ -258,7 +258,7 @@ mod tests {
     /// at, out of the ROM rather than out of memory.
     ///
     /// ```text
-    /// cargo test --release --features diagnostics --bin gb -- \
+    /// cargo test --release --features slow-tests --lib -- \
     ///   pokemon::wild::tests::probe_grind_sites --exact --ignored --nocapture
     /// ```
     ///
@@ -266,7 +266,7 @@ mod tests {
     /// the throughput, `poison` is how much of the *travel* cost the site adds by sending a poisoned
     /// trainee back to a Pokémon Centre, and neither knows how far the nearest Centre actually is.
     #[test]
-    #[cfg(feature = "diagnostics")]
+    #[cfg(feature = "slow-tests")]
     #[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
     fn probe_grind_sites() {
         use strum::IntoEnumIterator;

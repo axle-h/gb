@@ -3,7 +3,7 @@
 //! codec, the bitrate or the framing.
 //!
 //! Behind the `bench` feature:
-//! `cargo test --release --features bench --bin gb -- audio::bench --nocapture`
+//! `cargo test --release --features slow-tests --lib -- audio::bench --nocapture`
 //!
 //! It reads real audio out of the emulator actually playing, from the same four fixtures
 //! `video/bench.rs` uses and under the same seeded `RandomPolicy`, so the two streams' numbers can
@@ -148,6 +148,7 @@ fn to_mono(pcm: &[f32]) -> Vec<f32> {
 
 /// **The number the README quotes**, and the four alternatives it was chosen over.
 #[test]
+#[ignore = "benchmark: what the Opus stream costs, and what it beat"]
 fn bench_audio_the_shipped_stack_and_what_it_beat() {
     println!("\n=== {SECONDS}s per capture, {SAMPLE_RATE} Hz, kbit/s on the wire ===");
     let mut totals = [0f64; 7];

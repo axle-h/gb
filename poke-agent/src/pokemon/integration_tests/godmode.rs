@@ -27,12 +27,14 @@
 //! the rest of C2, and each one is either a gap in `llm::prompt` or an intent this file has to grow.
 
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "slow-tests")]
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "slow-tests")]
 use crate::pokemon::integration_tests::cheats::Cheats;
-use crate::pokemon::integration_tests::llm_harness::{
-    Brain, Call, LlmRun, Reply, TurnRequest,
-};
+#[cfg(feature = "slow-tests")]
+use crate::pokemon::integration_tests::llm_harness::LlmRun;
+use crate::pokemon::integration_tests::llm_harness::{Brain, Call, Reply, TurnRequest};
 
 /// One thing the run means to do next, resolved against the **rendered action menu** and nothing
 /// else.
@@ -334,6 +336,7 @@ fn default_for(request: &TurnRequest) -> Reply {
     Reply::Calls(vec![Call::wait(1)])
 }
 
+#[cfg(feature = "slow-tests")]
 /// ⭐ **Pallet Town to the Hall of Fame, as an intent list** — `docs/coverage-plan.md` step 2.
 ///
 /// ⚠️ **It does not play the scripted route, and the reason is in the cartridge rather than in
@@ -462,7 +465,7 @@ fn pallet_to_the_hall_of_fame() -> Vec<Intent> {
 /// the two are meant to be read side by side and the bar is "measured on the same machine on the
 /// same day".
 #[test]
-#[cfg(feature = "godmode")]
+#[cfg(feature = "slow-tests")]
 fn godmode_run() {
     let brain = ScriptedBrain::new(pallet_to_the_hall_of_fame());
     let (stuck, turns) = (Arc::clone(&brain.stuck), Arc::clone(&brain.turns));
@@ -568,6 +571,14 @@ mod tests {
 
         assert!(Intent::Enter("ViridianCity").satisfied_by(&request), "we are already there");
         assert!(!Intent::Enter("Route2").satisfied_by(&request));
+
+        // A `Repeat` resolves to its row and is done only once that row stops being offered.
+        assert_eq!(
+            Intent::Repeat("Old Man").resolve(&request).as_deref(),
+            Some("ViridianCity:OldMan"),
+        );
+        assert!(!Intent::Repeat("Old Man").satisfied_by(&request));
+        assert!(Intent::Repeat("Nurse").satisfied_by(&request), "no such row: nothing left to repeat");
     }
 
     /// A situation with no `Location:` line — a battle, a naming screen — has no location, and an

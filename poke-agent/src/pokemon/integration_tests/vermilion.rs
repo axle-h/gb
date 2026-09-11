@@ -201,7 +201,8 @@ fn lt_surge_is_not_a_row_while_his_doors_are_shut() {
 /// Only under `regen-fixtures`. Cut from `at-vermilion.bin`, the same pre-credits save the `ssanne`
 /// start uses, so both come from the playthrough's own state one leg before it boards.
 #[test]
-#[cfg(feature = "regen-fixtures")]
+#[cfg(feature = "slow-tests")]
+#[ignore = "tool: recuts on-the-ss-anne.bin; needs GB_REGEN_FIXTURES=1"]
 fn regen_on_the_ss_anne_fixture() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/at-vermilion.bin"),

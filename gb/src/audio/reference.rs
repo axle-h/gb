@@ -12,24 +12,32 @@
 //! `blip/tests.rs` are the real regression net, so it was removed rather than left in the ignored
 //! list pretending to be a test.
 
+#[cfg(feature = "slow-tests")]
 use std::path::Path;
+#[cfg(feature = "slow-tests")]
 use std::time::Duration;
 
+#[cfg(feature = "slow-tests")]
 use crate::cycles::MachineCycles;
+#[cfg(feature = "slow-tests")]
 use crate::game_boy::GameBoy;
 
+#[cfg(feature = "slow-tests")]
 /// A mid-game fixture with overworld music playing, so the captured seconds are actually audible.
 pub const CAPTURE_FIXTURE: &[u8] = crate::test_fixtures::AT_CELADON;
 
+#[cfg(feature = "slow-tests")]
 /// Emulated milliseconds to freeze as the golden-test input fixture.
 pub const GOLDEN_INPUT_MILLIS: u64 = 20;
 
+#[cfg(feature = "slow-tests")]
 fn load_fixture(save_state: &[u8]) -> GameBoy {
     let mut gb = GameBoy::dmg(crate::test_fixtures::POKERED);
     gb.load_state(save_state).expect("failed to load save state");
     gb
 }
 
+#[cfg(feature = "slow-tests")]
 /// Run the emulator and log every amplitude transition the synth is handed, run-length merged.
 ///
 /// The runs are the instruction boundaries the APU actually changes level on — a few tens of
@@ -48,6 +56,7 @@ pub fn capture_transitions(save_state: &[u8], game_time: Duration) -> Vec<(u16, 
     gb.core_mut().mmu_mut().audio_mut().output.take_capture()
 }
 
+#[cfg(feature = "slow-tests")]
 pub fn encode_runs(runs: &[(u16, i16, i16)]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + runs.len() * 6);
     out.extend_from_slice(&(runs.len() as u32).to_le_bytes());
@@ -76,7 +85,9 @@ pub fn rle_decode(bytes: &[u8]) -> Vec<(u16, i16, i16)> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "slow-tests")]
     use super::*;
+    #[cfg(feature = "slow-tests")]
     use crate::audio::blip::AMP_SCALE;
 
     /// Freeze 30 ms of real APU output as the golden test's input signal.
@@ -84,9 +95,9 @@ mod tests {
     /// Writes `src/audio/data/apu_capture_in.bin`. After running this, regenerate the matching
     /// output goldens with `tools/blip-golden/build.sh` — they are computed from this file.
     ///
-    /// `cargo test --release --bin gb -- audio::reference::tests::capture_golden_input --exact --ignored --nocapture`
+    /// `cargo test --release -- audio::reference::tests::capture_golden_input --exact --ignored --nocapture`
     #[test]
-    #[cfg(feature = "diagnostics")]
+    #[cfg(feature = "slow-tests")]
     #[ignore = "fixture generator, not a test; run with --ignored"]
     fn capture_golden_input() {
         let runs = capture_transitions(CAPTURE_FIXTURE, Duration::from_millis(GOLDEN_INPUT_MILLIS));

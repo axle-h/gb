@@ -1287,7 +1287,9 @@ mod tests {
             ..HostConfig::default()
         };
         tweak(&mut config);
-        EmulatorHost::new(state, Box::new(RandomPolicy::default()), published, config)
+        // Seeded: an unseeded walk makes "the game is where it was" a coin flip, because how many
+        // ticks a test gets through before it looks decides whether Red has taken the stairs.
+        EmulatorHost::new(state, Box::new(RandomPolicy::seeded(1)), published, config)
             .expect("the committed fixture should load")
     }
 
@@ -1299,7 +1301,10 @@ mod tests {
         let mut events = published.subscribe_events();
         let mut host = host(Arc::clone(&published));
 
-        let deadline = Instant::now() + Duration::from_secs(20);
+        // A safety net rather than a measurement: the loop leaves the moment forty heartbeats have
+        // arrived. Generous because the dev profile emulates every frame far more slowly and this
+        // tier has to pass there too.
+        let deadline = Instant::now() + Duration::from_secs(120);
         let mut statuses: Vec<StatusSnapshot> = Vec::new();
         while statuses.len() < 40 && Instant::now() < deadline {
             host.tick();
@@ -2098,7 +2103,9 @@ mod tests {
             let api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
             api.game_state().expect("a readable state")
         };
-        assert_eq!(after.map.map, played.map.map, "the game was restarted rather than left alone");
+        // The trainer ID rather than the map: a restart mints a new one, and the random walk this
+        // host is running can perfectly well have taken the stairs in the tick that answered.
+        assert_eq!(after.player_id, played.player_id, "the game was restarted rather than left alone");
         // …and the emulator is still running, on the same clock rather than one zeroed by a swap.
         let emulated = host.emulated;
         host.tick();

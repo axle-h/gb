@@ -696,6 +696,7 @@ impl LlmRunBuilder {
         self
     }
 
+    #[cfg(feature = "slow-tests")]
     /// **C3** — keep a verdict on every action the run takes. See
     /// [`TestFixture::with_coverage`](crate::pokemon::integration_tests::TestFixture::with_coverage);
     /// the fixture then owns the event stream, so nothing else may drain it.
@@ -903,11 +904,13 @@ impl LlmRun {
         }
     }
 
+    #[cfg(feature = "slow-tests")]
     /// Turn on the cheat sidecar. See `docs/coverage-plan.md` §3.2.
     pub fn with_cheats(&mut self, cheats: crate::pokemon::integration_tests::cheats::Cheats) {
         self.cheats = Some(cheats);
     }
 
+    #[cfg(feature = "slow-tests")]
     /// The coverage log, if the fixture was asked for one.
     pub fn coverage(&mut self) -> Option<&crate::pokemon::integration_tests::coverage::CoverageLog> {
         self.fixture().coverage.as_ref()
@@ -980,6 +983,7 @@ impl LlmRun {
             .collect()
     }
 
+    #[cfg(feature = "slow-tests")]
     /// How long each completed turn took the worker, in milliseconds: `TurnStarted` to `Decision`,
     /// off the events' own wall-clock stamps.
     ///
@@ -1038,6 +1042,7 @@ impl LlmRun {
         self.fixture().game_state().map.map
     }
 
+    #[cfg(feature = "slow-tests")]
     /// The map, or `None` where the game has no readable state — mid-warp, mid-transition, or on the
     /// tick a starter is being written into an empty party.
     ///

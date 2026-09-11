@@ -117,7 +117,7 @@ const EVENT_TAIL: usize = 12;
 ///
 /// ```shell
 /// for seed in $(seq 1 20); do
-///   GB_SOAK_SEED=$seed cargo test --release --features soak-tests --bin gb -- soak --nocapture
+///   GB_SOAK_SEED=$seed cargo test --release --features slow-tests --lib -- soak --nocapture
 /// done
 /// ```
 const DEFAULT_SEED: u64 = 1;
@@ -384,7 +384,7 @@ fn soak(state: &SoakState) {
         let on = PokemonApi::with_cache(&mut gb, &mut cache).game_state().map(|s| s.map.map);
         assert_eq!(on.ok(), Some(want),
                    "the `{}` checkpoint is not on {want} any more — re-cut it with \
-                    `cargo test --release --features full-playthrough,regen-fixtures --bin gb -- \
+                    `cargo test --release --features slow-tests --lib -- \
                     pokemon::integration_tests::playthrough::regen_soak_checkpoints --exact`",
                    state.name);
     }
@@ -459,8 +459,8 @@ fn soak(state: &SoakState) {
                  \x20 where: {}\n\
                  \x20 after: {:?} of game time\n\
                  \x20 last {} events:\n{}\n\
-                 \x20 reproduce: GB_SOAK_SEED={seed} cargo test --release --features soak-tests \
-                    --bin gb -- soak::{} --nocapture\n\
+                 \x20 reproduce: GB_SOAK_SEED={seed} cargo test --release --features slow-tests \
+                    --lib -- soak::{} --nocapture\n\
                  \x20 artifacts: {}.{{bin,png}}",
                 state.name, state.covers,
                 agent.state_debug(),

@@ -1366,7 +1366,7 @@ fn a_route_is_only_ever_over_ground_already_walked() {
     assert!(observe::route(fixture.agent.world_graph(), Map::PalletTown, Map::CinnabarIsland).is_none());
 }
 
-/// Under `--features web` the views serialise. Worth its own test because `cfg_attr` failing to
+/// Under `--features slow-tests` the views serialise. Worth its own test because `cfg_attr` failing to
 /// apply is silent — the code still compiles, it just stops being able to leave the process, and the
 /// first sign would be W5's tool layer not building.
 #[test]

@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # ⚠️ That line is a parser directive and only counts as one if it is the *first* line in the file.
 #
-# gb — one container, one process, one emulator. **W8** of `docs/llm-web-playthrough-plan.md`.
+# One container, one process, one emulator.
 #
 #   docker build -t gb .
 #   docker run -d --name gb -p 8080:8080 -v gb-runs:/runs \
@@ -10,12 +10,11 @@
 # Four stages, in dependency order, and the first two are the ones that are not obvious:
 #
 #   1. `rom`   — rgbds, then `pokered/pokered.gbc`. The ROM is `include_bytes!`'d at compile time
-#                (`src/pokemon/roms.rs`) but is *gitignored*, so nothing in the build context has
-#                it and the crate does not compile without it.
+#                but is *gitignored*, so nothing in the build context has it and the crate does not
+#                compile without it.
 #   2. `web`   — `web/dist`, which `rust-embed` bakes into the binary. Same story: it must exist
 #                before cargo runs, or the derive fails outright.
-#   3. `build` — the crate, without SDL: `gb serve` never opens a window, and a server image
-#                should not need `libsdl2` to link against.
+#   3. `build` — `poke-agent-web`. `poke-agent-sdl` is never built, so no `libsdl2` to link against.
 #   4. runtime — the binary, a volume for the run directory, and nothing else.
 
 
@@ -47,7 +46,7 @@ RUN curl -fsSL -o rgbds.tar.gz \
     && rgbasm --version
 
 WORKDIR /pokered
-COPY pokered/ ./
+COPY poke-agent/pokered/ ./
 
 # `pokered/` is a git submodule. An uninitialised one is an empty directory, and the error you get
 # from `make` for that ("No rule to make target 'main.asm'") says nothing about why.
@@ -56,8 +55,8 @@ RUN test -f main.asm || { \
         exit 1; \
     }
 
-# ⚠️ **The sha1 check is the point of this stage, not a formality.** All 91 committed fixtures in
-# `src/pokemon/data/`, every symbol `build.rs` generates, and every address the Pokémon layer reads
+# ⚠️ **The sha1 check is the point of this stage, not a formality.** Every committed fixture in
+# `poke-agent/src/pokemon/data/`, every symbol `build.rs` generates, and every address the agent reads
 # are pinned to *these* bytes. A ROM that merely assembles is not good enough — one built by a
 # different rgbds is a different game, and it would fail somewhere deep in the agent rather than
 # here. `roms.sha1` is upstream's own manifest; the grep takes the one line for the ROM we build.
@@ -81,9 +80,9 @@ WORKDIR /web
 # ⚠️ `pnpm-workspace.yaml` carries the `minimumReleaseAge` cooldown and must arrive *before* the
 # install, not with the source. Without it pnpm falls back to its own default and the image is built
 # under a policy that is not the one the repo states.
-COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+COPY poke-agent-web/web/package.json poke-agent-web/web/pnpm-lock.yaml poke-agent-web/web/pnpm-workspace.yaml ./
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
-COPY web/ ./
+COPY poke-agent-web/web/ ./
 RUN pnpm run build
 
 
@@ -93,23 +92,28 @@ RUN pnpm run build
 FROM rust:1-bookworm AS build
 WORKDIR /src
 
-# Exactly what the compile reads, and nothing else: the manifest, the build script (which parses
-# `pokered/pokered.sym`), the crate source, the ROM, and the SPA. Keeping it to this list means an
-# edit to a doc or a script does not invalidate the cargo layer.
-COPY Cargo.toml Cargo.lock build.rs ./
-COPY src/ ./src/
-COPY --from=rom /pokered/pokered.gbc /pokered/pokered.sym ./pokered/
-COPY --from=web /web/dist ./web/dist
+# Exactly what the compile reads, and nothing else, so an edit to a doc or a script does not
+# invalidate the cargo layer. ⚠️ `poke-agent-sdl`'s manifest **and its `main.rs`** are here because
+# cargo refuses to load a workspace member with no target at all — the file only has to exist.
+# `src/sdl/` is not copied and nothing asks for `-p poke-agent-sdl`, so `sdl2` is never built.
+COPY Cargo.toml Cargo.lock ./
+COPY gb/Cargo.toml ./gb/
+COPY gb/src/ ./gb/src/
+COPY poke-agent/Cargo.toml poke-agent/build.rs ./poke-agent/
+COPY poke-agent/src/ ./poke-agent/src/
+COPY poke-agent-web/Cargo.toml ./poke-agent-web/
+COPY poke-agent-web/src/ ./poke-agent-web/src/
+COPY poke-agent-sdl/Cargo.toml ./poke-agent-sdl/
+COPY poke-agent-sdl/src/main.rs ./poke-agent-sdl/src/
+COPY --from=rom /pokered/pokered.gbc /pokered/pokered.sym ./poke-agent/pokered/
+COPY --from=web /web/dist ./poke-agent-web/web/dist
 
 # ⚠️ The cache mounts are why the binary is copied out **inside this RUN**: a cache mount is not
 # part of the image, so `/src/target` does not exist in any later layer.
-#
-# `--no-default-features --features llm` is the container build (`Cargo.toml` documents it):
-# `llm` implies `web`, and dropping `sdl` drops the `libsdl2` link dependency entirely.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
-    cargo build --release --no-default-features --features llm \
-    && cp target/release/gb /usr/local/bin/gb
+    cargo build --release -p poke-agent-web \
+    && cp target/release/poke-agent-web /usr/local/bin/poke-agent-web
 
 
 ##############################################################################
@@ -133,11 +137,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && useradd --system --create-home --home-dir /home/gb --uid 10001 gb \
     && mkdir -p /runs && chown gb:gb /runs
 
-COPY --from=build /usr/local/bin/gb /usr/local/bin/gb
+COPY --from=build /usr/local/bin/poke-agent-web /usr/local/bin/poke-agent-web
 
 # ── which build this is ──────────────────────────────────────────────────────────────────────────
 #
-# `GET /version` serves these three beside the crate version, and `gb serve` prints them on the way
+# `GET /version` serves these three beside the crate version, and the binary prints them on the way
 # up. CI fills them in (`.github/workflows/container.yml`); a local `docker build` leaves them empty,
 # which reads as `null` rather than as a wrong answer.
 #
@@ -164,10 +168,9 @@ ARG GB_GIT_REVISION=""
 LABEL org.opencontainers.image.revision="$GB_GIT_REVISION" \
       org.opencontainers.image.created="$GB_BUILD_DATE"
 
-# The run directory is the whole of a run's state — `meta.json`, `state.gbst`, `sram.bin`,
-# `transcript.jsonl` and the model's `memories/` and `todo.json` (`src/run/mod.rs`). Mount it and a
-# run survives the container being replaced, not merely restarted. Owned by `gb` above, so an
-# anonymous volume inherits the ownership rather than arriving root-owned.
+# The run directory is the whole of a run's state (`poke-agent/src/run/mod.rs`). Mount it and a run
+# survives the container being replaced, not merely restarted. Owned by `gb` above, so an anonymous
+# volume inherits the ownership rather than arriving root-owned.
 ENV GB_RUN_DIR=/runs \
     GB_PORT=8080
 VOLUME /runs
@@ -179,8 +182,8 @@ WORKDIR /runs
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${GB_PORT}/api/healthz" >/dev/null || exit 1
 
-# ⚠️ Exec form, so `gb` is PID 1 and receives `docker stop`'s SIGTERM itself. The handler is what
-# checkpoints the run on the way out (W7); with a shell in between, the signal goes to the shell,
-# nothing is written, and up to a minute of play is lost to the next start. `gb serve` **resumes**
-# the newest run under `$GB_RUN_DIR` by default — `--new-run` is how you start the game over.
-CMD ["gb", "serve"]
+# ⚠️ Exec form, so the binary is PID 1 and receives `docker stop`'s SIGTERM itself. The handler is
+# what checkpoints the run on the way out; with a shell in between, the signal goes to the shell,
+# nothing is written, and up to a minute of play is lost to the next start. It **resumes** the newest
+# run under `$GB_RUN_DIR` by default — `--new-run` is how you start the game over.
+CMD ["poke-agent-web"]

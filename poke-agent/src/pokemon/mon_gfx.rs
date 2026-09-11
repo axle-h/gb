@@ -482,7 +482,7 @@ mod tests {
     /// makes the fixture mean anything.
     #[test]
     #[ignore = "a tool: writes the checksum fixture"]
-    #[cfg(feature = "diagnostics")]
+    #[cfg(feature = "slow-tests")]
     fn dump_front_pic_checksums() {
         let mut bytes = vec![0u8; 151 * 4];
         for species in PokemonSpecies::iter() {

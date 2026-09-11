@@ -1283,7 +1283,7 @@ mod tests {
     /// ⚠️ **Several turns, not one.** The block that needs eyeballing is the one whose prose nothing
     /// else prints, and a one-hit battle exercises none of what makes it hard to read: the damage
     /// on both sides, a turn where nothing moved, an item, a switch, and the closing line.
-    #[cfg(feature = "diagnostics")]
+    #[cfg(feature = "slow-tests")]
     fn probe_reports(kind: DecisionKind) -> Vec<String> {
         use crate::llm::battle_report::BattleReport;
         use crate::llm::battle_script::test_scenario;
@@ -1331,7 +1331,7 @@ mod tests {
         vec![report.finish(Some(&at(39, 0)))]
     }
 
-    #[cfg(feature = "diagnostics")]
+    #[cfg(feature = "slow-tests")]
     #[test]
     #[ignore = "probe: prints one turn request per decision kind"]
     fn probe_turn_requests() {
@@ -1507,7 +1507,7 @@ mod tests {
 
     /// The request as something to read: the messages with their newlines intact, then one block per
     /// tool. The JSON beside it is the wire truth; this is the reviewable copy.
-    #[cfg(feature = "diagnostics")]
+    #[cfg(feature = "slow-tests")]
     fn readable(request: &crate::llm::protocol::ChatRequest) -> String {
         let mut out = String::new();
         for message in &request.messages {
@@ -1534,14 +1534,14 @@ mod tests {
     /// The knobs the probe needs off an [`LlmConfig`](crate::llm::LlmConfig) without reading the
     /// environment — a probe that failed because `GB_MODEL` was unset would be reporting on the
     /// shell rather than on the prompt.
-    #[cfg(feature = "diagnostics")]
+    #[cfg(feature = "slow-tests")]
     struct LlmConfigForProbe {
         model: String,
         temperature: f32,
         max_tokens: Option<u32>,
     }
 
-    #[cfg(feature = "diagnostics")]
+    #[cfg(feature = "slow-tests")]
     impl Default for LlmConfigForProbe {
         fn default() -> Self {
             Self {

@@ -1,7 +1,7 @@
 # A run's entire state is one directory: `$GB_RUN_DIR/<run-id>/` holding meta.json, state.gbst,
 # sram.bin, transcript.jsonl, the model's own todo.json, and the conversation it is having with the
 # endpoint (history.json and conversation.jsonl, `src/llm/history.rs`). Lose it and the playthrough
-# starts over from the title screen; keep it and `gb serve` resumes the newest run in it on every
+# starts over from the title screen; keep it and the binary resumes the newest run in it on every
 # start, notes and conversation alike.
 #
 # `local-path` is k3s's built-in provisioner and pins the volume to the node it was first scheduled

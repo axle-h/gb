@@ -23,7 +23,7 @@ const RETRY_MS = 1000;
  *
  * `EventSource` reconnects by itself while it can, but it gives up permanently on some errors —
  * notably the server not being there yet, which is exactly what happens when the page is open while
- * `gb serve` restarts. So on `CLOSED` we rebuild it. Shared by both streams; the video one is not a
+ * the server restarts. So on `CLOSED` we rebuild it. Shared by both streams; the video one is not a
  * hook because its data must never reach React state.
  *
  * ⚠️ **The error path is only half of it: a stream can die without ever erroring.** See `STALE_MS` —

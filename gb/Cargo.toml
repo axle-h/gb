@@ -7,8 +7,6 @@ description = "A Game Boy and Game Boy Color emulator."
 [features]
 # The throughput benches, which run for tens of seconds each.
 slow-tests = []
-bench = []
-diagnostics = []
 
 [dependencies]
 bincode = "2.0.1"
