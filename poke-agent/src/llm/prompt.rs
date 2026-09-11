@@ -636,8 +636,13 @@ pub fn situation(
         }
     }
     let badges: Vec<String> = state.badges.iter_names().map(|(name, _)| name.to_string()).collect();
+    // Coins only once there is somewhere to keep them.
+    let coins = match state.bag.iter().any(|item| item.id == crate::pokemon::item::ItemId::CoinCase) {
+        true => format!("   Coins: {}", state.coins),
+        false => String::new(),
+    };
     out.push_str(&format!(
-        "Badges: {}\nMoney: ¥{}   Play time: {}\n",
+        "Badges: {}\nMoney: ¥{}{coins}   Play time: {}\n",
         if badges.is_empty() { "none yet".to_string() } else { badges.join(", ") },
         state.money,
         snapshot.playtime,
@@ -1174,6 +1179,19 @@ mod tests {
     fn overworld_turn(state: &GameState, menu: &[MenuItem]) -> String {
         situation(DecisionKind::Overworld, state, &ApiSnapshot::default(), &[], menu,
                   TurnContext::None, &[])
+    }
+
+    #[test]
+    fn the_coins_are_shown_once_there_is_a_coin_case() {
+        use crate::pokemon::item::ItemId;
+        let mut state = state_from(include_bytes!("../pokemon/data/postgame-game-corner.bin"));
+        state.coins = 180;
+        let has_case = state.bag.iter().any(|item| item.id == ItemId::CoinCase);
+        assert!(has_case, "the fixture holds the Coin Case");
+        assert!(overworld_turn(&state, &[]).contains("Coins: 180"));
+        let mut without = state_from(include_bytes!("../pokemon/data/at-vermilion.bin"));
+        without.coins = 180;
+        assert!(!overworld_turn(&without, &[]).contains("Coins:"), "no case, no coins line");
     }
 
     /// A map whose every door comes out on one other map says so.

@@ -72,6 +72,8 @@ pub struct BattleReport {
     after_answered: Vec<String>,
     /// Where `LlmPolicy::events` stood when this battle began.
     pub events_mark: usize,
+    /// And where it stood once the battle ended: what follows is the overworld's, not the report's.
+    pub events_end: Option<usize>,
 }
 
 impl BattleReport {
@@ -96,6 +98,7 @@ impl BattleReport {
             answering: false,
             after_answered: Vec::new(),
             events_mark,
+            events_end: None,
         })
     }
 

@@ -26,6 +26,9 @@ pub struct LlmPolicy {
     waiting: Option<(DecisionKind, u16)>,
     /// Everything the agent has said since the last turn was built, folded into the next one.
     events: Vec<String>,
+    /// The events the turn in flight carried: put back in front of the next turn's if that one
+    /// is abandoned unanswered, or nothing would ever say them.
+    in_flight_events: Vec<String>,
     /// The half of the situation that needs a `PokemonApi`.
     snapshot: ApiSnapshot,
     /// The last `GameState` seen at a poll where a turn could start.
@@ -148,6 +151,7 @@ impl LlmPolicy {
             pending: None,
             waiting: None,
             events: Vec::new(),
+            in_flight_events: Vec::new(),
             snapshot: ApiSnapshot::default(),
             state: None,
             site: None,
@@ -197,6 +201,7 @@ impl LlmPolicy {
             Some((pending, id)) if pending == kind => match self.handles.outcomes.try_recv() {
                 Ok(outcome) if outcome.id == id => {
                     self.pending = None;
+                    self.in_flight_events.clear();
                     Some(outcome.decision)
                 }
                 // An outcome from a turn already abandoned.
@@ -213,6 +218,11 @@ impl LlmPolicy {
 
     /// Bump the generation — which is what cancels anything in flight — and send a fresh turn.
     fn start_turn(&mut self, kind: DecisionKind, context: TurnContext<'_>) {
+        if self.pending.is_some() && !self.in_flight_events.is_empty() {
+            let mut carried = std::mem::take(&mut self.in_flight_events);
+            carried.append(&mut self.events);
+            self.events = carried;
+        }
         // Immutable reads of `self` stay inside this block, freeing the mutations below.
         let Some((mut situation, headline, menu)) = ({
             // No state has been observed yet, so there is nothing to describe.
@@ -250,12 +260,13 @@ impl LlmPolicy {
         if let Some(note) = self.note.take() {
             situation = format!("{note}\n\n{situation}");
         }
-        self.events.clear();
+        self.in_flight_events = std::mem::take(&mut self.events);
         // Spent by the turn that carried them.
         self.reports.clear();
         // Those events are gone, so the report has none to take back (`BattleReport::events_mark`).
-        if let Some(report) = self.battle_report.as_mut() {
+        for report in self.battle_report.iter_mut().chain(self.finishing.iter_mut()) {
             report.events_mark = 0;
+            report.events_end = report.events_end.map(|_| 0);
         }
 
         if self.handles.turns.send(TurnRequest { id, kind, situation, headline, menu }).is_ok() {
@@ -348,8 +359,8 @@ impl LlmPolicy {
     /// Close the report whose battle has ended and queue it for the next turn.
     fn close_battle_report(&mut self, observed: Option<&GameState>) {
         let Some(report) = self.finishing.take() else { return };
-        let mark = report.events_mark.min(self.events.len());
-        self.events.truncate(mark);
+        let end = report.events_end.unwrap_or(self.events.len()).min(self.events.len());
+        self.events.drain(report.events_mark.min(end)..end);
         let fallback = self.last_battle_state.take();
         let rendered = report.finish(observed.or(fallback.as_deref()));
         // Oldest dropped first: the recent battles are the useful ones.
@@ -713,6 +724,7 @@ impl Policy for LlmPolicy {
         self.pending = None;
         self.waiting = None;
         self.events.clear();
+        self.in_flight_events.clear();
         self.snapshot = ApiSnapshot::default();
         self.state = None;
         self.site = None;
@@ -753,6 +765,7 @@ impl Policy for LlmPolicy {
         self.handles.next_generation();
         // The in-flight turn, and any wait it asked for, answer a question the model forgot.
         self.pending = None;
+        self.in_flight_events.clear();
         self.waiting = None;
         Ok(())
     }
@@ -782,6 +795,10 @@ impl Policy for LlmPolicy {
             // The one place `taken_over` is cleared, which scopes it to one fight.
             AgentEvent::BattleEnded => {
                 self.finishing = self.battle_report.take();
+                // This event is pushed below, and is the report's last.
+                if let Some(report) = self.finishing.as_mut() {
+                    report.events_end = Some(self.events.len() + 1);
+                }
                 self.taken_over = false;
             }
             _ => {}
@@ -1429,6 +1446,32 @@ mod tests {
         // …and it is the battle decision that lands, from a fresh `battle_options`.
         let action = rig.pump_battle(&mut policy, Duration::from_secs(2)).expect("the battle turn decides");
         assert_eq!(tools::battle_id(&action), "run");
+    }
+
+    /// What the cancelled turn was told is told again by the turn that replaced it.
+    #[test]
+    fn a_cancelled_turn_hands_its_events_to_the_next() {
+        let release = Arc::new(AtomicBool::new(false));
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        {
+            let mut replies = rig.endpoint.replies.lock().unwrap();
+            replies.push_back(held(calls(&[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]), &release));
+            replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+        }
+        policy.on_event(&AgentEvent::TextBox { message: "the walk was given up".into() });
+        rig.tick_overworld(&mut policy);
+        rig.wait_for_requests(1, Duration::from_secs(2));
+
+        // A trainer spots the player before the model has answered.
+        rig.enter_battle();
+        rig.tick_battle(&mut policy);
+        rig.wait_for_requests(2, Duration::from_secs(2));
+        release.store(true, Ordering::SeqCst);
+
+        let requests = rig.requests();
+        let asked = last_user_message(&requests[1]);
+        assert!(asked.contains("the walk was given up"), "the cancelled turn's news went with it:\n{asked}");
     }
 
     /// The plan is in the history exactly once, and the prefix in front of it never moves.
@@ -2759,6 +2802,29 @@ mod tests {
             situation.matches("WILD RATTATA appeared!").count(), 1,
             "the battle is accounted for once, not once per mechanism:\n{situation}",
         );
+    }
+
+    /// What happens after the battle, before its report is closed, is the overworld's and stays.
+    #[test]
+    fn what_follows_a_scripted_battle_is_not_folded_into_its_report() {
+        use crate::pokemon::tile::MetaTile;
+        let (mut rig, mut policy) = armed_with(SCRIPT, 1);
+
+        rig.enter_battle();
+        policy.on_event(&AgentEvent::BattleStarted);
+        rig.pump_battle(&mut policy, Duration::from_millis(200)).expect("the script decides");
+        policy.on_event(&AgentEvent::BattleEnded);
+        // The verdict on a pickup a trainer's battle interrupted lands after the battle.
+        policy.on_event(&AgentEvent::OverworldPickupFailed { target: MetaTile::Sprite("Max Ether".into()) });
+
+        rig.gb.load_state(FIXTURE).expect("back to the overworld fixture");
+        rig.pump_overworld(&mut policy).expect("the next overworld turn lands");
+        rig.wait_for_requests(2, Duration::from_secs(5));
+
+        let situation = rig.requests().last().expect("a second request").messages.last()
+            .expect("a situation").text().unwrap_or_default().to_string();
+        assert!(situation.contains("nothing was picked up: the Max Ether"),
+                "the failed pickup was dropped with the battle's events:\n{situation}");
     }
 
     /// One strike.

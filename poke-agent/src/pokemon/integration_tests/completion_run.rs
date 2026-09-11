@@ -35,9 +35,10 @@ for mon in battle.party {
 battle.ask();
 "#;
 
-/// How a gift, a catch or a trade ends up in the party, for the nickname prompt that follows.
+/// How a gift or a catch ends up in the party, for the nickname prompt that follows. A trade asks
+/// for no name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Came { Caught, Given, Traded }
+enum Came { Caught, Given }
 
 /// One thing the run does, resolved against the menu the turn was sent.
 #[derive(Debug, Clone)]
@@ -58,7 +59,8 @@ pub enum Step {
     Field(&'static str),
     /// Answer the mart that is open with these orders, then leave.
     Buy(&'static [(&'static str, u32)]),
-    /// Choose the row whose id ends in `:{row}` until a wild `species` is caught with `ball`.
+    /// Choose the row whose id ends in `:{row}` until a wild `species` is caught with `ball`;
+    /// `*` is any species not caught yet.
     Hunt { species: &'static str, row: &'static str, ball: &'static str, way: Way },
     /// Choose the `row` and fight every wild battle, except from the species in `flee`, until a
     /// turn says `until`, then record `way`.
@@ -70,14 +72,57 @@ pub enum Step {
     Explore { maps: &'static [&'static str], patience: usize },
     /// Read the bag and toss every kind the run has no further use for.
     Tidy,
+    /// Teach the machine `item` to the first party member of `species`, found in the turn's party.
+    Teach { item: &'static str, species: &'static str },
+    /// Talk to the in-game trader `npc`; the agent hands over what the trade wants.
+    Trade(&'static str),
+    /// Vermilion Gym's bins, searched from what the game says after each until the door opens.
+    TrashCans,
+    /// A `pc_pokemon` operation at the PC on this map, done once the driver reports it done.
+    AtPc(Pc),
     /// End a turn without moving.
     Wait,
+    /// In the Day Care: board the first party member of this species, or with `None` pay and
+    /// collect; done once the party has shrunk or grown.
+    DayCare(Option<&'static str>),
+    /// Use a bag item on what the row whose id ends in `:{row}` stands at, as the Poké Flute is
+    /// used on a sleeping Snorlax.
+    UseItemOn { item: &'static str, row: &'static str },
+    /// Talk to the Game Corner's coin clerk until the turn shows at least this many coins.
+    Coins(u16),
+    /// Buy this Pokémon prize; the nickname prompt that follows is the proof.
+    Prize(&'static str),
+    /// Use the stone `item` on the first party member of `species`; done once it has evolved.
+    Evolve { item: &'static str, species: &'static str },
+    /// From here on, throw a Master Ball at every wild species not caught yet, or stop.
+    Collect(bool),
+}
+
+/// One `pc_pokemon` operation, on the first Pokémon of a species.
+#[derive(Debug, Clone, Copy)]
+pub enum Pc {
+    Deposit(&'static str),
+    Withdraw(&'static str),
+    Release(&'static str),
+    ChangeBox(u8),
+}
+
+impl Pc {
+    fn way(self) -> Way {
+        match self {
+            Pc::Deposit(_) => Way::PcDeposit,
+            Pc::Withdraw(_) => Way::PcWithdraw,
+            Pc::Release(_) => Way::PcRelease,
+            Pc::ChangeBox(_) => Way::PcChangeBox,
+        }
+    }
 }
 
 /// What a tidy keeps besides what cannot be tossed: the balls, the stones and the candy.
 const KEEP: &[ItemId] = &[
-    ItemId::MasterBall, ItemId::UltraBall, ItemId::GreatBall, ItemId::PokeBall, ItemId::RareCandy,
-    ItemId::MoonStone, ItemId::FireStone, ItemId::WaterStone, ItemId::ThunderStone, ItemId::LeafStone,
+    // The catches, a level evolution, Pikachu's evolution for the Raichu trade, and a drink for
+    // Saffron's guards.
+    ItemId::MasterBall, ItemId::RareCandy, ItemId::ThunderStone, ItemId::FreshWater,
 ];
 
 /// One pocket of a map, as last offered: what is in it to take, and its passages out as
@@ -95,8 +140,42 @@ fn passage(description: &str) -> String {
     description.split([';', '.']).next().unwrap_or(description).trim().to_string()
 }
 
-/// The map an exit row leads to, from its description.
+/// The bin a trash-can row searches, from "it is at (x, y)" in its description.
+fn bin_at(description: &str) -> Option<(u8, u8)> {
+    let at = description.split("it is at (").nth(1)?;
+    let (x, rest) = at.split_once(", ")?;
+    let y = rest.split(')').next()?;
+    Some((x.parse().ok()?, y.parse().ok()?))
+}
+
+/// The party slot of the first member of `species`, from the turn's `### Party` lines.
+fn party_slot_of(situation: &str, species: &str) -> Option<u8> {
+    situation.split("### Party").nth(1)?.lines().skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .find_map(|line| {
+            let (slot, rest) = line.split_once(". ")?;
+            let name = rest.split(" Lv").next()?;
+            let kind = name.rsplit(" the ").next()?;
+            same_species(kind, species).then(|| slot.trim().parse().ok()).flatten()
+        })
+}
+
+/// A species name as a turn spells it and as the code does, reduced to compare: `Farfetch'd` is
+/// `Farfetchd`.
+fn plain(species: &str) -> String {
+    species.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase()
+}
+
+fn same_species(a: &str, b: &str) -> bool {
+    plain(a) == plain(b)
+}
+
+/// The map an exit row leads to, from its description. A tree is a passage within its own map,
+/// and one that grows back whenever the map is reloaded, so it is never a thing done once.
 fn destination(id: &str, description: &str) -> Option<String> {
+    if id.ends_with(":CutTree") {
+        return id.split(':').next().map(str::to_string);
+    }
     if !matches!(id.rsplit(':').next(), Some("Warp" | "Connection" | "ConnectionWater")) {
         return None;
     }
@@ -118,8 +197,13 @@ pub struct CompletionBrain {
     reissued: usize,
     /// Orders still to place at the mart that is open.
     orders: VecDeque<(&'static str, u32)>,
-    /// A ball was thrown at the hunted species and the catch not yet seen.
-    thrown: bool,
+    /// The species a ball was thrown at, until the catch is seen or the battle is over.
+    thrown: Option<String>,
+    /// Every species the run has had in its party or caught, [`plain`].
+    caught: HashSet<String>,
+    /// [`Step::Collect`] is on, and the box has room.
+    collecting: bool,
+    box_full: bool,
     /// How the next nickname prompt's Pokémon came.
     came: Came,
     /// Every nickname prompt alternates between a name and the species name.
@@ -148,6 +232,24 @@ pub struct CompletionBrain {
     exploring: usize,
     /// A tidy under way: `None` until the bag has been read, then what is left to toss.
     tidying: Option<Option<VecDeque<String>>>,
+    /// The bins: where the first switch was found, the bins searched since, and the last one.
+    bins: (Option<(u8, u8)>, HashSet<(u8, u8)>, Option<(u8, u8)>),
+    /// The report the PC driver will make for the operation sent, once it is sent.
+    pc_sent: Option<String>,
+    /// A machine was just sent to be taught, so a move to forget is asked for it.
+    teaching: bool,
+    /// The party slot a machine was taught to, and the move, to find on the next overworld turn.
+    taught: Option<(u8, String)>,
+    /// The last row chosen, and how many turns running it has been.
+    repeated: (String, usize),
+    /// A prize Pokémon was bought and its nickname prompt not yet seen.
+    prize_pending: bool,
+    /// The party slot a stone was used on.
+    evolving: Option<u8>,
+    /// The party's size when a Day Care call was sent.
+    day_care_sent: Option<usize>,
+    /// Pickups that failed, per map and row.
+    pickups_failed: std::collections::HashMap<String, u8>,
     pub ledger: Arc<Mutex<Ledger>>,
     pub stuck: Arc<Mutex<Option<String>>>,
     pub turns: Arc<Mutex<usize>>,
@@ -161,10 +263,10 @@ impl CompletionBrain {
     pub fn new(steps: Vec<Step>, ledger: Arc<Mutex<Ledger>>) -> Self {
         Self {
             steps, at: 0, armed: false, chosen: Default::default(), unresolved: 0, reissued: 0,
-            orders: VecDeque::new(), thrown: false, came: Came::Given, named: 0, party_was_full: false,
+            orders: VecDeque::new(), thrown: None, caught: HashSet::new(), collecting: false, box_full: false, came: Came::Given, named: 0, party_was_full: false,
             graph: Default::default(), travelled: Default::default(), offered: HashSet::new(), barren: 0,
             last_walk: None, here: String::new(), pockets: Default::default(), pocket_edges: Default::default(), left_by: None,
-            exploring: 0, tidying: None, ledger,
+            exploring: 0, tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), day_care_sent: None, prize_pending: false, evolving: None, repeated: (String::new(), 0), ledger,
             stuck: Arc::new(Mutex::new(None)), turns: Arc::new(Mutex::new(0)),
         }
     }
@@ -184,10 +286,6 @@ impl CompletionBrain {
         }
     }
 
-    fn menu_listing(request: &TurnRequest) -> String {
-        request.menu_rows().iter().map(|(id, what)| format!("  - `{id}` — {what}")).collect::<Vec<_>>().join("\n")
-    }
-
     /// The wild battle turn: throw at the hunted species, and run from everything else.
     fn battle(&mut self, request: &TurnRequest) -> Reply {
         let ids = request.menu_ids();
@@ -195,14 +293,21 @@ impl CompletionBrain {
         let foe = situation.lines().find_map(|line| line.strip_prefix("Enemy: "))
             .and_then(|rest| rest.split_whitespace().next()).unwrap_or("").to_string();
         let choose = |id: &str| Reply::call("choose_battle_action", serde_json::json!({ "id": id, "summary": "as planned" }));
-        if let Some(Step::Hunt { species, ball, .. }) = self.steps.get(self.at).cloned() {
-            if foe.eq_ignore_ascii_case(species) {
-                // The Safari Zone's menu has one ball and no bag.
-                let throw = if ids.iter().any(|id| id == "ball") { "ball".to_string() } else { format!("item:{ball}") };
-                if ids.contains(&throw) {
-                    self.thrown = true;
-                    return choose(&throw);
-                }
+        if situation.contains("BOX is full") {
+            self.box_full = true;
+        }
+        let new = !self.caught.contains(&plain(&foe));
+        let (hunted, ball) = match self.steps.get(self.at) {
+            Some(Step::Hunt { species, ball, .. }) => ((*species == "*" && new) || same_species(&foe, species), *ball),
+            _ => (false, "MasterBall"),
+        };
+        if hunted || (self.collecting && new && !self.box_full) {
+            // The Safari Zone's menu has one ball and no bag.
+            let throw = if ids.iter().any(|id| id == "ball") { "ball".to_string() } else { format!("item:{ball}") };
+            if ids.contains(&throw) {
+                self.thrown = Some(foe);
+                self.came = Came::Caught;
+                return choose(&throw);
             }
         }
         let training = match self.steps.get(self.at) {
@@ -220,20 +325,25 @@ impl CompletionBrain {
 
     fn nickname(&mut self) -> Reply {
         // Every catch asks for a name, which makes the prompt the proof of the catch.
-        if self.thrown {
-            self.thrown = false;
-            if let Some(Step::Hunt { way, .. }) = self.steps.get(self.at).cloned() {
+        if let Some(species) = self.thrown.take() {
+            self.caught.insert(plain(&species));
+            if self.party_was_full {
+                self.saw(Way::CaughtToTheBox);
+            }
+            if let Some(Step::Hunt { way, species: hunted, .. }) = self.steps.get(self.at).cloned()
+                && (hunted == "*" || same_species(&species, hunted))
+            {
                 self.saw(way);
-                if self.party_was_full {
-                    self.saw(Way::CaughtToTheBox);
-                }
                 self.at += 1;
             }
+        }
+        if std::mem::take(&mut self.prize_pending) {
+            self.saw(Way::GameCornerPrize);
+            self.came = Came::Given;
         }
         let way = match self.came {
             Came::Caught => Way::NicknameAfterACatch,
             Came::Given => Way::NicknameAfterAGift,
-            Came::Traded => Way::NicknameAfterATrade,
         };
         self.saw(way);
         self.named += 1;
@@ -300,7 +410,7 @@ impl CompletionBrain {
         exits.sort();
         let key = format!("{map}|{}", exits.iter().map(|(way, ..)| way.as_str()).collect::<Vec<_>>().join(" ~ "));
         let things = rows.iter().map(|(id, _)| id.clone())
-            .filter(|id| (id.matches(':').count() == 1 && !id.contains("Boulder")) || id.ends_with(":CutTree"))
+            .filter(|id| id.matches(':').count() == 1 && !id.contains("Boulder"))
             .collect();
         // A walk a battle interrupted comes back to the same pocket, which is no passage.
         if let Some(from) = self.left_by.take()
@@ -357,6 +467,30 @@ impl CompletionBrain {
         None
     }
 
+    /// The first hop from `here` toward the nearest pocket with an exit `wanted` picks, over the
+    /// passages taken so far: for a map that is several pockets, where the map-level route cannot
+    /// tell which door of a map leads on.
+    fn toward(&self, here: &str, wanted: impl Fn(&str, &str) -> bool) -> Option<String> {
+        let mut first: std::collections::HashMap<String, String> = Default::default();
+        let mut queue = VecDeque::from([here.to_string()]);
+        let mut seen = HashSet::from([here.to_string()]);
+        while let Some(at) = queue.pop_front() {
+            let Some(pocket) = self.pockets.get(&at) else { continue };
+            if let Some((_, id, _)) = pocket.exits.iter().find(|(way, _, to)| wanted(way, to)) {
+                return Some(if at == here { id.clone() } else { first[&at].clone() });
+            }
+            for (way, id, _) in &pocket.exits {
+                let Some(next) = self.pocket_edges.get(&(at.clone(), way.clone())) else { continue };
+                if seen.insert(next.clone()) {
+                    let hop = if at == here { id.clone() } else { first[&at].clone() };
+                    first.insert(next.clone(), hop);
+                    queue.push_back(next.clone());
+                }
+            }
+        }
+        None
+    }
+
     /// Choose `id`, remembering it against the map, and the pocket it leaves if it is a passage.
     fn choose(&mut self, request: &TurnRequest, id: String) -> Reply {
         let map = request.location().unwrap_or_default();
@@ -370,6 +504,21 @@ impl CompletionBrain {
                 .find_map(|lead| what.strip_prefix(lead)).map(|rest| rest.split(" (").next().unwrap_or(rest).to_string()));
         self.last_walk = name.map(|name| (map.clone(), id.clone(), name, self.at));
         *self.travelled.entry(format!("{map}|{id}")).or_default() += 1;
+        // A row that never gets anywhere: what the agent could not do is the finding. Pacing
+        // and fishing are chosen over and over on purpose.
+        let hunting = ["Grass", "Pace", "PaceOnWater", "Fish"].iter().any(|kind| id.ends_with(&format!(":{kind}")))
+            || matches!(self.steps.get(self.at), Some(Step::Coins(_)));
+        if hunting {
+            self.repeated = (String::new(), 0);
+        } else if self.repeated.0 == format!("{map}|{id}") {
+            self.repeated.1 += 1;
+            if self.repeated.1 >= Self::MAX_REISSUES {
+                self.stuck(format!("step {}: chose {id} {} turns running on {map}:\n{}",
+                    self.at + 1, self.repeated.1, request.situation()));
+            }
+        } else {
+            self.repeated = (format!("{map}|{id}"), 1);
+        }
         self.chosen.entry(map).or_default().insert(id.clone());
         Reply::call("choose_action", serde_json::json!({ "id": id, "resume_after_battle": true, "summary": "as planned" }))
     }
@@ -380,7 +529,7 @@ impl CompletionBrain {
             None => {
                 let bag = request.messages.iter().rev().filter(|m| m.role == "tool")
                     .find_map(|m| serde_json::from_str::<serde_json::Value>(&m.text).ok()
-                        .filter(|value| value.get("slots_used").is_some()));
+                        .filter(|value| value.get("slots_used").is_some() && value.get("items").is_some()));
                 // On its own, so the turn carries on with the answer rather than ending.
                 let Some(bag) = bag else {
                     return Some(Reply::Calls(vec![Call::new("read_bag", serde_json::json!({}))]));
@@ -404,18 +553,103 @@ impl CompletionBrain {
         }
     }
 
+    /// One turn of a [`Step::Pc`] not yet reported done: read the box if the operation needs a
+    /// box slot, then send it.
+    fn pc(&mut self, request: &TurnRequest, op: Pc) -> Reply {
+        let text = request.situation();
+        if let Some(report) = &self.pc_sent {
+            self.stuck(format!("step {} ({op:?}): no report of {report} done:\n{text}", self.at + 1));
+            return Reply::Calls(vec![Call::wait(10)]);
+        }
+        use crate::pokemon::postgame::pc_box::PcBoxOp;
+        let op_sent = match op {
+            Pc::Deposit(species) => party_slot_of(text, species).map(|slot| PcBoxOp::Deposit { slot }),
+            Pc::ChangeBox(n) => Some(PcBoxOp::ChangeBox { n: n - 1 }),
+            Pc::Withdraw(species) | Pc::Release(species) => {
+                // On its own, so the turn carries on with the answer rather than ending.
+                let Some(boxed) = request.messages.last().filter(|m| m.role == "tool")
+                    .and_then(|m| serde_json::from_str::<serde_json::Value>(&m.text).ok())
+                    .filter(|value| value.get("open_box").is_some())
+                else {
+                    return Reply::Calls(vec![Call::new("read_pc", serde_json::json!({}))]);
+                };
+                boxed["pokemon"].as_array().into_iter().flatten()
+                    .find(|mon| mon["species"].as_str().is_some_and(|s| same_species(s, species)))
+                    .and_then(|mon| mon["box_slot"].as_u64())
+                    .map(|box_slot| box_slot as u8)
+                    .map(|box_slot| match op {
+                        Pc::Withdraw(_) => PcBoxOp::Withdraw { box_slot },
+                        _ => PcBoxOp::Release { box_slot },
+                    })
+            }
+        };
+        let Some(op_sent) = op_sent else {
+            self.stuck(format!("step {} ({op:?}): no such Pokémon to move", self.at + 1));
+            return Reply::Calls(vec![Call::wait(10)]);
+        };
+        let arguments = match op_sent {
+            PcBoxOp::Deposit { slot } => serde_json::json!({ "op": "deposit", "slot": slot }),
+            PcBoxOp::Withdraw { box_slot } => serde_json::json!({ "op": "withdraw", "box_slot": box_slot }),
+            PcBoxOp::Release { box_slot } => serde_json::json!({ "op": "release", "box_slot": box_slot }),
+            PcBoxOp::ChangeBox { n } => serde_json::json!({ "op": "change_box", "box": n + 1 }),
+        };
+        let mut arguments = arguments;
+        arguments["move"] = serde_json::json!("pc_pokemon");
+        arguments["summary"] = serde_json::json!("sorting the boxes");
+        self.pc_sent = Some(format!("PC box: {op_sent:?}"));
+        Reply::call("use_field_move", arguments)
+    }
+
     fn overworld(&mut self, request: &TurnRequest) -> Reply {
+        self.teaching = false;
+        self.thrown = None;
         let text = request.situation().to_string();
-        // A pickup the bag had no room for: take it back, and make room. Only for that reason: a
-        // starter's ball in Oak's lab is not picked up either, and never will be.
-        if let Some((map, id, name, _)) = self.last_walk.as_ref()
-            && text.contains(&format!("nothing was picked up: the {name}"))
-            && text.contains("No more room")
+        // A teach the game refused, or a machine never found, leaves the move unlearned.
+        if let Some((slot, name)) = self.taught.take() {
+            let knows = text.split("### Party").nth(1).and_then(|party| party.lines()
+                .find(|line| line.starts_with(&format!("{slot}. "))))
+                .is_some_and(|line| line.rsplit(" — ").next().unwrap_or("").replace(' ', "").contains(&name));
+            if !knows {
+                self.stuck(format!("step {}: party slot {slot} did not learn {name}:\n{text}", self.at));
+                return Reply::Calls(vec![Call::wait(10)]);
+            }
+        }
+        for line in text.split("### Party").nth(1).unwrap_or("").lines().skip(1).take_while(|line| !line.trim().is_empty()) {
+            if let Some(kind) = line.split_once(". ").and_then(|(_, rest)| rest.split(" Lv").next()).and_then(|name| name.rsplit(" the ").next()) {
+                self.caught.insert(plain(kind));
+            }
+        }
+        // A pickup that did not happen: take it back, and make room if that was why. Twice at
+        // most otherwise, since a starter's ball in Oak's lab is never picked up at all. The
+        // verdict can land a turn late, so the row is found by the item's name.
+        let map = request.location().unwrap_or_default();
+        let full = text.contains("No more room");
+        // A gift the bag had no room for: talk again once there is some.
+        if let Some((map, id, _, _)) = self.last_walk.as_ref()
+            && text.contains("have any room for this")
         {
             if let Some(chosen) = self.chosen.get_mut(map) {
                 chosen.remove(id);
             }
             self.tidying.get_or_insert(None);
+        }
+        let failed: Vec<String> = text.split("nothing was picked up: the ").skip(1)
+            .filter_map(|rest| rest.split(" is still lying there").next())
+            .filter_map(|name| request.menu_rows().into_iter()
+                .find(|(_, what)| what.starts_with(&format!("pick up the {name}")) || what.starts_with(&format!("pick up {name}")))
+                .map(|(id, _)| id))
+            .collect();
+        for id in failed {
+            let tries = self.pickups_failed.entry(format!("{map}|{id}")).or_default();
+            *tries += 1;
+            if full || *tries <= 2 {
+                if let Some(chosen) = self.chosen.get_mut(&map) {
+                    chosen.remove(&id);
+                }
+            }
+            if full {
+                self.tidying.get_or_insert(None);
+            }
         }
         if matches!(self.steps.get(self.at), Some(Step::Tidy)) {
             self.tidying.get_or_insert(None);
@@ -461,7 +695,8 @@ impl CompletionBrain {
                         .and_then(|i| path.get(i).copied()) else { self.at += 1; continue };
                     Intent::Enter(next).resolve(request)
                 }
-                Step::Take(fragment) => Intent::Says(fragment).resolve(request),
+                Step::Take(fragment) => Intent::Says(fragment).resolve(request)
+                    .or_else(|| self.toward(&here, |way, _| way.contains(fragment))),
                 Step::Talk(kind) | Step::Gift(kind) => Intent::Row(kind).resolve(request),
                 Step::Repeat(fragment) => {
                     if Intent::Repeat(fragment).satisfied_by(request) { self.at += 1; self.reissued = 0; continue }
@@ -493,7 +728,14 @@ impl CompletionBrain {
                 }
                 Step::GoTo(target) => {
                     if request.location().as_deref() == Some(*target) { self.at += 1; continue }
-                    self.route(request, target).or_else(|| Intent::Enter(target).resolve(request))
+                    Intent::Enter(target).resolve(request)
+                        .or_else(|| self.toward(&here, |_, to| to == *target))
+                        .or_else(|| self.route(request, target))
+                        // Walled in with nothing known beyond: a way on within this map, such as a
+                        // tree, not taken from here before.
+                        .or_else(|| self.pockets.get(&here).and_then(|pocket| pocket.exits.iter()
+                            .find(|(way, _, to)| *to == pocket.map && !self.pocket_edges.contains_key(&(here.clone(), way.clone())))
+                            .map(|(_, id, _)| id.clone())))
                 }
                 Step::Explore { maps, patience } => {
                     self.exploring += 1;
@@ -505,7 +747,136 @@ impl CompletionBrain {
                     }
                 }
                 Step::Wait => { self.at += 1; return Reply::Calls(vec![Call::wait(1)]) }
+                Step::Collect(on) => { self.collecting = *on; self.at += 1; continue }
+                Step::Coins(target) => {
+                    let coins: u16 = text.split("Coins: ").nth(1)
+                        .and_then(|rest| rest.split_whitespace().next())
+                        .and_then(|n| n.parse().ok()).unwrap_or(0);
+                    if coins >= *target { self.at += 1; continue }
+                    rows.iter().map(|(id, _)| id).find(|id| id.ends_with(":Clerk1")).cloned()
+                }
+                Step::UseItemOn { item, row } => {
+                    let at = rows.iter().find(|(id, _)| id.ends_with(&format!(":{row}")))
+                        .and_then(|(_, what)| bin_at(what));
+                    let Some((x, y)) = at else {
+                        self.unresolved += 1;
+                        if self.unresolved >= Self::PATIENCE {
+                            self.stuck(format!("step {} ({step:?}) had no {row} on {map}:\n{text}", self.at + 1));
+                        }
+                        return Reply::Calls(vec![Call::wait(20)]);
+                    };
+                    self.at += 1;
+                    return Reply::call("use_field_move", serde_json::json!({
+                        "move": "use_item", "item": item, "target": { "x": x, "y": y }, "summary": "waking it" }));
+                }
+                Step::Prize(name) => {
+                    self.at += 1;
+                    self.prize_pending = true;
+                    return Reply::call("use_field_move", serde_json::json!({ "move": "prize", "item": name, "summary": "a prize" }));
+                }
+                Step::Evolve { item, species } => {
+                    if let Some(slot) = self.evolving {
+                        let still = text.split("### Party").nth(1).and_then(|party| party.lines()
+                            .find(|line| line.starts_with(&format!("{slot}. "))))
+                            .is_some_and(|line| line.split(" Lv").next().and_then(|name| name.rsplit(" the ").next())
+                                .is_some_and(|kind| same_species(kind, species)));
+                        if still {
+                            self.stuck(format!("step {}: the {species} in slot {slot} did not evolve", self.at + 1));
+                            return Reply::Calls(vec![Call::wait(10)]);
+                        }
+                        self.evolving = None;
+                        self.saw(Way::EvolvedByStone);
+                        self.at += 1;
+                        continue;
+                    }
+                    let Some(slot) = party_slot_of(&text, species) else {
+                        self.stuck(format!("step {}: no {species} in the party to evolve", self.at + 1));
+                        return Reply::Calls(vec![Call::wait(10)]);
+                    };
+                    self.evolving = Some(slot);
+                    return Reply::call("use_field_move", serde_json::json!({
+                        "move": "evolve", "item": item, "slot": slot, "summary": "evolving" }));
+                }
+                Step::DayCare(board) => {
+                    let party = text.split("### Party").nth(1).map_or(0, |party| party.lines().skip(1)
+                        .take_while(|line| !line.trim().is_empty()).count());
+                    if let Some(before) = self.day_care_sent {
+                        let done = match board { Some(_) => party < before, None => party > before };
+                        if !done {
+                            self.stuck(format!("step {} ({step:?}): the party is still {party}", self.at + 1));
+                            return Reply::Calls(vec![Call::wait(10)]);
+                        }
+                        self.day_care_sent = None;
+                        if board.is_none() {
+                            self.saw(Way::DayCareWithdrawn);
+                        }
+                        self.at += 1;
+                        continue;
+                    }
+                    let arguments = match board {
+                        Some(species) => match party_slot_of(&text, species) {
+                            Some(slot) => serde_json::json!({ "move": "day_care", "op": "deposit", "slot": slot, "summary": "boarding" }),
+                            None => {
+                                self.stuck(format!("step {}: no {species} in the party to board", self.at + 1));
+                                return Reply::Calls(vec![Call::wait(10)]);
+                            }
+                        },
+                        None => serde_json::json!({ "move": "day_care", "op": "withdraw", "summary": "collecting" }),
+                    };
+                    self.day_care_sent = Some(party);
+                    return Reply::call("use_field_move", arguments);
+                }
                 Step::Tidy => { self.at += 1; continue }
+                Step::Teach { item, species } => {
+                    let Some(slot) = party_slot_of(&text, species) else {
+                        self.stuck(format!("step {}: no {species} in the party to teach {item} to", self.at + 1));
+                        return Reply::Calls(vec![Call::wait(10)]);
+                    };
+                    self.at += 1;
+                    self.teaching = true;
+                    // `Hm02Fly` teaches Fly, `Tm13IceBeam` Ice Beam.
+                    self.taught = Some((slot, item.get(4..).unwrap_or(item).to_string()));
+                    return Reply::call("use_field_move", serde_json::json!({
+                        "move": "teach", "item": item, "slot": slot, "summary": "teaching" }));
+                }
+                Step::Trade(npc) => Intent::Row(npc).resolve(request),
+                Step::AtPc(op) => {
+                    if self.pc_sent.as_ref().is_some_and(|report| text.contains(&format!("{report} done"))) {
+                        self.pc_sent = None;
+                        if matches!(op, Pc::ChangeBox(_) | Pc::Release(_)) {
+                            self.box_full = false;
+                        }
+                        self.saw(op.way());
+                        self.at += 1;
+                        continue;
+                    }
+                    return self.pc(request, *op);
+                }
+                Step::TrashCans => {
+                    if text.contains("motorized door") { self.at += 1; continue }
+                    let (first, tried, last) = &mut self.bins;
+                    if text.contains("1st electric lock opened") {
+                        *first = *last;
+                        tried.clear();
+                    } else if text.contains("locks were reset") {
+                        *first = None;
+                        tried.clear();
+                    }
+                    let bins: Vec<(String, (u8, u8))> = rows.iter()
+                        .filter(|(id, _)| id.contains(":TrashCan"))
+                        .filter_map(|(id, what)| bin_at(what).map(|at| (id.clone(), at)))
+                        .collect();
+                    // The second switch is always beside the first, one bin away on the grid.
+                    let next = bins.iter()
+                        .filter(|(_, at)| !tried.contains(at) && Some(*at) != *first)
+                        .find(|(_, at)| first.is_none_or(|f| f.0.abs_diff(at.0) + f.1.abs_diff(at.1) == 2))
+                        .cloned();
+                    match next {
+                        Some((id, at)) => { tried.insert(at); *last = Some(at); Some(id) }
+                        // Every neighbour searched: the switches moved, so start again.
+                        None => { *first = None; tried.clear(); None }
+                    }
+                }
             };
             return match resolved {
                 Some(id) => {
@@ -519,7 +890,15 @@ impl CompletionBrain {
                                 self.stuck(format!("step {} ({step:?}) re-issued {} times on {map}", self.at + 1, self.reissued));
                             }
                         }
-                        Step::Hunt { .. } | Step::Train { .. } | Step::Clear(_) | Step::GoTo(_) | Step::Explore { .. } => {}
+                        Step::Hunt { .. } | Step::Train { .. } | Step::Clear(_) | Step::GoTo(_) | Step::Explore { .. }
+                        | Step::TrashCans | Step::Coins(_) => {}
+                        Step::Trade(_) => self.at += 1,
+                        // A hop toward the row is not the row.
+                        Step::Take(fragment) => {
+                            if rows.iter().any(|(row, what)| *row == id && what.contains(fragment)) {
+                                self.at += 1;
+                            }
+                        }
                         Step::Gift(_) => { self.came = Came::Given; self.at += 1 }
                         _ => self.at += 1,
                     }
@@ -537,7 +916,7 @@ impl CompletionBrain {
                     self.unresolved += 1;
                     if self.unresolved >= Self::PATIENCE {
                         self.stuck(format!("step {} of {} ({step:?}) had no row on {map} for {} turns:\n{}",
-                            self.at + 1, self.steps.len(), Self::PATIENCE, Self::menu_listing(request)));
+                            self.at + 1, self.steps.len(), Self::PATIENCE, request.situation()));
                     }
                     Reply::Calls(vec![Call::wait(20)])
                 }
@@ -572,7 +951,15 @@ impl Brain for CompletionBrain {
             return self.mart();
         }
         if request.has_tool("forget_move") {
-            return Reply::call("forget_move", serde_json::json!({ "summary": "keeping what it knows" }));
+            // A machine taught on purpose replaces the first move that is not an HM's.
+            let hm = ["cut", "fly", "surf", "strength", "flash"];
+            let slot = self.teaching.then(|| request.menu_rows().into_iter()
+                .find(|(_, what)| !hm.contains(&what.split_whitespace().next().unwrap_or("").to_ascii_lowercase().as_str()))
+                .map(|(id, _)| id)).flatten();
+            return match slot {
+                Some(slot) => Reply::call("forget_move", serde_json::json!({ "slot": slot.parse::<u8>().unwrap_or(0), "summary": "making room" })),
+                None => Reply::call("forget_move", serde_json::json!({ "summary": "keeping what it knows" })),
+            };
         }
         if !request.has_tool("choose_action") {
             return Reply::Calls(vec![Call::wait(1)]);
@@ -635,7 +1022,10 @@ pub fn play(fixture: &'static [u8], name: &'static str, steps: Vec<Step>, game_m
     println!("[completion:{name}] {total} steps, {turns} turns, {:?} of game time in {:?}",
              run.fixture().total_cycles.to_duration(), started.elapsed());
     if let Some(why) = stuck.lock().expect("not poisoned").clone() {
-        panic!("[completion:{name}] stuck: {why}");
+        // Where it stuck, to load and look at.
+        let at = std::env::temp_dir().join(format!("{name}-stuck.bin"));
+        run.fixture().gb.save_state_to_file(at.to_str().expect("a UTF-8 path")).ok();
+        panic!("[completion:{name}] stuck (saved to {}): {why}", at.display());
     }
     assert!(*done.lock().expect("not poisoned"), "[completion:{name}] ran out of wall clock");
     let log = run.coverage().expect("coverage was asked for");
@@ -808,5 +1198,270 @@ fn completion_phase_bill() {
     // Behind a tree on Route 25, for the phase after Cut.
     let later = [Entry::ItemBall { map: Map::Route25, object: 10, item: ItemId::Tm19SeismicToss as u8 }];
     let missing: Vec<Entry> = missing.into_iter().filter(|entry| !later.contains(entry)).collect();
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// The Pokémon Tower-free half of the south: Route 5 and 6, Vermilion and the S.S. Anne, Cut, and
+/// Lt. Surge.
+pub fn to_the_thunder_badge() -> Vec<Step> {
+    use Step::*;
+    let mut steps = vec![
+        // Route 5 is reached only from the terrace behind the robbed house.
+        GoTo("CeruleanTrashedHouse"), Take("CeruleanCity, arriving at (28, 10)"),
+        GoTo("Route5"), Clear(&[]),
+        GoTo("UndergroundPathRoute5"), Clear(&[]),
+        GoTo("UndergroundPathNorthSouth"), Clear(&[]),
+        GoTo("UndergroundPathRoute6"), Clear(&[]),
+        GoTo("Route6"), Clear(&[]),
+        GoTo("VermilionCity"), Clear(&[]),
+        Tidy,
+    ];
+    for building in ["VermilionPokecenter", "VermilionMart", "PokemonFanClub", "VermilionOldRodHouse",
+                     "VermilionPidgeyHouse"] {
+        steps.extend(visit(building, "VermilionCity"));
+    }
+    steps.extend([
+        // The Old Rod's one catch is a Magikarp, at any water's edge.
+        Hunt { species: "Magikarp", row: "Fish", ball: "MasterBall", way: Way::OldRod },
+        GoTo("Route11"), Clear(&[]),
+        // For the Vermilion trade, which gives a Farfetch'd that can learn both Cut and Fly.
+        Hunt { species: "Spearow", row: "Grass", ball: "MasterBall", way: Way::WildInGrass },
+        // The party is full, so the catch went to the box.
+        GoTo("VermilionPokecenter"),
+        AtPc(Pc::Deposit("Kakuna")), AtPc(Pc::Withdraw("Spearow")), AtPc(Pc::Release("Kakuna")),
+        GoTo("VermilionCity"), GoTo("VermilionTradeHouse"), Trade("LittleGirl"), Clear(&[]),
+        GoTo("VermilionCity"), Tidy,
+        GoTo("VermilionDock"), Clear(&[]),
+        GoTo("SSAnne1F"),
+        Explore { maps: &["SSAnne1F", "SSAnne2F", "SSAnne3F", "SSAnneB1F", "SSAnneBow", "SSAnneKitchen",
+                          "SSAnneCaptainsRoom", "SSAnne1FRooms", "SSAnne2FRooms", "SSAnneB1FRooms"], patience: 800 },
+        GoTo("VermilionDock"), GoTo("VermilionCity"),
+        Teach { item: "Hm01Cut", species: "Farfetchd" },
+        Take("cut down the tree"),
+        GoTo("VermilionGym"), Clear(&[]), TrashCans, Clear(&[]),
+        GoTo("VermilionCity"),
+    ]);
+    steps
+}
+
+#[test]
+#[ignore = "a phase of the completion run; run with --ignored"]
+fn completion_phase_thunder_badge() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-bill.bin"), "completion-thunder",
+                          to_the_thunder_badge(), 300, Duration::from_secs(2400));
+    let missing = missing_on(&mut played, &[
+        Map::Route5, Map::UndergroundPathRoute5, Map::UndergroundPathNorthSouth,
+        Map::UndergroundPathRoute6, Map::Route6, Map::VermilionCity, Map::VermilionPokecenter,
+        Map::VermilionMart, Map::PokemonFanClub, Map::VermilionOldRodHouse, Map::VermilionPidgeyHouse,
+        Map::VermilionTradeHouse, Map::VermilionDock, Map::SSAnne1F, Map::SSAnne2F, Map::SSAnne3F,
+        Map::SSAnneB1F, Map::SSAnneBow, Map::SSAnneKitchen, Map::SSAnneCaptainsRoom, Map::SSAnne1FRooms,
+        Map::SSAnne2FRooms, Map::SSAnneB1FRooms, Map::VermilionGym,
+    ], &[Entry::Badge(2), Entry::Way(Way::OldRod), Entry::Machine(ItemId::Hm01Cut as u8)]);
+    cut(&mut played, "completion-thunder");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// Diglett's Cave and Route 2's east side, the Day Care, Route 25's tree, Rock Tunnel, Lavender
+/// and the way west under Saffron to Celadon.
+pub fn to_celadon() -> Vec<Step> {
+    use Step::*;
+    let mut steps = vec![
+        Collect(true),
+        // Out of the gym's corner, which the tree closes again behind every visit.
+        Take("cut down the tree"),
+        GoTo("Route11"), GoTo("DiglettsCaveRoute11"), Clear(&[]), GoTo("DiglettsCave"),
+        Hunt { species: "*", row: "Pace", ball: "MasterBall", way: Way::WildOnACaveFloor },
+        GoTo("DiglettsCaveRoute2"), Clear(&[]), GoTo("Route2"),
+        Explore { maps: &["Route2", "Route2TradeHouse", "Route2Gate"], patience: 300 },
+        GoTo("DiglettsCaveRoute2"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute11"), GoTo("Route11"),
+        GoTo("VermilionCity"), GoTo("Route6"), GoTo("UndergroundPathRoute6"), GoTo("UndergroundPathNorthSouth"),
+        GoTo("UndergroundPathRoute5"), GoTo("Route5"), GoTo("CeruleanCity"),
+        GoTo("CeruleanTrashedHouse"), GoTo("CeruleanCity"),
+        // The tree on the main terrace is the other way down to Route 5, and the only one to the
+        // Day Care.
+        Take("cut down the tree"), GoTo("Route5"), GoTo("Daycare"), DayCare(Some("Squirtle")),
+        GoTo("Route5"), GoTo("CeruleanCity"),
+        GoTo("Route24"), GoTo("Route25"), Take("cut down the tree"), Talk("TMSeismicToss"),
+        GoTo("Route24"), GoTo("CeruleanCity"),
+        GoTo("CeruleanTrashedHouse"), Take("CeruleanCity, arriving at (28, 10)"),
+        GoTo("Route9"), Explore { maps: &["Route9"], patience: 200 },
+        GoTo("Route10"), Explore { maps: &["Route10", "RockTunnelPokecenter"], patience: 200 },
+        GoTo("RockTunnel1F"), Explore { maps: &["RockTunnel1F", "RockTunnelB1F"], patience: 600 },
+        GoTo("RockTunnel1F"), Take("Route10, arriving at (9, 5"), Clear(&[]),
+        GoTo("LavenderTown"), Clear(&[]),
+    ];
+    for building in ["LavenderPokecenter", "LavenderMart", "LavenderCuboneHouse", "MrFujisHouse", "NameRatersHouse"] {
+        steps.extend(visit(building, "LavenderTown"));
+    }
+    steps.extend([
+        GoTo("PokemonTower1F"), Clear(&[]), GoTo("PokemonTower2F"), Clear(&[]),
+        GoTo("PokemonTower1F"), GoTo("LavenderTown"),
+        GoTo("Route12"), Clear(&["Snorlax"]), GoTo("Route12Gate1F"), Clear(&[]), GoTo("Route12Gate2F"), Clear(&[]),
+        GoTo("Route12Gate1F"), GoTo("Route12"), GoTo("LavenderTown"),
+        GoTo("Route8"), Explore { maps: &["Route8"], patience: 200 },
+        GoTo("Route8Gate"), Clear(&[]), GoTo("Route8"),
+        GoTo("UndergroundPathRoute8"), Clear(&[]), GoTo("UndergroundPathWestEast"), Clear(&[]),
+        GoTo("UndergroundPathRoute7"), Clear(&[]), GoTo("Route7"), Clear(&[]),
+        GoTo("Route7Gate"), Clear(&[]), GoTo("CeladonCity"),
+    ]);
+    steps
+}
+
+#[test]
+#[ignore = "a phase of the completion run; run with --ignored"]
+fn completion_phase_celadon() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-thunder.bin"), "completion-celadon",
+                          to_celadon(), 360, Duration::from_secs(2400));
+    let missing = missing_on(&mut played, &[
+        Map::DiglettsCaveRoute11, Map::DiglettsCave, Map::DiglettsCaveRoute2, Map::Route2, Map::Route2TradeHouse,
+        Map::Route2Gate, Map::Daycare, Map::Route25, Map::Route9, Map::Route10, Map::RockTunnelPokecenter,
+        Map::RockTunnel1F, Map::RockTunnelB1F, Map::LavenderTown, Map::LavenderPokecenter, Map::LavenderMart,
+        Map::LavenderCuboneHouse, Map::MrFujisHouse, Map::NameRatersHouse, Map::PokemonTower1F,
+        Map::PokemonTower2F, Map::Route12Gate1F, Map::Route12Gate2F, Map::Route8, Map::Route8Gate,
+        Map::UndergroundPathRoute8, Map::UndergroundPathWestEast, Map::UndergroundPathRoute7, Map::Route7,
+        Map::Route7Gate,
+    ], &[Entry::Way(Way::WildOnACaveFloor)]);
+    cut(&mut played, "completion-celadon");
+    // On the water by the Power Plant, for the phase after Surf.
+    let later = [Entry::Trainer { map: Map::Route10, index: 0 }];
+    let missing: Vec<Entry> = missing.into_iter().filter(|entry| !later.contains(entry)).collect();
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// Celadon: the Mart and its roof, the Mansion's Eevee, the Game Corner's prizes, Erika, and Route
+/// 16's Fly house; then Fly back to Cerulean for the Bicycle.
+pub fn to_the_rainbow_badge() -> Vec<Step> {
+    use Step::*;
+    vec![
+        Collect(true),
+        GoTo("CeladonPokecenter"), Clear(&[]),
+        AtPc(Pc::Deposit("Magikarp")), AtPc(Pc::Deposit("Magikarp")), AtPc(Pc::ChangeBox(2)),
+        GoTo("CeladonCity"), Explore { maps: &["CeladonCity"], patience: 200 },
+        GoTo("CeladonMart1F"), Clear(&[]),
+        GoTo("CeladonMart2F"), Tidy, Talk("Clerk2"),
+        Buy(&[("Tm32DoubleTeam", 1), ("Tm33Reflect", 1), ("Tm02RazorWind", 1), ("Tm07HornDrill", 1),
+              ("Tm37EggBomb", 1), ("Tm01MegaPunch", 1), ("Tm05MegaKick", 1), ("Tm09TakeDown", 1),
+              ("Tm17Submission", 1)]),
+        Tidy, Clear(&[]),
+        GoTo("CeladonMart3F"), Clear(&[]),
+        GoTo("CeladonMart4F"), Talk("Clerk"),
+        Buy(&[("FireStone", 1), ("WaterStone", 1), ("ThunderStone", 1), ("LeafStone", 1)]), Clear(&[]),
+        GoTo("CeladonMart5F"), Clear(&[]),
+        GoTo("CeladonMartRoof"), Clear(&["LittleGirl"]),
+        // The girl trades a different machine for each drink, and takes the one she is shown.
+        Take("buy a FRESH WATER"), Talk("LittleGirl"), Take("buy a SODA POP"), Talk("LittleGirl"),
+        Take("buy a LEMONADE"), Talk("LittleGirl"),
+        // One more, for the guards at Saffron's gates.
+        Take("buy a FRESH WATER"),
+        GoTo("CeladonMart5F"), GoTo("CeladonMartElevator"), Field(r#"{"move":"elevator","map":"CeladonMart1F"}"#),
+        GoTo("CeladonMart1F"), GoTo("CeladonCity"),
+        GoTo("CeladonMansion1F"),
+        Explore { maps: &["CeladonMansion1F", "CeladonMansion2F", "CeladonMansion3F", "CeladonMansionRoof",
+                          "CeladonMansionRoofHouse"], patience: 200 },
+        // The exploring took the Eevee in the roof house.
+        Evolve { item: "FireStone", species: "Eevee" },
+        GoTo("CeladonMansionRoof"), GoTo("CeladonMansion3F"), GoTo("CeladonMansion2F"), GoTo("CeladonMansion1F"),
+        GoTo("CeladonCity"),
+        GoTo("CeladonDiner"), Clear(&[]), GoTo("CeladonCity"),
+        GoTo("CeladonHotel"), Clear(&[]), GoTo("CeladonCity"),
+        GoTo("CeladonChiefHouse"), Clear(&[]), GoTo("CeladonCity"),
+        GoTo("GameCorner"), Clear(&[]),
+        Coins(9900),
+        GoTo("CeladonCity"), GoTo("GameCornerPrizeRoom"), Clear(&[]),
+        // The machines are items, and the bag holds twenty kinds.
+        Tidy,
+        Prize("Abra"), Field(r#"{"move":"prize","item":"Tm15HyperBeam"}"#), Field(r#"{"move":"prize","item":"Tm23DragonRage"}"#),
+        GoTo("CeladonCity"), GoTo("GameCorner"), Coins(7700),
+        GoTo("CeladonCity"), GoTo("GameCornerPrizeRoom"), Field(r#"{"move":"prize","item":"Tm50Substitute"}"#),
+        GoTo("CeladonCity"), GoTo("CeladonGym"), Explore { maps: &["CeladonGym"], patience: 200 },
+        GoTo("CeladonCity"), GoTo("Route16"), Explore { maps: &["Route16"], patience: 100 },
+        // The Fly house is on the west side, through the gate's top corridor, which has no guard.
+        Take("Route16Gate1F, arriving at (7, 2)"), Take("Route16, arriving at (17, 4)"),
+        Explore { maps: &["Route16", "Route16FlyHouse"], patience: 100 },
+        GoTo("Route16"), Take("Route16Gate1F, arriving at (0, 2)"), Take("Route16, arriving at (24, 4)"),
+        Teach { item: "Hm02Fly", species: "Farfetchd" },
+        Field(r#"{"move":"fly","map":"CeruleanCity"}"#),
+        GoTo("BikeShop"), Clear(&[]), GoTo("CeruleanCity"),
+        Field(r#"{"move":"fly","map":"CeladonCity"}"#),
+        GoTo("CeladonCity"),
+    ]
+}
+
+#[test]
+#[ignore = "a phase of the completion run; run with --ignored"]
+fn completion_phase_rainbow_badge() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-celadon.bin"), "completion-rainbow",
+                          to_the_rainbow_badge(), 360, Duration::from_secs(2400));
+    let missing = missing_on(&mut played, &[
+        Map::CeladonCity, Map::CeladonPokecenter, Map::CeladonMart1F, Map::CeladonMart2F, Map::CeladonMart3F,
+        Map::CeladonMart4F, Map::CeladonMart5F, Map::CeladonMartRoof, Map::CeladonMartElevator,
+        Map::CeladonMansion1F, Map::CeladonMansion2F, Map::CeladonMansion3F, Map::CeladonMansionRoof,
+        Map::CeladonMansionRoofHouse, Map::CeladonDiner, Map::CeladonHotel, Map::CeladonChiefHouse,
+        Map::GameCorner, Map::GameCornerPrizeRoom, Map::CeladonGym, Map::Route16FlyHouse, Map::Route16Gate1F,
+        Map::BikeShop,
+    ], &[Entry::Badge(3), Entry::Way(Way::GiftEevee), Entry::Way(Way::EvolvedByStone),
+         Entry::Way(Way::GameCornerPrize), Entry::Way(Way::PcChangeBox),
+         Entry::Machine(ItemId::Hm02Fly as u8), Entry::Machine(ItemId::Tm13IceBeam as u8),
+         Entry::Machine(ItemId::Tm48RockSlide as u8), Entry::Machine(ItemId::Tm49TriAttack as u8),
+         Entry::Machine(ItemId::Tm15HyperBeam as u8), Entry::Machine(ItemId::Tm23DragonRage as u8),
+         Entry::Machine(ItemId::Tm50Substitute as u8), Entry::KeyItem(vec![ItemId::Bicycle as u8])]);
+    cut(&mut played, "completion-rainbow");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// The Rocket Hideout and the Silph Scope, Pokémon Tower and the Poké Flute, and the two Snorlax
+/// the flute wakes.
+pub fn to_the_poke_flute() -> Vec<Step> {
+    use Step::*;
+    vec![
+        Collect(true),
+        GoTo("GameCorner"), Take("look behind the poster"),
+        GoTo("RocketHideoutB1F"),
+        Explore { maps: &["RocketHideoutB1F", "RocketHideoutB2F", "RocketHideoutB3F", "RocketHideoutB4F"],
+                  patience: 900 },
+        // Each floor's lift lobby is a room of its own, and B4F's is the only way into Giovanni's
+        // half of that floor, so the lift is both the ride and the route.
+        GoTo("RocketHideoutB4F"), GoTo("RocketHideoutElevator"),
+        Field(r#"{"move":"elevator","map":"RocketHideoutB1F"}"#),
+        Field(r#"{"move":"elevator","map":"RocketHideoutB4F"}"#),
+        Explore { maps: &["RocketHideoutB1F", "RocketHideoutB2F", "RocketHideoutB3F", "RocketHideoutB4F"],
+                  patience: 900 },
+        GoTo("RocketHideoutElevator"), Field(r#"{"move":"elevator","map":"RocketHideoutB2F"}"#),
+        GoTo("RocketHideoutB1F"), GoTo("GameCorner"), GoTo("CeladonCity"),
+        Field(r#"{"move":"fly","map":"LavenderTown"}"#), GoTo("LavenderTown"),
+        GoTo("PokemonTower1F"),
+        Explore { maps: &["PokemonTower1F", "PokemonTower2F", "PokemonTower3F", "PokemonTower4F",
+                          "PokemonTower5F", "PokemonTower6F", "PokemonTower7F"], patience: 900 },
+        // Mr Fuji's thanks puts the player in his house, with the flute.
+        GoTo("LavenderTown"), GoTo("MrFujisHouse"), Clear(&[]), GoTo("LavenderTown"),
+        GoTo("Route12"), UseItemOn { item: "PokeFlute", row: "Snorlax" },
+        Explore { maps: &["Route12"], patience: 400 },
+        GoTo("Route12SuperRodHouse"), Clear(&[]), GoTo("Route12"),
+        Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"),
+        GoTo("Route16"), UseItemOn { item: "PokeFlute", row: "Snorlax" },
+        // The gate's stairs are in its lower hall, past where the Snorlax slept.
+        GoTo("Route16Gate1F"), GoTo("Route16Gate2F"), Clear(&[]), GoTo("Route16Gate1F"),
+        GoTo("Route16"), GoTo("CeladonCity"),
+    ]
+}
+
+#[test]
+#[ignore = "a phase of the completion run; run with --ignored"]
+fn completion_phase_poke_flute() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-rainbow.bin"), "completion-flute",
+                          to_the_poke_flute(), 420, Duration::from_secs(2400));
+    let missing = missing_on(&mut played, &[
+        Map::RocketHideoutB1F, Map::RocketHideoutB2F, Map::RocketHideoutB3F, Map::RocketHideoutB4F,
+        Map::RocketHideoutElevator, Map::PokemonTower1F, Map::PokemonTower2F, Map::PokemonTower3F,
+        Map::PokemonTower4F, Map::PokemonTower5F, Map::PokemonTower6F, Map::PokemonTower7F,
+        Map::Route12, Map::Route12SuperRodHouse, Map::Route16, Map::Route16Gate2F,
+    ], &[Entry::Way(Way::SnorlaxOnRoute12), Entry::Way(Way::SnorlaxOnRoute16),
+         Entry::KeyItem(vec![ItemId::SilphScope as u8]), Entry::KeyItem(vec![ItemId::PokeFlute as u8]),
+         Entry::KeyItem(vec![ItemId::LiftKey as u8]), Entry::KeyItem(vec![ItemId::SuperRod as u8])]);
+    cut(&mut played, "completion-flute");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }

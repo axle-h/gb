@@ -66,6 +66,8 @@ cargo test --release --workspace --features slow-tests -- probe_ --ignored --noc
 - The four battle fixtures are read twice over — by `stalls` for the jam each was cut in and by
   `battle_refusals` for the refusal each one contains — so a re-cut has to keep *which battle* as
   well as which jam.
+- The `completion-*.bin` are a chain of their own, one per `completion_phase_*` test (`--ignored`),
+  each cut where the phase before it ended: re-cutting an early one invalidates every later one.
 - `soak-*.bin` are not in the chain and are re-cut wholesale by `regen_soak_checkpoints`.
 - `every_committed_fixture_decodes` (default tier, in `gb`) loads all of them, so a save-state layout
   break fails in two seconds rather than an hour into `slow-tests`.

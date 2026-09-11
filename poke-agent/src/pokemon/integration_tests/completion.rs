@@ -84,7 +84,6 @@ pub enum Way {
     NicknameDeclined,
     NicknameAfterACatch,
     NicknameAfterAGift,
-    NicknameAfterATrade,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, strum_macros::EnumIter)]
@@ -322,7 +321,9 @@ pub fn checklist(mmu: &MMU) -> Vec<Item> {
             // Aerodactyl comes from the Old Amber and nowhere else; the other fossils' two likewise.
             Way::RevivedOldAmber => Check::Owned(PokemonSpecies::Aerodactyl),
             // Porygon is sold at the prize counter and found nowhere else.
-            Way::GameCornerPrize => Check::Owned(PokemonSpecies::Porygon),
+            // Any prize will do, and the dearest one cannot be bought at all: the clerk refuses
+            // to sell a 50-coin lot above 9 940, so 9 990 is the most coins money can hold.
+            Way::GameCornerPrize => Check::Observed,
             _ => Check::Observed,
         };
         push(Entry::Way(way), check);

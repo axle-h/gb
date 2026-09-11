@@ -122,6 +122,8 @@ pub struct SellState {
 }
 
 const TICK_BUDGET: u16 = 1200;
+/// How long a walk to a counter waits on someone standing in the way before giving up.
+const BLOCKED_TICKS: u16 = 250;
 
 impl SellState {
     pub fn new(item: BagItem, clerk: (Point8, crate::pokemon::map_metadata::PlayerFacingDirection), api: &PokemonApi<'_>) -> Self {
@@ -361,6 +363,16 @@ impl Prize {
             _ => None,
         }
     }
+
+    /// The machine, for the three prizes that are items.
+    pub const fn item(self) -> Option<crate::pokemon::item::ItemId> {
+        match self {
+            Self::DragonRage => Some(crate::pokemon::item::ItemId::Tm23DragonRage),
+            Self::HyperBeam => Some(crate::pokemon::item::ItemId::Tm15HyperBeam),
+            Self::Substitute => Some(crate::pokemon::item::ItemId::Tm50Substitute),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,6 +459,11 @@ pub fn prize_tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PrizeSt
                 api.press_button(btn);
                 agent.set_state(AgentState::RedeemingPrize(PrizeState { press: true, ticks: s.ticks + 1, ..s }));
             }
+            // The room's gambler paces in front of the counters: wait for him to move on.
+            None if s.ticks < BLOCKED_TICKS => {
+                api.release_all_buttons();
+                agent.set_state(AgentState::RedeemingPrize(PrizeState { ticks: s.ticks + 1, ..s }));
+            }
             _ => abort(agent, api, format!("can't reach the {:?} vendor at {tile}", s.prize)),
         }
         return Ok(());
@@ -469,8 +486,15 @@ pub fn prize_tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PrizeSt
     };
 
     // The prize list is checked before the yes/no: `wTextBoxID` still reads `TwoOptionMenu` from an
-    // earlier box while the prize list, which draws no text box, is up.
-    let button = if text.contains("NO THANKS") {
+    // earlier box while the prize list, which draws no text box, is up. The list stays drawn under
+    // the question, so the question is known by its words.
+    if text.contains("enough room") {
+        abort(agent, api, "the bag has no room for it".to_string());
+        return Ok(());
+    }
+    let button = if text.contains("you want") && tbid == Some(TextBoxId::TwoOptionMenu) {
+        nav(cursor, 0) // "So, you want …?" → YES
+    } else if text.contains("NO THANKS") {
         nav(cursor, s.prize.menu_row())
     } else if tbid == Some(TextBoxId::TwoOptionMenu) {
         nav(cursor, 0) // "So! You want …?" → YES

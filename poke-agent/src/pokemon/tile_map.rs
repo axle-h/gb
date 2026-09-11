@@ -1741,6 +1741,9 @@ pub const CINNABAR_QUIZ_MACHINES: [(u8, u8, &str); 6] = [
     (1, 7, "TM28 contains TOMBSTONER?"),
 ];
 
+/// What each Celadon roof vending row buys, by ordinal, as the menu lists them (`DrinkText`).
+pub const VENDING_DRINKS: [(&str, u16); 3] = [("FRESH WATER", 200), ("SODA POP", 300), ("LEMONADE", 350)];
+
 /// Every hidden object a playthrough presses on `map`, from pokered's `hidden_events.asm`.
 pub fn hidden_objects_for(map: Map) -> &'static [HiddenObjectSite] {
     use HiddenObject::{Poster, Statue, TrashCan, VendingMachine};
