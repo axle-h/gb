@@ -319,7 +319,7 @@ mod tests {
     /// `make` leaves the *uncompressed* form of every pic beside the compressed one, so
     /// upstream's own build output is available as an oracle.
     fn upstream_2bpp(species: PokemonSpecies) -> Option<Vec<u8>> {
-        std::fs::read(format!("pokered/gfx/pokemon/front/{}.2bpp", sprite_file_name(species))).ok()
+        std::fs::read(format!("../vendor/pokered/gfx/pokemon/front/{}.2bpp", sprite_file_name(species))).ok()
     }
 
     /// Reverse [`front_pic_shades`]'s canvas back into the tile stream a `.2bpp` file holds: each

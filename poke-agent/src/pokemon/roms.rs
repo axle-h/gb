@@ -1,2 +1,2 @@
 
-pub const POKERED: &[u8] = include_bytes!("../../pokered/pokered.gbc");
+pub const POKERED: &[u8] = include_bytes!("../../../vendor/pokered/pokered.gbc");

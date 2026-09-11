@@ -28,7 +28,7 @@ RUN curl -fsSL -o rgbds.tar.gz \
     && rgbasm --version
 
 WORKDIR /pokered
-COPY poke-agent/pokered/ ./
+COPY vendor/pokered/ ./
 RUN test -f main.asm || { \
         echo "the pokered submodule is empty — run: git submodule update --init --recursive" >&2; \
         exit 1; \
@@ -67,7 +67,7 @@ COPY poke-agent-web/Cargo.toml ./poke-agent-web/
 COPY poke-agent-web/src/ ./poke-agent-web/src/
 COPY poke-agent-sdl/Cargo.toml ./poke-agent-sdl/
 RUN mkdir -p poke-agent-sdl/src && echo 'fn main() {}' > poke-agent-sdl/src/main.rs
-COPY --from=rom /pokered/pokered.gbc /pokered/pokered.sym ./poke-agent/pokered/
+COPY --from=rom /pokered/pokered.gbc /pokered/pokered.sym ./vendor/pokered/
 COPY --from=web /web/dist ./poke-agent-web/web/dist
 
 # The binary is copied out inside this RUN because `target/` is a cache mount, absent from the image.

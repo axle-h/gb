@@ -3,7 +3,7 @@
 //! that builds the cartridge; this module is `#[cfg(test)]`, so a published `gb` reaches outside
 //! its own directory for nothing.
 
-pub const POKERED: &[u8] = include_bytes!("../../poke-agent/pokered/pokered.gbc");
+pub const POKERED: &[u8] = include_bytes!("../../vendor/pokered/pokered.gbc");
 
 /// A mid-game save: standing in the Celadon overworld with music playing.
 pub const AT_CELADON: &[u8] = include_bytes!("../../poke-agent/src/pokemon/data/at-celadon.bin");

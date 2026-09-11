@@ -10,7 +10,7 @@ target/
 .gitmodules
 runs/
 docs/
-gb/tools/
+vendor/Blip_Buffer/
 .github/
 *.md
 Dockerfile
@@ -33,15 +33,15 @@ poke-agent-web/web/dist/
 # ⚠️ The `**` is load-bearing: `*.o` alone leaves `pokered/gfx/pics_red.o` in the context,
 # and a host object file built by a *newer* rgbds stops the build dead inside the container
 # ("Unsupported object file ... expected revision 12, got 13"). Found exactly that way.
-poke-agent/pokered/**/*.o
-poke-agent/pokered/**/*.gbc
-poke-agent/pokered/**/*.sym
-poke-agent/pokered/**/*.map
-poke-agent/pokered/**/*.patch
-poke-agent/pokered/**/*.1bpp
-poke-agent/pokered/**/*.2bpp
-poke-agent/pokered/**/*.pic
-poke-agent/pokered/tools/gfx
-poke-agent/pokered/tools/make_patch
-poke-agent/pokered/tools/pkmncompress
-poke-agent/pokered/tools/scan_includes
+vendor/pokered/**/*.o
+vendor/pokered/**/*.gbc
+vendor/pokered/**/*.sym
+vendor/pokered/**/*.map
+vendor/pokered/**/*.patch
+vendor/pokered/**/*.1bpp
+vendor/pokered/**/*.2bpp
+vendor/pokered/**/*.pic
+vendor/pokered/tools/gfx
+vendor/pokered/tools/make_patch
+vendor/pokered/tools/pkmncompress
+vendor/pokered/tools/scan_includes
