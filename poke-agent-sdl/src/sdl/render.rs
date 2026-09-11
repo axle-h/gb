@@ -347,7 +347,8 @@ mod tests {
         gb.core_mut().mmu_mut().write_game_options(&shift).expect("writable");
 
         let mut agent = PokemonAgent::new(Box::new(RandomPolicy::default()));
-        agent_slice(&mut agent, &mut gb, &mut MapMetadataCache::default(), MachineCycles::ONE);
+        let (_, ticked) = agent_slice(&mut agent, &mut gb, &mut MapMetadataCache::default(), MachineCycles::ONE);
+        ticked.expect("the agent ticks");
         assert_eq!(gb.core().mmu().read_game_options(), Ok(SERVED_OPTIONS));
     }
 }

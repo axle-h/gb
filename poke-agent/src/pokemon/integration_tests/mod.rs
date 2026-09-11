@@ -32,6 +32,8 @@ pub(crate) mod cheats;
 
 pub(crate) mod coverage;
 
+pub(crate) mod completion;
+
 pub(crate) mod godmode;
 
 mod mechanics;

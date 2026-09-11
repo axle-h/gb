@@ -1161,29 +1161,7 @@ fn unreached_report(entered: &std::collections::BTreeSet<&String>) -> String {
 }
 
 #[cfg(feature = "slow-tests")]
-/// Headers the ROM carries that no warp in any map targets, so nothing can walk into one.
-const UNREACHABLE_DUPLICATES: [crate::pokemon::map::Map; 4] = [
-    crate::pokemon::map::Map::CeruleanTrashedHouseCopy,
-    crate::pokemon::map::Map::CinnabarMartCopy,
-    crate::pokemon::map::Map::UndergroundPathRoute6Copy,
-    crate::pokemon::map::Map::UndergroundPathRoute7Copy,
-];
-
-#[cfg(feature = "slow-tests")]
-/// Why a map number is or is not something a walk could have entered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MapBucket { Padding, LinkCable, Duplicate, Reachable }
-
-#[cfg(feature = "slow-tests")]
-fn classify(map: crate::pokemon::map::Map, name: &str) -> MapBucket {
-    use crate::pokemon::map::Map;
-    match map {
-        _ if name.starts_with("UnusedMap") => MapBucket::Padding,
-        Map::Colosseum | Map::TradeCenter => MapBucket::LinkCable,
-        _ if UNREACHABLE_DUPLICATES.contains(&map) => MapBucket::Duplicate,
-        _ => MapBucket::Reachable,
-    }
-}
+use super::completion::{classify, MapBucket};
 
 #[cfg(feature = "slow-tests")]
 /// Game-minutes per walk below which a sweep is a smoke run and the union checks only print.
