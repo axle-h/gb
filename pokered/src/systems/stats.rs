@@ -49,6 +49,15 @@ pub fn calc_stat(stat: Stat, base: u8, dvs: Dvs, stat_exp: Option<u16>, level: u
     (value as u16).min(MAX_STAT_VALUE)
 }
 
+/// `CalcStats`: all five, from a species' base stats, in `CalcStat`'s order.
+pub fn calc_stats(base: [u8; 5], dvs: Dvs, stat_exp: Option<[u16; 5]>, level: u8) -> [u16; 5] {
+    const STATS: [Stat; 5] = [Stat::Hp, Stat::Attack, Stat::Defense, Stat::Speed, Stat::Special];
+    STATS.map(|stat| {
+        let i = stat as usize - 1;
+        calc_stat(stat, base[i], dvs, stat_exp.map(|exp| exp[i]), level)
+    })
+}
+
 /// `.statExpLoop`: the least `b` from 1 with `b * b >= stat_exp`, stopping at 255, so zero stat
 /// experience still counts 1.
 fn stat_exp_bonus(stat_exp: u16) -> u8 {

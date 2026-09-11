@@ -1,6 +1,6 @@
 use crate::pokemon::{PokemonStats, PokemonType};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum_macros::Display, strum_macros::FromRepr, strum_macros::EnumIter)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum_macros::Display, strum_macros::FromRepr, strum_macros::EnumIter, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum PokemonSpecies {
     Rhydon = 0x1,
@@ -157,6 +157,17 @@ pub enum PokemonSpecies {
 }
 
 impl PokemonSpecies {
+    /// `GetMonName`: charmap bytes, unterminated. A name is ten bytes padded with `@`, so a
+    /// ten-letter one has no terminator of its own.
+    pub fn name(self) -> Vec<u8> {
+        use crate::rom_gfx::rom_slice;
+        use crate::symbols::pokered_symbols;
+        const LENGTH: usize = 10;
+        const TERMINATOR: u8 = 0x50;
+        let entry = &rom_slice(pokered_symbols::MonsterNames)[(self as usize - 1) * LENGTH..][..LENGTH];
+        entry.iter().copied().take_while(|&b| b != TERMINATOR).collect()
+    }
+
     pub fn metadata(&self) -> &'static PokemonMetadata {
         use PokemonSpecies::*;
         match self {
@@ -512,4 +523,17 @@ impl PokemonMetadata {
     pub const BELLSPROUT: Self = Self::new("Bellsprout",69, 50, 75, 35, 40, 70, ExperienceGroup::MediumSlow, PokemonType::Grass, Some(PokemonType::Poison));
     pub const WEEPINBELL: Self = Self::new("Weepinbell",70, 65, 90, 50, 55, 85, ExperienceGroup::MediumSlow, PokemonType::Grass, Some(PokemonType::Poison));
     pub const VICTREEBEL: Self = Self::new("Victreebel",71, 80, 105, 65, 70, 100, ExperienceGroup::MediumSlow, PokemonType::Grass, Some(PokemonType::Poison));
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::charmap::encode;
+    use super::PokemonSpecies::*;
+
+    #[test]
+    fn a_name_stops_at_its_padding_or_its_tenth_letter() {
+        assert_eq!(Rhydon.name(), encode("RHYDON").unwrap());
+        assert_eq!(Butterfree.name(), encode("BUTTERFREE").unwrap());
+        assert_eq!(Victreebel.name(), encode("VICTREEBEL").unwrap());
+    }
 }

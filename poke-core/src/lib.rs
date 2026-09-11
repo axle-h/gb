@@ -9,6 +9,7 @@ pub mod battle;
 pub mod battle_data;
 pub mod charmap;
 pub mod damage;
+pub mod evos_moves;
 pub mod font;
 pub mod geometry;
 pub mod item;
