@@ -71,6 +71,31 @@ fn an_arrow_tile_carries_the_walk_rather_than_ending_it() {
             "a spin tile is the walk, not a script that ended it — aborted at {script_aborts:?}");
 }
 
+/// A lift's doors lead back to the floor it was entered from until its panel picks another.
+#[test]
+fn a_lifts_doors_lead_to_the_floor_it_was_entered_from() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/post-silph-scope.bin"),
+        Duration::from_secs(240),
+        vec![PolicyStep::enter(Map::RocketHideoutElevator)],
+    );
+    fixture.step_until_exhausted();
+    fixture.run_until(|state| state.map.map == Map::RocketHideoutElevator);
+    // A second inside, for the lift's own script to have run.
+    for _ in 0..50 {
+        fixture.step();
+    }
+    let state = fixture.game_state();
+
+    let doors: Vec<Map> = state.map.actions().iter().filter_map(|action| match action.tile {
+        MetaTile::Warp { to_map, .. } => Some(to_map),
+        _ => None,
+    }).collect();
+    assert!(!doors.is_empty(), "the lift offered no door at all");
+    assert!(doors.iter().all(|&to| to == Map::RocketHideoutB4F),
+            "the lift was entered from B4F and its doors say {doors:?}");
+}
+
 /// A text box in answer to an A press is the interaction landing, not a failure.
 #[test]
 fn talking_to_a_sprite_is_a_success_not_an_abort() {

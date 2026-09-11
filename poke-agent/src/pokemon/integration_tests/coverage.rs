@@ -552,6 +552,8 @@ pub struct ExploringBrain {
     pub here: String,
     /// PC operations the walk has tried, by map.
     pc_ops_tried: std::collections::BTreeSet<(String, &'static str)>,
+    /// Floors each lift has been ridden to, which no menu row leads to either.
+    rides: std::collections::BTreeSet<(String, crate::pokemon::map::Map)>,
     /// Consecutive turns the menu has offered nothing at all, and the flies spent escaping it.
     pub rowless_turns: usize,
     /// Consecutive turns on which the menu had rows and the brain chose nothing: every row visited
@@ -602,6 +604,7 @@ impl ExploringBrain {
             here: String::new(),
             turns: 0,
             pc_ops_tried: std::collections::BTreeSet::new(),
+            rides: std::collections::BTreeSet::new(),
             rowless_turns: 0,
             stalled_turns: 0,
             stalled_worst: 0,
@@ -744,6 +747,20 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
             }
         }
 
+        // A lift, once to each floor: on a floor only a lift reaches, it is the one way on.
+        if let Some(here) = request.location()
+            && request.has_tool("use_field_move")
+            && let Some(lift) = <crate::pokemon::map::Map as strum::IntoEnumIterator>::iter().find(|map| format!("{map:?}") == here)
+            && let Some((_, floors)) = crate::pokemon::tile_map::elevator_for(lift)
+            && let Some(&floor) = floors.iter().find(|&&floor| !self.rides.contains(&(here.clone(), floor)))
+        {
+            self.rides.insert((here, floor));
+            let arguments = serde_json::json!({
+                "move": "elevator", "map": format!("{floor:?}"), "summary": "ride the lift",
+            });
+            return Reply::call("use_field_move", arguments);
+        }
+
         // Reaching the Hall of Fame ends the walk, because it ends the game.
         if request.location().as_deref() == Some("HallOfFame") {
             self.reached_the_end = true;
@@ -865,6 +882,9 @@ pub struct Start {
     pub map: crate::pokemon::map::Map,
     /// Set only for a start taken before the credits, with the reason.
     pub before_the_credits: Option<&'static str>,
+    /// Whether the walk must earn its own way: `Cheats::story`, so the story's gates are live,
+    /// rather than every key item and badge.
+    pub story: bool,
 }
 
 /// The regional starts, one per region the `entry` walk never reaches, plus `entry` itself.
@@ -874,48 +894,56 @@ pub const COVERAGE_STARTS: &[Start] = &[
         state: include_bytes!("../data/postgame-entry.bin"),
         map: crate::pokemon::map::Map::ViridianPokecenter,
         before_the_credits: None,
+        story: false,
     },
     Start {
         name: "cerulean",
         state: include_bytes!("../data/postgame-daycare.bin"),
         map: crate::pokemon::map::Map::Route5,
         before_the_credits: None,
+        story: false,
     },
     Start {
         name: "vermilion",
         state: include_bytes!("../data/postgame-farfetchd.bin"),
         map: crate::pokemon::map::Map::VermilionCity,
         before_the_credits: None,
+        story: false,
     },
     Start {
         name: "lavender",
         state: include_bytes!("../data/postgame-sweep-lavender.bin"),
         map: crate::pokemon::map::Map::Route10,
         before_the_credits: None,
+        story: false,
     },
     Start {
         name: "celadon",
         state: include_bytes!("../data/postgame-game-corner.bin"),
         map: crate::pokemon::map::Map::CeladonCity,
         before_the_credits: None,
+        story: false,
     },
     Start {
         name: "saffron",
         state: include_bytes!("../data/postgame-silph-floors.bin"),
         map: crate::pokemon::map::Map::SaffronCity,
         before_the_credits: None,
+        story: false,
     },
     Start {
         name: "fuchsia",
         state: include_bytes!("../data/postgame-safari.bin"),
         map: crate::pokemon::map::Map::FuchsiaCity,
         before_the_credits: None,
+        story: false,
     },
     Start {
         name: "cinnabar",
         state: include_bytes!("../data/postgame-seel.bin"),
         map: crate::pokemon::map::Map::CinnabarIsland,
         before_the_credits: None,
+        story: false,
     },
     // The only start that is not a finished game.
     Start {
@@ -925,6 +953,7 @@ pub const COVERAGE_STARTS: &[Start] = &[
         before_the_credits: Some(
             "the S.S. Anne has not sailed yet, and `EVENT_SS_ANNE_LEFT` is what makes its ten \
              rooms and VermilionDock unreachable from every finished game"),
+        story: false,
     },
     // The only start whose job is to remove a coin flip.
     Start {
@@ -934,6 +963,36 @@ pub const COVERAGE_STARTS: &[Start] = &[
         before_the_credits: Some(
             "it is standing on the S.S. Anne, which sails before the third badge and never comes \
              back, so no finished save can be cut here at all"),
+        story: false,
+    },
+    // Mid-story: what a finished game has already opened is shut here, and the walk earns its way.
+    Start {
+        name: "rocktunnel",
+        state: include_bytes!("../data/back-in-cerulean.bin"),
+        map: crate::pokemon::map::Map::CeruleanCity,
+        before_the_credits: Some("three badges, before Rock Tunnel, with every later gate still shut"),
+        story: true,
+    },
+    Start {
+        name: "hideout",
+        state: include_bytes!("../data/at-rocket-hideout.bin"),
+        map: crate::pokemon::map::Map::RocketHideoutB1F,
+        before_the_credits: Some("four badges, with the Rocket Hideout and Silph Co still held"),
+        story: true,
+    },
+    Start {
+        name: "tower",
+        state: include_bytes!("../data/post-silph-scope.bin"),
+        map: crate::pokemon::map::Map::RocketHideoutB4F,
+        before_the_credits: Some("the Silph Scope in the bag and Pokémon Tower still haunted"),
+        story: true,
+    },
+    Start {
+        name: "seafoam",
+        state: include_bytes!("../data/post-marsh-badge.bin"),
+        map: crate::pokemon::map::Map::SaffronGym,
+        before_the_credits: Some("six badges, before Seafoam and Cinnabar"),
+        story: true,
     },
 ];
 
@@ -1264,8 +1323,11 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
         .game_time(budget * 2)
         .with_coverage()
         .start(Box::new(brain.clone()));
-    // The bag is what makes the overworld fully offered.
-    run.with_cheats(Cheats::default().with_key_items(999_999));
+    // The bag is what makes the overworld fully offered, except where the story is the point.
+    run.with_cheats(match start.story {
+        true => Cheats::story(999_999),
+        false => Cheats::default().with_key_items(999_999),
+    });
 
     /// Wall-clock seconds between progress lines.
     const BEAT_SECS: u64 = 30;

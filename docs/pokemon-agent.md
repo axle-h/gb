@@ -52,6 +52,8 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   nothing.
 - `map_uses_runtime_blocks` lists every map `ReplaceTileBlock` rewrites. A map missing from it is
   offered rows through closed doors, and no finished-game fixture can show that.
+- A lift's doors lead where the live `wWarpEntries` says, the floor it was entered from until the
+  panel picks another; the ROM's table is written for one floor (`with_live_exits`).
 - A map script can cancel a warp the tiles call fine. `map_warp_gate_specs` is deliberately tiny:
   withholding a real door is how a floor loses its only exit, so only a refusal proved in the
   cartridge's own source goes in. `WarpTrigger::Unknown` is never dropped either — unsure is not no.
