@@ -32,6 +32,14 @@ impl<'a> PokemonApi<'a> {
         }
     }
 
+    /// Overwrite the Game Corner coins (capped at the Coin Case's 9,999).
+    pub fn debug_set_coins(&mut self, coins: u16) {
+        let bytes = to_bcd(coins.min(9_999) as u32, 2);
+        for (i, b) in bytes.iter().enumerate() {
+            self.mmu_mut().write(pokered_symbols::wPlayerCoins.address + i as u16, *b);
+        }
+    }
+
     /// Put `qty` of `item` in the bag, or top up the stack if it is already there.
     pub fn debug_give_item(&mut self, item: ItemId, qty: u8) -> Result<(), String> {
         self.debug_give_item_id(item as u8, qty)

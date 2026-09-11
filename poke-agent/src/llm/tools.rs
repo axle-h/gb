@@ -151,6 +151,10 @@ pub enum FieldMoveRequest {
     UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp, item: ItemId, qty: u8 },
     /// Ride the lift the player is standing in to `to`.
     UseElevator { to: Map },
+    /// Board the Pokémon in `deposit` at the Day Care, or collect the one boarded.
+    DayCare { deposit: Option<u8> },
+    /// Buy `prize` with coins in the Game Corner's prize room.
+    RedeemPrize { prize: crate::pokemon::postgame::game_corner::Prize },
 }
 
 /// The badge each HM needs outside battle, from `.outOfBattleMovePointers` in
@@ -355,6 +359,50 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             // A withdrawal reads PC storage, not the bag, so only a deposit asks `held`.
             if matches!(op, PcItemOp::Deposit) { held(*item)?; }
             FieldMove::UseItemPc { op: *op, item: *item, qty: *qty, pc }
+        }
+        FieldMoveRequest::DayCare { deposit } => {
+            use crate::pokemon::postgame::gifts::{pick, PartyScript};
+            if state.map.map != Map::Daycare {
+                return Err("The Day Care is the house on Route 5, and this is done inside it, facing \
+                            the gentleman.".to_string());
+            }
+            match deposit {
+                Some(_) if state.day_care_in_use => return Err(
+                    "The Day Care is already boarding a Pokémon, and it takes one at a time: \
+                     `withdraw` it first.".to_string()),
+                Some(_) if state.pokemon.len() < 2 => return Err(
+                    "The gentleman will not take the only Pokémon you have with you.".to_string()),
+                None if !state.day_care_in_use => return Err(
+                    "Nothing is boarded at the Day Care, so there is nothing to collect.".to_string()),
+                None if state.pokemon.len() >= 6 => return Err(
+                    "The party is full, so a boarded Pokémon has nowhere to come back to.".to_string()),
+                _ => {}
+            }
+            let slot = match deposit { Some(slot) => party_slot(*slot)?, None => 0 };
+            if deposit.is_some()
+                && let Some(hm) = state.pokemon.get(slot as usize).and_then(|mon| mon.moves.iter().flatten()
+                    .find(|m| HM_BADGES.iter().any(|(name, _)| *name == m.name)))
+            {
+                return Err(format!(
+                    "The gentleman says \"I can't accept a POKéMON that knows an HM move.\" The \
+                     Pokémon in slot {slot} knows {}.", hm.name));
+            }
+            pick(state, PartyScript::Daycare, slot)
+                .ok_or_else(|| "The gentleman cannot be reached from here.".to_string())?
+        }
+        FieldMoveRequest::RedeemPrize { prize } => {
+            if state.map.map != Map::GameCornerPrizeRoom {
+                return Err("Prizes are bought in the Game Corner's prize room, beside it in \
+                            Celadon City, and this is done inside it.".to_string());
+            }
+            held(ItemId::CoinCase).map_err(|_| "Coins need the COIN CASE, which the Celadon \
+                                               Diner's gym guide gives away.".to_string())?;
+            if state.coins < prize.cost() {
+                return Err(format!(
+                    "{prize:?} costs {} coins and you have {}. The clerk in the Game Corner sells \
+                     50 coins for ¥1000.", prize.cost(), state.coins));
+            }
+            FieldMove::RedeemPrize { prize: *prize }
         }
         FieldMoveRequest::UseElevator { to } => {
             let Some((panel, floors)) = crate::pokemon::tile_map::elevator_for(state.map.map) else {
@@ -941,6 +989,9 @@ fn use_field_move_spec() -> ToolSpec {
              between the bag and PC storage. The bag holds only 20 kinds.\n\
              - `elevator` — inside a lift, ride it to `map`. The three lifts are in the Rocket \
              Hideout, Celadon Mart and Silph Co.\n\
+             - `day_care` — in the Day Care, `op` `deposit` boards `slot`; `withdraw` pays and \
+             collects.\n\
+             - `prize` — in the prize room, buy `item` with coins.\n\
              Cutting a tree, pushing a boulder and mounting Surf are not here: each of the three is \
              a walk with one legal ending, so the walk does it. A `:CutTree` row cuts the tree it \
              walks up to, a `:PushBoulder…` row names a boulder and a target and does the whole \
@@ -990,7 +1041,7 @@ fn field_move_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = PARTY_MOVES.iter().map(|(name, _, _)| *name).collect();
     names.extend([
         "fly", "teach", "evolve", "use_item", "toss_item", "reorder_party",
-        "pc_pokemon", "pc_items", "elevator",
+        "pc_pokemon", "pc_items", "elevator", "day_care", "prize",
     ]);
     names
 }
@@ -1524,6 +1575,19 @@ fn field_move_arguments(arguments: &Value) -> Result<FieldMoveRequest, String> {
                 .ok_or_else(|| format!("`{name}` is not a map. The lift's own panel lists the floors it serves."))
         }
         "reorder_party" => Ok(FieldMoveRequest::ReorderParty { slot: slot()? }),
+        "day_care" => match string_argument(arguments, "op")?.trim().to_ascii_lowercase().as_str() {
+            "deposit" => Ok(FieldMoveRequest::DayCare { deposit: Some(slot()?) }),
+            "withdraw" => Ok(FieldMoveRequest::DayCare { deposit: None }),
+            other => Err(format!("`{other}` is not a Day Care operation: deposit or withdraw.")),
+        },
+        "prize" => {
+            let name = string_argument(arguments, "item")?;
+            crate::pokemon::postgame::game_corner::Prize::named(&name)
+                .map(|prize| FieldMoveRequest::RedeemPrize { prize })
+                .ok_or_else(|| format!(
+                    "`{name}` is not a prize. The counter sells Abra, Clefairy, Nidorina, Dratini, \
+                     Scyther and Porygon, and TM23, TM15 and TM50."))
+        }
         other => Err(format!(
             "`{other}` is not one of the field moves. They are: {}.",
             field_move_names().join(", "),
@@ -1732,6 +1796,11 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
         }
         MetaTile::ConnectionWater(to_map) => format!("surf into {to_map}"),
         MetaTile::Grass => "walk into tall grass to find wild Pokémon".to_string(),
+        // Where there is no grass, as a cave's floor and the sea's surface roll the same.
+        MetaTile::Pace { water: false } =>
+            "walk up and down this floor to find wild Pokémon: here any floor rolls them".to_string(),
+        MetaTile::Pace { water: true } =>
+            "surf up and down on this water to find wild water Pokémon".to_string(),
         MetaTile::Pc => "use the PC".to_string(),
         // One press of A each; what it does is the cartridge's business.
         MetaTile::Switch { object, ordinal } => {
@@ -1741,6 +1810,17 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
                 HiddenObject::Poster => "look behind the poster",
                 HiddenObject::Statue => "press this statue's switch",
                 HiddenObject::CellSeparator => "run the cell separator to turn Bill back into a person",
+                HiddenObject::Quiz { yes } => {
+                    let question = crate::pokemon::tile_map::CINNABAR_QUIZ_MACHINES.iter()
+                        .find(|(x, y, _)| crate::pokemon::tile_map::hidden_objects_for(state.map.map)
+                            .get(ordinal as usize - 1)
+                            .is_some_and(|site| (site.at.x, site.at.y) == (*x, *y)))
+                        .map_or("", |(_, _, question)| question);
+                    return format!(
+                        "answer {} to this quiz machine's question, \"{question}\" Right, and its gate \
+                         opens; wrong, and a trainer battles you (you stand at ({}, {}))",
+                        if yes { "YES" } else { "NO" }, action.destination.x, action.destination.y);
+                }
             };
             match crate::pokemon::tile_map::hidden_objects_for(state.map.map)
                 .get(ordinal as usize - 1) {
@@ -2381,7 +2461,7 @@ mod tests {
     fn the_tool_array_stays_within_its_budget() {
         // Overworld is the big one: it carries `use_field_move`.
         for (kind, ceiling) in [
-            (DecisionKind::Overworld, 12_975),
+            (DecisionKind::Overworld, 13_075),
             (DecisionKind::Battle, 5_575),
             (DecisionKind::Nickname, 4_075),
             (DecisionKind::MartPurchase, 4_825),

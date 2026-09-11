@@ -25,7 +25,7 @@ pub enum Intent {
 
 impl Intent {
     /// Whether the situation says this intent is already satisfied, so no turn is spent.
-    fn satisfied_by(&self, request: &TurnRequest) -> bool {
+    pub(crate) fn satisfied_by(&self, request: &TurnRequest) -> bool {
         match self {
             Self::Enter(map) => request.location().as_deref() == Some(map),
             Self::Repeat(fragment) => !request.menu_rows().iter()
@@ -37,7 +37,7 @@ impl Intent {
     }
 
     /// The id that carries this intent out, or `None` if the menu does not offer one.
-    fn resolve(&self, request: &TurnRequest) -> Option<String> {
+    pub(crate) fn resolve(&self, request: &TurnRequest) -> Option<String> {
         let rows = request.menu_rows();
         match self {
             Self::Wait => None,

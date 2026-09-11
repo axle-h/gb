@@ -39,6 +39,8 @@ pub struct MapMetadata {
     pub meta_tiles_base: Vec<MetaTile>,
     /// Bottom-left raw tile id of each meta-tile, the sub-tile the cartridge's collision check reads.
     pub raw_tile_ids: Vec<u8>,
+    /// Bottom-right raw tile id of each meta-tile, the one `TryDoWildEncounter` compares.
+    pub encounter_tile_ids: Vec<u8>,
 }
 
 impl std::fmt::Debug for MapMetadata {
@@ -201,6 +203,11 @@ impl MapMetadata {
     }
 
     pub fn build_raw_tile_ids(&self) -> Vec<u8> {
+        self.build_tile_ids(0)
+    }
+
+    /// The sub-tile `column` along each meta-tile's bottom row.
+    fn build_tile_ids(&self, column: usize) -> Vec<u8> {
         let dimensions = self.dimensions();
         let exp_width  = dimensions.full_width();
         let exp_height = dimensions.full_height();
@@ -212,7 +219,7 @@ impl MapMetadata {
             let my = tile_y / Self::TILES_PER_META + dimensions.north_extra;
             for tile_x in (0..width_tiles).step_by(Self::TILES_PER_META) {
                 let mx = tile_x / Self::TILES_PER_META + dimensions.west_extra;
-                ids[mx + my * exp_width] = self.tile_id(tile_x, tile_y);
+                ids[mx + my * exp_width] = self.tile_id(tile_x + column, tile_y);
             }
         }
         ids
@@ -606,6 +613,7 @@ impl MapMetadataCache {
             player_direction: PlayerFacingDirection::from_repr(player_direction_raw)
                 .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?,
             grass_encounter_rate: mmu.read_pointer(&pokered_symbols::wGrassRate),
+            water_encounter_rate: mmu.read_pointer(&pokered_symbols::wWaterRate),
             closed_doors: closed_door_blocks(mmu, map),
             script_cancelled_warps: script_cancelled_warps(mmu, map),
             standing_on_warp: mmu.read_pointer(&pokered_symbols::wMovementFlags) & BIT_STANDING_ON_WARP != 0,
@@ -656,6 +664,7 @@ impl MapMetadataReader for MMU {
                 player_direction: PlayerFacingDirection::from_repr(player_direction_raw)
                     .ok_or_else(|| format!("Invalid player facing direction {}", player_direction_raw))?,
                 grass_encounter_rate: self.read_pointer(&pokered_symbols::wGrassRate),
+                water_encounter_rate: self.read_pointer(&pokered_symbols::wWaterRate),
                 closed_doors: closed_door_blocks(self, map),
                 script_cancelled_warps: script_cancelled_warps(self, map),
                 standing_on_warp: self.read_pointer(&pokered_symbols::wMovementFlags) & BIT_STANDING_ON_WARP != 0,
@@ -726,10 +735,11 @@ impl MapMetadataInternals for MMU {
             talking_over_tiles: ts.talking_over_tiles, warp_events, is_water_tileset,
             grass_tile_id: ts.grass_tile, connected_strips, ledge_tiles, tile_pair_collisions,
             tile_pair_collisions_water,
-            meta_tiles_base: Vec::new(), raw_tile_ids: Vec::new(),
+            meta_tiles_base: Vec::new(), raw_tile_ids: Vec::new(), encounter_tile_ids: Vec::new(),
         };
         metadata.meta_tiles_base = metadata.build_meta_tiles_base();
         metadata.raw_tile_ids = metadata.build_raw_tile_ids();
+        metadata.encounter_tile_ids = metadata.build_tile_ids(1);
         Ok(metadata)
     }
 
@@ -1115,6 +1125,8 @@ pub struct CurrentMap {
     pub closed_doors: Vec<DoorBlock>,
     /// `wGrassRate`, out of 256; zero in every town, whose tall grass still looks ordinary.
     pub grass_encounter_rate: u8,
+    /// `wWaterRate`, out of 256, rolled on water tile `$14` while surfing.
+    pub water_encounter_rate: u8,
     /// On a Silph Co floor without the Card Key, whose door tiles are then walls.
     pub card_key_locked: bool,
     /// False mid-transition, while `wCurMap` names the map being entered and all else belongs to the
@@ -1286,6 +1298,7 @@ mod test {
             metadata: Arc::new(map),
             closed_doors: vec![],
             grass_encounter_rate: 0,
+            water_encounter_rate: 0,
             card_key_locked: false,
             header_loaded: true,
             surfing: false,
@@ -1379,6 +1392,7 @@ mod test {
             metadata: Arc::new(metadata),
             closed_doors: vec![],
             grass_encounter_rate: 0,
+            water_encounter_rate: 0,
             card_key_locked: false,
             header_loaded: true,
             surfing: false,
