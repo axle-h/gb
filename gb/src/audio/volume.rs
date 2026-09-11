@@ -1,19 +1,16 @@
 use bincode::{Decode, Encode};
 
-/// NRX2 - Volume and Envelope Register
-/// This register controls the digital amplitude of the “high” part of the pulse, and the sweep applied to that setting.
+/// NRX2 - Volume and Envelope Register This register controls the digital amplitude of the “high”
+/// part of the pulse, and the sweep applied to that setting.
 #[derive(Debug, Clone, Default, Eq, PartialEq, Decode, Encode)]
 pub struct VolumeAndEnvelopeRegister {
-    /// bits 4-7: Initial volume:
-    /// How loud the channel initially is.
-    /// Note that these bits are readable, but are not updated by the envelope functionality!
+    /// Bits 4-7: Initial volume: How loud the channel initially is.
     initial_volume: u8,
-    /// bit 3: Envelope direction:
-    /// The envelope’s direction; 0 = decrease volume over time, 1 = increase volume over time.
+    /// Bit 3: Envelope direction: The envelope’s direction; 0 = decrease volume over time, 1 =
+    /// increase volume over time.
     envelope_direction: bool,
-    /// bits 0-2: Envelope sweep pace:
-    /// The envelope ticks at 64 Hz, and the channel’s envelope will be increased / decreased (depending on bit 3) every Sweep pace of those ticks.
-    /// A setting of 0 disables the envelope.
+    /// Bits 0-2: Envelope sweep pace: The envelope ticks at 64 Hz, and the channel’s envelope
+    /// will be increased / decreased (depending on bit 3) every Sweep pace of those ticks.
     sweep_pace: u8,
 }
 

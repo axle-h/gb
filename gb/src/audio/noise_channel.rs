@@ -7,8 +7,7 @@ use crate::cycles::MachineCycles;
 
 #[derive(Debug, Clone, Eq, PartialEq, Decode, Encode)]
 pub struct NoiseChannel {
-    /// NR41 length timer
-    /// bits 0-5 Initial length timer
+    /// NR41 length timer bits 0-5 Initial length timer
     initial_length_timer: u8,
     length_timer: LengthTimer,
 
@@ -20,7 +19,7 @@ pub struct NoiseChannel {
     lfsr_width: bool, // bit 3 LFSR width (0=15 bits, 1=7 bits)
     clock_divider: u8, // bits 0-2 Dividing ratio of frequencies (0-7)
 
-    /// internal state
+    /// Internal state
     active: bool,
     lfsr: u16, // 15-bit LFSR
     counter: u32,
@@ -52,7 +51,7 @@ impl NoiseChannel {
     pub fn set_nr41_length_timer(&mut self, value: u8) {
         self.initial_length_timer = value & 0x3F; // Bits 0-5
 
-        // the length timer can be reset at any time
+        // The length timer can be reset at any time
         self.length_timer.reset(self.initial_length_timer);
     }
 
@@ -78,7 +77,7 @@ impl NoiseChannel {
     }
 
     pub fn nr44_control(&self) -> u8 {
-        // only bit 6 is readable, all other bits read as 1
+        // Only bit 6 is readable, all other bits read as 1
         if self.length_timer.enabled() { 0xFF } else { 0xBF }
     }
 
@@ -116,7 +115,7 @@ impl NoiseChannel {
     }
 
     pub fn trigger(&mut self, frame_sequencer: &FrameSequencer) {
-        // the length timer is still triggered even when the dac is disabled.
+        // The length timer is still triggered even when the dac is disabled.
         self.length_timer.trigger(frame_sequencer);
         self.envelope_function.trigger();
         self.lfsr = 0x7FFF; // reset LFSR to all 1s
@@ -125,7 +124,7 @@ impl NoiseChannel {
     }
 
     pub fn update(&mut self, delta: MachineCycles, events: FrameSequencerEvent) {
-        // disabled channels still clock the length counter
+        // Disabled channels still clock the length counter
         if events.is_length_counter() {
             self.length_timer.clock(&mut self.active);
         }
@@ -139,17 +138,11 @@ impl NoiseChannel {
             self.envelope_function.clock();
         }
 
-        // Clock shifts 14 and 15 are not used by hardware: the LFSR simply stops advancing. Left
-        // running, `compute_clock_period` shifts the divisor far enough to make the channel emit
-        // a stuck DC level rather than falling silent.
+        // Clock shifts 14 and 15 are not used by hardware: the LFSR simply stops advancing.
         if self.clock_shift >= 14 {
             return;
         }
 
-        // C3: count the LFSR steps in closed form rather than walking the window one M-cycle at a
-        // time. The shift itself is inherently sequential, but the *counting* was the cost — the
-        // old loop ran once per M-cycle whether or not the divisor had elapsed, and the shortest
-        // divisor here is two M-cycles.
         let ticks = delta.m_cycles() as u32;
         if ticks < self.counter {
             self.counter -= ticks;

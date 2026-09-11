@@ -1,5 +1,5 @@
 //! One LCD frame and one encoded video message: the two types the emulator→UI buffers in
-//! [`crate::published`] need from the video path. The codec itself lives with the server.
+//! [`crate::published`] need from the video path.
 
 use gb::lcd_palette::LcdColor;
 use gb::ppu::{LCD_HEIGHT, LCD_WIDTH};
@@ -13,7 +13,7 @@ pub type Frame = [LcdColor; PIXELS];
 /// against a keyframe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Encoded {
-    /// Monotonic and **not** wrapped — the wire field is `u16`, but a late joiner compares sequence
+    /// Monotonic and not wrapped — the wire field is `u16`, but a late joiner compares sequence
     /// numbers to decide what to discard, and that comparison is wrong across a `u16` wrap (~36
     /// minutes at 30 fps).
     pub seq: u64,

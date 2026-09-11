@@ -1,25 +1,3 @@
-//! **C1** — the cheats a driver applies **between** agent ticks, so a coverage run can reach the
-//! whole game without playing eight gyms first.
-//!
-//! `docs/coverage-plan.md` §3. The line this file is on the right side of is
-//! [`postgame::debug`](crate::pokemon::postgame::debug)'s:
-//!
-//! - **Play path** — anything reachable from `Policy::pick_*`: button input only, no exceptions.
-//! - **Debug tier** — free to write RAM, for building fixtures and seeding tests.
-//!
-//! ⚠️ **Everything here is the *driver*, never the policy**, and that is what makes a finding from a
-//! cheated run trustworthy. [`Cheats::apply`] is called from the test loop between
-//! `PokemonAgent::run` calls; the policy sees the result only through an ordinary `GameState`, and
-//! `LlmPolicy` is byte-identical to the deployed one. A jam a cheated run walks into is a jam a
-//! paying run would have walked into.
-//! `play_path_contains_no_debug_ram_writes` still passes unchanged, and must keep doing so.
-//!
-//! ⚠️ **The story is played rather than skipped.** Nothing here writes `wEventFlags`. Setting them
-//! wholesale desynchronises scripts from map objects — an NPC whose flag says "gone" while the
-//! object is still in the map, a door whose script has already run — and every stall found in such a
-//! save is a false positive that costs a day to disbelieve. The badges are the one wholesale write,
-//! and [`PokemonApi::debug_set_badges`](crate::pokemon::PokemonApi::debug_set_badges) argues that
-//! one on the ground that a badge is a capability rather than an event.
 
 use crate::pokemon::badge::Badge;
 use crate::pokemon::item::ItemId;
@@ -31,14 +9,6 @@ use crate::pokemon::symbols::{DmgPointerRead, pokered_symbols};
 use crate::pokemon::{GameState, PokemonApi};
 
 /// What the god party's fighter knows.
-///
-/// ⚠️ **Four attacks and a type chart, not one move.** `battle.fight` picks from what is known, and a
-/// Psychic-only Mewtwo gives a battle script exactly one legal choice — which tests nothing about
-/// move selection, and move selection is most of what a script is for. `docs/coverage-plan.md` §3.3.
-///
-/// ⚠️ **And no HM on the fighter.** An HM is the one move `pick_move_to_forget` will never drop, so
-/// teaching one spends a permanent slot in the only Pokémon that attacks. The slaves below carry
-/// them instead.
 const FIGHTER_MOVES: [PokemonMoveName; 4] = [
     PokemonMoveName::Psychic,
     PokemonMoveName::Blizzard,
@@ -46,9 +16,8 @@ const FIGHTER_MOVES: [PokemonMoveName; 4] = [
     PokemonMoveName::Earthquake,
 ];
 
-/// The four HMs the **action menu** gates rows on: a cuttable tree, a water crossing, a boulder
-/// push, and a dark floor. Without all four, whole regions of the map never appear as a row at all
-/// and a coverage walk cannot tell "gated" from "not there".
+/// The four HMs the action menu gates rows on: a cuttable tree, a water crossing, a boulder push,
+/// and a dark floor.
 const TERRAIN_MOVES: [PokemonMoveName; 4] = [
     PokemonMoveName::Cut,
     PokemonMoveName::Surf,
@@ -56,12 +25,6 @@ const TERRAIN_MOVES: [PokemonMoveName; 4] = [
     PokemonMoveName::Flash,
 ];
 
-/// ⚠️ **A third member, where `docs/coverage-plan.md` §3.3 asked for two — and the plan is the thing
-/// that was wrong.** Gen 1 has **five** HMs and a Pokémon has four move slots, so "a second slot for
-/// the HM slave" cannot hold them all. Fly is the one that does not fit, and it is not droppable
-/// either: it is the only field move that *travels*, so a walk without it can never reach a map
-/// whose only other approach is gated. One more party slot is free (six are allowed and three are
-/// used); an unreachable third of the world is not.
 const FLIGHT_MOVES: [PokemonMoveName; 4] = [
     PokemonMoveName::Fly,
     PokemonMoveName::WingAttack,
@@ -70,29 +33,6 @@ const FLIGHT_MOVES: [PokemonMoveName; 4] = [
 ];
 
 /// The key items a coverage walk needs in the bag before the *overworld* is fully offered to it.
-///
-/// ⭐ **Every one of these is a map or an action the game withholds until you carry it**, and
-/// `MetaTileMap::actions()` is right to withhold the row with it — an action the cartridge would
-/// silently decline is worse than no action. So a walk meant to reach everywhere has to be given
-/// them, exactly as it is given the badges.
-///
-/// - the three **rods**, because `actions()` gates a `MetaTile::Fish` row on
-///   `Rod::best_in_bag`: with no rod in the bag there is no fishing row anywhere in the game, which
-///   is why C3's first walks found none;
-/// - the **Bicycle**, for Cycling Road, whose gates refuse a walker;
-/// - the **Poké Flute**, for the Snorlax asleep across Routes 12 and 16;
-/// - the **Silph Scope**, without which Pokémon Tower's ghosts are unbattleable and its upper
-///   floors unreachable;
-/// - the **Card Key** for Silph Co's locked floors, the **Lift Key** for the Rocket Hideout's
-///   elevator, the **Secret Key** for Cinnabar Gym and the **S.S. Ticket** for the S.S. Anne;
-/// - the **Item Finder**, the **Coin Case**, the **Gold Teeth** and the **Town Map**, which are the
-///   remaining conversation gates.
-///
-/// ⚠️ **These are given, not earned, and that is a deliberate widening of §1.2's rule.** The story
-/// is still *played* — no event flag is written — but a walk that had to earn the Silph Scope before
-/// it could look at Pokémon Tower would spend its whole budget on the main quest and never get to
-/// the exhaustive part, which is the thing being measured. What this cannot hide is a row the agent
-/// cannot execute: that is still a defect wherever it appears.
 pub const COVERAGE_KEY_ITEMS: [ItemId; 14] = [
     ItemId::OldRod, ItemId::GoodRod, ItemId::SuperRod,
     ItemId::Bicycle, ItemId::PokeFlute, ItemId::SilphScope,
@@ -101,19 +41,13 @@ pub const COVERAGE_KEY_ITEMS: [ItemId; 14] = [
 ];
 
 /// The sidecar. Built once, [`Self::apply`]-ed between ticks, and idempotent — every field is a
-/// *state to hold the game in* rather than an action to take, so it can be re-applied fifty times a
-/// second and only write when the game has drifted off it.
+/// *state to hold the game in* rather than an action to take, so it can be re-applied fifty times
+/// a second and only write when the game has drifted off it.
 #[derive(Debug, Clone)]
 pub struct Cheats {
     /// Badges to hold the player at. `None` leaves `wObtainedBadges` alone.
     pub badges: Option<Badge>,
     /// Install the god party once the game has produced a party of its own.
-    ///
-    /// ⚠️ **Once, and only after the starter exists.** Oak's script is one of the things being
-    /// tested, and overwriting the party before it runs is the class of cheat §1.2 rules out — so
-    /// this waits for a non-empty party and then replaces it. What the player chose is kept: it goes
-    /// behind the god party rather than being thrown away, so the save still shows which branch of
-    /// the script ran.
     pub god_party: bool,
     /// Top the party up to full HP and PP whenever it is safe to.
     pub keep_healthy: bool,
@@ -122,35 +56,17 @@ pub struct Cheats {
     /// How many times a top-up actually wrote something, for a test that wants to prove the gate
     /// below is doing work rather than never being reached.
     pub top_ups: u32,
-    /// How many times [`Self::apply`] was called while it was not safe to write the party.
     pub refused_in_battle: u32,
     /// Key items to hold in the bag, and how much money to hold. `None` leaves the bag alone.
-    ///
-    /// ⚠️ **Given once rather than held every tick.** The bag is a list the player reorders and
-    /// spends from, so re-writing it every tick would undo a purchase the run had just made and make
-    /// every mart row untestable. See [`COVERAGE_KEY_ITEMS`].
     pub key_items: Option<u32>,
     /// Whether the bag has been stocked yet.
     pub stocked: bool,
-    /// Key items that would not fit, by name. ⚠️ **Reported rather than fatal**: the bag holds
-    /// twenty *kinds* and a finished save arrives nearly full, so a walk that cannot be handed a
-    /// Bicycle is a walk that cannot reach Cycling Road — a coverage gap worth printing, not a
-    /// reason to fail before the run has taken a single step.
-    ///
-    /// ⭐ **It was a count, and a count is not actionable.** Nothing printed it at all until
-    /// 2026-09-09, and when the walk's summary finally did, every one of the eight starts turned
-    /// out to be refusing between **one and nine** of them — the rods, the S.S. Ticket, the Lift
-    /// Key, the Coin Case, the Silph Scope — which was most of `docs/coverage-plan.md`'s list of
-    /// maps no walk had ever entered. Room is made for them now; see [`Cheats::bag_was_shed`]. Which ones is the whole of that finding, so it says which.
+    /// Key items that would not fit, by name. Reported rather than fatal: the bag holds twenty
+    /// *kinds* and a finished save arrives nearly full, so a walk that cannot be handed a Bicycle
+    /// is a walk that cannot reach Cycling Road — a coverage gap worth printing, not a reason to
+    /// fail before the run has taken a single step.
     pub bag_was_full: Vec<crate::pokemon::item::ItemId>,
     /// What was dropped from the bag to make room for [`COVERAGE_KEY_ITEMS`], as raw ids.
-    ///
-    /// ⭐ **The other half of `bag_was_full`, and the reason that counter finally reads zero.** A
-    /// finished save carries fourteen to twenty of Gen 1's twenty bag *kinds* — the five HMs, four
-    /// junk TMs, a fossil, the stat items, spare Revives — none of which a cheated walk can use,
-    /// because the god party is written straight into the party struct and never teaches anything.
-    /// So the junk is shed before the key items go in, and this says what went: a walk that later
-    /// turns out to have needed one of these can see which start dropped it.
     pub bag_was_shed: Vec<u8>,
 }
 
@@ -179,21 +95,7 @@ impl Cheats {
         self
     }
 
-    /// Applied by the driver between ticks. **Never from `pick_*`.**
-    ///
-    /// ⚠️ **Top up in the overworld only, never in a battle.** Gen 1 copies the active party member
-    /// into `wBattleMon` on send-out and writes it back on switch-out, so a party-struct write
-    /// mid-battle desynchronises the two — and the symptom is a Pokémon that heals and then
-    /// un-heals on the next switch, which looks like an emulator bug and is not.
-    ///
-    /// ⚠️ **And not during the black-out window either.** `wIsInBattle == `[`LOST_BATTLE`] is written
-    /// by the overworld loop *before* `HandleBlackOut` fades, halves the money, heals the party and
-    /// warps the player — so for the whole of that sequence there is no battle and the party is
-    /// about to be rewritten by the cartridge. Healing into it is a write the game then throws away,
-    /// and installing a party into it is worse.
-    ///
-    /// The badge write has neither constraint: it is one byte nothing else in the game is holding a
-    /// copy of.
+    /// Applied by the driver between ticks. Never from `pick_*`.
     pub fn apply(&mut self, api: &mut PokemonApi<'_>, state: &GameState) {
         if let Some(badges) = self.badges {
             if state.badges != badges {
@@ -213,32 +115,14 @@ impl Cheats {
             }
         }
 
-        // The bag, once the game has one to write into. Same "wait for the cartridge" rule the god
-        // party follows: a fresh save has no bag until Oak's script has run.
+        // The bag, once the game has one to write into.
         if let Some(money) = self.key_items
             && !self.stocked
             && state.pokemon.len() > 0
         {
-            // ⭐ **Room first, and it is the whole of `docs/coverage-plan.md` step 6's first
-            // job.** Gen 1's bag holds twenty *kinds* and every one of the eight coverage starts
-            // arrives with fourteen to twenty of them used, so the loop below used to have between
-            // one and nine of its fourteen key items refused — and *which* ones depended on which
-            // finished save the walk started from, which is the worst possible shape for a
-            // coverage gap: no S.S. Ticket is the whole of the S.S. Anne, no Lift Key is the
-            // Rocket Hideout's four floors, no rod is every `Fish` row in the game, and nothing
-            // said so until `bag_was_full` was finally printed.
-            //
-            // ⚠️ **What is shed is everything the *walk* cannot use, which is not the same as
-            // everything the player earned.** The god party is written into the party struct
-            // directly, so the five HMs teach nothing; a walk never uses a TM, a stat item, a
-            // Revive or a fossil. What is left is a bag of exactly [`COVERAGE_KEY_ITEMS`], the
-            // same fourteen from all eight starts — which also leaves six slots free, and a walk
-            // with no free slot cannot pick an item up off the floor.
             self.bag_was_shed = api.debug_keep_only_items(&COVERAGE_KEY_ITEMS);
 
-            // ⚠️ **Only what is missing, and a full bag is still not a panic.** The line above
-            // makes room rather than guaranteeing it: a start whose bag holds twenty key items
-            // would still refuse, and `bag_was_full` is what would say so.
+            // Only what is missing, and a full bag is still not a panic.
             for item in COVERAGE_KEY_ITEMS {
                 if state.bag.iter().any(|held| held.id == item) {
                     continue;
@@ -265,8 +149,7 @@ impl Cheats {
                 != crate::pokemon::battle::LOST_BATTLE
     }
 
-    /// Whether anything in the party is short of full HP or PP. Checked rather than written blind,
-    /// because a write per tick is a write per tick.
+    /// Whether anything in the party is short of full HP or PP.
     fn needs_a_top_up(&self, state: &GameState) -> bool {
         state.pokemon.iter().any(|member| {
             member.current_hp < member.stats.hp
@@ -280,25 +163,20 @@ impl Cheats {
     }
 }
 
-/// The party a cheated run plays with: a fighter that cannot lose and the field moves that make the
-/// whole map reachable, with whatever the game itself produced kept behind them.
-///
-/// ⚠️ **The species of the two slaves is cosmetic and the moves are not.** This is a direct party
-/// write, so the cartridge never asks whether a Lapras could have learned Flash — but `UsedCut`,
-/// `UsedSurf`, `UsedStrength` and `UsedFlash` all search the party for a member that *knows* the
-/// move, and `MetaTileMap::actions` will not offer the row without one.
+/// The party a cheated run plays with: a fighter that cannot lose and the field moves that make
+/// the whole map reachable, with whatever the game itself produced kept behind them.
 pub fn god_party(state: &GameState) -> PokemonParty {
     let (name, id) = (state.name.clone(), state.player_id);
     let mut party = PokemonParty::default();
     let mut push = |species, nickname: &str, moves| {
-        // A party is six; three named members plus up to three carried over cannot overflow it, and
-        // the carried-over loop below stops at the cap anyway.
+        // A party is six; three named members plus up to three carried over cannot overflow it,
+        // and the carried-over loop below stops at the cap anyway.
         let _ = party.push(Pokemon::maxed(species, nickname, moves, name.clone(), id));
     };
     push(PokemonSpecies::Mewtwo, "MEWTWO", FIGHTER_MOVES);
     push(PokemonSpecies::Lapras, "TERRAIN", TERRAIN_MOVES);
     push(PokemonSpecies::Pidgeot, "FLIGHT", FLIGHT_MOVES);
-    // What the game produced, kept. It is the evidence that the story ran rather than being skipped.
+    // What the game produced, kept.
     for member in state.pokemon.iter() {
         if party.push(member.clone()).is_err() {
             break;
@@ -313,7 +191,7 @@ mod tests {
     use crate::pokemon::integration_tests::TestFixture;
     use std::time::Duration;
 
-    /// Every new primitive, written and read back **through the ordinary `GameState` path** — not
+    /// Every new primitive, written and read back through the ordinary `GameState` path — not
     /// through the symbol it wrote, which would only prove the write landed where the write went.
     #[test]
     fn the_debug_primitives_are_visible_to_everything_that_reads_the_game() {
@@ -326,18 +204,18 @@ mod tests {
         fixture.api().debug_set_badges(Badge::all());
         assert_eq!(fixture.game_state().badges, Badge::all(), "the badges did not reach `GameState`");
 
-        // A party to work on. The fixture's own is a fresh save's, which is empty.
+        // A party to work on.
         let state = fixture.game_state();
         fixture.api().debug_set_party(&god_party(&state)).expect("a party can be installed");
         let installed = fixture.game_state();
-        // The three named members lead, and whatever the fixture was already carrying follows them
-        // — kept deliberately, as the evidence that the story ran rather than being skipped.
+        // The three named members lead, and whatever the fixture was already carrying follows
+        // them — kept deliberately, as the evidence that the story ran rather than being skipped.
         assert!(installed.pokemon.len() >= 3, "the god party is at least its three named members");
         assert_eq!(installed.pokemon[0].species, PokemonSpecies::Mewtwo);
         assert_eq!(installed.pokemon.len(), 3 + state.pokemon.len().min(3), "the old party was not carried");
 
-        // ⚠️ The point of the three-member party: every field move the action menu gates a row on,
-        // plus the one that travels. This is the assertion that would fail if a slave lost a slot.
+        // The point of the three-member party: every field move the action menu gates a row on,
+        // plus the one that travels.
         for wanted in TERRAIN_MOVES.iter().chain(FLIGHT_MOVES.iter().take(1)) {
             assert!(
                 installed.pokemon.iter().any(|member| member
@@ -378,26 +256,13 @@ mod tests {
         fixture.api().debug_teach_move(0, 3, PokemonMoveName::Fly).expect("teaching works");
         let taught = fixture.game_state();
         assert_eq!(taught.pokemon[0].moves[3].expect("slot 3").name, PokemonMoveName::Fly);
-        // A slot or a member that is not there is an error rather than a silent no-op: a caller that
-        // believed a field move was available and was wrong has no way to find out otherwise.
+        // A slot or a member that is not there is an error rather than a silent no-op: a caller
+        // that believed a field move was available and was wrong has no way to find out
+        // otherwise.
         assert!(fixture.api().debug_teach_move(9, 0, PokemonMoveName::Cut).is_err());
         assert!(fixture.api().debug_teach_move(0, 9, PokemonMoveName::Cut).is_err());
     }
 
-    /// ⭐ **Step 6's first job, as an assertion rather than as a line in a sweep's summary.**
-    ///
-    /// Every coverage start is a real save the cartridge played to, so every one of them arrives
-    /// with fourteen to twenty of Gen 1's twenty bag *kinds* already used — and
-    /// [`COVERAGE_KEY_ITEMS`] is fourteen more. Before the shed in [`Cheats::apply`]
-    /// that meant between one and nine of them were refused, differently per start, and what they
-    /// gate is whole clusters of the map: the S.S. Anne's nine rooms, the Rocket Hideout's four
-    /// floors, the Game Corner's prize room, every `Fish` row in the game.
-    ///
-    /// ⚠️ **It asserts on the bag rather than on the shed list**, because the shed list is a
-    /// property of the fixtures and the fixtures get regenerated. What has to hold is that all
-    /// fourteen are in hand afterwards and that there is room left over — a walk with no free slot
-    /// cannot pick an item up off the floor, and a refused pickup reads from outside exactly like
-    /// a pickup that worked.
     #[test]
     fn every_coverage_start_can_be_handed_all_of_the_key_items() {
         use crate::pokemon::integration_tests::coverage::COVERAGE_STARTS;
@@ -410,7 +275,7 @@ mod tests {
             );
             let mut cheats = Cheats::default().with_key_items(999_999);
             let state = fixture.game_state();
-            // ⚠️ The gate `Cheats::apply` waits on: a fresh save has no bag until Oak's script has
+            // The gate `Cheats::apply` waits on: a fresh save has no bag until Oak's script has
             // run, so a start with no party would silently never be stocked at all.
             assert!(state.pokemon.len() > 0, "{}: a start has to have a party", start.name);
             cheats.apply(&mut fixture.api(), &state);
@@ -428,7 +293,7 @@ mod tests {
                     "{}: {item:?} is not in the bag after stocking", start.name,
                 );
             }
-            // Room left for what the walk finds on the floor. Fourteen kinds of twenty, so six.
+            // Room left for what the walk finds on the floor.
             let used = bag.iter().count();
             assert!(
                 used < crate::pokemon::bag::Bag::MAX_ITEMS,
@@ -437,7 +302,7 @@ mod tests {
         }
     }
 
-    /// **The gate in [`Cheats::apply`] is what keeps a cheated run honest**, so it gets its own test:
+    /// The gate in [`Cheats::apply`] is what keeps a cheated run honest, so it gets its own test:
     /// it must refuse to touch the party during a battle and during the black-out window, and it
     /// must still write the badges, which have neither constraint.
     #[test]
@@ -449,7 +314,8 @@ mod tests {
             Duration::from_secs(10),
             Box::new(crate::pokemon::policy::RandomPolicy::seeded(0)),
         );
-        // Step until the battle is actually readable — the fixture is captured a moment before it.
+        // Step until the battle is actually readable — the fixture is captured a moment before
+        // it.
         let mut ticks = 0;
         while fixture.try_game_state().map_or(true, |state| state.battle.is_none()) {
             fixture.step();
@@ -500,7 +366,8 @@ mod tests {
         let state = fixture.game_state();
         assert_eq!(state.pokemon[0].species, PokemonSpecies::Mewtwo);
         assert_eq!(state.badges, Badge::all());
-        // Idempotent: a party already at full HP and PP needs no further write, so the count settles.
+        // Idempotent: a party already at full HP and PP needs no further write, so the count
+        // settles.
         let settled = cheats.top_ups;
         for _ in 0..8 {
             let state = fixture.game_state();

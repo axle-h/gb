@@ -1,14 +1,4 @@
-//! **W4 / §7.1** — the HTTP half: one blocking `POST /chat/completions` with `stream: true`.
-//!
-//! `ureq` rather than `reqwest`, and blocking rather than async, for one reason: `Body::into_reader()`
-//! hands back a plain `impl Read`, so consuming the SSE stream is a `BufReader::lines()` loop on the
-//! worker's own thread. `reqwest::blocking` would start a second tokio runtime inside a process that
-//! already has one for `axum` and does not want the emulator anywhere near either.
-//!
-//! The retry policy lives here too but is **not** inside the client: [`stream_with_retries`] is a
-//! free function over the [`ChatEndpoint`] trait, so the mock server in the tests exercises the same
-//! backoff the real endpoint does, and so the sleep between attempts can be interrupted by the same
-//! cancellation signal that interrupts a stream.
+//! The HTTP half: one blocking `POST /chat/completions` with `stream: true`.
 
 use std::io::BufReader;
 use std::time::Duration;
@@ -20,15 +10,9 @@ use crate::llm::protocol::{
 };
 use crate::published::now_ms;
 
-/// One streamed chat completion. A trait so the worker can be driven by a scripted endpoint in tests
-/// without a socket, and so W6's accounting has one place to wrap.
+/// One streamed chat completion.
 pub trait ChatEndpoint: Send {
     /// Stream one completion.
-    ///
-    /// `on_delta` receives each [`Fragment`] — prose and reasoning on separate channels — as it
-    /// arrives. `cancelled` is consulted on every line of
-    /// the response — see §7.3: it is one of the two points a turn can be abandoned, and returning
-    /// [`LlmError::Cancelled`] drops the reader, which aborts the request.
     fn stream_completion(
         &self,
         request: &ChatRequest,
@@ -37,9 +21,7 @@ pub trait ChatEndpoint: Send {
     ) -> Result<Completion, LlmError>;
 }
 
-/// How long to wait for the endpoint to *start* answering. A completion itself has no deadline —
-/// a long one is a model thinking, not a fault — but a connection that never produces a first byte
-/// would otherwise hang the worker for the rest of the run.
+/// How long to wait for the endpoint to *start* answering.
 const TIMEOUT_CONNECT: Duration = Duration::from_secs(30);
 
 pub struct OpenAiClient {
@@ -51,15 +33,13 @@ pub struct OpenAiClient {
 impl OpenAiClient {
     pub fn new(config: &LlmConfig) -> Self {
         let agent: ureq::Agent = ureq::Agent::config_builder()
-            // ⚠️ Off, deliberately. ureq's default turns a 4xx into `Error::StatusCode` *and throws
-            // the body away* — and the body is where an OpenAI-compatible endpoint says which
-            // parameter it did not like, which is the single most useful thing in the whole error.
+            // Off, deliberately.
             .http_status_as_error(false)
             .timeout_connect(Some(TIMEOUT_CONNECT))
-            // Both deadlines are the same number and both are `GB_REQUEST_TIMEOUT_SECS`: one is how
-            // long the endpoint may take to *start* answering, the other the gap it may leave
-            // mid-answer, and an operator who has to lengthen one always means "be more patient with
-            // this endpoint" rather than one half of it.
+            // Both deadlines are the same number and both are `GB_REQUEST_TIMEOUT_SECS`: one is
+            // how long the endpoint may take to *start* answering, the other the gap it may leave
+            // mid-answer, and an operator who has to lengthen one always means "be more patient
+            // with this endpoint" rather than one half of it.
             .timeout_recv_response(Some(config.request_timeout))
             .timeout_recv_body(Some(config.request_timeout))
             .user_agent("gb-pokemon-agent/0.1")
@@ -91,12 +71,13 @@ impl ChatEndpoint for OpenAiClient {
             .header("Accept", "text/event-stream")
             // Identity, though `ureq` would decompress transparently: a compressed SSE body only
             // reaches us in whole decoder blocks, which turns a token-by-token stream into a
-            // sputtering one for no bandwidth worth having on a link carrying a video feed anyway.
+            // sputtering one for no bandwidth worth having on a link carrying a video feed
+            // anyway.
             .header("Accept-Encoding", "identity")
             .send(body)
             .map_err(|e| match e {
-                // The request is on the wire and the endpoint is sitting on it — not the same thing
-                // as never having reached it. See `LlmError::Timeout`.
+                // The request is on the wire and the endpoint is sitting on it — not the same
+                // thing as never having reached it.
                 ureq::Error::Timeout(_) => {
                     LlmError::Timeout(format!("POST {} was not answered: {e}", self.url))
                 }
@@ -105,10 +86,7 @@ impl ChatEndpoint for OpenAiClient {
 
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            // ⚠️ **Read before the body, because reading the body consumes the response.** The two
-            // headers are the whole of what makes a 429 actionable — without them a rate limit is
-            // just another failure to back off from, which against a daily quota is the one
-            // response that cannot work. See `LlmError::RateLimited`.
+            // Read before the body, because reading the body consumes the response.
             let header = |name: &str| {
                 response.headers().get(name).and_then(|value| value.to_str().ok()).map(str::to_owned)
             };
@@ -129,18 +107,15 @@ impl ChatEndpoint for OpenAiClient {
     }
 }
 
-// ── Retries ──────────────────────────────────────────────────────────────────────────────────────
+// ── Retries
+// ──────────────────────────────────────────────────────────────────────────────────────
 
-/// How finely the backoff sleep is chopped, so cancelling a turn during one is felt promptly rather
-/// than up to half a minute later.
+/// How finely the backoff sleep is chopped, so cancelling a turn during one is felt promptly
+/// rather than up to half a minute later.
 const SLEEP_SLICE: Duration = Duration::from_millis(50);
 
-/// Exponential backoff, capped. Deterministic — no jitter — because there is exactly one client in
-/// this process and jitter exists to de-correlate a fleet.
-///
-/// A struct rather than three constants so the tests can set `base` to zero. Sleeping for real in a
-/// unit test buys nothing: what is worth asserting is the *plan* the UI is shown, and a test that
-/// spends a second proving `Duration::from_secs(1)` has been added to every future `cargo test`.
+/// Exponential backoff, capped. Deterministic — no jitter — because there is exactly one client
+/// in this process and jitter exists to de-correlate a fleet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// Attempts, not retries: `1` would mean never retrying.
@@ -165,23 +140,20 @@ impl RetryPolicy {
 }
 
 /// What happened between two attempts, for the UI. A rate limit that resolves itself in eight
-/// seconds should still be *visible*: an invisible one looks like the model thinking slowly, and the
-/// two want completely different responses from whoever is watching.
+/// seconds should still be *visible*: an invisible one looks like the model thinking slowly, and
+/// the two want completely different responses from whoever is watching.
 pub struct Retry<'a> {
     pub attempt: u32,
     pub of: u32,
     pub waiting: Duration,
     pub failure: &'a LlmError,
-    /// Whether the failed attempt had already streamed prose into the UI, so the replacement's text
-    /// will read as a repetition unless the UI says a restart happened.
+    /// Whether the failed attempt had already streamed prose into the UI, so the replacement's
+    /// text will read as a repetition unless the UI says a restart happened.
     pub already_spoke: bool,
 }
 
 /// [`ChatEndpoint::stream_completion`] with exponential backoff on the transient failures — 429,
 /// 5xx, and a connection that broke.
-///
-/// Cancellation wins over retrying, both during a stream and during a backoff: a turn whose question
-/// is already stale should not be waiting sixteen seconds to ask it again.
 pub fn stream_with_retries(
     policy: RetryPolicy,
     endpoint: &dyn ChatEndpoint,
@@ -208,11 +180,10 @@ pub fn stream_with_retries(
         if attempt == policy.attempts || !failure.is_retryable() || cancelled() {
             return Err(failure);
         }
-        // ⚠️ **A dated rate limit is handed straight up rather than retried**, whenever the reset is
-        // further away than the backoff could ever reach. Retrying it is not merely useless, it is
-        // the failure making itself worse: every attempt is another request counted against the
-        // quota that has already run out, and on a daily cap all of them fail. The caller parks
-        // until the stated time instead — see `Worker::decide`.
+        // A dated rate limit is handed straight up rather than retried, whenever the reset is
+        // further away than the backoff could ever reach. Retrying it is not merely useless, it
+        // is the failure making itself worse: every attempt is another request counted against
+        // the quota that has already run out, and on a daily cap all of them fail.
         if let LlmError::RateLimited { resets_at_ms: Some(at), .. } = &failure {
             if *at > now_ms().saturating_add(policy.max.as_millis() as u64) {
                 return Err(failure);
@@ -311,8 +282,7 @@ mod tests {
         assert_eq!(policy.backoff_for(30), policy.max, "no overflow, and no unbounded wait");
     }
 
-    /// 429 then 200. The interesting part is not that it retried but that the UI was told — and told
-    /// that the reply it had already started reading is going to start again.
+    /// 429 then 200.
     #[test]
     fn a_rate_limit_is_retried_and_reported() {
         let endpoint = scripted("thinking…", vec![
@@ -340,11 +310,7 @@ mod tests {
         assert!(retries[0].3.contains("429"), "{}", retries[0].3);
     }
 
-    /// ⚠️ **The distinction the whole `RateLimited` variant exists for.** A daily quota is exhausted
-    /// and the endpoint said when it reopens: every retry is another request counted against that
-    /// same spent quota, so the backoff would spend four more of an allowance that has already run
-    /// out and fail four more times doing it. One attempt, and the deadline is handed up for
-    /// `Worker::park_until` to wait out.
+    /// The distinction the whole `RateLimited` variant exists for.
     #[test]
     fn a_rate_limit_dated_beyond_the_backoff_is_not_retried_at_all() {
         let hour_away = now_ms() + 60 * 60 * 1000;
@@ -366,10 +332,8 @@ mod tests {
         }
     }
 
-    /// The other half of the same rule: a limit that clears within the backoff, or one the endpoint
-    /// did not date at all, is the ordinary transient case and is still retried. Undated is far more
-    /// often a per-minute limit than a daily one, and parking a run for hours on a guess would be a
-    /// worse mistake than waiting a second.
+    /// The other half of the same rule: a limit that clears within the backoff, or one the
+    /// endpoint did not date at all, is the ordinary transient case and is still retried.
     #[test]
     fn a_rate_limit_within_reach_of_the_backoff_is_still_retried() {
         for resets_at_ms in [None, Some(now_ms() + 2_000)] {
@@ -385,8 +349,7 @@ mod tests {
         }
     }
 
-    /// A 400 is the request being wrong. Trying it four more times only spends four more seconds
-    /// being wrong.
+    /// A 400 is the request being wrong.
     #[test]
     fn a_client_error_is_not_retried() {
         let endpoint = scripted("", vec![Err(LlmError::Http { status: 400, message: "bad tool schema".into() })]);
@@ -408,8 +371,7 @@ mod tests {
         assert_eq!(endpoint.attempts.get(), 1, "no second attempt was made");
     }
 
-    /// The budget is finite. A permanently broken endpoint must stop the turn rather than hold the
-    /// policy at `None` forever, which the agent cannot distinguish from a model thinking.
+    /// The budget is finite.
     #[test]
     fn a_persistent_fault_gives_up_after_the_last_attempt() {
         let outcomes = (0..5).map(|_| Err(LlmError::Http { status: 503, message: "down".into() })).collect();

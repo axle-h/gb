@@ -44,8 +44,8 @@ pub mod actions;
 pub mod battle;
 pub mod observe;
 pub mod policy;
-/// **W4** — the `Policy` an LLM drives. Behind the `llm` feature, which is where its channel
-/// endpoints and the worker it talks to live.
+/// The `Policy` an LLM drives. Behind the `llm` feature, which is where its channel endpoints and
+/// the worker it talks to live.
 pub mod llm_policy;
 pub mod tile_map;
 pub mod encoding;
@@ -55,9 +55,6 @@ pub mod font;
 pub mod roms;
 mod text;
 pub mod map_header;
-// ⚠️ **W5 made these two public.** `ItemId` and `BagItem` are arguments the LLM tool layer parses —
-// `buy_item`, `use_field_move { teach, use_item, toss_item }` — and it lives outside `pokemon`, so
-// reaching them through `policy`'s one re-export would have meant re-exporting the other half too.
 pub mod item;
 pub mod item_use;
 pub mod bag;
@@ -88,82 +85,36 @@ pub trait PokemonApiTrait {
     fn game_mode(&self) -> Option<GameMode>;
     /// True when a trainer has engaged the player (e.g. via line of sight) and the battle is
     /// about to start, but `wIsInBattle` has not yet flipped to its trainer-battle value.
-    /// In this window the game initialises the battle on its own — the agent must NOT press
-    /// any button (a held direction wedges the engagement and a battle never starts).
-    /// Whether WRAM holds a game at all — `wPlayerID` is non-zero.
-    ///
-    /// ⭐ **The one signal that says the cartridge has been reset, as opposed to merely being
-    /// mid-transition.** `game_mode()` answers `None` through every screen change there is, so it
-    /// cannot tell a fade between two rooms from `jp Init`; this can, because `Init` clears WRAM and
-    /// `wPlayerID` is only written when a save is loaded or a new game is named. Measured through a
-    /// real ending: it holds its value for the whole Hall of Fame ceremony and the credits, and goes
-    /// to zero 169 s of game time later at the reset. [`PokemonAgent`](crate::pokemon::agent::PokemonAgent)
-    /// uses it to know when the world it was standing in has come back.
     fn a_game_is_loaded(&self) -> bool;
 
     fn trainer_battle_pending(&self) -> bool;
-    /// True while the player is inside a **PC menu that A-mashing cannot leave**.
-    ///
-    /// ⚠️ **Every PC menu in Gen 1 is a closed loop under A-only input**, and this is what escapes
-    /// them. Each one leaves only on B, and A on its resting cursor picks the first entry, which
-    /// bounces off a refusal message straight back to the menu with the cursor untouched:
-    ///
-    /// | Menu | Leaves on | A on the resting cursor | Bounces back via |
-    /// |---|---|---|---|
-    /// | `PCMainMenu` (`menus/pc.asm:12`) | `bit B_PAD_B / jp nz, LogOff` | `BillsPC` | see the row below |
-    /// | `BillsPCMenu` (`pokemon/bills_pc.asm`) | B | `WITHDRAW` | `NoMonText` on an empty box, `CantTakeMonText` on a full party (`:256`) |
-    /// | `PlayerPCMenu` (`menus/players_pc.asm:19`) | `jp nz, ExitPlayerPC` | `WITHDRAW ITEM` | nothing stored |
-    ///
-    /// Nothing in any of those cycles moves the cursor, so A never reaches `LOG OFF` or `SEE YA!`
-    /// either. An empty box is only the *first* way in, not the cause — a full party or a one-mon
-    /// party (`CantDepositLastMonText`) trap just as well.
-    ///
-    /// **Two checks, because there are two ways into a PC and only one of them sets a flag.**
-    /// `TextScript_PokemonCenterPC` goes through `ActivatePC`, which sets `wMiscFlags`'
-    /// `BIT_USING_GENERIC_PC` and clears it only in `LogOff` — so that covers the whole parent tree
-    /// including Bill's-PC submenus, where B is also what backs out a level at a time. But
-    /// `TextScript_ItemStoragePC` — the PC in Red's bedroom, eight tiles from a fresh save — calls
-    /// `PlayerPC` **directly** and deliberately leaves the flag clear (`players_pc.asm:11`, "accessing
-    /// it directly"). That one is caught by its screen instead: `LOG OFF` is the last entry of both
-    /// top-level PC menus and appears nowhere else in the game, which is the same match
-    /// [`postgame::pc_box`](crate::pokemon::postgame::pc_box) uses and for the same reason — the
-    /// first entry's *label* varies (`SOMEONE's PC` before `EVENT_MET_BILL`, `BILL's PC` after) but
-    /// `LOG OFF` never does.
+    /// True while the player is inside a PC menu that A-mashing cannot leave.
     fn in_pc_menu(&self) -> bool;
-    /// The player's **raw** map coordinates (`wXCoord`/`wYCoord`) — i.e. before the
-    /// connection-strip offsets that `MetaTileMap` adds to produce "expanded" coordinates.
-    /// These are the coordinate space warp `to_position`s and world-graph node keys use, so the
-    /// agent keys the incremental world graph by these when it lands on a new map.
+    /// The player's raw map coordinates (`wXCoord`/`wYCoord`) — i.e. before the connection-strip
+    /// offsets that `MetaTileMap` adds to produce "expanded" coordinates.
     fn raw_player_coords(&self) -> Point8;
     fn game_state(&self) -> Result<GameState, String>;
     fn on_screen_text(&self, only_message_box: bool) -> Option<String>;
     fn menu_state(&self) -> Option<MenuState>;
-    /// Currently-active list-menu template (`wListMenuID`). `0x04` (`SPECIALLISTMENU`) is the
-    /// elevator floor list / badge list. Used to drive the elevator floor menu, whose `wTextBoxID`
-    /// reads `MessageBox` (the "Which floor?" print) rather than `ListMenuBox`.
+    /// Currently-active list-menu template (`wListMenuID`).
     fn list_menu_id(&self) -> u8;
     /// Raw menu geometry `(top_menu_item_x, top_menu_item_y, current_item, scroll_offset)` read
-    /// directly from RAM, regardless of `wTextBoxID` (which the START menu leaves unset). Used to
-    /// detect/drive the START-menu → bag → use-item menus when teaching an HM.
+    /// directly from RAM, regardless of `wTextBoxID` (which the START menu leaves unset).
     fn menu_geometry(&self) -> (u8, u8, u8, u8);
     /// The list index of `item` in the bag as the game's item menu orders it — read from raw
-    /// `wBagItems` so it matches the on-screen list exactly (unlike `read_bag`, which drops item ids
-    /// not in the `ItemId` enum and so shifts every later index). Used to navigate the bag cursor.
+    /// `wBagItems` so it matches the on-screen list exactly (unlike `read_bag`, which drops item
+    /// ids not in the `ItemId` enum and so shifts every later index).
     fn bag_item_position(&self, item: ItemId) -> Option<u8>;
     /// What a mart charges for `item`, read straight out of the ROM's `ItemPrices` table
-    /// (`data/items/prices.asm` — three BCD bytes per item, in item-id order). `None` for an id the
-    /// table prices at zero, i.e. one no mart sells. Used to size a purchase to the wallet: the game
-    /// answers an unaffordable quantity with "You don't have enough money" and gives *nothing*, which
-    /// from outside is indistinguishable from a dropped confirm.
+    /// (`data/items/prices.asm` — three BCD bytes per item, in item-id order).
     fn item_price(&self, item: ItemId) -> Option<u32>;
     /// How many of `item` the bag holds (0 if absent), read from raw `wBagItems`.
     fn bag_item_quantity(&self, item: ItemId) -> u8;
-    /// The same two reads against **PC item storage** (`wNumBoxItems`/`wBoxItems`), which the
-    /// player's-PC deposit/withdraw list shows. Same `(id, quantity)` pair layout as the bag.
+    /// The same two reads against PC item storage (`wNumBoxItems`/`wBoxItems`), which the
+    /// player's-PC deposit/withdraw list shows.
     fn pc_box_item_position(&self, item: ItemId) -> Option<u8>;
     fn pc_box_item_quantity(&self, item: ItemId) -> u8;
-    /// Everything in PC item storage. `read_pc` answers with it, because a withdrawal names an item
-    /// and there is nowhere else the model could learn what is banked.
+    /// Everything in PC item storage.
     fn pc_stored_items(&self) -> Bag;
     /// Returns the species currently being named on the nickname-entry screen.
     fn naming_screen_species(&self) -> Result<PokemonSpecies, String>;
@@ -181,28 +132,13 @@ pub trait PokemonApiTrait {
     /// True when the pokemart buy-quantity selector is active (wMaxItemQuantity == 99).
     fn mart_in_quantity_selector(&self) -> bool;
 
-    /// Writes `value` to `wMaxItemQuantity` (used to clear the stale 99 before waiting for the
-    /// quantity selector to open, so we can detect the fresh write reliably).
     fn write_max_item_quantity(&mut self, value: u8);
 
-    /// Writes `nickname` (or an empty terminator for `None`) directly into the
-    /// naming screen's string buffer so pressing START submits it immediately.
+    /// Writes `nickname` (or an empty terminator for `None`) directly into the naming screen's
+    /// string buffer so pressing START submits it immediately.
     fn write_naming_screen_buffer(&mut self, nickname: Option<&str>) -> Result<(), String>;
 
     /// Rename the player, by writing `wPlayerName` directly.
-    ///
-    /// ⚠️ **There is no other way to do it, because nothing here ever sees the name screen.** A run
-    /// starts from `data::START_OF_GAME`, which is a save state captured in Red's bedroom — past
-    /// the title screen, past Oak's speech and past both name screens, with a name a human typed
-    /// once when the fixture was made. Everything before that point is invisible to the agent
-    /// anyway: `game_mode` returns `None` for the whole intro (`wPlayerName` still holds
-    /// `DebugNewGamePlayerName`), so `agent.update` answers `Err("Not in game")` and no policy is
-    /// ever asked anything.
-    ///
-    /// ⚠️ **Seven characters, not ten.** `naming_screen.asm` checks the length against
-    /// `PLAYER_NAME_LENGTH - 1` for a player or rival and `NAME_LENGTH - 1` for a Pokémon, so the
-    /// cap here is the game's own for this field — the storage is eleven bytes either way, and a
-    /// longer name would be one the game's own UI could never have produced.
     fn write_player_name(&mut self, name: &str) -> Result<(), String>;
 
     fn read_game_options(&self) -> Result<GameOptions, String>;
@@ -234,8 +170,9 @@ impl<'a> PokemonApi<'a> {
     pub fn pimp_out_pokemon(&mut self) -> Result<(), String> {
         let player_state = self.game_state()?;
 
-        // 19 items — deliberately one slot short of Bag::MAX_ITEMS (20) so the agent can still pick
-        // up ground items (e.g. the Mt Moon fossil, whose pickup fails with "no room" on a full bag).
+        // 19 items — deliberately one slot short of Bag::MAX_ITEMS (20) so the agent can still
+        // pick up ground items (e.g. the Mt Moon fossil, whose pickup fails with "no room" on a
+        // full bag).
         const EPIC_BAG: [BagItem; 19] = [
             BagItem::new(ItemId::Revive, 99),
             BagItem::new(ItemId::FullHeal, 99),
@@ -329,7 +266,6 @@ impl<'a> PokemonApi<'a> {
         );
         party.push(dragonite)?;
 
-
         let tauros = Pokemon::maxed(
             PokemonSpecies::Tauros,
             "TAUROS",
@@ -349,10 +285,9 @@ impl<'a> PokemonApi<'a> {
         mmu.write_player_pokemon_party(&party)
     }
 
-    /// Reorder the party so the member currently in `slot` becomes the lead (slot 0), shifting the
-    /// rest down. Written straight to RAM (species list + mon blocks + names), so no in-game party-menu
-    /// navigation is needed. Used to make a trained bench mon (e.g. Vaporeon) the battle lead so it
-    /// fights from the start of every battle and earns the XP without any in-battle switch-in.
+    /// Reorder the party so the member currently in `slot` becomes the lead (slot 0), shifting
+    /// the rest down. Written straight to RAM (species list + mon blocks + names), so no in-game
+    /// party-menu navigation is needed.
     pub fn move_party_member_to_front(&mut self, slot: usize) -> Result<(), String> {
         let mut party = self.mmu().read_player_pokemon_party()?;
         party.move_to_front(slot);
@@ -374,7 +309,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
     fn toggle_button(&mut self, button: JoypadButton) {
         let joypad = self.mmu_mut().joypad_mut();
         let pressed = !joypad.state().is_button_pressed(button);
-        // release all other buttons
+        // Release all other buttons
         for btn in JoypadButton::iter() {
             joypad.release_button(btn);
         }
@@ -399,26 +334,14 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             })
         }
 
-        // `BIT_ALWAYS_ON_BIKE` (wStatusFlags6 bit 5) is set while the player is forced onto the bike —
-        // i.e. on Cycling Road — and `IsSurfingAllowed` refuses Surf outright there
-        // (`engine/overworld/field_move_messages.asm:21-45`: *"Surfing isn't allowed on the Cycling
-        // Road…"*, answered with "Cycling is fun! Forget SURFing!"). It has to be part of `can_surf`
-        // because Routes 16–18 run **along the sea**: with Surf believed available, the BFS routes
-        // straight down the water rather than along the road, and the agent then stands on the last dry
-        // tile trying to mount Surf for the rest of the budget. Discovered riding Cycling Road for
-        // workstream B — see `docs/postgame-coverage-plan.md` §11.
+        // `BIT_ALWAYS_ON_BIKE` (wStatusFlags6 bit 5) is set while the player is forced onto the
+        // bike — i.e. on Cycling Road — and `IsSurfingAllowed` refuses Surf outright there
+        // (`engine/overworld/field_move_messages.asm:21-45`: *"Surfing isn't allowed on the
+        // Cycling Road…"*, answered with "Cycling is fun!
         const BIT_ALWAYS_ON_BIKE: u8 = 1 << 5;
         let forced_onto_bike = mmu.read_pointer(&pokered_symbols::wStatusFlags6) & BIT_ALWAYS_ON_BIKE != 0;
-        // The four Safari Zone areas are the other place Surf is refused, and the refusal is quieter
-        // than the Cycling Road's. Their tileset is `FOREST`, which `TilePairCollisionsWater` gives two
-        // rules for — `db FOREST, $14, $2E` and `db FOREST, $48, $2E`
-        // (`data/tilesets/pair_collision_tile_ids.asm:20-23`) — so a mount from the bank answers "No
-        // SURFing here!" and nothing happens. With `can_surf` left true the BFS treats the centre's
-        // pond as pass-through, and since a route across it can tie with the route around it, a plain
-        // walk to the *nearest grass tile* picks the water at random and the agent then re-issues a
-        // refused mount for the rest of the budget (workstream E; see `probe_safari_centre_from_the_
-        // entrance`). Treating the zone's water as a wall is also what the pre-existing Safari steps
-        // already assume — they cross Centre → East → North → West "the long way round".
+        // The four Safari Zone areas are the other place Surf is refused, and the refusal is
+        // quieter than the Cycling Road's.
         let mut map = MetaTileMap::new(&match &self.map_cache {
             Some(c) => c.read_current_map(mmu)?,
             None    => mmu.read_current_map()?,
@@ -430,25 +353,20 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             && !forced_onto_bike
             && !in_safari_zone;
         map.can_surf = can_use_surf;
-        // The badge and the move, exactly as `.cut` in `engine/menus/start_sub_menus.asm` checks them
-        // — and the map needs it for the same reason it needs `can_surf`: `actions()` must not offer a
-        // walk whose only follow-up is a field move the game will refuse. See `MetaTileMap::can_cut`.
+        // The badge and the move, exactly as `.cut` in `engine/menus/start_sub_menus.asm` checks
+        // them — and the map needs it for the same reason it needs `can_surf`: `actions()` must
+        // not offer a walk whose only follow-up is a field move the game will refuse.
         let can_use_cut = badges.contains(Badge::CascadeBadge) && has_move(&pokemon, PokemonMoveName::Cut);
         map.can_cut = can_use_cut;
-        // The same pair for Strength (`.strength` in `engine/menus/start_sub_menus.asm` checks the
-        // RainbowBadge), and for the same reason: `actions()` must not offer a boulder push the
-        // cartridge would answer with silence. See `MetaTileMap::can_strength`, and note that this
-        // is *not* `strength_active` below — that one is whether it has been armed on this map, and
-        // the push driver arms it itself.
+        // The same pair for Strength (`.strength` in `engine/menus/start_sub_menus.asm` checks
+        // the RainbowBadge), and for the same reason: `actions()` must not offer a boulder push
+        // the cartridge would answer with silence.
         map.can_strength = badges.contains(Badge::RainbowBadge) && has_move(&pokemon, PokemonMoveName::Strength);
         // The best rod in the bag, for the same reason and by the same rule: `actions()` must not
-        // offer a fishing row when there is nothing to cast with. Read here rather than in the map
-        // builder because that is where the bag is (`GameState::bag`, below).
+        // offer a fishing row when there is nothing to cast with.
         let bag = mmu.read_bag();
         map.best_rod = postgame::fishing::Rod::best_in_bag(&bag);
-        // Bill's cell separator, while pressing it would do something. Both events live in the same
-        // `wEventFlags` byte: EVENT_BILL_SAID_USE_CELL_SEPARATOR = 0x55E → byte 171 bit 6,
-        // EVENT_USED_CELL_SEPARATOR_ON_BILL = 0x55B → byte 171 bit 3.
+        // Bill's cell separator, while pressing it would do something.
         map.bill_cell_separator = map.map == Map::BillsHouse && {
             let flags = mmu.read(pokered_symbols::wEventFlags.address + 171);
             flags & 0x40 != 0 && flags & 0x08 == 0
@@ -480,10 +398,10 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             trash_cans,
             // EVENT_FOUND_ROCKET_HIDEOUT = 0x1b9 → wEventFlags[55] bit 1.
             found_rocket_hideout: mmu.read(pokered_symbols::wEventFlags.address + 55) & 0x02 != 0,
-            // EVENT_MANSION_SWITCH_ON = 0x278 → wEventFlags[79] bit 0. Toggled by any Mansion statue.
+            // EVENT_MANSION_SWITCH_ON = 0x278 → wEventFlags[79] bit 0.
             mansion_switch_on: mmu.read(pokered_symbols::wEventFlags.address + 79) & 0x01 != 0,
-            // BIT_STRENGTH_ACTIVE = bit 0 of wStatusFlags1 — set by using Strength from the party menu,
-            // reset on every map change. Required before a boulder will move when pushed.
+            // BIT_STRENGTH_ACTIVE = bit 0 of wStatusFlags1 — set by using Strength from the party
+            // menu, reset on every map change.
             strength_active: mmu.read_pointer(&pokered_symbols::wStatusFlags1) & 0x01 != 0,
             hall_of_fame_teams: mmu.read_pointer(&pokered_symbols::wNumHoFTeams),
             repel_steps: postgame::items::repel_steps(mmu),
@@ -525,12 +443,12 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
 
             if let Some(prev) = prev_pos {
                 if pos.y != prev.y {
-                    // line break
+                    // Line break
                     lines.push(current_line);
                     current_line = Vec::new();
                 } else {
                     let is_space = pos.x.saturating_sub(prev.x) > 1;
-                    // only add a space (char=64) if the previous character is not a space
+                    // Only add a space (char=64) if the previous character is not a space
                     if is_space && current_line.last() != Some(&64) {
                         current_line.push(64);
                     }
@@ -555,14 +473,14 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         let mmu = self.mmu();
         let player_id = mmu.read_pointer_u16_be(&pokered_symbols::wPlayerID);
         if player_id == 0 {
-            // intro screens
+            // Intro screens
             return None;
         }
 
         let new_game_player = mmu.read_pointer_pokemon_string(&pokered_symbols::DebugNewGamePlayerName);
         let player_name = mmu.read_pointer_pokemon_string(&pokered_symbols::wPlayerName);
         if player_name == new_game_player {
-            // on new game screen
+            // On new game screen
             return None;
         }
         Some(mmu.read_game_mode())
@@ -574,16 +492,14 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
 
     fn trainer_battle_pending(&self) -> bool {
         let mmu = self.mmu();
-        // wCurOpponent is set by the trainer encounter script before InitBattle runs; for a
+        // WCurOpponent is set by the trainer encounter script before InitBattle runs; for a
         // trainer battle wIsInBattle only becomes 2 after the engage/transition completes.
         mmu.read_pointer(&pokered_symbols::wCurOpponent) != 0
             && mmu.read_pointer(&pokered_symbols::wIsInBattle) == 0
     }
 
     fn in_pc_menu(&self) -> bool {
-        // `BIT_USING_GENERIC_PC` is bit 3 of `wMiscFlags` (`constants/ram_constants.asm:11`). Cheap,
-        // and it covers the parent tree's submenus, which show no `LOG OFF` of their own — so it is
-        // tried first and the screen is only scanned when it says no.
+        // `BIT_USING_GENERIC_PC` is bit 3 of `wMiscFlags` (`constants/ram_constants.asm:11`).
         self.mmu().read_pointer(&pokered_symbols::wMiscFlags) & 0x08 != 0
             || self.on_screen_text(false).is_some_and(|text| text.contains("LOG OFF"))
     }
@@ -626,13 +542,11 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
     }
 
     fn item_price(&self, item: ItemId) -> Option<u32> {
-        /// Entries in `ItemPrices` — MASTER_BALL (id 1) through FLOOR_B4F (id 97). **TMs and HMs are
-        /// not in it**: their ids start at `$C4`, far past the end, and the TM prices live in their own
-        /// `TMPrices` table (`data/items/tm_prices.asm`, one nibble each). Without this bound an HM
-        /// reads 3 bytes of whatever follows the table and decodes them as a BCD price.
+        /// Entries in `ItemPrices` — MASTER_BALL (id 1) through FLOOR_B4F (id 97).
         const ITEM_PRICES_LEN: u8 = 97;
 
-        // `table_width 3`, indexed by (item id - 1): the table starts at MASTER_BALL, which is id 1.
+        // `table_width 3`, indexed by (item id - 1): the table starts at MASTER_BALL, which is id
+        // 1.
         let id = item as u8;
         if id > ITEM_PRICES_LEN { return None; }
         let entry = pokered_symbols::ItemPrices + (id.checked_sub(1)? as u16) * 3;
@@ -670,7 +584,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
 
     fn mart_item_list(&self) -> Vec<ItemId> {
         let mmu = self.mmu();
-        // wItemList format: [count, item1, item2, ..., 0xFF] — skip the count byte at index 0
+        // WItemList format: [count, item1, item2, ..., 0xFF] — skip the count byte at index 0
         (1..16u16)
             .map(|i| mmu.read(pokered_symbols::wItemList.address + i))
             .take_while(|&b| b != 0xFF)
@@ -711,7 +625,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
     fn write_player_name(&mut self, name: &str) -> Result<(), String> {
         let name = name.trim();
         if name.is_empty() {
-            // ⚠️ No em dash: this reaches the page inside a `Notice`.
+            // No em dash: this reaches the page inside a `Notice`.
             return Err("a player name cannot be empty; the game's own screen refuses one".to_string());
         }
         let mut bytes = PokemonString::from_string(name).0;
@@ -743,13 +657,13 @@ pub struct GameState {
     pub badges: Badge,
     pub money: u32,
     /// Game Corner coins (`wPlayerCoins`, two BCD bytes, so 0–9999). Only spendable in the prize
-    /// room; bought at the counter at ¥1000 → 50. Zero until the Coin Case is held — the counter
-    /// refuses without it — which is why workstream F starts there.
+    /// room; bought at the counter at ¥1000 → 50.
     pub coins: u16,
-    /// True on a **dark** map, i.e. one that HM05 Flash lights. `wMapPalOffset` is set to 6 on
-    /// entering `ROCK_TUNNEL_1F` (`home/overworld.asm:497-501`) and cleared to 0 by the Flash field
-    /// move (`engine/menus/start_sub_menus.asm:183-191`) — the palette offset *is* the darkness, so
-    /// this one byte is both the precondition for using Flash and the proof that it worked.
+    /// True on a dark map, i.e. one that HM05 Flash lights. `wMapPalOffset` is set to 6 on
+    /// entering `ROCK_TUNNEL_1F` (`home/overworld.asm:497-501`) and cleared to 0 by the Flash
+    /// field move (`engine/menus/start_sub_menus.asm:183-191`) — the palette offset *is* the
+    /// darkness, so this one byte is both the precondition for using Flash and the proof that it
+    /// worked.
     pub map_is_dark: bool,
     pub pokemon: PokemonParty,
     pub mode: GameMode,
@@ -757,17 +671,19 @@ pub struct GameState {
     pub bag: Bag,
     /// Populated whenever `mode` is `WildBattle` or `TrainerBattle`.
     pub battle: Option<BattleState>,
-    /// Contents of the **currently open** PC box (`wBoxCount`/`wBoxMons`). Only ever one box of the
-    /// twelve — see [`postgame::pc_box::read_current_box`] for why the other eleven aren't readable.
+    /// Contents of the currently open PC box (`wBoxCount`/`wBoxMons`). Only ever one box of the
+    /// twelve — see [`postgame::pc_box::read_current_box`] for why the other eleven aren't
+    /// readable.
     pub boxed_pokemon: Vec<postgame::pc_box::BoxedPokemon>,
     /// Which box is open, 0-based (`wCurrentBoxNum`).
     pub current_box: u8,
-    /// True when the player has the Cascade Badge and at least one party Pokémon
-    /// knows HM Cut — the two requirements to use Cut outside of battle in pokémon Red.
-    /// Currently always false until the player has earned these.
+    /// True when the player has the Cascade Badge and at least one party Pokémon knows HM Cut —
+    /// the two requirements to use Cut outside of battle in pokémon Red. Currently always false
+    /// until the player has earned these.
     pub can_use_cut: bool,
-    /// True when the player has the Soul Badge and at least one party Pokémon knows HM Surf — the two
-    /// requirements to Surf outside of battle in pokémon Red. Gates water traversal in the pathfinder.
+    /// True when the player has the Soul Badge and at least one party Pokémon knows HM Surf — the
+    /// two requirements to Surf outside of battle in pokémon Red. Gates water traversal in the
+    /// pathfinder.
     pub can_use_surf: bool,
     /// True once EVENT_GOT_POKEDEX is set (Oak gives the player the Pokédex).
     pub has_pokedex: bool,
@@ -777,49 +693,37 @@ pub struct GameState {
     pub pokedex_seen: Pokedex,
     /// Vermilion Gym trash-can switch puzzle state — `Some` only when `map` is `VermilionGym`.
     pub trash_cans: Option<TrashCanPuzzle>,
-    /// True once EVENT_FOUND_ROCKET_HIDEOUT is set — the Celadon Game Corner poster switch has been
-    /// flipped, opening the hidden staircase down to the Rocket Hideout.
+    /// True once EVENT_FOUND_ROCKET_HIDEOUT is set — the Celadon Game Corner poster switch has
+    /// been flipped, opening the hidden staircase down to the Rocket Hideout.
     pub found_rocket_hideout: bool,
-    /// State of EVENT_MANSION_SWITCH_ON — the single global Pokémon Mansion switch that every statue
-    /// on every floor toggles, opening/closing the sliding-door gates on all four floors.
+    /// State of EVENT_MANSION_SWITCH_ON — the single global Pokémon Mansion switch that every
+    /// statue on every floor toggles, opening/closing the sliding-door gates on all four floors.
     pub mansion_switch_on: bool,
-    /// Live state of a Safari Zone trip — `Some` only while `EVENT_IN_SAFARI_ZONE` is set, which is
-    /// every tick between paying the ¥500 and the gate printing "good haul". Carries the two budgets
-    /// the game enforces (502 steps, 30 balls); see [`postgame::safari::SafariState`].
+    /// Live state of a Safari Zone trip — `Some` only while `EVENT_IN_SAFARI_ZONE` is set, which
+    /// is every tick between paying the ¥500 and the gate printing "good haul". Carries the two
+    /// budgets the game enforces (502 steps, 30 balls); see [`postgame::safari::SafariState`].
     pub safari: Option<postgame::safari::SafariState>,
-    /// True while Strength is active (BIT_STRENGTH_ACTIVE in `wStatusFlags1`) — set by using Strength
-    /// from the party menu, reset on every map change. A boulder only moves when pushed with this set.
+    /// True while Strength is active (BIT_STRENGTH_ACTIVE in `wStatusFlags1`) — set by using
+    /// Strength from the party menu, reset on every map change. A boulder only moves when pushed
+    /// with this set.
     pub strength_active: bool,
-    /// `wNumHoFTeams` — how many times this save has entered the Hall of Fame. **Non-zero means the
-    /// game has been beaten**, and it is the only byte that means that both during the ceremony and
+    /// `wNumHoFTeams` — how many times this save has entered the Hall of Fame. Non-zero means the
+    /// game has been beaten, and it is the only byte that means that both during the ceremony and
     /// long after it: `AnimateHallOfFame` increments it at its very first frame
-    /// (`engine/movie/hall_of_fame.asm:27-32`), saturating rather than wrapping, and it sits inside
-    /// the `wMainDataStart..wMainDataEnd` block that `engine/menus/save.asm` round-trips through SRAM
-    /// — so the credits' save-and-soft-reset carries it across. It is what the ROM's own main menu
-    /// reads to warp a returning Champion home (`main_menu.asm:116-125`).
-    ///
-    /// ⚠️ **This is not what [`agent::PokemonAgent`]'s completion detector reads.** `game_state` is
-    /// fallible and answers `Err` through every screen transition, and a Hall of Fame ceremony is
-    /// made of them; the detector reads the byte straight out of the MMU for that reason. This field
-    /// is here so the model and the tests can see it.
+    /// (`engine/movie/hall_of_fame.asm:27-32`), saturating rather than wrapping, and it sits
+    /// inside the `wMainDataStart..wMainDataEnd` block that `engine/menus/save.asm` round-trips
+    /// through SRAM — so the credits' save-and-soft-reset carries it across.
     pub hall_of_fame_teams: u8,
-    /// **I5** — `wRepelRemainingSteps`: overworld steps left before the Repel wears off. Repel sets
-    /// 100, Super Repel 200, Max Repel 250, and the counter is decremented one per step; while it is
-    /// non-zero the ROM suppresses any wild encounter whose level is below the lead's.
+    /// I5 — `wRepelRemainingSteps`: overworld steps left before the Repel wears off. Repel sets
+    /// 100, Super Repel 200, Max Repel 250, and the counter is decremented one per step; while it
+    /// is non-zero the ROM suppresses any wild encounter whose level is below the lead's.
     pub repel_steps: u8,
-    /// **I6** — true while riding the Bicycle (`wWalkBikeSurfState == 1`). The bike doubles overworld
+    /// I6 — true while riding the Bicycle (`wWalkBikeSurfState == 1`). The bike doubles overworld
     /// speed, and it is a *toggle*: using the item again dismounts.
     pub on_bicycle: bool,
 }
 
 /// State of the Vermilion Gym two-switch trash-can puzzle that unlocks the door to Lt. Surge.
-///
-/// The two switches hide in the cans indexed by `wFirstLockTrashCanIndex` /
-/// `wSecondLockTrashCanIndex`; `first_target` / `second_target` are those cans' map coordinates.
-/// Check the first can (opens the 1st lock, which then randomly places the 2nd switch in an adjacent
-/// can), then check the second can (opens the 2nd lock and unlocks the door). Checking a wrong can
-/// for the second switch resets both locks — reading the indices from RAM lets the agent go straight
-/// to the correct cans and never reset.
 #[derive(Debug, Clone)]
 pub struct TrashCanPuzzle {
     pub first_target: gb::geometry::Point8,
@@ -828,18 +732,8 @@ pub struct TrashCanPuzzle {
     pub second_opened: bool,
 }
 
-/// Both the bag (`wNumBagItems`/`wBagItems`) and PC item storage (`wNumBoxItems`/`wBoxItems`) are a
-/// count byte followed by `(id, quantity)` pairs, so the two readers below serve either.
-///
-/// These read **raw** RAM rather than going through [`Bag`], which silently drops every id [`ItemId`]
-/// cannot name and so reports both the wrong count and shifted indices. Menu navigation and
-/// occupancy checks must use these.
-///
-/// ⚠️ **The gap is much smaller than it was and the rule is unchanged.** [`ItemId`] named only
-/// twelve of the fifty TMs until 2026-08-27, which put a hole in `read_bag`'s own occupancy count;
-/// all fifty are named now, so what `Bag` still drops is ids the game never puts in a bag at all.
-/// That is not a reason to read through it here: the same drop would be silent, and this is the
-/// layer whose whole job is to agree with the cursor on the screen.
+/// Both the bag (`wNumBagItems`/`wBagItems`) and PC item storage (`wNumBoxItems`/`wBoxItems`) are
+/// a count byte followed by `(id, quantity)` pairs, so the two readers below serve either.
 fn inventory_position(mmu: &MMU, count_ptr: &symbols::DmgPointer, base_ptr: &symbols::DmgPointer, item: ItemId) -> Option<u8> {
     let count = mmu.read_pointer(count_ptr) as usize;
     (0..count)
@@ -855,9 +749,8 @@ fn inventory_quantity(mmu: &MMU, count_ptr: &symbols::DmgPointer, base_ptr: &sym
 }
 
 /// Map coordinate of gym trash-can hidden event `index` (0..=14), from pokered
-/// `data/events/hidden_events.asm` (`HiddenEventsFor_VERMILION_GYM`): cans laid out in a 5×3 grid at
-/// odd columns 1,3,5,7,9 and rows 7,9,11, indexed column-major.
+/// `data/events/hidden_events.asm` (`HiddenEventsFor_VERMILION_GYM`): cans laid out in a 5×3 grid
+/// at odd columns 1,3,5,7,9 and rows 7,9,11, indexed column-major.
 pub fn trash_can_position(index: u8) -> gb::geometry::Point8 {
     gb::geometry::Point8 { x: 1 + 2 * (index / 3), y: 7 + 2 * (index % 3) }
 }
-

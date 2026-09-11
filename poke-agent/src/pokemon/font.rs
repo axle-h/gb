@@ -9,7 +9,7 @@ pub const FONT_BYTES: [u8; 0x800] = {
 
     let length = end_pointer.address as usize - font_pointer.address as usize;
     if length != 0x400 {
-        // compressed 1bpp
+        // Compressed 1bpp
         panic!("Font bytes length is incorrect");
     }
 
@@ -45,10 +45,7 @@ pub fn render_font_string(indexes: &[usize], menu_characters: bool) -> String {
             62 => result += "'t",
             63 => result += "'v",
             64..=95 => result.push(' '),
-            // ⚠️ Glyph 96 is `'`, not `,`. They are the same mark drawn in different halves of the
-            // cell — 96 (charmap `$E0`) sits against the top, 116 (`$F4`) against the bottom — and
-            // this said `,` for both, so every contraction the game printed came back as
-            // "Let,s go". `charmap.asm:160` and the sheet itself both say apostrophe.
+            // Glyph 96 is `'`, not `,`.
             96 => result.push('\''),
             97 => result += "Poké",
             98 => result += "mon",
@@ -85,7 +82,8 @@ pub trait FontAware {
 
 impl FontAware for MMU {
     fn pokemon_font_loaded(&self) -> bool {
-        // TODO refactor the pointer access stuff to use slices like this, would have to assume that all data for a slice is in the same bank
+        // TODO refactor the pointer access stuff to use slices like this, would have to assume
+        // that all data for a slice is in the same bank
         let loaded = self.read_vram_slice(pokered_symbols::vFont.address, FONT_BYTES.len())
             .expect("Failed to read font from vram");
         loaded == FONT_BYTES
@@ -111,7 +109,7 @@ mod tests {
 
     #[test]
     fn font_bytes_are_correct() {
-        // validate the first 10 bytes
+        // Validate the first 10 bytes
         let expected = [0x10, 0x10, 0x28, 0x28, 0x28, 0x28, 0x44, 0x44, 0x7c, 0x7c];
         for i in 0..10 {
             assert_eq!(FONT_BYTES[i], expected[i], "Byte {} does not match expected value", i);

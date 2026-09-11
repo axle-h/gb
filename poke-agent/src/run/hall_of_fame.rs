@@ -1,10 +1,4 @@
-//! **The end of the game**: a finished run's permanent record, and the leaderboard built from them.
-//!
-//! `gb` could always play Pokémon Red to the Hall of Fame and never knew that it had. This module is
-//! what happens when [`crate::pokemon::agent::AgentEvent::HallOfFame`] fires: the winning run is
-//! copied out whole, one line describing it is appended to a ledger, and [`top`] reads that ledger
-//! back for `/api/leaderboard`.
-//!
+//! The end of the game: a finished run's permanent record, and the leaderboard built from them.
 //! ```text
 //! $GB_RUN_DIR/
 //!     run-20260810-093011/                    a live run — one writer, unchanged
@@ -19,26 +13,6 @@
 //!             memories/  todo.json            the model's own notes
 //!             battle-script.json                   how it chose to fight
 //! ```
-//!
-//! ⚠️ **The nesting is load-bearing, not tidiness.** [`crate::run::resumable`] lists the *direct*
-//! children of `$GB_RUN_DIR` that hold a `state.gbst` and continues the newest one. Every archive is
-//! a complete run directory, `state.gbst` included, written *after* the run it copied — so an
-//! archive placed beside the runs would be the newest resumable thing on the volume the instant it
-//! landed, and the next `gb serve` would resume into a copy of a game that has already been won and
-//! filed rather than into the run it had just started. One level of nesting is the whole fix:
-//! `hall-of-fame/` has no state file of its own, so the one-level-deep scan skips it.
-//!
-//! ⚠️ **A JSONL ledger rather than SQLite, deliberately.** Ten rows read and sorted in memory is not
-//! a query workload, and the alternative — `rusqlite` with `bundled` — compiles SQLite's C
-//! amalgamation into every build including a container whose only non-Rust dependency is `ring`'s.
-//! This is the same trade `super::civil` makes against `chrono`.
-//!
-//! ⚠️ **Ranking is on the *cartridge's* clock** (`wPlayTime`, as `playtime_seconds`), not on ours.
-//! It lives in the save state, so it survives every resume with no bookkeeping at all; it is gated
-//! on `BIT_GAME_TIMER_COUNTING`, so it counts while a game is in progress and stops on a title
-//! screen; and it is the number a player would actually quote. Our own `emulated_ms` and `wall_ms`
-//! are recorded beside it because they are the only figures that separate "the emulator ran for six
-//! hours" from "the game clock advanced six hours" — but they are not what a leaderboard is for.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -47,54 +21,47 @@ use std::time::{Duration, Instant, SystemTime};
 use super::{ArchivedCompletion, RunMeta, files, unique_dir};
 
 /// How long [`archive`] will wait for the transcript writer to catch up to the completion event.
-///
-/// ⚠️ **Not a fudge — the transcript is written by a different thread.** `transcript.rs` is a
-/// `blocking_recv` loop on the broadcast channel, so at the moment the emulator thread decides to
-/// archive, the event announcing the victory has been *published* but very likely not yet written.
-/// Copying the file now would produce an archive of a win with no win in it. The follow below reads
-/// whole lines until it sees the event's own sequence number, and gives up here rather than block
-/// the emulator for ever if the writer has died.
 const TRANSCRIPT_FOLLOW: Duration = Duration::from_secs(5);
 
 /// How often the follow re-checks a file it has read to the end of.
 const FOLLOW_POLL: Duration = Duration::from_millis(50);
 
 /// One finished playthrough, as it appears in the ledger and on `/api/leaderboard`.
-///
-/// `Deserialize` as well as `Serialize` because this *is* the wire format: the row is read back by
-/// [`top`], not projected out of some richer store.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Completion {
     /// The archive directory's name, relative to `<root>/hall-of-fame/`.
     pub archive: String,
     pub run_id: String,
-    /// `wNumHoFTeams` after the increment: `1` is a first championship, `2` a second in the same save.
+    /// `wNumHoFTeams` after the increment: `1` is a first championship, `2` a second in the same
+    /// save.
     pub teams: u8,
     pub completed_at: String,
     pub started_at: String,
-    /// [`crate::cli::VERSION`] at the time — which build played this.
+    /// `crate::cli::VERSION` at the time — which build played this.
     pub app_version: String,
     /// [`crate::pokemon::policy::Policy::name`].
     pub policy: String,
     /// `GB_MODEL`. `None` under any policy that is not an LLM.
     pub model: Option<String>,
 
-    // ── How long it took ─────────────────────────────────────────────────────────────────────────
-    /// The cartridge's own play clock, in seconds. **The ranking key** — see the module note.
+    // ── How long it took
+    // ───────────────────────────────────────────────────────────────────────── The cartridge's
+    // own play clock, in seconds.
     pub playtime_seconds: u32,
-    /// `HH:MM:SS`, for a person reading the ledger. ⚠️ Never sort on this: the hours field runs to
+    /// `HH:MM:SS`, for a person reading the ledger. Never sort on this: the hours field runs to
     /// 255, so it is two digits below 100 hours and three above, and a lexical comparison puts
     /// `255:59:59` before `06:12:44`.
     pub playtime: String,
-    /// `wPlayTimeMaxed` — the clock stopped at 255:59:59 and the real figure is unknown. Such a run
-    /// ranks last rather than first.
+    /// `wPlayTimeMaxed` — the clock stopped at 255:59:59 and the real figure is unknown. Such a
+    /// run ranks last rather than first.
     pub playtime_maxed: bool,
     /// Emulated milliseconds over the run's whole life, across every process that played it.
     pub emulated_ms: u64,
     /// Wall clock spent playing, ditto.
     pub wall_ms: u64,
 
-    // ── What it cost ─────────────────────────────────────────────────────────────────────────────
+    // ── What it cost
+    // ─────────────────────────────────────────────────────────────────────────────
     pub turns: u64,
     pub completions: u64,
     pub prompt_tokens: u64,
@@ -108,7 +75,8 @@ pub struct Completion {
     pub resumes: usize,
     pub checkpoints: u64,
 
-    // ── What it finished with ────────────────────────────────────────────────────────────────────
+    // ── What it finished with
+    // ────────────────────────────────────────────────────────────────────
     pub badges: u32,
     pub pokedex_owned: usize,
     pub pokedex_seen: usize,
@@ -124,9 +92,7 @@ pub struct PartyMember {
 }
 
 impl Completion {
-    /// Where this run sorts. Lower is better; a maxed clock is pushed behind every honest one,
-    /// because 255:59:59 is not a time, it is the counter giving up. Ties break on when the run
-    /// finished, so the board is stable rather than dependent on the order of the file.
+    /// Where this run sorts.
     fn rank(&self) -> (bool, u32, &str) {
         (self.playtime_maxed, self.playtime_seconds, &self.completed_at)
     }
@@ -136,7 +102,7 @@ impl Completion {
 pub struct ArchiveJob {
     /// `$GB_RUN_DIR`.
     pub root: PathBuf,
-    /// The run directory being filed. Still the current run — see [`archive`]'s ⚠️ about ordering.
+    /// The run directory being filed. Still the current run — see [`archive`]'s about ordering.
     pub run_dir: PathBuf,
     pub meta: RunMeta,
     /// `gb.save_state()` at the moment the counter moved. Held in memory rather than re-read from
@@ -146,18 +112,12 @@ pub struct ArchiveJob {
     /// The sequence number [`crate::published::Published::publish_event`] returned for the
     /// completion event — where the transcript follow stops.
     pub until_seq: u64,
-    /// The row to append, bar the fields only this module can fill in (`archive`, `completed_at`).
+    /// The row to append, bar the fields only this module can fill in (`archive`,
+    /// `completed_at`).
     pub completion: Completion,
 }
 
 /// Copy the run out and append its row. Returns the archive directory's name.
-///
-/// ⚠️ **Called synchronously, on the emulator thread, and *before* the run is swapped.**
-/// `transcript.rs` re-reads `CurrentRun::get().transcript_path()` per event, so once a new run is
-/// current, an event published before the swap but written after it lands in the *new* run's
-/// transcript. Doing the follow first is what makes "which file is the victory in?" a question with
-/// an answer. It costs the stream a stall bounded by [`TRANSCRIPT_FOLLOW`] plus the copy — once per
-/// run, during a cutscene.
 pub fn archive(job: &ArchiveJob) -> Result<String, String> {
     let home = job.root.join(files::HALL_OF_FAME);
     std::fs::create_dir_all(&home)
@@ -182,39 +142,31 @@ pub fn archive(job: &ArchiveJob) -> Result<String, String> {
         &into.join(format!("{}.gz", files::TRANSCRIPT)),
         job.until_seq,
     )?;
-    // The rotated half, if this run went on long enough to have one. Already complete, so no follow.
+    // The rotated half, if this run went on long enough to have one.
     let rotated = job.run_dir.join(files::TRANSCRIPT).with_extension("jsonl.1");
     if rotated.exists() {
         follow_lines(&rotated, &into.join("transcript.jsonl.1.gz"), u64::MAX)?;
     }
 
-    // `memories/` is legacy — nothing has written one since W6b's two note mechanisms became one —
-    // but a run old enough to have one is exactly the kind whose archive should be complete.
-    // `copy_tree` is a no-op when the directory is not there.
     copy_tree(&job.run_dir.join(files::MEMORIES), &into.join(files::MEMORIES))?;
     let todo = job.run_dir.join(files::TODO);
     if todo.exists() {
         std::fs::copy(&todo, into.join(files::TODO))
             .map_err(|e| format!("could not copy {}: {e}", todo.display()))?;
     }
-    // The battle script, if the run wrote one. It is a decision the model made about how to play
-    // rather than a cache, so a finished run's archive is incomplete without it.
+    // The battle script, if the run wrote one.
     let script = job.run_dir.join(files::BATTLE_SCRIPT);
     if script.exists() {
         std::fs::copy(&script, into.join(files::BATTLE_SCRIPT))
             .map_err(|e| format!("could not copy {}: {e}", script.display()))?;
     }
 
-    // The conversation, both halves. `history.json` is written by rename, so a plain copy of it is
-    // whole or absent and never torn.
+    // The conversation, both halves.
     let history = job.run_dir.join(files::HISTORY);
     if history.exists() {
         std::fs::copy(&history, into.join(files::HISTORY))
             .map_err(|e| format!("could not copy {}: {e}", history.display()))?;
     }
-    // ⚠️ **Whole lines, not `fs::copy`, for the transcript's reason**: the LLM worker is appending
-    // to this on its own thread while we read, so a byte copy can catch it between the `writeln!`
-    // and the flush. There is no seq to follow to — nothing keys on one — so it is read to EOF.
     follow_lines(
         &job.run_dir.join(files::CONVERSATION),
         &into.join(format!("{}.gz", files::CONVERSATION)),
@@ -236,17 +188,12 @@ pub fn archive(job: &ArchiveJob) -> Result<String, String> {
     )
     .map_err(|e| format!("could not write the archived meta: {e}"))?;
 
-    // ⚠️ **Last.** A row always points at a directory that is already complete; the reverse order
-    // would leave a leaderboard entry for an archive that a crash truncated.
+    // Last.
     append(&home.join(files::LEDGER), &completion)?;
     Ok(name)
 }
 
 /// The best `limit` completions, fastest first.
-///
-/// ⚠️ **An unreadable line is skipped, not fatal, and a missing file is an empty leaderboard.** A
-/// server nobody has finished a game on is the normal state of a fresh deployment, and a torn final
-/// append — the one failure mode an append-only file has — must not take the endpoint down with it.
 pub fn top(root: &Path, limit: usize) -> Vec<Completion> {
     let path = root.join(files::HALL_OF_FAME).join(files::LEDGER);
     let Ok(file) = std::fs::File::open(&path) else { return Vec::new() };
@@ -263,7 +210,8 @@ pub fn top(root: &Path, limit: usize) -> Vec<Completion> {
     rows
 }
 
-// ── The pieces ───────────────────────────────────────────────────────────────────────────────────
+// ── The pieces
+// ───────────────────────────────────────────────────────────────────────────────────
 
 fn append(path: &Path, completion: &Completion) -> Result<(), String> {
     let line = serde_json::to_string(completion)
@@ -278,10 +226,6 @@ fn append(path: &Path, completion: &Completion) -> Result<(), String> {
 }
 
 /// Copy `from` to `to`, gzipped, reading whole lines until one carries `until_seq`.
-///
-/// Whole lines only: a byte copy can catch the writer between its `writeln!` and its `flush` and
-/// archive half an event. `u64::MAX` means "whatever is there now", for a file nothing is appending
-/// to any more.
 fn follow_lines(from: &Path, to: &Path, until_seq: u64) -> Result<(), String> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -301,7 +245,7 @@ fn follow_lines(from: &Path, to: &Path, until_seq: u64) -> Result<(), String> {
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => {
-                // Caught up. Either we have what we came for, or the writer has not got here yet.
+                // Caught up.
                 if until_seq == u64::MAX || Instant::now() >= deadline {
                     break;
                 }
@@ -323,10 +267,6 @@ fn follow_lines(from: &Path, to: &Path, until_seq: u64) -> Result<(), String> {
 }
 
 /// Whether this transcript line is the event we are waiting for.
-///
-/// Parsed rather than substring-matched: `"seq":41` is also a substring of `"seq":410`, and the
-/// difference between stopping at the right line and stopping ten events early is invisible in the
-/// archive.
 fn carries_seq(line: &str, seq: u64) -> bool {
     serde_json::from_str::<serde_json::Value>(line)
         .ok()
@@ -399,11 +339,6 @@ mod tests {
 
     /// The whole of [`archive`] with no emulator anywhere near it — and, load-bearing, the proof
     /// that what it writes cannot be mistaken for a run to resume.
-    ///
-    /// ⚠️ **The `resumable` assertion is the point of this test, not a flourish.** An archive is a
-    /// complete run directory with a `state.gbst` in it, written *after* the run it copied, so if it
-    /// landed beside the runs it would be the newest resumable thing on the volume and the next
-    /// `gb serve` would continue a game that has already been won and filed.
     #[test]
     fn an_archive_carries_the_whole_run_including_the_conversation_and_is_not_resumable() {
         let scratch = Scratch::new("hof-archive");
@@ -457,10 +392,7 @@ mod tests {
         assert_eq!(inflated.lines().count(), 2, "both lines, and nothing invented: {inflated}");
         assert!(inflated.contains("hall_of_fame"), "the victory itself is in the archive");
 
-        // ⚠️ **The conversation log is gzipped whole rather than followed to a seq.** Nothing keys on
-        // one, so it is read to EOF — but it is still read as *lines*, because the LLM worker is
-        // appending to it on another thread while this runs and a byte copy can catch it between the
-        // `writeln!` and the flush.
+        // The conversation log is gzipped whole rather than followed to a seq.
         let gz = std::fs::read(into.join("conversation.jsonl.gz")).expect("a gzipped conversation");
         let mut log = String::new();
         std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&gz[..]), &mut log)
@@ -473,7 +405,7 @@ mod tests {
         assert_eq!(rows[0].archive, name, "the row points at the directory that was written");
         assert_eq!(rows[0].playtime_seconds, 22_364);
 
-        // ⚠️ The one that matters.
+        // The one that matters.
         let candidates = resumable(&scratch.0);
         assert_eq!(candidates, vec![run.path().to_path_buf()],
             "hall-of-fame/ must be invisible to the resume scan, or gb serve resumes a finished game");
@@ -500,8 +432,8 @@ mod tests {
         assert_eq!(top(&scratch.0, 2).len(), 2, "the limit is honoured");
     }
 
-    /// ⚠️ A torn final append is the one failure mode an append-only file has, and it must not take
-    /// `/api/leaderboard` down with it. Nor may a ledger nobody has written yet.
+    /// A torn final append is the one failure mode an append-only file has, and it must not take
+    /// `/api/leaderboard` down with it.
     #[test]
     fn a_broken_line_is_skipped_and_a_missing_ledger_is_empty() {
         let scratch = Scratch::new("hof-broken");
@@ -522,7 +454,7 @@ mod tests {
         assert_eq!(rows[0].run_id, "run-good");
     }
 
-    /// ⚠️ `"seq":4` is a substring of `"seq":41`, so the follow has to parse rather than match — the
+    /// `"seq":4` is a substring of `"seq":41`, so the follow has to parse rather than match — the
     /// difference between stopping at the right line and stopping thirty-seven events early is
     /// invisible once the archive is written.
     #[test]

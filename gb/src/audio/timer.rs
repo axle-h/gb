@@ -29,7 +29,8 @@ impl<const MAX_PHASE: u8, const SPEED_MULTIPLIER: usize> PhaseTimer<MAX_PHASE, S
     }
 
     pub fn trigger(&mut self) {
-        // TODO When triggering Ch1 and Ch2, the low two bits of the frequency timer are NOT modified.
+        // TODO When triggering Ch1 and Ch2, the low two bits of the frequency timer are NOT
+        // modified.
         self.phase = 0;
         self.counter = self.period;
     }
@@ -58,18 +59,13 @@ impl<const MAX_PHASE: u8, const SPEED_MULTIPLIER: usize> PhaseTimer<MAX_PHASE, S
         self.phase
     }
 
-    /// M-cycles until the next phase advance. One tick is `1 / SPEED_MULTIPLIER` of an M-cycle, so
-    /// this rounds *up*: waking a fraction of a cycle early is harmless, waking late is not.
+    /// M-cycles until the next phase advance. One tick is `1 / SPEED_MULTIPLIER` of an M-cycle,
+    /// so this rounds *up*: waking a fraction of a cycle early is harmless, waking late is not.
     pub fn machine_cycles_to_next_phase(&self) -> u64 {
         u64::from(self.counter).div_ceil(SPEED_MULTIPLIER as u64)
     }
 
     /// Advance by `machine_cycles`, returning whether the phase moved.
-    ///
-    /// **C3: closed form, no loop** — the same shape as gambatte's `DutyUnit::updatePos`
-    /// (`sound/duty_unit.cpp:51-58`). The old `for _ in 0..ticks` ran once per M-cycle per channel
-    /// and was measured at 7.7% of the whole emulator; four channels each stepping one tick at a
-    /// time is most of what made the APU 37%.
     pub fn update(&mut self, machine_cycles: MachineCycles) -> bool {
         let ticks = machine_cycles.m_cycles() as u32 * SPEED_MULTIPLIER as u32;
         if ticks < u32::from(self.counter) {
@@ -83,10 +79,7 @@ impl<const MAX_PHASE: u8, const SPEED_MULTIPLIER: usize> PhaseTimer<MAX_PHASE, S
         let period = u32::from(self.period);
         let past_first = ticks - u32::from(self.counter);
         if past_first < period {
-            // ⚠️ Not merely a shortcut — **this is the case that matters**. The emulator drives the
-            // APU one M-cycle at a time, so a window almost never spans two advances, and the
-            // general form below costs two `u32` divisions (~20 cycles each) where the old
-            // one-iteration loop cost about two. Measured: without this, `cpu_instrs` lost 13%.
+            // Not merely a shortcut — this is the case that matters.
             self.counter = self.period - past_first as u16;
             self.phase = (self.phase + 1) & MAX_PHASE;
         } else {
@@ -105,9 +98,6 @@ pub type WavetableTimer = PhaseTimer<31, 2>;
 mod tests {
     use super::*;
 
-    /// The pre-C3 implementation, kept as the oracle. The closed form has to agree with it on
-    /// every field, not just the phase — `just_reloaded()` reads `counter` and the DMG wave-RAM
-    /// aperture is one tick wide, so being one off is audible.
     fn stepped<const MAX_PHASE: u8, const SPEED: usize>(
         timer: &mut PhaseTimer<MAX_PHASE, SPEED>,
         machine_cycles: MachineCycles,

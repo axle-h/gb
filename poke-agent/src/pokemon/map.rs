@@ -260,29 +260,13 @@ impl Map {
         Self::iter()
     }
 
-    /// Returns `true` if this map is a Pokémon Center.
-    /// A town or a numbered route — the part of Kanto you can simply *walk* across.
-    ///
-    /// ⚠️ **This is the test for "is it safe to interrupt the route here", and the discriminants are
-    /// what make it cheap.** Towns and cities are `0x00-0x0A` and Routes 1-25 are `0x0C-0x24`, so
-    /// everything at or below [`Map::Route25`] is outdoors and everything above it is a building, a
-    /// cave or a scripted maze. A detour to a Pokémon Centre from a route is a walk the router can
-    /// always undo; from inside Silph Co, Victory Road or the Seafoam Islands it abandons a chain of
-    /// single-hop `EnterMap` steps that cannot be resolved from anywhere else.
+    /// Returns `true` if this map is a Pokémon Center. A town or a numbered route — the part of
+    /// Kanto you can simply *walk* across.
     pub fn is_overworld(self) -> bool {
         (self as u8) <= Map::Route25 as u8
     }
 
     /// The outdoor map a Pokémon Centre's front door opens onto.
-    ///
-    /// ⚠️ **A Centre is a *building*, and routing to a building is a strictly harder question than
-    /// routing to the town it stands in.** `route_toward` reads the incremental world graph, whose
-    /// nodes are keyed on the entry the agent actually landed on — so a run that has wandered a long
-    /// route past `bfs_nodes`' `SNAP_THRESHOLD` can fail to find a warp two hops away while the
-    /// *connection* to the next town is sitting in its own `actions()`. Measured: "no route from
-    /// Route3 to PewterPokecenter to heal", on a grind whose only problem was that it had walked
-    /// east, and the run then fought on at zero PP until Struggle's recoil blacked it out. The heal
-    /// detour falls back to the town, which is always one walkable connection at a time.
     pub fn pokemon_center_town(self) -> Option<Map> {
         Some(match self {
             Map::ViridianPokecenter => Map::ViridianCity,
@@ -315,10 +299,7 @@ impl Map {
                 | Map::FuchsiaPokecenter
                 | Map::CinnabarPokecenter
                 | Map::SaffronPokecenter
-                // ⚠️ **The Indigo Plateau lobby is a Pokémon Centre in every way this asks about.**
-                // It has the nurse `elite_four_steps` heals at and the mart it buys from, and it is
-                // the only one within reach of Victory Road and Route 23 — so a grind or a faint out
-                // there routed all the way back to Viridian without it.
+                // The Indigo Plateau lobby is a Pokémon Centre in every way this asks about.
                 | Map::IndigoPlateauLobby
         )
     }
@@ -1488,9 +1469,9 @@ impl Map {
         }
     }
 
-    /// Returns the pointer to this map's header in the ROM, using the pokered symbol
-    /// naming convention `{MapName}_h` (e.g. `pokered_symbols::OaksLab_h`).
-    /// Returns `None` for unused/copy maps that have no header symbol.
+    /// Returns the pointer to this map's header in the ROM, using the pokered symbol naming
+    /// convention `{MapName}_h` (e.g. `pokered_symbols::OaksLab_h`). Returns `None` for
+    /// unused/copy maps that have no header symbol.
     pub fn header_pointer(&self) -> Option<crate::pokemon::symbols::DmgPointer> {
         use crate::pokemon::symbols::pokered_symbols;
         match self {

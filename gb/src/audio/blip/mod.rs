@@ -1,34 +1,4 @@
 //! Band-limited synthesis and resampling for the Game Boy APU.
-//!
-//! A Rust port of Blip_Buffer 0.4.0 by Shay Green (blargg), <http://www.slack.net/~ant/>.
-//! Copyright (C) 2003-2006 Shay Green. Distributed under the GNU Lesser General Public License,
-//! version 2.1 or later; see `tools/blip-golden/vendor/LGPL.txt` for the full text, alongside the
-//! original C++ this was translated from.
-//!
-//! ## What this replaces, and why
-//!
-//! The obvious way to get 1 048 576 Hz down to 44 100 Hz is a polyphase sinc filter, which is what
-//! this emulator used to do (rubato, 256 taps × 256 phases). That treats the APU as a *sampled
-//! signal* and reconstructs it — but the APU's output is not sampled, it is a piecewise-constant
-//! staircase whose step times are known exactly. Blip_Buffer works from those steps directly: hand
-//! it "the amplitude changed by this much at this clock" and it adds a pre-computed band-limited
-//! step response straight into a buffer that is already at the output rate.
-//!
-//! That is cheaper (the Game Boy's mixed output only actually changes a few tens of thousands of
-//! times a second, and unchanged means no work at all), lower latency (8 output samples of kernel
-//! tail, versus a 1024-frame input chunk plus a 256-tap kernel), and needs no FFT — so no
-//! dependencies.
-//!
-//! ## Layout
-//!
-//! - [`eq`] — the windowed-sinc kernel generator, the only floating-point in the pipeline.
-//! - [`synth`] — [`BlipSynth`], which owns the impulse table and scatter-adds transitions.
-//! - [`buffer`] — [`BlipBuffer`], the delta array and its integrating reader.
-//! - [`BlipStereo`] — the pair of the above that the rest of the emulator actually talks to.
-//!
-//! Nothing here knows about SDL, or about any particular sink: [`BlipStereo::read_interleaved_f32`]
-//! and [`BlipStereo::read_interleaved_i16`] fill a caller-owned slice, so an audio queue, a file
-//! writer and a network stream are all the same to it.
 
 pub mod buffer;
 pub mod eq;
@@ -58,10 +28,6 @@ pub const BLIP_SAMPLE_BITS: u32 = 30;
 pub const QUALITY: usize = 12;
 
 /// Amplitude span the synth is scaled for: a waveform running from `-RANGE/2` to `+RANGE/2`.
-///
-/// Must be a power of two no greater than 32768 for the gain to be exact, and 16384 is the largest
-/// value that still leaves `delta_factor >= 2` — below that the kernel gets attenuated instead and
-/// loses tap precision. See the amplitude discussion in [`synth`].
 pub const SYNTH_RANGE: i32 = 16384;
 
 /// Scale applied to a mixed sample in [-1, 1] to reach the synth's integer amplitude domain.
@@ -71,10 +37,6 @@ pub const AMP_SCALE: f32 = 8192.0;
 pub const DEFAULT_TREBLE_DB: f64 = -8.0;
 
 /// Bass corner in Hz.
-///
-/// Reproduces the DMG capacitor high-pass the APU used to run at 1.048 MHz (coefficient
-/// 0.999832011, i.e. a corner of ~28 Hz). The shift-based coefficient here resolves 28 Hz at
-/// 44.1 kHz to a shift of 8, an actual corner of ~27.4 Hz.
 pub const DEFAULT_BASS_HZ: u32 = 28;
 
 /// Output rate assumed until the sink says otherwise.
@@ -90,10 +52,9 @@ pub struct BlipStereo {
     right: BlipBuffer,
     left_synth: BlipSynth<QUALITY>,
     right_synth: BlipSynth<QUALITY>,
-    /// Source clock rate at 1× speed. [`Self::set_speed`] scales against this.
+    /// Source clock rate at 1× speed.
     base_clock_rate: u32,
-    /// Transition log for the golden-fixture generator in `audio::reference`. Test-only, and free
-    /// to live here because `BlipStereo` is excluded from the emulator's serialised state.
+    /// Transition log for the golden-fixture generator in `audio::reference`.
     #[cfg(test)]
     capture: Option<Vec<(u16, i16, i16)>>,
 }
@@ -112,18 +73,9 @@ impl BlipStereo {
         }
     }
 
-    /// Track how fast the emulator is running relative to real time, so that fast-forwarding plays
-    /// back faster (and higher pitched) instead of backing up the sink's queue. 1.0 is real time.
-    ///
-    /// This scales the *source clock* rather than dividing the output sample rate. The two are
-    /// arithmetically identical — `factor` is only ever `sample_rate / clock_rate` — but the buffer
-    /// is sized from the sample rate, so leaving that at the sink's actual rate keeps the buffer
-    /// worth 100 ms of **wall-clock** audio at any speed. Dividing the sample rate instead would
-    /// shrink it to 100/N ms and start dropping audio exactly when the emulator is producing the
-    /// most of it.
-    ///
-    /// Cheap enough to call every frame: it recomputes one fixed-point ratio per channel and leaves
-    /// the buffered audio alone, so there is no click on a speed change.
+    /// Track how fast the emulator is running relative to real time, so that fast-forwarding
+    /// plays back faster (and higher pitched) instead of backing up the sink's queue. 1.0 is real
+    /// time.
     pub fn set_speed(&mut self, speed: f64) {
         assert!(speed > 0.0 && speed.is_finite(), "speed must be positive and finite, got {speed}");
         let clock_rate = (self.base_clock_rate as f64 * speed).round().max(1.0) as u32;
@@ -157,9 +109,6 @@ impl BlipStereo {
     }
 
     /// Retune for a new output rate, discarding anything buffered.
-    ///
-    /// The synths are untouched: with a treble-only equalisation the kernel does not depend on the
-    /// sample rate.
     pub fn set_sample_rate(&mut self, sample_rate: u32) {
         if sample_rate == self.left.sample_rate() {
             return;
@@ -186,9 +135,6 @@ impl BlipStereo {
     }
 
     /// Report the mixed output level at the start of the current frame.
-    ///
-    /// Emits a transition only when the level has actually moved, which for Game Boy audio is a few
-    /// tens of thousands of times a second rather than a million.
     pub fn update(&mut self, sample: AudioSample) {
         let (left, right) = (quantise(sample.left), quantise(sample.right));
         #[cfg(test)]

@@ -10,13 +10,12 @@ pub struct Divider {
     enabled: bool,
     value: u8,
     /// When DIV next increments — an absolute m-cycle stamp while it runs, the cycles the
-    /// interrupted period still owes while `STOP` has it halted. Exactly
-    /// [`crate::timer::Timer::next_tick`]'s two origins, and for the same reason.
+    /// interrupted period still owes while `STOP` has it halted.
     next_tick: i64,
 }
 
 /// The serialised shape of a [`Divider`]: field-for-field what the `timer` save-state section has
-/// always held. See [`crate::timer::TimerSnapshot`] for why C1 needed one.
+/// always held.
 #[derive(Debug, Clone, Copy, Decode, Encode)]
 pub struct DividerSnapshot {
     enabled: bool,
@@ -51,7 +50,7 @@ impl Divider {
             - snapshot.cycles_since_tick.m_cycles() as i64;
     }
 
-    /// ⚠️ Catch the divider up to `now` before either of these, or the part-period it is in the
+    /// Catch the divider up to `now` before either of these, or the part-period it is in the
     /// middle of would be rebased from a stale deadline.
     pub fn enable(&mut self, now: u64) {
         if !self.enabled {
@@ -115,9 +114,6 @@ pub struct DividerClocks {
 impl DividerClocks {
     pub const ZERO: Self = Self { initial_value: 0, count: 0 };
 
-    /// Checks if the specified bit transitions from 1 to 0 at any point during the clock iterations.
-    /// # Arguments
-    /// * `bit` - The bit position to check (0-7 for u8)
     pub fn bit_fall_edge(&self, bit: u8) -> usize {
         debug_assert!(bit < 8, "Bit position must be between 0 and 7");
 
@@ -194,8 +190,6 @@ mod tests {
         assert_eq!(divider.value(), 0);
     }
 
-    /// C1: the scheduler asks DIV when it next moves; being one cycle out here would let C2's
-    /// HALT skip land past a frame-sequencer step.
     #[test]
     fn next_event_names_the_cycle_div_increments() {
         let mut divider = Divider::default();
@@ -221,7 +215,6 @@ mod tests {
         assert_eq!(restored.next_event(), divider.next_event());
     }
 
-
     #[test]
     fn bit_fall_edge() {
         let mut count = 0;
@@ -229,8 +222,8 @@ mod tests {
             let clocks = DividerClocks { initial_value: i, count: 1 };
             count += clocks.bit_fall_edge(4);
         }
-        // There are 8 transitions from 1 to 0 for bit 4 in a full cycle of u8
-        // this is used by the audio frame sequencer derive a 512hz clock
+        // There are 8 transitions from 1 to 0 for bit 4 in a full cycle of u8 this is used by the
+        // audio frame sequencer derive a 512hz clock
         assert_eq!(count, 8);
     }
 }

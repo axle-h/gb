@@ -89,8 +89,8 @@ impl Core {
     /// Return to power-on state without dropping the cartridge. Equivalent to reconstructing via
     /// [`Core::new`] with the same ROM and model, except that battery-backed SRAM survives.
     pub fn reset(&mut self) {
-        // `mmu.data()` is the padded image, but the header bytes the boot register file
-        // depends on are all inside the first bank, so padding is irrelevant here.
+        // `mmu.data()` is the padded image, but the header bytes the boot register file depends
+        // on are all inside the first bank, so padding is irrelevant here.
         self.registers = RegisterSet::boot(self.mmu.color_mode(), &self.mmu.data().to_vec());
         self.interrupts_enabled = false;
         self.interrupts_enabled_on_next_instruction = false;
@@ -212,8 +212,7 @@ impl Core {
         if self.mode == CoreMode::Normal {
             OpCode::parse(self)
         } else {
-            // execute a "virtual" nop if not in normal mode
-            // this keeps the clocks ticking
+            // Execute a "virtual" nop if not in normal mode this keeps the clocks ticking
             OpCode::Nop
         }
     }
@@ -221,8 +220,7 @@ impl Core {
     pub fn execute(&mut self, opcode: OpCode) -> MachineCycles {
         // Peripherals are still advanced once per instruction, after this returns — but the DMG
         // wave-RAM aperture is a single 2-T tick wide, so it needs to know where inside the
-        // instruction the bus access sits. See `Audio::set_instruction_length`; nothing else
-        // reads it.
+        // instruction the bus access sits.
         let base_cycles = opcode.machine_cycles(false);
         self.mmu.set_instruction_length(base_cycles as u8);
         if self.interrupts_enabled_on_next_instruction {
@@ -385,13 +383,13 @@ impl Core {
                 let value = self.register16(register);
                 let result = value.wrapping_add(1);
                 self.write_register16(register, result);
-                // no flags are set
+                // No flags are set
             }
             OpCode::Decrement16 { register } => {
                 let value = self.register16(register);
                 let result = value.wrapping_sub(1);
                 self.write_register16(register, result);
-                // no flags are set
+                // No flags are set
             }
             OpCode::Add16 { register } => {
                 let value = self.register16(register) as u32;
@@ -534,10 +532,9 @@ impl Core {
             }
             OpCode::Stop => {
                 // On CGB, a STOP with the KEY1 prepare bit set is not a stop at all: it performs
-                // the speed switch and execution continues. Only an unprepared STOP halts.
+                // the speed switch and execution continues.
                 if self.mmu.try_speed_switch() {
-                    // The switch costs ~2050 M-cycles of stalled CPU on hardware. Not modelled;
-                    // nothing observable depends on it and it would need the M-cycle work.
+                    // The switch costs ~2050 M-cycles of stalled CPU on hardware.
                 } else {
                     self.mode = CoreMode::Stop;
                     self.mmu.stop();
@@ -552,9 +549,7 @@ impl Core {
             }
             OpCode::Illegal { .. } => {
                 // Hardware locks up the *CPU*, not the machine: video, audio, DIV and serial all
-                // keep running. Gambatte models this by disabling interrupts and halting
-                // (`memory.cpp:344-351`) — so nothing can ever wake it — rather than by stopping
-                // the world. No logging: this is the hot path.
+                // keep running.
                 self.mmu.write(0xFFFF, 0);
                 self.mode = CoreMode::Halt;
             }
@@ -570,9 +565,9 @@ impl Core {
                 self.interrupt()
             }
             CoreMode::Stop => {
-                // do not run timers in stop mode
+                // Do not run timers in stop mode
                 if self.mmu.joypad().is_activation_pending() {
-                    // stop is interrupted by any joypad input
+                    // Stop is interrupted by any joypad input
                     self.mode = CoreMode::Normal;
                     // ...and the clocks STOP switched off have to come back, or DIV, TIMA and
                     // every APU length/envelope/sweep stay dead for the rest of the run.
@@ -581,7 +576,7 @@ impl Core {
                 MachineCycles::ZERO
             }
             CoreMode::Crash => {
-                // do nothing, the CPU is crashed
+                // Do nothing, the CPU is crashed
                 MachineCycles::ZERO
             }
         };
@@ -591,23 +586,6 @@ impl Core {
         cycles + interrupt_cycles
     }
 
-    /// **C2: the HALT fast-path.** Sleep straight through to the next scheduled event instead of
-    /// executing a virtual `Nop` — and a full [`MMU::update`] over every peripheral — for each of
-    /// the M-cycles in between.
-    ///
-    /// This is finding **F2**: *81.2% of `gb`'s CPU dispatches and 65.0% of its emulated M-cycles
-    /// were HALT*, each one paying full price. Gambatte skips the whole idle span with one addition
-    /// (`cpu.cpp:521-525`).
-    ///
-    /// The span is safe precisely because [`MMU::schedule`] is complete: a halted CPU cannot write
-    /// a register, so nothing inside the machine can change between now and the next scheduled
-    /// event except the peripherals, and every one of them either has an entry or is only
-    /// observable at one that does. It is clamped to `budget` so the skip can never run past the
-    /// end of the caller's slice, and to at least one M-cycle so the loop always advances even
-    /// when something is already overdue.
-    ///
-    /// Callers that drive `fetch`/`execute` directly still get the old cycle-at-a-time behaviour,
-    /// which remains correct — only slower.
     pub fn skip_halt(&mut self, budget: MachineCycles) -> MachineCycles {
         debug_assert_eq!(self.mode, CoreMode::Halt, "skip_halt is only valid in HALT");
 
@@ -616,8 +594,6 @@ impl Core {
             .saturating_sub(now)
             .clamp(1, budget.m_cycles().max(1));
 
-        // What the virtual `Nop` used to leave behind, for the DMG wave-RAM access aperture. No
-        // bus access happens during the skip, but the next real instruction sets its own.
         self.mmu.set_instruction_length(1);
 
         let cycles = MachineCycles::from_m(span);
@@ -630,7 +606,8 @@ impl Core {
     fn interrupt(&mut self) -> MachineCycles {
         if let Some(interrupt) = self.mmu.interrupt_pending() {
             if self.mode == CoreMode::Halt {
-                // if we are in halt mode, we exit it, regardless of whether interrupts are enabled
+                // If we are in halt mode, we exit it, regardless of whether interrupts are
+                // enabled
                 self.mode = CoreMode::Normal;
             }
 
@@ -851,7 +828,7 @@ mod tests {
                 core.execute(OpCode::Load { source: register, destination: mHL });
                 assert_eq!(core.mmu.read(0xC000), 0x42);
             }
-            // special case for H & L
+            // Special case for H & L
             let mut core = Core::dmg_hello_world();
             core.registers.set_hl(0xC010);
             core.execute(OpCode::Load { source: H, destination: mHL });
@@ -871,7 +848,7 @@ mod tests {
                 core.execute(OpCode::Load { source: mHL, destination: register });
                 assert_eq!(core.register(register), 0x42);
             }
-            // special case for H & L
+            // Special case for H & L
             let mut core = Core::dmg_hello_world();
             core.registers.set_hl(0xC010);
             core.mmu.write(0xC010, 0x11);
@@ -1035,10 +1012,9 @@ mod tests {
             let mut core = Core::dmg_hello_world();
             core.registers.c = 0x00;
             core.registers.a = 0x42;
-            // this is the joypad register at 0xFF00, only the 5th and 6th bits are writeable
+            // This is the joypad register at 0xFF00, only the 5th and 6th bits are writeable
             core.mmu.write(0xFF00, 0x30);
             core.execute(OpCode::LoadHighAccumulatorIndirect);
-            // A13: 0xFF, not 0x3F — bits 6-7 of FF00 are unused and read as 1 on hardware.
             assert_eq!(core.registers.a, 0xFF); // all buttons released
         }
 
@@ -1069,7 +1045,6 @@ mod tests {
             core.execute(OpCode::LoadHighDirectAccumulator { lsb: 0x00});
             assert_eq!(core.mmu.read(0xFF00), 0xFF); // all buttons released
         }
-
 
     }
 
@@ -1113,7 +1088,7 @@ mod tests {
         fn stack() {
             let mut core = Core::dmg_hello_world();
 
-            // push some values onto stack from all 16-but registers
+            // Push some values onto stack from all 16-but registers
             core.registers.set_bc(0x1234);
             core.registers.set_de(0x5678);
             core.registers.set_hl(0x9ABC);
@@ -1129,19 +1104,19 @@ mod tests {
             assert_eq!(core.mmu.read_u16_le(0xFFF8), 0x9ABC);
             assert_eq!(core.mmu.read_u16_le(0xFFF6), 0xEFF0);
 
-            // reset all registers to zero
+            // Reset all registers to zero
             core.registers.set_bc(0x0000);
             core.registers.set_de(0x0000);
             core.registers.set_hl(0x0000);
             core.registers.set_af(0x0000);
 
-            // pop them back from stack (in reverse)
+            // Pop them back from stack (in reverse)
             core.execute(OpCode::Pop { register: Register16Stack::AF });
             core.execute(OpCode::Pop { register: Register16Stack::HL });
             core.execute(OpCode::Pop { register: Register16Stack::DE });
             core.execute(OpCode::Pop { register: Register16Stack::BC });
 
-            // values popped from stack
+            // Values popped from stack
             assert_eq!(core.registers.sp, 0xFFFE); // SP incremented back up to top
             assert_eq!(core.registers.bc(), 0x1234);
             assert_eq!(core.registers.de(), 0x5678);
@@ -1717,8 +1692,8 @@ mod tests {
         #[test]
         fn rotate_left_accumulator() {
             let mut core = Core::dmg_hello_world();
-            // B11: the boot `F` now follows the cartridge header, and these rotate-through-
-            // carry opcodes read the incoming carry — so set it explicitly rather than inherit it.
+            // B11: the boot `F` now follows the cartridge header, and these rotate-through- carry
+            // opcodes read the incoming carry — so set it explicitly rather than inherit it.
             core.registers.flags.c = false;
             core.registers.a = 0b10101010;
             core.execute(OpCode::RotateLeftAccumulator);
@@ -1739,8 +1714,8 @@ mod tests {
         #[test]
         fn rotate_right_accumulator() {
             let mut core = Core::dmg_hello_world();
-            // B11: the boot `F` now follows the cartridge header, and these rotate-through-
-            // carry opcodes read the incoming carry — so set it explicitly rather than inherit it.
+            // B11: the boot `F` now follows the cartridge header, and these rotate-through- carry
+            // opcodes read the incoming carry — so set it explicitly rather than inherit it.
             core.registers.flags.c = false;
             core.registers.a = 0b10101001;
             core.execute(OpCode::RotateRightAccumulator);
@@ -1799,8 +1774,8 @@ mod tests {
         #[test]
         fn rotate_left_register() {
             let mut core = Core::dmg_hello_world();
-            // B11: the boot `F` now follows the cartridge header, and these rotate-through-
-            // carry opcodes read the incoming carry — so set it explicitly rather than inherit it.
+            // B11: the boot `F` now follows the cartridge header, and these rotate-through- carry
+            // opcodes read the incoming carry — so set it explicitly rather than inherit it.
             core.registers.flags.c = false;
             core.registers.b = 0b10101010;
             core.execute(OpCode::RotateLeft { register: Register::B });
@@ -1821,8 +1796,8 @@ mod tests {
         #[test]
         fn rotate_right_register() {
             let mut core = Core::dmg_hello_world();
-            // B11: the boot `F` now follows the cartridge header, and these rotate-through-
-            // carry opcodes read the incoming carry — so set it explicitly rather than inherit it.
+            // B11: the boot `F` now follows the cartridge header, and these rotate-through- carry
+            // opcodes read the incoming carry — so set it explicitly rather than inherit it.
             core.registers.flags.c = false;
             core.registers.b = 0b10101001;
             core.execute(OpCode::RotateRight { register: Register::B });
@@ -2041,7 +2016,6 @@ mod tests {
             core.execute(OpCode::JumpRelativeConditional { offset: 5, condition: JumpCondition::Zero });
             assert_eq!(core.registers.pc, 0x0002);
 
-
             // Positive offset
             core.execute(OpCode::JumpRelativeConditional { offset: 1, condition: JumpCondition::NotZero });
             assert_eq!(core.registers.pc, 0x0003);
@@ -2098,7 +2072,7 @@ mod tests {
             assert_eq!(core.registers.sp, 0xFFFE); // Stack pointer should increment by 2
             assert!(core.interrupts_enabled); // does not affect interrupts
 
-            // simulate an interrupt handler call
+            // Simulate an interrupt handler call
             core.interrupts_enabled = false;
             core.execute(OpCode::Call { address: 0x0300 });
             core.execute(OpCode::ReturnInterrupt);
@@ -2187,7 +2161,7 @@ mod tests {
             core.execute(OpCode::Halt);
             assert_eq!(core.mode, CoreMode::Halt);
 
-            // interrupts wake it up
+            // Interrupts wake it up
             core.interrupts_enabled = true;
             core.mmu.write(0xFFFF, 0xFF); // enable all interrupts
             core.mmu.write(0xFF0F, 0xFF); // request all interrupts
@@ -2202,10 +2176,7 @@ mod tests {
             core.execute(OpCode::Stop);
             assert_eq!(core.mode, CoreMode::Stop);
 
-            // ⚠️ **D9: the group has to be selected first.** A wake needs one of `P10-P13` to go
-            // low, and a button can only pull its line low while `P14`/`P15` selects its group —
-            // which is the documented hardware quirk that STOP with *both* groups deselected
-            // cannot be woken by the joypad at all. Before D9 `gb` woke on any press.
+            // D9: the group has to be selected first.
             core.mmu.joypad_mut().set(0x10); // select the buttons
             core.mmu.joypad_mut().press_button(JoypadButton::A);
             core.execute(OpCode::Nop); // update core state
@@ -2250,8 +2221,7 @@ mod tests {
             assert_ne!(core.mmu.divider().value(), before, "DIV is frozen after STOP+wake");
         }
 
-        /// A3: STOP is a two-byte instruction. Fetching only the opcode leaves PC on the pad byte,
-        /// which then gets executed as an instruction.
+        /// A3: STOP is a two-byte instruction.
         #[test]
         fn stop_consumes_its_pad_byte() {
             let mut core = Core::dmg_hello_world();
@@ -2267,8 +2237,6 @@ mod tests {
         }
 
         /// A4: an illegal opcode locks the CPU, but the rest of the machine keeps running.
-        /// Previously this set `CoreMode::Crash` and called `mmu.stop()`, freezing PPU, APU,
-        /// serial and DIV along with it.
         #[test]
         fn illegal_opcode_locks_the_cpu_but_not_the_machine() {
             let mut core = Core::dmg_hello_world();
@@ -2331,7 +2299,7 @@ mod tests {
             core.mmu.write(0xFFFF, 0xFF); // enable all interrupts
             core.mmu.write(0xFF0F, 0xFF); // request all interrupts
 
-            // run all interrupts in sequence
+            // Run all interrupts in sequence
             let expected_interrupts = [0x0040, 0x0048, 0x0050, 0x0058, 0x0060];
             for expected_address in expected_interrupts {
                 core.execute(OpCode::Nop);
@@ -2348,7 +2316,7 @@ mod tests {
                 println!("Handled interrupt at address: {:#04X}", expected_address);
             }
 
-            // after that there should be no more interrupts
+            // After that there should be no more interrupts
             core.execute(OpCode::Nop);
             assert_eq!(core.registers.pc, 0x0100); // PC should not change
         }
@@ -2378,4 +2346,3 @@ mod tests {
         assert_eq!(core.registers.pc, 0x0104); // PC should increment by 3 for the Jump (opcode + 2 bytes address)
     }
 }
-

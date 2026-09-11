@@ -4,26 +4,6 @@ use super::*;
 
 /// Where along the eight-badge route [`super::soak`] turns its fuzzer loose, and the map each of
 /// those save states is cut on.
-///
-/// ⚠️ **These are seeds for a fuzzer, not links in the fixture chain.** Nothing reads one as the
-/// *input* to a route the way `at-cerulean.bin` feeds the leg tests, so the rules on
-/// [`TestFixture::save_state_named`] about cutting where the mainline stands and where the party is
-/// healed do not apply: a capture taken mid-dungeon, mid-errand and half-poisoned is a better
-/// starting point for a random walker than a tidy one, because it is a state a deployed run can
-/// really be in.
-///
-/// ⚠️ **The map is the whole specification, and [`regen_soak_checkpoints`] is what honours it.** A
-/// checkpoint is the first moment the scripted run has stood on that map for
-/// [`CHECKPOINT_SETTLE_TICKS`], so adding one is a line here and a 7-minute regeneration — no
-/// fixture is cut by hand, and none of them can drift away from the route, because they are the
-/// route. `soak`'s own `expect_map` re-asserts each one on the way in, so a stale capture fails
-/// where it is used rather than silently fuzzing somewhere else.
-///
-/// ⚠️ **Chosen for what a fuzzer can reach from them, exactly as [`super::soak::STATES`] is** — a
-/// dark cave, a quiz gym, a warp maze, a step counter — and deliberately *not* for the maps the
-/// curated states already cover. This list and the hand-cut states are two halves of one budget:
-/// these buy the ground the route crosses for nothing, and the curated ones buy the ground it never
-/// does (a bicycle, a full PC box, a ledge pocket a real run got stuck in).
 #[cfg(feature = "slow-tests")]
 pub(super) const SOAK_CHECKPOINTS: &[(&str, Map)] = &[
     ("soak-mt-moon", Map::MtMoonB2F),
@@ -42,32 +22,14 @@ pub(super) const SOAK_CHECKPOINTS: &[(&str, Map)] = &[
 
 /// How long the run has to have been standing on a checkpoint's map before the state is taken —
 /// 50 ticks of [`AGENT_RESOLUTION`], one second of game time.
-///
-/// ⚠️ **Not the first tick the map id changes.** A warp lands with the map header read and the rest
-/// of the world still being built: the connection strips, the sprite slots and the tile map arrive
-/// over the following frames, and a state cut in that window loads into an agent that reads a map
-/// half of which is the previous one. A second is far longer than that takes and far shorter than
-/// the run spends anywhere it is worth starting a fuzzer from.
 #[cfg(feature = "slow-tests")]
 const CHECKPOINT_SETTLE_TICKS: u32 = 50;
 
 /// Re-cut every [`SOAK_CHECKPOINTS`] state by playing the eight-badge route once.
-///
-/// ⚠️ **A test of its own rather than a hook inside [`full_playthrough`], and that is deliberate.**
-/// `full_playthrough` is the gate everything else is measured against; it reads the game state once
-/// per tick only when it has to, and it already rewrites one committed fixture under
-/// `regen-fixtures`. Hanging a dozen more writes off it would mean the run that proves the route
-/// still works is also the run that quietly replaces a dozen inputs, and any per-tick cost added
-/// here would be paid by the seven-minute gate rather than by the regeneration nobody runs weekly.
-///
 /// ```text
 /// cargo test --release --features slow-tests --lib -- \
 ///   regen_soak_checkpoints --exact --nocapture
 /// ```
-///
-/// It prints every distinct map the route visited, in order, which is the list to pick a new
-/// checkpoint from — and it **fails** naming any declared checkpoint the run never stood on, so a
-/// map that drops off the route cannot leave a stale `.bin` behind pretending to still be on it.
 #[test]
 #[cfg(feature = "slow-tests")]
 #[ignore = "tool: recuts every soak checkpoint; needs GB_REGEN_FIXTURES=1"]
@@ -119,16 +81,9 @@ fn regen_soak_checkpoints() {
     println!("[checkpoint] re-cut {} soak fixtures", written.len());
 }
 
-/// Resume [`full_playthrough`] from the save state a stalled run drops in `target/test-artifacts/`,
-/// with the steps it had left still queued — so a stall 270 steps in can be re-tested in seconds
-/// instead of re-running the whole 20 minutes up to it.
-///
-/// A save state carries the emulator's RNG registers, so resuming continues the *same* stream the run
-/// was on. That is what makes this valid for chasing a route bug and **invalid as a substitute for the
-/// real run**: it proves a fix works from that point, not that the run still reaches that point.
-/// Always finish with a clean `full_playthrough`.
-///
-/// `RESUME_QUEUE_LEN` is the `queue_len=` from the last `[policy]` line of the stalled run.
+/// Resume [`full_playthrough`] from the save state a stalled run drops in
+/// `target/test-artifacts/`, with the steps it had left still queued — so a stall 270 steps in
+/// can be re-tested in seconds instead of re-running the whole 20 minutes up to it.
 /// ```text
 /// RESUME_QUEUE_LEN=233 cargo test --release --features slow-tests --lib -- \
 ///   probe_resume_playthrough --exact --ignored --nocapture
@@ -156,8 +111,9 @@ fn probe_resume_playthrough() {
     let s = fixture.game_state();
     println!("resume state: {} @ {} — party {:?}", s.map.map, s.map.player_position,
         s.pokemon.iter().map(|p| (p.species, p.level)).collect::<Vec<_>>());
-    // The bag and the reachable set are the two things a stall is usually *about*: an item a gift or a
-    // purchase silently failed to deliver, or an exit the pathfinder cannot see from where it stands.
+    // The bag and the reachable set are the two things a stall is usually *about*: an item a gift
+    // or a purchase silently failed to deliver, or an exit the pathfinder cannot see from where
+    // it stands.
     println!("   bag[{}]: {:?}", s.bag.len(), s.bag.iter().map(|i| i.id).collect::<Vec<_>>());
     println!("   tile under player: {:?}", s.map.tile_at_checked(s.map.player_position));
     for sprite in &s.map.sprites {
@@ -171,40 +127,7 @@ fn probe_resume_playthrough() {
     println!("resume ended: {} @ {} badges={:?}", s.map.map, s.map.player_position, s.badges);
 }
 
-/// The full end-to-end playthrough — the single source of truth for how far the agent can play. From a
-/// fresh `RedsHouse2F` save it plays legitimately (button input only, starting from a **Squirtle**) and
-/// earns **all 8 gym badges**: Boulder → (Nugget Bridge → Bill → ) Cascade → Thunder → Rainbow →
-/// (Silph Scope → Poké Flute → Snorlax) → Soul → (Safari Surf/Strength) → Silph Co (Card Key → rival →
-/// Giovanni → liberation) → Marsh → surf to Cinnabar → Pokémon Mansion Secret Key → Volcano → back to
-/// the Viridian Gym for **Earth** (Giovanni), with the **Seafoam Islands** detour for Articuno slotted
-/// in between Volcano and Earth.
-///
-/// It catches exactly two things on the way and neither of them fights: an **Oddish** on Route 25 to
-/// carry Cut, and a **Machop** on Victory Road to carry Strength. Blastoise does everything else, with
-/// Surf, Blizzard and Dig — Surf is the one HM on it, because Surf is a 95-power STAB attack that
-/// happens to be an HM.
-///
-/// It emulates every frame, so even in `--release` it takes ~7 min of wall clock — hence its own
-/// feature gate, separate from the leg chain:
-/// `cargo test --release --features slow-tests full_playthrough`. The per-leg tests (each seeded
-/// from a saved fixture) cover the same ground quickly and in parallel.
-///
-/// ⚠️ **Run this after every major work item and always before pushing** (see CLAUDE.md). It is the
-/// only test that proves the legs *compose*; the leg tier proves each leg from a committed fixture and
-/// is systematically blind to three things — a leg that only passes because `run_leg` kept stepping
-/// after its queue emptied, a fixture that hands a leg a party or a bag the run could not actually
-/// have earned, and any change to frame timing re-rolling the RNG stream every route is tuned against.
-///
-/// ⚠️ **Its end point is Victory Road 2F, and that is a cost decision rather than a limitation.**
-/// The route `gb serve --policy deterministic` plays goes all the way to the Hall of Fame — see
-/// [`PolicyStep::complete_game_steps`] and `hall_of_fame_playthrough`, which is the same run carried
-/// through the gauntlet grind, both Victory Road puzzles and the Elite Four. That takes **~26 min**
-/// against this one's seven, most of it the grind's ~840 wild battles, so it lives behind its own
-/// `hall-of-fame` feature and this stays the gate you run before pushing.
-///
-/// ⚠️ **This doc comment has lied before, so keep it honest.** The test sat broken for a long time
-/// while this very paragraph claimed it reached the Hall of Fame. It does not, on purpose, and the
-/// assertion at the bottom is what says where it does stop — not this.
+/// The full end-to-end playthrough — the single source of truth for how far the agent can play.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "full playthrough; run with --features slow-tests")]
 fn full_playthrough() {
@@ -220,21 +143,12 @@ fn full_playthrough() {
         assert_eq!(state.pokemon.len(), 0, "player should have no pokemon before Oak's script");
     }
 
-    // ⚠️ **`step_until_exhausted`, never `run_leg`.** The queue emptying is the *only* thing this
-    // test is allowed to accept as "the run finished". `run_leg` would keep stepping afterwards until
-    // the assertions happened to come true, which turns "the step list plays the game" into "the step
-    // list plus whatever the agent does on its own eventually gets there" — and that is precisely the
-    // hole the Poké Flute fell through for a long time (see `TestFixture::run_leg`). Everything below
-    // has to be true the instant the last step pops.
+    // `step_until_exhausted`, never `run_leg`.
     let started = std::time::Instant::now();
     fixture.step_until_exhausted();
     let elapsed = started.elapsed();
     let state = fixture.game_state();
 
-    // ⭐ **The rate, because the bar for `docs/coverage-plan.md`'s god run is this test measured on
-    // the same machine on the same day** — and until this line you had to time the whole cargo
-    // invocation from outside, which folds a compile into the number. Game time over wall clock is
-    // what makes it comparable with `godmode_turn_cost`'s own figure.
     println!("\nplayed {:?} of game time in {elapsed:?} of wall clock ({:.0}x realtime)",
              fixture.total_cycles.to_duration(), elapsed.as_secs_f64().max(0.001).recip()
                  * fixture.total_cycles.to_duration().as_secs_f64());
@@ -254,16 +168,14 @@ fn full_playthrough() {
     assert!(state.bag.contains(&ItemId::SilphScope), "should have the Silph Scope");
     assert!(state.bag.contains(&ItemId::PokeFlute), "should have the Poké Flute");
     assert!(state.badges.contains(Badge::SoulBadge), "should have the Soul Badge");
-    // Post-Soul: Safari HMs → Vaporeon → Silph (Marsh) → Cinnabar Mansion → Volcano → Viridian (Earth).
+    // Post-Soul: Safari HMs → Vaporeon → Silph (Marsh) → Cinnabar Mansion → Volcano → Viridian
+    // (Earth).
     assert!(state.bag.contains(&ItemId::Hm03Surf), "should have HM03 Surf");
     assert!(state.badges.contains(Badge::MarshBadge), "should have the Marsh Badge");
     assert!(state.badges.contains(Badge::VolcanoBadge), "should have the Volcano Badge");
     assert!(state.badges.contains(Badge::EarthBadge), "should have the Earth Badge (all 8 gym badges)");
 
-    // ⚠️ **One fighter and two HM slaves, and the slaves are the *only* other members.** Measured at
-    // the end of a clean run: Blastoise 59, Gloom 21 (the Oddish evolves on the way), Machop 24, all
-    // eight badges and **no black-outs at all**. Anything else in the party is a regression — the
-    // whole point of `gauntlet_grind_steps` is that one mon taken further is cheaper than three.
+    // One fighter and two HM slaves, and the slaves are the *only* other members.
     assert_eq!(state.pokemon.len(), 3, "party should be the starter + the two HM slaves");
     assert!(state.pokemon.iter().any(|p| p.species == PokemonSpecies::Blastoise),
         "the starter should have reached Blastoise");
@@ -272,7 +184,7 @@ fn full_playthrough() {
     assert!(state.pokemon.iter().any(|p| p.species == PokemonSpecies::Machop),
         "should have caught the Victory Road Strength slave");
 
-    // ⚠️ **Every HM this route needs, checked on the *party* rather than the bag**, because a carrier
+    // Every HM this route needs, checked on the *party* rather than the bag, because a carrier
     // that cannot learn one is exactly the failure the starter swap introduced: Cut lives on the
     // Oddish and Surf, Strength and Dig on Blastoise, and a step aimed at the wrong one waits for
     // ever rather than failing.
@@ -285,36 +197,8 @@ fn full_playthrough() {
     fixture.save_state_named("src/pokemon/data/post-victory-road-1f.bin").unwrap();
 }
 
-/// **The whole game, to the Hall of Fame** — [`PolicyStep::complete_game_steps`], which is what
-/// `gb serve --policy deterministic` plays.
-///
-/// ⚠️ **Its own `hall-of-fame` feature because it is ~26 minutes against `full_playthrough`'s seven,
-/// and a gate that long is a gate nobody runs.** Most of the difference is `gauntlet_grind_steps`:
-/// ~840 wild battles in the Pokémon Mansion to bring one Blastoise to lv85. Run this when the endgame
-/// changes — the grind, either Victory Road puzzle, or the Elite Four — and `full_playthrough` the
-/// rest of the time.
-///
-/// ⚠️ **It has been fifty minutes twice, and both times the cause was the grind rather than the
-/// route.** Once because a trainee was switched in rather than *leading*, which halves the payout and
-/// costs the turn; and once because it was grinding three Pokémon to lv75 (1.4 M experience) instead
-/// of one to lv85 (425 k). The whole argument is on `PolicyStep::gauntlet_grind_steps`.
-///
-/// ⚠️ **`run_until`, not `step_until_exhausted`, and this is the one test allowed that.** The final
-/// step is the rival in the Champion's room, and beating him hands the agent to
-/// `drive_post_champion_cutscene`, which stops polling the policy — so the queue never empties and
-/// waiting on it would hang. The exception is kept honest by asserting afterwards that all but the
-/// **last two** steps popped, so "reached the Hall of Fame" cannot be satisfied by the agent
-/// wandering into the credits on its own.
-///
-/// ⚠️ **Two rather than one, and the difference is a frame-timing race rather than a step that did
-/// not happen.** The bound was `<= 1` — the rival's own `BattleTrainer` — and that only held while
-/// the agent happened to get one overworld poll between arriving in the Champion's room and the
-/// rival challenging. He challenges *on entry*, as a script, so there is nothing to guarantee that
-/// poll, and the `enter(ChampionsRoom)` in front of him pops on the tick after the map changes or
-/// not at all. A run that took the room faster stopped getting it: the log shows Gary beaten, the
-/// Champion's script played and the Hall of Fame reached with both steps still queued. It is the
-/// same mechanism the paragraph above describes for the last step, one step earlier. Out of 516 the
-/// guard is unchanged in what it is for.
+/// The whole game, to the Hall of Fame — [`PolicyStep::complete_game_steps`], which is what `gb
+/// serve --policy deterministic` plays.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "~26 min — run with --features slow-tests")]
 fn hall_of_fame_playthrough() {
@@ -335,10 +219,7 @@ fn hall_of_fame_playthrough() {
         println!("{}: {} lv.{}", pokemon.species, pokemon.nickname, pokemon.level);
     }
     assert!(state.badges.contains(Badge::EarthBadge), "all eight badges");
-    // ⚠️ **One fighter over the target, and it replaced "three fighters or you lose".** That rule
-    // was true of three mons at *seventy-five*, with a lv26, a lv30 and a lv24 behind them; height
-    // turned out to be the answer rather than depth of bench. See
-    // `PolicyStep::gauntlet_grind_steps`.
+    // One fighter over the target, and it replaced "three fighters or you lose".
     for species in [PokemonSpecies::Blastoise] {
         let mon = state.pokemon.iter().find(|p| p.species == species)
             .unwrap_or_else(|| panic!("the party should carry a {species:?}"));

@@ -1,27 +1,14 @@
 //! Low-pass equalisation for the band-limited step kernel.
-//!
-//! Ported from `blip_eq_t` / `gen_sinc` in Blip_Buffer 0.4.0. The original carries three parameters
-//! — treble, rolloff frequency and cutoff frequency — but for a treble-only equalisation (the only
-//! kind this emulator uses) `rolloff_freq` is 0, which makes `cutoff` 0, which in turn makes the
-//! hard-coded `sample_rate` in the default constructor dead. So only `treble_db` survives here.
-//!
-//! The expressions below are kept in the original's exact shape and evaluation order rather than
-//! simplified for `cutoff == 0`. Floating-point addition is not associative, and the goldens in
-//! `data/blip_*.bin` were produced by the C++; rewriting `a * d + c * b` into something tidier can
-//! move a rounded tap by one and break bit-exactness for no gain.
 
 use std::f64::consts::PI;
 
 /// Width of the scratch kernel `Blip_Synth::treble_eq` works in, in `f32` entries.
-///
-/// The original sizes this off `blip_widest_impulse_` rather than the synth's own quality, so it is
-/// the same 608 entries whatever quality is in use.
 pub const FIMPULSE_LEN: usize = super::BLIP_RES / 2 * (super::BLIP_WIDEST_IMPULSE - 1) + super::BLIP_RES * 2;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlipEq {
-    /// Treble level in dB at half the sampling rate. 0.0 is flat, negative values roll treble off.
-    /// The library default of -8.0 is what most emulators ship.
+    /// Treble level in dB at half the sampling rate. 0.0 is flat, negative values roll treble
+    /// off.
     pub treble_db: f64,
 }
 
@@ -37,10 +24,6 @@ impl BlipEq {
     }
 
     /// Fill `out` with the half-kernel, then apply half a Hamming window to it.
-    ///
-    /// Note the deliberate `f64` → `f32` narrowing inside `gen_sinc`: the original stores into a
-    /// `float` array and then multiplies that `float` back through `double` for the window. Keeping
-    /// both steps is what makes the rounded `i16` taps come out identical.
     pub fn generate(&self, out: &mut [f32]) {
         let count = out.len();
         // With no rolloff frequency there is no cutoff, and `oversample` reduces to this.
@@ -58,9 +41,6 @@ impl BlipEq {
 }
 
 /// The windowed-sinc generator itself.
-///
-/// This is a closed-form sum of a geometric series of cosines — the `a/b + c/d` at the end is a
-/// single rational evaluated as `(a*d + c*b) / (b*d)` to avoid two divisions.
 fn gen_sinc(out: &mut [f32], oversample: f64, treble: f64, cutoff: f64) {
     let cutoff = if cutoff >= 0.999 { 0.999 } else { cutoff };
     let treble = treble.clamp(-300.0, 5.0);

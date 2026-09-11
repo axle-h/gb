@@ -1,48 +1,7 @@
 //! The model's battle script: a sandboxed program that decides battle turns without a request.
-//!
 //! ```text
 //! $GB_RUN_DIR/<run-id>/battle-script.json      { source, armed, last_failure }
 //! ```
-//!
-//! Battles are where this run's tokens go and where its play is worst. The deployed run of
-//! 2026-08-26 made **204 battle decisions of which 31 were `run` and none was a Poké Ball**, and
-//! reached Mt Moon on 92 minutes of cartridge time with a single Lv19 starter as its whole party.
-//! Every one of those 204 decisions was a full request against a ~50 k-token history, to answer a
-//! question that is usually mechanical: hit the thing with the move that does the most damage.
-//!
-//! So the model writes the mechanical answer down once and the policy runs it.
-//! [`crate::pokemon::llm_policy::LlmPolicy::pick_battle_action`] evaluates the script **on the
-//! emulator thread**, so a scripted turn returns on the first poll: no request, no round trip, no
-//! latency. Paired with `resume_after_battle`, a wild encounter interrupting a walk costs nothing
-//! at all.
-//!
-//! ⚠️ **The script filters [`crate::pokemon::policy::battle_options`]; it never invents an action.**
-//! That function is the one legal-action chokepoint `RandomPolicy`, `DeterministicPolicy`,
-//! `ConsolePolicy` and `tools::battle_menu` already share, and
-//! `postgame::{safari,fishing,legendaries}::pick_battle_action(state, …, &actions)` is the existing
-//! pluggable-strategy shape. A choice that is not on that list is a **script failure with a named
-//! reason**, never a silently dropped turn — the same rule `tools::classify` follows for an id the
-//! model invented.
-//!
-//! ⚠️ **The safety of this is the engine's limits, not the language.** The source is written by a
-//! model and runs on the thread that owns the `GameBoy`, so [`engine`] sets an operation cap, a
-//! wall-clock abort, string/array/map ceilings and a call-depth limit, and `Cargo.toml` never
-//! enables rhai's `unchecked`. Rhai has no file, process or network API to disable. On top of that
-//! [`run`] wraps the evaluation in `catch_unwind`, the way `web::audio` wraps the Opus encoder and
-//! for the same reason: a panic on this thread would take the run's checkpoint with it.
-//!
-//! ⚠️ **Nothing here is cached and that is deliberate.** [`run`] builds an engine, compiles and
-//! evaluates, every call. A cached `AST` would have to be invalidated when the source changed, and
-//! the failure mode of getting that wrong is a run quietly fighting every battle with a script the
-//! model replaced an hour ago. Measured against what it saves — a whole HTTP request — a compile of
-//! a thirty-line script is not worth the invalidation bug.
-//!
-//! ⚠️ **The choice cell is the authority, not the abort.** Every action function records its choice
-//! and then aborts evaluation, which is what makes "calling an action ends the script" true rather
-//! than a convention the docs ask for. But rhai has `try`/`catch`, so a script *can* swallow that
-//! abort — in which case the first recorded choice still stands and any later one is ignored. The
-//! rule is "the first action wins", enforced by the cell, and it holds however the script is
-//! written.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -58,85 +17,33 @@ use crate::pokemon::pokemon::PokemonSummary;
 use crate::pokemon::policy::battle_options;
 use crate::run::files;
 
-/// The docs `get_battle_script_docs` answers with, sent **verbatim**.
-///
-/// Ordinary markdown, `include_str!`'d, with no template and nothing rendered — exactly what
-/// [`crate::llm::guide`] does with a chapter, and for the same reason: what is on disk is what the
-/// model is sent, so reviewing the file is reviewing the answer.
+/// The docs `get_battle_script_docs` answers with, sent verbatim.
 pub const DOCS: &str = include_str!("battle_script/DOCS.md");
 
 /// The deterministic policy's battle strategy, written as a battle script.
-///
-/// ⚠️ **A worked example that is known to play the game, rather than one invented for the docs.** It
-/// is `DeterministicPolicy::pick_battle_action` with the route-plan arms removed — the strategy
-/// `full_playthrough` finishes the game with — and
-/// `the_deterministic_strategy_still_arms_and_still_plays` keeps it compiling and choosing as this
-/// module changes underneath it. It is deliberately **not** `include_str!`'d into `DOCS.md`: the
-/// docs are carried in the model's context and this is 120 lines, so it is offered only if the
-/// model asks for it and used here as a test.
 pub const DETERMINISTIC: &str = include_str!("battle_script/DETERMINISTIC.rhai");
 
 /// The script every run starts with, and the one a `set_battle_script` with no `script` goes back
-/// to. It calls `battle.ask()` and nothing else, so it decides no turns and the run behaves exactly
-/// as it did when the answer to "is there a script" was "no".
-///
-/// ⚠️ **The point is that the artefact exists, not that it does anything.** Two deployed runs never
-/// called `set_battle_script` once — 207 battle turns and 22.3 M prompt tokens in the run of
-/// 2026-08-27 — and `get_battle_script_docs` was never called either, so this was never weighed and
-/// rejected, it was never reached. A blank page asks the model to invent a file; a default asks it
-/// to edit one, which is a smaller step and the one `read_battle_script` can actually show it. That
-/// tool used to answer "There is no battle script", which is a round trip spent learning nothing.
-///
-/// ⚠️ **It is deliberately not a strategy.** `DETERMINISTIC` is right here and is known to finish
-/// the game, and shipping it as the default would make every run's battles somebody else's play
-/// rather than the model's, which is the thing the run exists to measure. The comments point at the
-/// docs instead of restating them, so the worked example cannot drift into a second copy.
-///
-/// ⚠️ **It never reaches [`Live`] and so is never evaluated.** `battle.ask()` and "no script" are
-/// the same outcome, so [`BattleScript::live_source`] withholds it and the emulator thread's battle
-/// path is byte-for-byte what it was: no engine built per battle turn, no failure surface, and — the
-/// half that matters — no `self.note`, which would otherwise be set on every battle turn and
-/// suppress the very `TurnContext::Battle` line this exists to keep showing.
+/// to. It calls `battle.ask()` and nothing else, so it decides no turns and the run behaves
+/// exactly as it did when the answer to "is there a script" was "no".
 pub const DEFAULT: &str = include_str!("battle_script/DEFAULT.rhai");
 
-/// How long a script may be. Generous — it is written once and re-read only when the model asks for
-/// it — but bounded, because it is sent back whole by `read_battle_script` and quoted in full in
-/// every validation failure.
+/// How long a script may be. Generous — it is written once and re-read only when the model asks
+/// for it — but bounded, because it is sent back whole by `read_battle_script` and quoted in full
+/// in every validation failure.
 pub const MAX_SOURCE: usize = 6_000;
 
 /// How long a script's stated purpose may be.
-///
-/// ⚠️ **Much tighter than [`MAX_SOURCE`], because this one is re-sent on every overworld turn.**
-/// The source is read when the model asks for it; the purpose rides in the standing line of every
-/// situation for as long as the script is armed, so a model that answered the field with its whole
-/// reasoning would pay for it thousands of times. Truncated rather than refused — a purpose that
-/// is too long is still a purpose, and refusing the call would throw away the script with it.
 pub const MAX_PURPOSE: usize = 200;
 
 /// How much of a disarm reason rides on the overworld turn.
-///
-/// ⚠️ **[`MAX_PURPOSE`]'s argument, for the same reason: this is re-sent on every overworld turn
-/// for as long as the script stays broken.** The reasons this codebase writes are one sentence
-/// (the longest is `NO_ACTION` at 191 bytes), but `describe`'s fallback arm is rhai's own
-/// `Display` and is not ours to bound. Cut with an ellipsis rather than silently, because a
-/// truncated sentence about what went wrong reads as a complete one and is then acted on.
-/// `read_battle_script` still answers with the whole of it.
 pub const MAX_FAILURE: usize = 240;
 
 /// The fuel. Rhai counts operations and terminates when this is reached, which is the guard
 /// `catch_unwind` cannot provide: a panic can be caught, a loop cannot.
-///
-/// ⚠️ **Sized against the emulator's tick budget, not against what a script needs.** A battle
-/// decision is a scan of at most six party members and four moves each, so a few hundred
-/// operations; 20 000 is two orders of magnitude of headroom for a model that likes writing
-/// helpers. It matters that it is finite rather than what the number is.
 pub const MAX_OPERATIONS: u64 = 20_000;
 
 /// The wall-clock abort, checked from rhai's progress hook.
-///
-/// ⚠️ **Belt and braces on top of [`MAX_OPERATIONS`], and not redundant.** An operation count is a
-/// bound on work, not on time: one operation on a very large string or array is not one operation's
-/// worth of wall clock, and `host.rs`'s `MAX_CATCHUP` starts dropping emulated time at 250 ms.
 pub const MAX_RUNTIME: Duration = Duration::from_millis(50);
 
 /// How many `print` lines are carried back to the model, and how long each may be. A script that
@@ -153,12 +60,12 @@ const NO_ACTION: &str = "the script ran to the end without calling an action. Ev
 /// What one evaluation decided.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// A legal action, already resolved against [`battle_options`].
+    /// A legal action, already resolved against `battle_options`.
     Action(BattleAction),
-    /// `battle.ask()` — the script wants the model to answer this particular turn, and stays armed.
+    /// `battle.ask()` — the script wants the model to answer this particular turn, and stays
+    /// armed.
     Ask,
-    /// The script did not produce an action. The string is shown to the model verbatim, so it says
-    /// what went wrong rather than naming a variant.
+    /// The script did not produce an action.
     Failed(String),
 }
 
@@ -176,10 +83,6 @@ impl Evaluation {
 }
 
 /// A choice the script made, before it has been checked against the game.
-///
-/// Symbolic on purpose: the script names a move or a Pokémon, and [`resolve`] is what turns that
-/// into a [`BattleAction`] that is actually on the menu this turn. Nothing the script says reaches
-/// the game without going through that.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Choice {
     Fight(Ref),
@@ -189,7 +92,6 @@ enum Choice {
     Ask,
 }
 
-/// How the script named something: by the `slot` off the object it was handed, or by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Ref {
     Slot(i64),
@@ -212,11 +114,7 @@ impl Ref {
         if let Ok(slot) = value.as_int() {
             return Ok(Ref::Slot(slot));
         }
-        // ⚠️ **`()` gets its own sentence, because it is the mistake a model actually makes.**
-        // `battle.fight(battle.best_move)` is the first line anyone writes, and `best_move` is `()`
-        // exactly when nothing in the moveset can hurt the foe — which is also the turn on which
-        // getting it right matters most. Told only "got a ()" a model has to work out where the
-        // unit came from; told this, it has the guard to add.
+        // `()` gets its own sentence, because it is the mistake a model actually makes.
         if value.is_unit() {
             return Err(
                 "it was given `()`. That is what `battle.best_move` is when nothing you know can \
@@ -240,15 +138,10 @@ impl Ref {
 }
 
 /// Names are compared with the punctuation and the case taken out.
-///
-/// ⚠️ **Because the cartridge's spelling is not the one a model will type.** `ItemId`'s `Display` is
-/// strum's, so a Poké Ball is `PokeBall`; a move is `Karate Chop`; a nickname is whatever the model
-/// chose. Matching literally would refuse `"POKE BALL"`, `"poke ball"` and `"Pokeball"` — three
-/// spellings of the thing the run most needs to start using.
 fn normalised(name: &str) -> String {
     name.chars()
-        // ⚠️ `é` is alphanumeric, so filtering on that alone keeps it and `POKÉBALL` never equals
-        // `POKEBALL`. It is the only accent the cartridge has and the only one this needs.
+        // `é` is alphanumeric, so filtering on that alone keeps it and `POKÉBALL` never equals
+        // `POKEBALL`.
         .map(|c| match c {
             'é' | 'É' | 'è' | 'È' => 'E',
             other => other,
@@ -258,14 +151,7 @@ fn normalised(name: &str) -> String {
         .collect()
 }
 
-// ---------------------------------------------------------------------------------------------
-// The context the script sees
-// ---------------------------------------------------------------------------------------------
-
-/// The `battle` global. A handle onto the shared choice cell and nothing else — every *fact* is
-/// pre-built into rhai maps at construction, so a getter is a clone rather than a read of live game
-/// state. That is what keeps the script's view of the turn consistent with itself: `battle.me` read
-/// twice is the same Pokémon, whatever the emulator did in between.
+/// The `battle` global.
 #[derive(Clone)]
 struct Battle {
     facts: Rc<Map>,
@@ -278,9 +164,6 @@ impl Battle {
     }
 
     /// Record a choice and stop the script.
-    ///
-    /// The first call wins: a later one is dropped rather than overwriting, so a script that
-    /// catches the abort and carries on still commits to the action it committed to first.
     fn commit(&self, choice: Choice) -> Result<(), Box<EvalAltResult>> {
         let mut cell = self.choice.borrow_mut();
         if cell.is_none() {
@@ -299,10 +182,6 @@ impl Battle {
 }
 
 /// The engine every script is compiled and run by.
-///
-/// ⚠️ **One builder, used by the live evaluation *and* by `set_battle_script`'s validation.** If
-/// validation ran on a differently-configured engine it would be proving something about a program
-/// that is never executed, which is worse than not validating at all.
 fn engine(deadline: Instant, prints: Rc<RefCell<Vec<String>>>) -> Engine {
     let mut engine = Engine::new();
 
@@ -328,8 +207,7 @@ fn engine(deadline: Instant, prints: Rc<RefCell<Vec<String>>>) -> Engine {
             lines.push(truncated(line, MAX_PRINT_LEN));
         }
     });
-    // `debug` is rhai's other output channel and a model will reach for it. Sending it to the same
-    // place costs nothing and beats a print that silently goes nowhere.
+    // `debug` is rhai's other output channel and a model will reach for it.
     let captured = Rc::clone(&prints);
     engine.on_debug(move |line, _, _| {
         let mut lines = captured.borrow_mut();
@@ -351,10 +229,7 @@ fn engine(deadline: Instant, prints: Rc<RefCell<Vec<String>>>) -> Engine {
         .register_get("best_move", |battle: &mut Battle| battle.get("best_move"))
         .register_get("can_run", |battle: &mut Battle| battle.get("can_run"))
         .register_fn("fight", |battle: &mut Battle, value: Dynamic| battle.action(Choice::Fight, value))
-        // ⚠️ **`switch_to`, and it wanted to be `switch`.** `switch` is a statement keyword in rhai
-        // and is reserved even in method position, so `battle.switch(x)` is a *parse* error that no
-        // amount of registering can fix. Same trap as `move_type` above, and
-        // `every_name_the_docs_use_is_one_the_parser_accepts` is what stops a third one shipping.
+        // `switch_to`, and it wanted to be `switch`.
         .register_fn("switch_to", |battle: &mut Battle, value: Dynamic| battle.action(Choice::Switch, value))
         .register_fn("use_item", |battle: &mut Battle, value: Dynamic| {
             match value.clone().into_string() {
@@ -372,33 +247,13 @@ fn engine(deadline: Instant, prints: Rc<RefCell<Vec<String>>>) -> Engine {
     engine
 }
 
-// ---------------------------------------------------------------------------------------------
-// Building the facts
-// ---------------------------------------------------------------------------------------------
-
 /// One move, as the script sees it.
-///
-/// ⚠️ **`damage` and `effectiveness` are the whole reason this is affordable to write.** Without
-/// them a script has to carry a type chart — hundreds of lines the model has to get right from
-/// memory, in a file it is charged for storing and cannot test. Both are thin wrappers over
-/// `damage::expected_damage` and `PokemonType::attack_effectiveness`, which the deterministic
-/// policy has used since long before this existed.
-///
-/// ⚠️ **`usable` is decided by the caller, and the turn's option list is half of it.** It used to
-/// be `pp > 0 && !disabled` alone, which is what the move knows about itself and not what the game
-/// will allow: in a ghost battle every move has PP and none may be chosen, so a script that read
-/// `usable` and fought was disarmed with "Usable now: nothing". The PP half stays, because
-/// `battle_options` offers every move when *all* are empty — choosing one is Struggle — and a
-/// Tackle with no PP reported as usable at 40 damage is the same lie facing the other way. See
-/// [`facts`].
 fn move_map(slot: usize, battle_move: &crate::pokemon::move_name::PokemonMove, me: &PokemonSummary, turn: Turn, usable: bool) -> Map {
     let metadata = battle_move.name.metadata();
     let mut map = Map::new();
     map.insert("slot".into(), Dynamic::from(slot as i64));
     map.insert("name".into(), Dynamic::from(battle_move.name.to_string()));
-    // ⚠️ **`move_type`, and it wanted to be `type`.** `type` is a reserved word in rhai, so
-    // `mv.type` is a *parse* error — which a model writes on its first attempt and pays a whole
-    // round trip to find out. The key is spelled the way the docs spell it, and the docs say why.
+    // `move_type`, and it wanted to be `type`.
     map.insert("move_type".into(), Dynamic::from(metadata.move_type.to_string()));
     map.insert("power".into(), Dynamic::from(metadata.power.unwrap_or(0) as i64));
     map.insert("accuracy".into(), Dynamic::from(metadata.accuracy as i64));
@@ -414,16 +269,6 @@ fn move_map(slot: usize, battle_move: &crate::pokemon::move_name::PokemonMove, m
 }
 
 /// What this turn lets a move do, shared by every Pokémon the script reads.
-///
-/// ⚠️ **A ghost is the case this exists for, and it is the one `expected_damage` cannot see.**
-/// `battle::is_ghost_battle` is a fact about the map and the bag, not about either Pokémon: the
-/// Gastly in front of a Lv40 starter has ordinary stats and takes ordinary damage on paper, and the
-/// cartridge replaces every move with "too scared to move" regardless. So `damage` and
-/// `effectiveness` are zero for *everyone* — the bench included, or the docs' worked example
-/// would find a bench member whose moves "do damage" and switch to it, which `battle_options` does
-/// not offer either. The deployed run of 2026-09-01 was disarmed **thirty times** in Pokémon
-/// Tower on exactly this, every rewrite guarding on `best_move == ()` as the docs say to and the
-/// guard never firing, because `best_move` was Tackle at 40 damage against a ghost.
 #[derive(Clone, Copy)]
 struct Turn<'a> {
     foe: &'a PokemonSummary,
@@ -440,13 +285,7 @@ impl Turn<'_> {
     }
 }
 
-/// One Pokémon, as the script sees it. `moves` is scored against the foe, so a bench member's moves
-/// carry the damage they *would* do — which is what a coverage switch is decided on.
-///
-/// `fight_slots` is the list of move slots the game offers as a `Fight` this turn — `Some` for the
-/// Pokémon that is out, whose moves are the only ones that can be chosen, and `None` for a bench
-/// member or the foe, where the ghost is the only thing the turn can say about a move nobody can
-/// pick right now. PP and Disable are checked on top either way: see [`move_map`].
+/// One Pokémon, as the script sees it.
 fn pokemon_map(slot: usize, name: &str, mon: &PokemonSummary, turn: Turn, fight_slots: Option<&[usize]>) -> Map {
     let mut map = Map::new();
     map.insert("slot".into(), Dynamic::from(slot as i64));
@@ -486,9 +325,7 @@ fn pokemon_map(slot: usize, name: &str, mon: &PokemonSummary, turn: Turn, fight_
     map
 }
 
-/// ⚠️ **A healthy Pokémon says `""`, not `"None"`.** `PokemonStatus`' `Display` is strum's derive,
-/// which is what put `20/20 HP, None` in front of the model in every party line for months. A
-/// script would compare against it, so the same trap is closed here rather than only in `prompt`.
+/// A healthy Pokémon says `""`, not `"None"`.
 fn status_word(status: crate::pokemon::status::PokemonStatus) -> String {
     use crate::pokemon::status::PokemonStatus::*;
     match status {
@@ -503,14 +340,6 @@ fn status_word(status: crate::pokemon::status::PokemonStatus) -> String {
 }
 
 /// Everything the script can read, built once per evaluation.
-///
-/// ⚠️ **`options` is the list [`resolve`] will check the choice against, and everything here that
-/// says what *can* be done is derived from it rather than from the battle.** `can_run` was
-/// `battle_type == Wild`, `usable` was the move's PP, and `best_move` was the highest
-/// `expected_damage` with PP left — three separate readings of the rules, each right until
-/// `battle_options` narrowed the list for a reason none of them knew about. The ghost is that
-/// reason today (`[Run]` alone); the point of reading the list is that the next one flows through
-/// as well. The script filters `battle_options`; so does what it is shown.
 fn facts(state: &GameState, turn: u32, options: &[BattleAction]) -> Option<Map> {
     let battle = state.battle.as_ref()?;
     let me = &battle.player;
@@ -548,10 +377,8 @@ fn facts(state: &GameState, turn: u32, options: &[BattleAction]) -> Option<Map> 
     let me_map = pokemon_map(active, &my_name, me, against_foe, Some(&fight_slots));
     let my_moves = me_map.get("moves").cloned().unwrap_or(Dynamic::UNIT);
     map.insert("me".into(), Dynamic::from(me_map));
-    // The foe is scored against *itself* for `damage`, which is meaningless — but the field has to
-    // exist or `battle.foe.moves[0].damage` is a hard error rather than a number to ignore. What
-    // matters is that the moves and their PP are there: they are read out of `wEnemyMon`, so a
-    // script can see what it is up against.
+    // The foe is scored against *itself* for `damage`, which is meaningless — but the field has
+    // to exist or `battle.foe.moves[0].damage` is a hard error rather than a number to ignore.
     map.insert("foe".into(), Dynamic::from(pokemon_map(usize::MAX, &foe.species.to_string(), foe, Turn { foe: me, ghost }, None)));
     map.insert("moves".into(), my_moves);
 
@@ -579,11 +406,8 @@ fn facts(state: &GameState, turn: u32, options: &[BattleAction]) -> Option<Map> 
         .collect();
     map.insert("bag".into(), Dynamic::from(bag));
 
-    // The highest-damage usable move, which is what most scripts want and none should have to write
-    // twice. `()` when nothing can damage the foe at all — a real state, and one the script has to
-    // handle, since it is exactly when switching is the right answer — and `()` when the game
-    // offers no move to choose, which is the ghost. Same slots and same damage as `me.moves`, so
-    // `best_move == ()` and "no move in `battle.moves` is usable with damage > 0" are one fact.
+    // The highest-damage usable move, which is what most scripts want and none should have to
+    // write twice.
     let best = me
         .moves
         .iter()
@@ -605,15 +429,7 @@ fn facts(state: &GameState, turn: u32, options: &[BattleAction]) -> Option<Map> 
     Some(map)
 }
 
-// ---------------------------------------------------------------------------------------------
-// Resolution
-// ---------------------------------------------------------------------------------------------
-
 /// Turn what the script said into an action the game will actually accept, or say why not.
-///
-/// ⚠️ **Every arm names what was wrong and what was available.** This message is the only thing the
-/// model gets back before the script is disarmed, so "no such move" is a dead end and "`SURF` is
-/// not one of BULBASAUR's moves; it knows Tackle, Growl, Vine Whip" is a fix.
 fn resolve(choice: Choice, state: &GameState, options: &[BattleAction]) -> Outcome {
     match choice {
         Choice::Ask => Outcome::Ask,
@@ -700,13 +516,7 @@ fn list(names: impl Iterator<Item = String>) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Running one
-// ---------------------------------------------------------------------------------------------
-
 /// Evaluate `source` against the turn `state` describes, and resolve whatever it chose.
-///
-/// Never panics and never blocks: see the module's third and fourth ⚠️.
 pub fn run(source: &str, state: &GameState, turn: u32) -> Evaluation {
     let Some(options) = battle_options(state) else {
         return Evaluation::failed("there is no battle to decide", Vec::new());
@@ -730,8 +540,7 @@ pub fn run(source: &str, state: &GameState, turn: u32) -> Evaluation {
     let prints = prints.borrow().clone();
     let taken = choice.borrow_mut().take();
 
-    // ⚠️ **The cell is read before the error, always.** An action aborts evaluation on purpose, so
-    // the *expected* path through here has an `Err` beside a perfectly good choice.
+    // The cell is read before the error, always.
     if let Some(choice) = taken {
         return Evaluation { outcome: resolve(choice, state, &options), prints };
     }
@@ -741,7 +550,6 @@ pub fn run(source: &str, state: &GameState, turn: u32) -> Evaluation {
         Ok(Err(failure)) => Evaluation::failed(describe(&failure), prints),
         // The audio encoder's rule, one thread over: a panic here would unwind the emulator and
         // take the run's checkpoint with it, so it is caught and reported as an ordinary failure.
-        // The script is disarmed by the caller either way, which is what makes it unrepeatable.
         Err(_) => Evaluation::failed("the script made the sandbox panic", prints),
     }
 }
@@ -757,9 +565,8 @@ fn describe(failure: &EvalAltResult) -> String {
             "the script ran for longer than {} ms and was stopped.",
             MAX_RUNTIME.as_millis(),
         ),
-        // ⚠️ **Our own refusals come back through here, and rhai's `Display` prefixes them with
-        // "Runtime error:".** They are sentences written for the model, not diagnostics, so the
-        // prefix is dropped and only the position is kept — that is the half it cannot work out.
+        // Our own refusals come back through here, and rhai's `Display` prefixes them with
+        // "Runtime error:".
         EvalAltResult::ErrorRuntime(message, position) => match message.clone().into_string() {
             Ok(sentence) => format!("{sentence} (at {position})"),
             Err(_) => failure.to_string(),
@@ -769,10 +576,6 @@ fn describe(failure: &EvalAltResult) -> String {
 }
 
 /// A disarm reason, cut to [`MAX_FAILURE`] for the overworld turn that carries it every turn.
-///
-/// ⚠️ **With an ellipsis, unlike [`truncated`].** A print line that stops mid-word is obviously
-/// cut; a sentence saying what went wrong is not, and the model acts on it. `MAX_QUOTE`'s
-/// head-only truncation in `battle_report` is the same mistake already paid for once.
 fn standing_failure(why: &str) -> String {
     match why.char_indices().nth(MAX_FAILURE) {
         Some((at, _)) => format!("{}…", &why[..at]),
@@ -793,43 +596,24 @@ fn truncated(text: &str, limit: usize) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// The persisted script
-// ---------------------------------------------------------------------------------------------
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Saved {
     #[serde(default)]
     source: Option<String>,
-    /// Whether the policy should consult it. A script that failed once is kept but not armed —
-    /// see [`BattleScript::disarm`].
+    /// Whether the policy should consult it.
     #[serde(default)]
     armed: bool,
     #[serde(default)]
     last_failure: Option<String>,
     /// The model's own one-line answer to "what did you write this for", taken by
     /// `set_battle_script` and said back to it on every overworld turn.
-    ///
-    /// ⚠️ **This is the field that makes a stale script legible, and nothing else can.** A script
-    /// is written for whatever fight is in front of the model and then decides every battle in the
-    /// run until it is replaced. The deployed script of 2026-09-01 opened `// Misty gym: Staryu
-    /// then Starmie.` and was still choosing Slash in Pokémon Tower hours later; the standing line
-    /// said only that a script was armed, which is true of every turn and so says nothing about
-    /// this one.
     #[serde(default)]
     purpose: Option<String>,
-    /// Battle turns this script has decided since it was armed. Reset by [`BattleScript::set`],
-    /// because a new script has decided nothing.
     #[serde(default)]
     decided: u32,
 }
 
-/// ⚠️ **A run always has a script, and the one it starts with is [`DEFAULT`].** The empty state is
-/// gone: there is no longer a difference between "no script" and "a script that asks every turn",
-/// so the file always has a source and the model always has something to edit rather than something
-/// to invent. ⚠️ **Per-field `#[serde(default)]` does not reach this** — it uses each field's own
-/// `Default`, so a file written before this change deserialises with `source: None`, which is what
-/// [`BattleScript::open`] normalises.
+/// A run always has a script, and the one it starts with is [`DEFAULT`].
 impl Default for Saved {
     fn default() -> Self {
         Self {
@@ -842,7 +626,7 @@ impl Default for Saved {
     }
 }
 
-/// The script on disk, and the tool calls against it. Answered on the **worker thread**: validation
+/// The script on disk, and the tool calls against it. Answered on the worker thread: validation
 /// runs the script seven times and none of it needs the emulator.
 pub struct BattleScript {
     /// `None` for a run with no directory — the tests, and the in-process worker in `LlmPolicy`.
@@ -853,11 +637,6 @@ pub struct BattleScript {
 impl BattleScript {
     /// Open the script in a run directory. Never fails: an unreadable file starts on [`DEFAULT`],
     /// on `TodoList::open`'s argument that refusing to play is worse than losing the thing.
-    ///
-    /// ⚠️ **A missing source is normalised to the default rather than left empty**, which is what
-    /// carries a run written before there was a default across the change: `{"source": null}`
-    /// deserialises to `None` through the per-field `#[serde(default)]`, and every reader below now
-    /// assumes there is always a source. A *disarmed* script keeps its own source and is left alone.
     pub fn open(run_dir: Option<&Path>) -> Self {
         let Some(run_dir) = run_dir else {
             return Self { path: None, saved: Saved::default() };
@@ -878,14 +657,6 @@ impl BattleScript {
     }
 
     /// Whether the script the model wrote is deciding battle turns.
-    ///
-    /// ⚠️ **The default does not count, and this is the one place that rule is made.** It is armed
-    /// in the file — there is nothing else for the flag to say — but it decides nothing, so every
-    /// reader downstream of this would otherwise tell the model and the page that the battles going
-    /// past are free when the run is paying a full prefill for each of them. That is the exact
-    /// direction the nudge cannot afford to be wrong in, and it is `false` here so that the turn
-    /// line, `read_battle_script`, [`live_source`](Self::live_source) and the page's `armed` chip
-    /// all inherit it rather than each remembering to ask.
     pub fn armed(&self) -> bool {
         self.saved.armed && self.saved.source.is_some() && !self.is_default()
     }
@@ -901,22 +672,19 @@ impl BattleScript {
     }
 
     /// What the model said it wrote this script for, how many battle turns it has decided since,
-    /// and — if it has stopped — why. Empty for the default, which decides nothing and was written
-    /// by nobody.
+    /// and — if it has stopped — why. Empty for the default, which decides nothing and was
+    /// written by nobody.
     pub fn standing(&self) -> ScriptStanding {
         ScriptStanding {
             purpose: self.saved.purpose.clone(),
             decided: self.saved.decided,
-            // ⚠️ **Only while it is the *current* state.** `set` clears `last_failure`, so this is
-            // normally `None` on an armed script anyway — but a file written before that was true
-            // could carry one, and an armed script explaining why it is broken is the one reading
-            // of this line that is worse than no line at all.
+            // Only while it is the *current* state.
             failure: (!self.armed()).then(|| self.saved.last_failure.as_deref().map(standing_failure)).flatten(),
         }
     }
 
-    /// Write back the running count the policy has been keeping. ⚠️ **The policy cannot persist it
-    /// itself** — one writer per run directory — so it counts in [`Live`] and the worker drains it
+    /// Write back the running count the policy has been keeping. The policy cannot persist it
+    /// itself — one writer per run directory — so it counts in [`Live`] and the worker drains it
     /// here at the top of a turn, exactly as it drains a failure.
     pub fn record_decided(&mut self, decided: u32) {
         if self.saved.decided == decided { return }
@@ -924,17 +692,16 @@ impl BattleScript {
         self.persist();
     }
 
-    /// What [`Live`] should hold: the source only while the script is armed, since the policy runs
-    /// whatever it is given. `None` for the default, which is [`armed`](Self::armed)'s doing and is
-    /// what keeps the emulator thread's battle path exactly as it was.
+    /// What [`Live`] should hold: the source only while the script is armed, since the policy
+    /// runs whatever it is given.
     pub fn live_source(&self) -> Option<String> {
         self.armed().then(|| self.saved.source.clone()).flatten()
     }
 
     /// The one line a battle turn says about the script. Three states rather than two, because
     /// "yours is still the one we gave you" and "yours broke" want opposite sentences and the
-    /// difference is invisible from the source alone: [`Live::failed`] drops the source the moment
-    /// it fails, and the default never reaches [`Live`] at all.
+    /// difference is invisible from the source alone: [`Live::failed`] drops the source the
+    /// moment it fails, and the default never reaches [`Live`] at all.
     pub fn state(&self) -> ScriptState {
         match (self.armed(), self.is_default()) {
             (true, _) => ScriptState::Armed,
@@ -967,16 +734,13 @@ impl BattleScript {
                     armed: true,
                     last_failure: None,
                     purpose: purpose.map(str::trim).filter(|p| !p.is_empty()).map(|p| {
-                        // ⚠️ **`char_indices`, not a byte slice.** The model writes prose here and
-                        // the game's own names are full of `é`; cutting mid-codepoint panics.
+                        // `char_indices`, not a byte slice.
                         match p.char_indices().nth(MAX_PURPOSE) {
                             Some((at, _)) => format!("{}…", &p[..at]),
                             None => p.to_string(),
                         }
                     }),
-                    // ⚠️ **Zeroed rather than carried over.** The count exists to say how long
-                    // *this* script has been deciding; inheriting the last one's would make a
-                    // freshly written script look like the stale one it replaced.
+                    // Zeroed rather than carried over.
                     decided: 0,
                 };
                 self.persist();
@@ -987,10 +751,6 @@ impl BattleScript {
     }
 
     /// `read_battle_script`.
-    ///
-    /// ⚠️ **There is no "there is no script" answer any more, and that is most of why [`DEFAULT`]
-    /// exists.** This used to be able to spend a round trip saying only that the model had not
-    /// written anything, which it already knew. It now always comes back with a file to edit.
     pub fn read(&self) -> String {
         let Some(source) = self.source() else {
             return "There is no battle script, which should not be possible. \
@@ -998,10 +758,7 @@ impl BattleScript {
                 .to_string();
         };
         let state = match (self.armed(), self.is_default(), self.last_failure()) {
-            // ⚠️ **The same two facts the standing line carries, from the same accessor.** A tool
-            // that answered "Armed." while the situation said "installed for the Misty gym, 340
-            // battle turns ago" would be two accounts of one script, and the round trip is bought
-            // precisely to settle the question the line raised.
+            // The same two facts the standing line carries, from the same accessor.
             (true, _, _) => {
                 let standing = self.standing();
                 let mut armed = "Armed. This is deciding your battle turns.".to_string();
@@ -1027,10 +784,6 @@ impl BattleScript {
 
     /// The policy hit a failure. The script is kept — it is the thing the model has to edit — but
     /// it stops deciding turns until the model arms it again.
-    ///
-    /// ⚠️ **One strike, and not one battle.** A script that failed once will fail again, and each
-    /// failure costs a whole request against the history to say so. Disarming for the rest of the
-    /// battle only moves that cost to the next battle; disarming for one turn pays it every turn.
     pub fn disarm(&mut self, why: &str) {
         if !self.saved.armed && self.saved.last_failure.as_deref() == Some(why) {
             return;
@@ -1049,49 +802,19 @@ impl BattleScript {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// The cell between the two threads
-// ---------------------------------------------------------------------------------------------
-
 /// Whether a script is deciding battle turns, as the battle turn reports it.
-///
-/// ⚠️ **This is a fact about the run, not about this turn, and it is why the state is carried
-/// rather than inferred.** A failure is reported once, by the note [`LlmPolicy`] writes on the turn
-/// that caused it; every battle turn after that one said nothing at all, so a run whose script broke
-/// on Route 3 spent the rest of its life paying for battle turns with no idea it had stopped being
-/// free. The deployed run of 2026-08-27 is the other half of the same hole: **207 battle turns, and
-/// `set_battle_script` was never called once** — nothing on a battle turn had ever mentioned that a
-/// script was an option, and the argument for one lives in the system prompt, which is the least
-/// recent thing in every request.
-///
-/// [`LlmPolicy`]: crate::pokemon::llm_policy::LlmPolicy
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ScriptState {
     /// [`DEFAULT`] is installed, untouched: a script exists but decides nothing, so battle turns
     /// cost what they always did.
-    ///
-    /// ⚠️ **Named for what is true rather than for what used to be.** This was `Unset`, back when a
-    /// run could genuinely have no script; a variant still called that while every run has one is
-    /// exactly the drift that costs the next reader an hour.
     #[default]
     Unedited,
     /// Armed and deciding battle turns — so a turn carrying this is one it did not decide.
     Armed,
-    /// One was written and has stopped deciding turns. The source is kept, because it is the thing
-    /// the model has to edit; `read_battle_script` says why it stopped.
+    /// One was written and has stopped deciding turns.
     Disarmed,
 }
 
-/// The two facts that turn "a battle script is armed" from a constant into a sentence worth
-/// reading: what the model said it was for, and how much it has done since.
-///
-/// ⚠️ **A standing line that never changes is not read.** The armed line was added because a run
-/// could go ~80 overworld turns without being told a script existed at all — but it says the same
-/// words on turn 5 and turn 500, so it cannot tell a script written for the fight in front of you
-/// from one written for a gym leader three towns back. These two fields are what differ, and they
-/// are carried rather than looked up because only the worker has the file and only the policy is
-/// counting. The alternative is `read_battle_script`, which is a whole round trip to answer a
-/// question the model did not know it had.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScriptStanding {
     /// The model's own words, from `set_battle_script`. `None` for the default and for any script
@@ -1101,29 +824,11 @@ pub struct ScriptStanding {
     pub decided: u32,
     /// Why the script stopped deciding turns, capped at [`MAX_FAILURE`]. `Some` exactly while
     /// [`ScriptState::Disarmed`] holds, and cleared by [`BattleScript::set`] along with the rest.
-    ///
-    /// ⚠️ **This is a second copy of the reason and it is not [`Live::take_failure`]'s.** That one
-    /// is a *message in transit*: the worker takes it once, at the top of the next turn, to write
-    /// it into the file, and it is gone. This one is a standing fact that lasts as long as the
-    /// broken script does, so it can be said on every overworld turn until the model fixes it —
-    /// which is the whole point, since the overworld turn is the only one carrying the tools that
-    /// can. Conflating the two gives the reason to exactly one turn: the battle turn that cannot
-    /// act on it.
     pub failure: Option<String>,
 }
 
 /// The armed script, shared between the worker thread that writes it and the emulator thread that
 /// runs it.
-///
-/// ⚠️ **Two directions, and both are needed.** The worker arms and disarms deliberately, in
-/// response to `set_battle_script`; the policy disarms *because a battle went wrong*, and the file
-/// on disk has to learn about that or a restart re-arms a script already known to be broken. So the
-/// failure travels back through here and [`crate::llm::worker::Worker::run_one`] drains it into
-/// [`BattleScript::disarm`] at the top of the next turn.
-///
-/// ⚠️ **The worker still owns the file.** This carries no path and never writes: one writer per run
-/// directory is the rule `run::transcript` and `llm::history` both keep, and a policy that persisted
-/// from the emulator thread would race the worker's own `persist`.
 #[derive(Debug, Default)]
 pub struct Live {
     inner: std::sync::Mutex<LiveInner>,
@@ -1153,9 +858,9 @@ impl Live {
         self.locked().source.clone()
     }
 
-    /// What the battle turn should say about it. Survives [`Self::take_failure`], which the worker
-    /// calls to persist the reason — the *reason* is spent by being reported once, and the fact that
-    /// there is a broken script to go and fix is not.
+    /// What the battle turn should say about it. Survives [`Self::take_failure`], which the
+    /// worker calls to persist the reason — the *reason* is spent by being reported once, and the
+    /// fact that there is a broken script to go and fix is not.
     pub fn state(&self) -> ScriptState {
         self.locked().state
     }
@@ -1166,10 +871,6 @@ impl Live {
     }
 
     /// The script decided a battle turn. Called on the emulator thread, once per decision.
-    ///
-    /// ⚠️ **Saturating, because this is the one number here that grows without bound.** A long run
-    /// is thousands of battle turns and the count is only ever rendered into a sentence, so
-    /// wrapping at `u32::MAX` would be a silently absurd claim rather than an error.
     pub fn decided_one(&self) {
         let mut inner = self.locked();
         inner.standing.decided = inner.standing.decided.saturating_add(1);
@@ -1178,14 +879,6 @@ impl Live {
     /// The policy found the script wanting. It stops deciding turns immediately — the source is
     /// dropped here rather than flagged, so nothing can consult it again before the worker has
     /// caught up — and `why` is left for the worker to persist.
-    ///
-    /// ⚠️ **The reason is written into the standing as well as into the outbox, and the two have
-    /// different lifetimes on purpose.** `failure` is taken by the worker one turn later and is
-    /// then gone; `standing.failure` has to outlive that, because the turn that can do something
-    /// about a broken script is the *overworld* turn and the failure happened in a battle. Without
-    /// this the first overworld turn after a disarm reads the file — which the worker has by then
-    /// written — and every path agrees, but only by going through a checkpoint the policy does not
-    /// control; setting it here means the very next turn has it whatever the worker got to.
     pub fn failed(&self, why: &str) {
         let mut inner = self.locked();
         inner.source = None;
@@ -1199,36 +892,15 @@ impl Live {
         self.locked().failure.take()
     }
 
-    /// A poisoned lock is recovered rather than propagated: everything held across it is a clone of
-    /// a `String`, so there is no half-updated state to protect, and panicking here would stop the
-    /// run over a script.
+    /// A poisoned lock is recovered rather than propagated: everything held across it is a clone
+    /// of a `String`, so there is no half-updated state to protect, and panicking here would stop
+    /// the run over a script.
     fn locked(&self) -> std::sync::MutexGuard<'_, LiveInner> {
         self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------------------------
-
 /// The scenarios every script is put through before it is armed.
-///
-/// ⚠️ **They are the point of `set_battle_script`, not a formality.** A script is written blind, by
-/// a model that cannot run it, against an API it has read once. Compiling is not evidence that it
-/// terminates, chooses anything, or chooses something legal — and the alternative to finding that
-/// out here is finding it out mid-battle, at the cost of a disarm and a turn.
-///
-/// ⚠️ **The table that comes back is as valuable as the pass/fail.** It shows the model its own
-/// policy's behaviour on seven turns it never has to describe, which is the only chance it gets to
-/// notice that "run below 10%" reads `hp` where it meant `hp_frac` before a real battle does.
-///
-/// ⚠️ **Every scenario is turn 1, and validation is therefore not a proof.** A script whose
-/// behaviour depends on `battle.turn`, on a party member that only exists later in the run, or on a
-/// bag it expects to have something in cannot be checked here at all — there is no game to check it
-/// against, which is the whole reason these run on the worker thread in the first place. That is
-/// what the one-strike disarm is for, and why it is a separate mechanism rather than a fallback
-/// nobody expects to need. `a_script_that_fails_disarms_and_hands_the_turn_back` is built on
-/// exactly this gap.
 const SCENARIOS: &[(&str, fn() -> GameState)] = &[
     ("full-hp wild", scenarios::healthy_wild),
     ("low-hp wild", scenarios::hurt_wild),
@@ -1239,14 +911,14 @@ const SCENARIOS: &[(&str, fn() -> GameState)] = &[
     ("ghost in Pokemon Tower, no Silph Scope", scenarios::ghost),
 ];
 
-/// Compile and run a script through every scenario. `Ok` is the table the model is shown.
+/// Compile and run a script through every scenario.
 fn validate(source: &str) -> Result<String, String> {
     let mut table = String::new();
     for (name, scenario) in SCENARIOS {
         let state = scenario();
         let evaluation = run(source, &state, 1);
         let what = match &evaluation.outcome {
-            // ⚠️ The report's verb phrase, not `BattleAction`'s `Display` — see
+            // The report's verb phrase, not `BattleAction`'s `Display` — see
             // `battle_report::intent`, which says both why and what the alternative put here.
             Outcome::Action(action) => crate::llm::battle_report::intent(action),
             Outcome::Ask => "hands the turn to you".to_string(),
@@ -1275,8 +947,8 @@ pub fn test_scenario() -> GameState {
     scenarios::healthy_wild()
 }
 
-/// The seven turns [`SCENARIOS`] puts a script through, hand-built so validation needs no emulator
-/// and can run on the worker thread while a turn is in flight.
+/// The seven turns [`SCENARIOS`] puts a script through, hand-built so validation needs no
+/// emulator and can run on the worker thread while a turn is in flight.
 pub(crate) mod scenarios {
     use crate::pokemon::GameState;
     use crate::pokemon::bag::{Bag, BagItem};
@@ -1287,10 +959,7 @@ pub(crate) mod scenarios {
     use crate::pokemon::pokemon::Pokemon;
     use crate::pokemon::species::PokemonSpecies;
 
-    /// ⚠️ **The level is set through the experience and a `recalculate`, never by writing the
-    /// field.** `Pokemon::maxed` builds a Lv100, and assigning `level` alone leaves a Lv12 Squirtle
-    /// with 292 HP — which validates a script's `hp_frac` rules perfectly well and validates
-    /// anything written against `battle.me.hp` against a number no real party member ever has.
+    /// The level is set through the experience and a `recalculate`, never by writing the field.
     fn mon(species: PokemonSpecies, nickname: &str, level: u8, moves: [PokemonMoveName; 4]) -> Pokemon {
         let mut mon = Pokemon::maxed(species, nickname, moves, "AI", 1);
         mon.experience = species.metadata().experience_group.experience_for_level(level);
@@ -1365,23 +1034,18 @@ pub(crate) mod scenarios {
         state(vec![at(starter(14), 0.08)], vec![], BattleType::Trainer, 0, rattata(13))
     }
 
-    /// Every move out of PP. `battle_options` offers every move here, because choosing any of them
-    /// is Struggle, but none is `usable` and `best_move` is `()` — the case a script written around
-    /// `best_move` will walk into and has to survive.
+    /// Every move out of PP. `battle_options` offers every move here, because choosing any of
+    /// them is Struggle, but none is `usable` and `best_move` is `()` — the case a script written
+    /// around `best_move` will walk into and has to survive.
     pub fn out_of_pp() -> GameState {
         let mut lead = starter(14);
         lead.moves = lead.moves.map(|slot| slot.map(|battle_move| PokemonMove { pp: 0, ..battle_move }));
         state(vec![lead, bench(12)], vec![BagItem::new(ItemId::Potion, 1)], BattleType::Wild, 0, rattata(9))
     }
 
-    /// A wild encounter in Pokémon Tower without the Silph Scope. `battle_options` offers `Run` and
-    /// nothing else — no move executes and no ball or switch does anything — so every move is
+    /// A wild encounter in Pokémon Tower without the Silph Scope. `battle_options` offers `Run`
+    /// and nothing else — no move executes and no ball or switch does anything — so every move is
     /// `usable: false` with `damage` 0 and `best_move` is `()`, whatever the level gap says.
-    ///
-    /// ⚠️ **This is the scenario the other six could not stand in for.** `out_of_pp` proves a
-    /// script survives `best_move == ()`, but a script that fights whatever has PP left passes it
-    /// and is disarmed by the first Gastly, which is what the deployed run of 2026-09-01 did thirty
-    /// times over. The map is what makes it a ghost, so it is the one scenario that sets one.
     pub fn ghost() -> GameState {
         let gastly = mon(
             PokemonSpecies::Gastly,
@@ -1420,14 +1084,12 @@ mod tests {
         scenarios::healthy_wild()
     }
 
-    /// The shortest script that reaches an action on **every** scenario, which is what arming
-    /// requires. `battle.run()` alone does not: two of the seven are trainer battles.
+    /// The shortest script that reaches an action on every scenario, which is what arming
+    /// requires.
     const ALWAYS_DECIDES: &str = "if battle.can_run { battle.run(); }\nbattle.ask();";
 
-    /// ⚠️ `switch` is a statement keyword in rhai and reserved even in method position, which is
-    /// why the action is `switch_to`. That is a fact about rhai's grammar rather than a choice, so
-    /// it is pinned: if a future rhai lets `switch` through, this still passes and the name can be
-    /// reconsidered deliberately rather than by accident.
+    /// `switch` is a statement keyword in rhai and reserved even in method position, which is why
+    /// the action is `switch_to`.
     #[test]
     fn switching_parses_under_the_name_the_keyword_forced() {
         let outcome = decide("battle.switch_to(battle.party[1]);", &wild());
@@ -1441,8 +1103,8 @@ mod tests {
         );
     }
 
-    /// The whole feature in one assertion: a script chooses a real battle action, and the action is
-    /// one the game would have offered.
+    /// The whole feature in one assertion: a script chooses a real battle action, and the action
+    /// is one the game would have offered.
     #[test]
     fn a_script_decides_a_battle_turn() {
         let outcome = decide("battle.fight(battle.best_move);", &wild());
@@ -1454,9 +1116,8 @@ mod tests {
         assert!(matches!(action, BattleAction::Fight { .. }), "got {action}");
     }
 
-    /// ⚠️ The example in `DOCS.md` is the one piece of this the model copies verbatim, so it is
-    /// checked rather than proof-read. It runs against every scenario, since a worked example that
-    /// only works on a healthy lead is the example that teaches the bug.
+    /// The example in `DOCS.md` is the one piece of this the model copies verbatim, so it is
+    /// checked rather than proof-read.
     #[test]
     fn the_worked_example_in_the_docs_runs_on_every_scenario() {
         let example = DOCS
@@ -1474,8 +1135,8 @@ mod tests {
         }
     }
 
-    /// The rule the docs state, and the one Alex's original sketch depends on: `run()` followed by
-    /// more code must not fall through into it.
+    /// The rule the docs state, and the one Alex's original sketch depends on: `run()` followed
+    /// by more code must not fall through into it.
     #[test]
     fn an_action_ends_the_script() {
         // If `run` did not terminate, `fight` below would overwrite the choice.
@@ -1483,8 +1144,7 @@ mod tests {
         assert_eq!(outcome, Outcome::Action(BattleAction::Run));
     }
 
-    /// ⚠️ Rhai has `try`/`catch`, so the abort *can* be swallowed. The choice cell is what makes the
-    /// rule hold anyway: the first action wins however the script is written.
+    /// Rhai has `try`/`catch`, so the abort *can* be swallowed.
     #[test]
     fn the_first_action_wins_even_when_the_abort_is_caught() {
         let outcome = decide(
@@ -1494,11 +1154,9 @@ mod tests {
         assert_eq!(outcome, Outcome::Action(BattleAction::Run), "the caught abort still committed");
     }
 
-    /// ⚠️ **Two of this API's names were parse errors before they were anything else** —
-    /// `mv.type` and `battle.switch(...)`, both reserved words in rhai, both found by a test rather
-    /// than by reading the grammar. A name a model cannot type is worse than a missing feature: the
-    /// script does not misbehave, it does not compile, and the model spends a round trip finding
-    /// out. So every field and every action is *parsed* here, mechanically, rather than trusted.
+    /// Two of this API's names were parse errors before they were anything else — `mv.type` and
+    /// `battle.switch(...)`, both reserved words in rhai, both found by a test rather than by
+    /// reading the grammar.
     #[test]
     fn every_name_the_docs_use_is_one_the_parser_accepts() {
         let fields = ["kind", "turn", "can_run", "ghost", "trapped", "catch_rate", "me", "foe", "party", "moves", "best_move", "bag"];
@@ -1507,10 +1165,7 @@ mod tests {
             assert_eq!(outcome, Outcome::Ask, "`battle.{field}` does not parse or does not exist");
             assert!(DOCS.contains(&format!("battle.{field}")), "`battle.{field}` exists and is undocumented");
         }
-        // ⚠️ **Documented *in its own section*, not merely mentioned somewhere.** The fields are
-        // tabulated per object now, and `name` appears on all three — so a bare `contains` would
-        // pass for a Move field that only the Pokemon table lists, which is precisely the confusion
-        // this rewrite was for.
+        // Documented *in its own section*, not merely mentioned somewhere.
         let section = |heading: &str| -> String {
             let from = DOCS.split(heading).nth(1).unwrap_or_else(|| panic!("no `{heading}` section"));
             from.split("\n### ").next().unwrap_or(from).to_string()
@@ -1535,7 +1190,7 @@ mod tests {
     }
 
     /// A hang is the failure `catch_unwind` cannot catch, so the fuel limit is the guard that
-    /// matters most. `loop` has no exit here at all.
+    /// matters most.
     #[test]
     fn a_runaway_script_is_stopped_rather_than_hanging() {
         let started = Instant::now();
@@ -1565,8 +1220,7 @@ mod tests {
         assert!(why.contains("battle.fight"), "the reason names the way out: {why}");
     }
 
-    /// ⚠️ The script filters `battle_options`; it never invents. A move the Pokémon does not know is
-    /// refused, and the refusal says what it *does* know.
+    /// The script filters `battle_options`; it never invents.
     #[test]
     fn an_action_the_game_would_refuse_is_named_rather_than_taken() {
         let Outcome::Failed(why) = decide(r#"battle.fight("Hydro Pump");"#, &wild()) else {
@@ -1586,8 +1240,7 @@ mod tests {
         assert!(why.contains("can_run"), "{why}");
     }
 
-    /// ⚠️ The cartridge's spelling is not the one a model types. All three of these are the same
-    /// item, and the run most needs the one it has never thrown.
+    /// The cartridge's spelling is not the one a model types.
     #[test]
     fn an_item_is_matched_however_the_model_spells_it() {
         let state = scenarios::catchable_wild();
@@ -1600,8 +1253,7 @@ mod tests {
         }
     }
 
-    /// `battle.ask()` keeps the script armed and hands one turn back. Without it scripting is
-    /// all-or-nothing and a model will choose nothing.
+    /// `battle.ask()` keeps the script armed and hands one turn back.
     #[test]
     fn asking_hands_the_turn_back_without_being_a_failure() {
         assert_eq!(decide("battle.ask();", &wild()), Outcome::Ask);
@@ -1618,8 +1270,7 @@ mod tests {
         assert_eq!(flooded.outcome, Outcome::Action(BattleAction::Run), "and still decides the turn");
     }
 
-    /// ⚠️ The facts the script reads are the ones the turn was built from, and the two must agree.
-    /// `hp_frac` is the field every script will branch on, so it is the one pinned.
+    /// The facts the script reads are the ones the turn was built from, and the two must agree.
     #[test]
     fn the_facts_are_the_ones_the_game_is_actually_in() {
         let state = scenarios::hurt_wild();
@@ -1634,8 +1285,8 @@ mod tests {
         assert_eq!(outcome, Outcome::Action(BattleAction::Run));
     }
 
-    /// A bench member's moves are scored against the foe that is out, which is the whole basis of a
-    /// coverage switch. Squirtle's Water Gun beats Charmander's Scratch against nothing in
+    /// A bench member's moves are scored against the foe that is out, which is the whole basis of
+    /// a coverage switch. Squirtle's Water Gun beats Charmander's Scratch against nothing in
     /// particular here — what is asserted is that the numbers are *there* and differ.
     #[test]
     fn a_bench_members_moves_are_scored_against_the_current_foe() {
@@ -1655,8 +1306,8 @@ mod tests {
         assert_eq!(outcome, Outcome::Action(BattleAction::Run), "some move in the party does damage");
     }
 
-    /// ⚠️ `best_move` is `()` when nothing can hurt the foe, and a script written around it has to
-    /// survive that. The `out_of_pp` scenario exists for this and `SCENARIOS` runs it on every set.
+    /// `best_move` is `()` when nothing can hurt the foe, and a script written around it has to
+    /// survive that.
     #[test]
     fn no_usable_damaging_move_leaves_best_move_unset() {
         let outcome = decide(
@@ -1666,14 +1317,8 @@ mod tests {
         assert_eq!(outcome, Outcome::Action(BattleAction::Run));
     }
 
-    /// ⚠️ **A ghost has to read as "nothing can be done" from every field, not only from the
-    /// options list `resolve` checks.** The deployed run of 2026-09-01 was disarmed thirty times in
-    /// Pokémon Tower by scripts guarding on `best_move == ()` exactly as the docs say to: the guard
-    /// never fired because `best_move` was computed from PP and `expected_damage`, neither of which
-    /// knows the cartridge will replace the move with "too scared to move". So `best_move` is `()`,
-    /// every move on every Pokémon is `usable: false` with `damage` 0, `battle.ghost` says why, and
-    /// `can_run` is still true. A script that reads any of them and fights or switches would have
-    /// been disarmed, so the assertion is that none of them lead anywhere but `Run`.
+    /// A ghost has to read as "nothing can be done" from every field, not only from the options
+    /// list `resolve` checks.
     #[test]
     fn a_ghost_leaves_best_move_unset_and_every_move_unusable() {
         let state = scenarios::ghost();
@@ -1693,9 +1338,7 @@ mod tests {
         assert_eq!(decide("if battle.ghost { battle.run(); } battle.ask();", &wild()), Outcome::Ask);
     }
 
-    /// ⚠️ **`usable` is the options list, not the move's own PP.** Every other scenario lets a
-    /// script that fights whatever has PP left through, and the ghost is the first battle that
-    /// disarms it — which is why the ghost is a validation scenario rather than only a live fact.
+    /// `usable` is the options list, not the move's own PP.
     #[test]
     fn a_script_that_fights_whatever_has_pp_is_refused_by_the_ghost_scenario() {
         let mut script = BattleScript::open(None);
@@ -1705,8 +1348,7 @@ mod tests {
         assert!(answer.contains("Usable now: nothing"), "and says nothing could be used:\n{answer}");
     }
 
-    /// The sandbox has no way out. None of these are registered, and a model reaching for one gets
-    /// a compile error rather than a file.
+    /// The sandbox has no way out.
     #[test]
     fn a_script_cannot_reach_the_machine() {
         for attempt in [
@@ -1719,10 +1361,6 @@ mod tests {
             assert!(matches!(outcome, Outcome::Failed(_)), "`{attempt}` must not work: {outcome:?}");
         }
     }
-
-    // ---------------------------------------------------------------------------------------
-    // Validation and persistence
-    // ---------------------------------------------------------------------------------------
 
     /// The table is the feedback loop: it shows the model what its own rules do on seven turns it
     /// never has to describe.
@@ -1743,8 +1381,7 @@ mod tests {
         assert!(answer.contains("tried to run"), "the low-hp wild scenario should have fled:\n{answer}");
     }
 
-    /// ⚠️ Compiling is not evidence. This script is syntactically perfect and dies on the one
-    /// scenario where nothing can attack — which is exactly the failure a live battle would find.
+    /// Compiling is not evidence.
     #[test]
     fn a_script_that_only_works_sometimes_is_not_armed() {
         let mut script = BattleScript::open(None);
@@ -1763,7 +1400,7 @@ mod tests {
         assert!(answer.len() > 40, "the parse error has to reach the model: {answer}");
     }
 
-    /// One strike. A script that failed is kept so it can be edited, and stops deciding turns.
+    /// One strike.
     #[test]
     fn a_failure_disarms_but_keeps_the_script() {
         let mut script = BattleScript::open(None);
@@ -1796,12 +1433,8 @@ mod tests {
         assert_eq!(reopened.source(), Some(source), "byte for byte");
         assert!(reopened.armed(), "and still deciding turns");
 
-        // ⚠️ **The standing has to make the trip too, and it is the half a restart would silently
-        // lose.** The count lives on the emulator thread and the purpose is written once, so a
-        // resumed run whose `battle-script.json` had dropped them would be told, on every overworld
-        // turn, that the script deciding its battles was for nothing in particular and had never
-        // decided a turn — which is the exact opposite of the fact the line exists to carry, and
-        // reads as a *fresh* script rather than an eight-hour-old one.
+        // The standing has to make the trip too, and it is the half a restart would silently
+        // lose.
         assert_eq!(
             reopened.standing(),
             ScriptStanding { purpose: Some("a test".into()), decided: 340, failure: None },
@@ -1813,23 +1446,15 @@ mod tests {
         written.disarm("it ran out of operations");
         let reopened = BattleScript::open(Some(&scratch.0));
         assert!(!reopened.armed());
-        // ⚠️ **A disarm keeps them.** The script is kept because it is the thing the model has to
-        // edit, so what it was for and how far it got are exactly the context for editing it.
+        // A disarm keeps them.
         assert_eq!(reopened.standing().purpose.as_deref(), Some("a test"));
         assert_eq!(reopened.standing().decided, 340);
-        // ⚠️ **And the reason comes back with them, because it rides on the overworld turn for as
-        // long as the script stays broken.** A restart that dropped it would leave the one turn
-        // that can fix a script telling the model only that it is broken, which is the state this
-        // whole line replaced.
+        // And the reason comes back with them, because it rides on the overworld turn for as long
+        // as the script stays broken.
         assert_eq!(reopened.standing().failure.as_deref(), Some("it ran out of operations"));
     }
 
-    /// ⚠️ **The disarm reason has two lifetimes and needs two carriers, which is the trap this
-    /// guards.** `Live::take_failure` is a message in transit — the worker takes it once, at the
-    /// top of the next turn, writes it to the file, and it is gone. But the turn that can *act* on
-    /// a broken script is the overworld turn, and the failure happened in a battle, so a reason
-    /// that lived only in the outbox would reach exactly one turn: the battle turn that cannot
-    /// call `set_battle_script`. `ScriptStanding::failure` is the copy that outlives the drain.
+    /// The disarm reason has two lifetimes and needs two carriers, which is the trap this guards.
     #[test]
     fn a_disarm_reason_outlives_the_worker_taking_it() {
         let live = Live::default();
@@ -1848,8 +1473,7 @@ mod tests {
         // And every overworld turn after that still has it.
         let standing = live.standing();
         assert_eq!(standing.failure.as_deref(), Some("it named a move the Pokémon does not know"));
-        // ⚠️ **The purpose and the tally are kept rather than cleared.** They describe the script
-        // that is still on disk waiting to be edited, which is what the model is being asked to do.
+        // The purpose and the tally are kept rather than cleared.
         assert_eq!(standing.purpose.as_deref(), Some("a test"));
         assert_eq!(standing.decided, 12);
 
@@ -1858,10 +1482,7 @@ mod tests {
         assert_eq!(live.standing().failure, None);
     }
 
-    /// ⚠️ **Cut with an ellipsis, and only in the standing.** `MAX_FAILURE` exists because the
-    /// reason is re-sent on every overworld turn until the script is fixed; the ellipsis exists
-    /// because a sentence about what went wrong that stops mid-clause reads as a finished one and
-    /// gets acted on. `battle_report`'s `MAX_QUOTE` paid for that lesson head-first.
+    /// Cut with an ellipsis, and only in the standing.
     #[test]
     fn a_long_disarm_reason_is_cut_for_the_turn_but_not_for_the_file() {
         let scratch = Scratch::new("battle-script");
@@ -1877,10 +1498,8 @@ mod tests {
         assert!(cut.ends_with('…'), "and says that it was cut: {cut}");
     }
 
-    /// ⚠️ **Unsetting goes back to [`DEFAULT`] rather than to nothing**, which is the whole of what
-    /// "a run always has a script" means at the tool boundary. The behaviour is identical either way
-    /// — the default hands every turn back — so nothing is lost, and what is gained is that
-    /// `read_battle_script` can never again answer a round trip with "there is no battle script".
+    /// Unsetting goes back to [`DEFAULT`] rather than to nothing, which is the whole of what "a
+    /// run always has a script" means at the tool boundary.
     #[test]
     fn unsetting_goes_back_to_the_default() {
         let scratch = Scratch::new("battle-script");
@@ -1916,9 +1535,7 @@ mod tests {
         assert!(script.is_default());
     }
 
-    /// ⚠️ **A run written before there was a default is carried across it.** `{"source": null}` is
-    /// what every run's file said until this change, and the per-field `#[serde(default)]` reads it
-    /// back as `None` — which every reader below `open` now assumes cannot happen.
+    /// A run written before there was a default is carried across it.
     #[test]
     fn a_run_from_before_the_default_is_brought_onto_it() {
         let scratch = Scratch::new("battle-script");
@@ -1928,8 +1545,6 @@ mod tests {
         assert!(script.is_default(), "an empty file is the default now");
         assert_eq!(script.state(), ScriptState::Unedited);
 
-        // ⚠️ A *disarmed* script is left exactly as it was: it has its own source, and replacing it
-        // with the default would throw away the thing the model has to edit and the reason it broke.
         std::fs::write(&path, br#"{"source":"battle.run();","armed":false,"last_failure":"it fled"}"#).unwrap();
         let broken = BattleScript::open(Some(&scratch.0));
         assert_eq!(broken.source(), Some("battle.run();"));
@@ -1937,7 +1552,7 @@ mod tests {
         assert_eq!(broken.last_failure(), Some("it fled"));
     }
 
-    /// ⚠️ **The default has to compile and has to ask** — it ships as a `const` and is never run in
+    /// The default has to compile and has to ask — it ships as a `const` and is never run in
     /// anger (`live_source` withholds it), so nothing else would ever find out that it did not.
     #[test]
     fn the_default_script_compiles_and_hands_every_turn_back() {
@@ -1952,10 +1567,7 @@ mod tests {
         );
     }
 
-    /// ⚠️ **The default never reaches the emulator thread, and that is what keeps this change free.**
-    /// A default that *was* run would evaluate an engine on every battle turn of every run and, far
-    /// worse, set `LlmPolicy::note` each time — which suppresses the `TurnContext::Battle` line that
-    /// is the entire point of having a default at all.
+    /// The default never reaches the emulator thread, and that is what keeps this change free.
     #[test]
     fn the_default_is_never_handed_to_the_policy() {
         let script = BattleScript::open(None);
@@ -1972,8 +1584,9 @@ mod tests {
         assert_eq!(script.state(), ScriptState::Armed);
     }
 
-    /// ⚠️ **`read_battle_script` can no longer spend a round trip saying "there is nothing"**, which
-    /// is the reason the default exists at all: the model is asked to edit a file, not to invent one.
+    /// `read_battle_script` can no longer spend a round trip saying "there is nothing", which is
+    /// the reason the default exists at all: the model is asked to edit a file, not to invent
+    /// one.
     #[test]
     fn reading_a_fresh_runs_script_answers_with_the_default_source() {
         let answer = BattleScript::open(None).read();
@@ -1982,16 +1595,15 @@ mod tests {
         assert!(answer.contains("set_battle_script"), "and what to do about it: {answer}");
     }
 
-    /// ⚠️ **The bundled strategy is checked the way the docs' example is, and for a stronger
-    /// reason**: it is the deterministic policy's own logic, so a change here that silently stops it
-    /// arming has broken the one script known to finish this game.
+    /// The bundled strategy is checked the way the docs' example is, and for a stronger reason:
+    /// it is the deterministic policy's own logic, so a change here that silently stops it arming
+    /// has broken the one script known to finish this game.
     #[test]
     fn the_deterministic_strategy_still_arms_and_still_plays() {
         let mut script = BattleScript::open(None);
         let answer = script.set(Some(DETERMINISTIC), Some("a test"));
         assert!(script.armed(), "the bundled strategy no longer arms:\n{answer}");
 
-        // It mirrors the policy's order, so the scenarios it was built from pin its arms.
         for (scenario, expected) in [
             ("full-hp wild", "used Ember"),
             ("low-hp wild", "used a Potion"),
@@ -2005,22 +1617,15 @@ mod tests {
             assert!(row.contains(expected), "`{scenario}` should have {expected}: {row}");
         }
 
-        // ⚠️ It is longer than the docs' example and must still fit, or the one strategy that is
+        // It is longer than the docs' example and must still fit, or the one strategy that is
         // known to work is the one the size cap refuses.
         assert!(DETERMINISTIC.len() < MAX_SOURCE, "it is {} bytes against {MAX_SOURCE}", DETERMINISTIC.len());
     }
 
-
-    /// The docs are carried in the context once the model reads them, so they are bounded the way a
-    /// guide chapter is.
+    /// The docs are carried in the context once the model reads them, so they are bounded the way
+    /// a guide chapter is.
     #[test]
     fn the_docs_stay_within_what_they_cost_to_carry() {
-        // ⚠️ **9.5 KB, and it was 6.** The first version was terse enough to be wrong: it described
-        // the language in one sentence ("close to Rust and JavaScript"), never documented `bag` at
-        // all, and left it unclear which fields belonged to which object. A model that has to guess
-        // pays a round trip per guess, and this is fetched **once** and then carried — so the
-        // trade is ~800 tokens against the requests a working script removes, which is the same
-        // arithmetic that bought the tools their place in the catalogue.
         assert!(DOCS.len() < 9_500, "the docs are {} bytes", DOCS.len());
         for name in ["battle.fight", "battle.switch", "battle.use_item", "battle.run", "battle.ask"] {
             assert!(DOCS.contains(name), "the docs never mention {name}");
@@ -2029,10 +1634,7 @@ mod tests {
         assert!(DOCS.contains("effectiveness"), "the reason no type chart is needed is undocumented");
     }
 
-    /// ⚠️ **The docs make claims about the *language*, and a wrong one costs a round trip.** These
-    /// are the constructs they tell the model it may use, each run through the real engine — the
-    /// list was built by running them rather than from memory, and `fn` scope was the one that came
-    /// back different from what the first draft of the docs said.
+    /// The docs make claims about the *language*, and a wrong one costs a round trip.
     #[test]
     fn the_language_the_docs_promise_is_the_language_the_engine_runs() {
         let state = wild();
@@ -2057,17 +1659,14 @@ mod tests {
             assert_eq!(decide(code, &state), Outcome::Ask, "the docs promise `{what}` works");
         }
 
-        // ⚠️ **And the one the docs warn about, which has to keep failing.** A `fn` body cannot see
-        // `battle`. If a future rhai changes that, this test is where the warning gets deleted from
-        // the docs deliberately rather than quietly becoming a lie in the other direction.
+        // And the one the docs warn about, which has to keep failing.
         let Outcome::Failed(why) = decide("fn f() { battle.turn } let x = f(); battle.ask();", &state)
         else { panic!("a `fn` must not see `battle`; the docs devote a numbered point to it") };
         assert!(why.contains("battle"), "and the reason has to name it: {why}");
     }
 
-    /// ⚠️ **Every field the docs tabulate has to exist, and every field that exists has to be
-    /// tabulated.** The first version of the docs never mentioned `bag` at all, so the run that most
-    /// needed to start throwing Poké Balls had no documented way to find one.
+    /// Every field the docs tabulate has to exist, and every field that exists has to be
+    /// tabulated.
     #[test]
     fn the_docs_tabulate_every_field_an_object_actually_has() {
         let state = scenarios::catchable_wild();
@@ -2087,10 +1686,8 @@ mod tests {
         }
         assert!(DOCS.contains("battle.bag"), "the bag is undocumented");
     }
-    /// ⚠️ **A new script starts its tally at zero, or it inherits the credibility of the one it
-    /// replaced.** The count is the model's only measure of how long a script has been running, so
-    /// a freshly written one carrying the last one's 340 would read as the stale script it was
-    /// written to replace.
+    /// A new script starts its tally at zero, or it inherits the credibility of the one it
+    /// replaced.
     #[test]
     fn a_new_script_is_for_something_and_has_decided_nothing_yet() {
         let mut script = BattleScript { path: None, saved: Saved::default() };
@@ -2098,7 +1695,8 @@ mod tests {
         assert!(answer.starts_with("ok, armed"), "{answer}");
 
         let standing = script.standing();
-        // Trimmed, and stored as the model wrote it otherwise — the whole value is recognising it.
+        // Trimmed, and stored as the model wrote it otherwise — the whole value is recognising
+        // it.
         assert_eq!(standing.purpose.as_deref(), Some("Misty's Staryu"));
         assert_eq!(standing.decided, 0, "a script that has not run has decided nothing");
 
@@ -2110,19 +1708,18 @@ mod tests {
         assert_eq!(script.standing().decided, 0, "the tally belongs to the script, not to the run");
         assert_eq!(script.standing().purpose.as_deref(), Some("fleeing everything in the tower"));
 
-        // ⚠️ Back to the default is not a script and is for nothing — both fields go with it.
+        // Back to the default is not a script and is for nothing — both fields go with it.
         script.record_decided(12);
         script.set(None, None);
         assert_eq!(script.standing(), ScriptStanding::default());
     }
 
-    /// ⚠️ **Capped, because unlike the source this is re-sent on every overworld turn** for as long
-    /// as the script is armed. Truncated rather than refused: a purpose that runs long is still a
-    /// purpose, and refusing would throw away the script written with it.
+    /// Capped, because unlike the source this is re-sent on every overworld turn for as long as
+    /// the script is armed.
     #[test]
     fn a_purpose_that_runs_long_is_cut_rather_than_refused() {
         let mut script = BattleScript { path: None, saved: Saved::default() };
-        // ⚠️ Multi-byte on purpose: the prose is full of `é` and a byte slice would panic here.
+        // Multi-byte on purpose: the prose is full of `é` and a byte slice would panic here.
         let long = "é".repeat(MAX_PURPOSE * 2);
         let answer = script.set(Some("if battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);"), Some(&long));
         assert!(answer.starts_with("ok, armed"), "the script is still installed: {answer}");

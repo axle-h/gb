@@ -4,7 +4,6 @@ use crate::pokemon::item::ItemId;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use gb::ram::{RAM, ROM};
 
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct BagItem {
     pub id:       ItemId,
@@ -140,8 +139,8 @@ mod tests {
 
 pub trait BagReader {
     fn read_bag(&self) -> Bag;
-    /// PC item storage (`wNumBoxItems`/`wBoxItems`) — the same count-then-pairs layout as the bag,
-    /// which is why one trait serves both.
+    /// PC item storage (`wNumBoxItems`/`wBoxItems`) — the same count-then-pairs layout as the
+    /// bag, which is why one trait serves both.
     fn read_pc_items(&self) -> Bag;
 }
 

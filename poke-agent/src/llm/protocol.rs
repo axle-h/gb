@@ -1,13 +1,4 @@
-//! **W4** — the OpenAI chat-completions wire format, and the streaming parser over it.
-//!
-//! Deliberately free of HTTP. Everything here is a serde type or a state machine over lines of
-//! text, which is what lets the awkward part — tool-call arguments arriving in fragments across many
-//! SSE chunks — be tested against a byte string rather than against a network.
-//!
-//! Only the fields we actually send or read are modelled. An OpenAI-compatible endpoint returns a
-//! great deal more (`id`, `created`, `system_fingerprint`, log probabilities), and every one of them
-//! is a field that could change shape under us for no benefit; `serde` ignores unknown keys by
-//! default and that is the whole handling this needs.
+//! The OpenAI chat-completions wire format, and the streaming parser over it.
 
 use std::io::BufRead;
 
@@ -15,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::LlmError;
 
-// ── Messages ─────────────────────────────────────────────────────────────────────────────────────
+// ── Messages
+// ─────────────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -27,10 +19,6 @@ pub enum Role {
 }
 
 /// What a message says: either a plain string, or the multi-part form an image needs.
-///
-/// `#[serde(untagged)]` is what makes the plain case serialise as `"content": "…"` rather than as a
-/// one-element array — which matters, because a *tool* message is only allowed the string form on
-/// several endpoints (see [`Message::user_with_image`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Content {
@@ -50,17 +38,8 @@ pub struct ImageUrl {
     /// A `data:image/png;base64,…` URL. Nothing is hosted: the run has no public address, and a
     /// screenshot that outlived the turn would be a privacy question nobody asked for.
     pub url: String,
-    /// `"low"` or `"high"`. A screenshot is `"low"`: the Game Boy screen is 160×144 in four shades,
-    /// so there is no detail for the expensive tier to find, and §8's ⚠️ is that pictures dominate
-    /// the token cost of a run. A **map** is `"high"` — it is up to 1600 px on a side and squashing
-    /// it into one 512×512 tile would turn forty squares of terrain into mush.
+    /// `"low"` or `"high"`.
     pub detail: String,
-    /// What this picture is estimated to cost, from its pixel dimensions at the moment it was
-    /// encoded.
-    ///
-    /// ⚠️ **`serde(skip)`, because it is ours and not the wire's** — and defaulted on the way back
-    /// in, so a history deserialised from anywhere prices its images at the `"low"` flat rate rather
-    /// than at zero.
     #[serde(skip, default = "default_image_tokens")]
     pub tokens: u64,
 }
@@ -84,16 +63,6 @@ impl ImageDetail {
 }
 
 /// Roughly what a `width × height` picture costs at `detail`.
-///
-/// OpenAI's published tiling: fit inside 2048×2048, scale the *shortest* side to 768, then
-/// `85 + 170 × ⌈w/512⌉ × ⌈h/512⌉`. Other providers differ — Anthropic caps the long edge and charges
-/// about `w·h/750` — but every one of them charges by area, and the estimate only ever has to be
-/// closer than the flat 85 it replaces.
-///
-/// ⚠️ **It has to be roughly right, not exact.** [`Usage::estimate`] is what decides when the history
-/// is compacted, and a `"high"` map priced at 85 is out by 10–45×, so a genuinely full context would
-/// never compact at all on an endpoint that reports no `usage` of its own. That is the failure this
-/// function exists to prevent, not a billing question.
 pub fn image_tokens(detail: ImageDetail, width: u32, height: u32) -> u64 {
     if detail == ImageDetail::Low || width == 0 || height == 0 {
         return IMAGE_TOKENS;
@@ -133,11 +102,6 @@ impl Message {
 
     /// The assistant turn that carries tool calls. `content` is kept even when empty-ish because
     /// several endpoints echo their own reasoning there and dropping it loses the thread.
-    ///
-    /// ⚠️ **The calls are sanitised on the way in, and this is the only place that can be done
-    /// once.** See [`history_safe`]: a tool call goes into the history and back out on *every*
-    /// later request, so one whose `arguments` are not a JSON object poisons the whole conversation
-    /// rather than costing one turn.
     pub fn assistant(content: String, tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: Role::Assistant,
@@ -147,9 +111,7 @@ impl Message {
         }
     }
 
-    /// The answer to one tool call. Every `tool_calls` entry needs exactly one of these before the
-    /// next request, or the endpoint rejects the whole history — which is what §7.3's one-step
-    /// rollback exists to guarantee.
+    /// The answer to one tool call.
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: Role::Tool,
@@ -160,18 +122,12 @@ impl Message {
     }
 
     /// A user message carrying a picture, which is how a `screenshot` result reaches the model.
-    ///
-    /// ⚠️ **The image cannot ride on the `tool` message that answered the call.** OpenAI's schema
-    /// allows an array of content parts on a tool result but only *text* parts in it, and several
-    /// compatible endpoints reject an `image_url` there outright. So the call is answered with a
-    /// sentence and the picture follows as a user message — which every endpoint accepts, and which
-    /// keeps §7.3's rule that every `tool_call` has exactly one matching result.
     pub fn user_with_image(caption: impl Into<String>, data_url: String) -> Self {
         Self::user_with_image_detail(caption, data_url, ImageDetail::Low, IMAGE_TOKENS)
     }
 
-    /// As [`Self::user_with_image`], for a picture whose size makes the flat `"low"` price a lie —
-    /// see [`image_tokens`].
+    /// As [`Self::user_with_image`], for a picture whose size makes the flat `"low"` price a lie
+    /// — see [`image_tokens`].
     pub fn user_with_image_detail(
         caption: impl Into<String>, data_url: String, detail: ImageDetail, tokens: u64,
     ) -> Self {
@@ -209,24 +165,17 @@ impl Message {
         }
     }
 
-    /// Whether this message carries a picture. W6 evicts these first, which is the reason it is
-    /// asked as a question rather than derived by whoever needs it.
+    /// Whether this message carries a picture.
     pub fn has_image(&self) -> bool {
         matches!(self.content.as_ref(), Some(Content::Parts(parts))
             if parts.iter().any(|part| matches!(part, ContentPart::ImageUrl { .. })))
     }
 
     /// Roughly how many tokens this message costs, for the fallback in [`Usage::estimate`].
-    ///
-    /// ⚠️ The base64 payload is deliberately **not** counted by its length — a 3 KB data URL is
-    /// four thousand characters and about eighty tokens, so charging it as text would overstate the
-    /// context by fifty times and trip compaction on a history that is nowhere near full.
     pub fn approximate_tokens(&self) -> u64 {
         let text = self.text().unwrap_or("").len()
             + self.tool_calls.iter().map(|c| c.function.name.len() + c.function.arguments.len()).sum::<usize>();
-        // ⚠️ Each picture is charged what *it* costs, not a flat rate. A map is `detail: "high"` and
-        // up to forty-five times the price of a screenshot; charging both 85 would leave a full
-        // context reading as a nearly empty one, and compaction would never run.
+        // Each picture is charged what *it* costs, not a flat rate.
         let images: u64 = match self.content.as_ref() {
             Some(Content::Parts(parts)) => parts.iter().map(|part| match part {
                 ContentPart::ImageUrl { image_url } => image_url.tokens,
@@ -238,19 +187,18 @@ impl Message {
     }
 }
 
-/// What one `detail: "low"` image costs. OpenAI's published figure, and the right order of magnitude
-/// everywhere else; only ever used when the endpoint reports no `usage` of its own.
+/// What one `detail: "low"` image costs. OpenAI's published figure, and the right order of
+/// magnitude everywhere else; only ever used when the endpoint reports no `usage` of its own.
 pub const IMAGE_TOKENS: u64 = 85;
 
-/// English through a byte-pair tokeniser runs about this many characters per token. Only ever used
-/// when the endpoint declines to report `usage` at all — see [`Usage::estimate`].
+/// English through a byte-pair tokeniser runs about this many characters per token.
 const CHARS_PER_TOKEN: f64 = 3.7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
-    /// Always `"function"`. Sent back verbatim because the endpoint requires the field, not because
-    /// there is a second kind.
+    /// Always `"function"`. Sent back verbatim because the endpoint requires the field, not
+    /// because there is a second kind.
     #[serde(rename = "type")]
     pub kind: String,
     pub function: FunctionCall,
@@ -259,42 +207,13 @@ pub struct ToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FunctionCall {
     pub name: String,
-    /// A JSON *string*, not an object — that is how the API sends it, and it arrives in fragments.
+    /// A JSON *string*, not an object — that is how the API sends it, and it arrives in
+    /// fragments.
     pub arguments: String,
 }
 
 /// Tool calls as they can safely be put in the history, with anything that is not a JSON object
 /// replaced by `{}`.
-///
-/// ⚠️ **A bad tool call is not a bad turn, it is a bad *conversation*, and that is what makes this
-/// worth doing rather than tolerating.** `arguments` is a JSON string the model writes, and the
-/// assistant message carrying it is replayed on every request for the rest of the run. So a single
-/// completion that emits `""`, or a fragment cut short mid-object, is rejected not once but for ever
-/// after by any endpoint strict enough to parse what it is sent:
-///
-/// - `tool_calls[].function.arguments must be a JSON object` (400),
-/// - `Expecting ',' delimiter: line 1 column 22 (char 21)` (400),
-/// - `Failed to apply prompt template: cannot convert value into pairs` (502).
-///
-/// All three were measured against `openrouter/free` on 2026-08-14, 331 of them in one backlog, and
-/// the second is the tell: character-identical every time, because it is the same stored message
-/// being re-sent rather than a run of unlucky completions. It never appeared against a single local
-/// endpoint, since one model that writes clean arguments writes them every turn; a router hands the
-/// conversation to a different model each request, and it takes one.
-///
-/// ⚠️ **In place, never dropped.** §7.3's one-step rollback is sound because every `tool_calls` entry
-/// in the history has a matching `tool_result`; removing a call here would orphan its answer and 400
-/// the request for a different reason.
-///
-/// ⚠️ **Only the broken ones are rewritten.** A valid object is left byte-for-byte alone rather than
-/// re-serialised: `serde_json`'s map sorts keys, so canonicalising every call would quietly reword
-/// the model's own history and shift the token count for nothing.
-///
-/// ⚠️ **[`Message::assistant`] is no longer the only way in.** A history now comes back off disk
-/// too ([`crate::llm::history`]), and `serde` builds a `Message` field by field, so deserialisation
-/// walks straight past that funnel. `History::open` runs this same pass over every restored
-/// assistant message for exactly that reason — a file written by an older build, or edited by hand,
-/// would otherwise resurrect the disease above and 400 every request for the rest of the run.
 pub(crate) fn history_safe(tool_calls: Vec<ToolCall>) -> Vec<ToolCall> {
     tool_calls
         .into_iter()
@@ -303,8 +222,8 @@ pub(crate) fn history_safe(tool_calls: Vec<ToolCall>) -> Vec<ToolCall> {
             let object = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw);
             if object.is_err() {
                 // The model still learns what went wrong: an unparseable call is rejected by
-                // `ToolCall::arguments`, whose message quotes the raw text, and that rejection is the
-                // `tool_result` sitting right beside this in the history.
+                // `ToolCall::arguments`, whose message quotes the raw text, and that rejection is
+                // the `tool_result` sitting right beside this in the history.
                 call.function.arguments = "{}".to_string();
             }
             call
@@ -313,8 +232,8 @@ pub(crate) fn history_safe(tool_calls: Vec<ToolCall>) -> Vec<ToolCall> {
 }
 
 impl ToolCall {
-    /// The call's arguments as JSON. An empty string means "no arguments", which several endpoints
-    /// send for a zero-parameter tool and which `serde_json` would otherwise reject.
+    /// The call's arguments as JSON. An empty string means "no arguments", which several
+    /// endpoints send for a zero-parameter tool and which `serde_json` would otherwise reject.
     pub fn arguments(&self) -> Result<serde_json::Value, LlmError> {
         let raw = self.arguments.trim();
         if raw.is_empty() {
@@ -333,7 +252,8 @@ impl std::ops::Deref for ToolCall {
     }
 }
 
-// ── Requests ─────────────────────────────────────────────────────────────────────────────────────
+// ── Requests
+// ─────────────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolSpec {
@@ -346,9 +266,9 @@ pub struct ToolSpec {
 pub struct FunctionSpec {
     pub name: &'static str,
     pub description: String,
-    /// A JSON Schema object. `serde_json::Value` rather than a typed builder: these are written once,
-    /// read by a model rather than by code, and a builder would be more machinery than the thing it
-    /// builds.
+    /// A JSON Schema object. `serde_json::Value` rather than a typed builder: these are written
+    /// once, read by a model rather than by code, and a builder would be more machinery than the
+    /// thing it builds.
     pub parameters: serde_json::Value,
 }
 
@@ -364,39 +284,18 @@ pub struct ChatRequest {
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolSpec>,
-    /// Explicit, though `true` is the default: §7.1 wants the whole batch of reads in one assistant
-    /// message, because a batch is answered from one observed `GameState` and therefore cannot
-    /// disagree with itself.
-    ///
-    /// ⚠️ **`None` — the key absent entirely — whenever `tools` is empty.** OpenAI rejects the field
-    /// outright without tools ("only allowed when 'tools' are specified"), which is exactly the shape
-    /// of W6's summarisation request; a `false` there would be a 400 in the one place a 400 stalls
-    /// the run rather than costing a turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
     /// A ceiling on the completion. `None` omits the key, which is what every endpoint reads as
     /// "until you are finished or the window is full".
-    ///
-    /// ⚠️ **The window is not a ceiling worth relying on.** A local run produced two completions of
-    /// ~26 000 tokens against turns that normally take 24–2 000, and with no cap each ran for the ten
-    /// minutes our own deadline allowed before we hung up — on a server that answers one request at a
-    /// time, so nothing else could be decided meanwhile. A cap turns that into a truncated reply and
-    /// a nudge, which the turn loop already knows how to handle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     /// How hard the model should think, for endpoints that expose it. `None` omits the key.
-    ///
-    /// ⚠️ **Measured, not assumed, and it is an on/off switch rather than a dial** — at least on LM
-    /// Studio with gemma-4: `"none"` takes reasoning to exactly zero tokens while still answering
-    /// correctly, `"low"` is indistinguishable from the default, and `chat_template_kwargs`
-    /// (`thinking` / `enable_thinking`, the Qwen spelling) is accepted and ignored. A string rather
-    /// than an enum because the accepted values are the endpoint's to define, and an enum here would
-    /// mean a release of this crate every time one of them adds a level.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     pub temperature: f32,
     pub stream: bool,
-    /// ⚠️ Several endpoints report no `usage` on a streamed response unless asked. Some report none
+    /// Several endpoints report no `usage` on a streamed response unless asked. Some report none
     /// regardless, which is what [`Usage::estimate`] is for.
     pub stream_options: StreamOptions,
 }
@@ -406,7 +305,8 @@ pub struct StreamOptions {
     pub include_usage: bool,
 }
 
-// ── Responses ────────────────────────────────────────────────────────────────────────────────────
+// ── Responses
+// ────────────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
@@ -416,20 +316,20 @@ pub struct Usage {
     pub completion_tokens: u64,
     #[serde(default)]
     pub total_tokens: u64,
-    /// Set when the numbers came from [`Usage::estimate`] rather than from the endpoint, so the UI
-    /// can say so rather than presenting a guess as a measurement.
+    /// Set when the numbers came from [`Usage::estimate`] rather than from the endpoint, so the
+    /// UI can say so rather than presenting a guess as a measurement.
     #[serde(default, skip_deserializing)]
     pub estimated: bool,
 }
 
 impl Usage {
-    /// The fallback when an endpoint reports nothing: count characters. Wrong by tens of percent, and
-    /// that is the point — a token gauge that degrades beats one that freezes at zero for a whole run.
+    /// The fallback when an endpoint reports nothing: count characters. Wrong by tens of percent,
+    /// and that is the point — a token gauge that degrades beats one that freezes at zero for a
+    /// whole run.
     pub fn estimate(request: &[Message], completion: &Completion) -> Self {
         let prompt = request.iter().map(Message::approximate_tokens).sum();
-        // Reasoning counts here even though it never enters the history: the endpoint billed for it,
-        // and this is the bill. On a reasoning model it is most of the completion — leaving it out
-        // would report a run costing four times what the gauge showed.
+        // Reasoning counts here even though it never enters the history: the endpoint billed for
+        // it, and this is the bill.
         let reply = Message::assistant(completion.content.clone(), completion.tool_calls.clone())
             .approximate_tokens()
             + Message::assistant(completion.reasoning.clone(), Vec::new()).approximate_tokens();
@@ -441,27 +341,18 @@ impl Usage {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Completion {
     pub content: String,
-    /// What the model thought on its way to `content`, for the endpoints that stream it separately.
-    ///
-    /// ⚠️ **It is shown and recorded, and never sent back.** Reasoning is billed as completion
-    /// tokens once; putting it into the next request's history would pay for it again on every turn
-    /// after that, and this model spends three quarters of a trivial turn's output on it. Nothing
-    /// downstream builds a `Message` out of this field — see [`Message::assistant`], which takes
-    /// `content` alone.
+    /// What the model thought on its way to `content`, for the endpoints that stream it
+    /// separately.
     pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
     pub finish_reason: Option<String>,
 }
 
-// ── The streaming parser ─────────────────────────────────────────────────────────────────────────
+// ── The streaming parser
+// ─────────────────────────────────────────────────────────────────────────
 
 /// One piece of a completion as it arrives, tagged with which channel it came in on.
-///
-/// ⚠️ **Two channels, not one string.** A reasoning model streams its thinking and its answer
-/// separately, and they have to stay separate all the way to the UI: the thinking is shown in a
-/// block that collapses when it ends, and — unlike the answer — it is never sent back to the
-/// endpoint. Concatenating them at the parser is what makes both of those impossible later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fragment<'a> {
     /// Assistant prose: the reply itself.
@@ -471,12 +362,6 @@ pub enum Fragment<'a> {
 }
 
 /// Consume an SSE body to the end of the completion.
-///
-/// `on_delta` is called with each fragment as it arrives — this is what makes the browser show the
-/// model thinking rather than a spinner. `cancelled` is checked **on every line**, which is one of
-/// §7.3's two cancel points: returning `Err(LlmError::Cancelled)` drops the reader, which aborts the
-/// HTTP request and stops the endpoint billing for a completion that is already answering a dead
-/// question.
 pub fn read_stream(
     reader: impl BufRead,
     on_delta: &mut dyn FnMut(Fragment<'_>),
@@ -501,26 +386,22 @@ pub fn read_stream(
     Ok(accumulator.finish())
 }
 
-/// Whether an `io::Error` from the body reader is the deadline expiring rather than the connection
-/// breaking, so it can become an [`LlmError::Timeout`] rather than a retryable transport fault.
-///
-/// ⚠️ **Both a kind and a string check, and the string is not belt-and-braces.** A read deadline
-/// reaches us as `ErrorKind::TimedOut` on most paths, but ureq wraps its own `Error::Timeout` in an
-/// `io::Error` on the streaming-body path, where the kind is whatever the wrapper chose — and
-/// getting this wrong silently restores the old behaviour rather than failing a test.
+/// Whether an `io::Error` from the body reader is the deadline expiring rather than the
+/// connection breaking, so it can become an [`LlmError::Timeout`] rather than a retryable
+/// transport fault.
 fn is_timeout(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::TimedOut
         || format!("{error}").to_ascii_lowercase().contains("timeout")
 }
 
-/// The state machine [`read_stream`] drives, separated from the reader so a test can feed it lines
-/// split wherever it likes.
+/// The state machine [`read_stream`] drives, separated from the reader so a test can feed it
+/// lines split wherever it likes.
 #[derive(Debug, Default)]
 pub struct StreamAccumulator {
     content: String,
     reasoning: String,
-    /// Indexed by the `index` field of the delta, which is how the API identifies *which* of several
-    /// parallel calls a fragment belongs to.
+    /// Indexed by the `index` field of the delta, which is how the API identifies *which* of
+    /// several parallel calls a fragment belongs to.
     calls: Vec<PartialCall>,
     usage: Option<Usage>,
     finish_reason: Option<String>,
@@ -541,8 +422,7 @@ impl StreamAccumulator {
         line: &str,
         on_delta: &mut dyn FnMut(Fragment<'_>),
     ) -> Result<bool, LlmError> {
-        // Blank lines separate events and a leading `:` is a keep-alive comment. Anything that is not
-        // a `data:` field — `event:`, `id:`, `retry:` — is not something this protocol uses.
+        // Blank lines separate events and a leading `:` is a keep-alive comment.
         let Some(payload) = line.strip_prefix("data:") else { return Ok(false) };
         let payload = payload.trim();
         if payload.is_empty() {
@@ -555,21 +435,21 @@ impl StreamAccumulator {
         let chunk: StreamChunk = serde_json::from_str(payload)
             .map_err(|e| LlmError::Protocol(format!("unparseable stream chunk ({e}): {payload}")))?;
 
-        // An error mid-stream arrives as a normal `data:` frame with a 200 already sent, so it cannot
-        // be handled at the status-code layer — but the status is *in* it, and on OpenRouter it is
-        // routinely a transient upstream fault the retry loop already knows what to do with.
+        // An error mid-stream arrives as a normal `data:` frame with a 200 already sent, so it
+        // cannot be handled at the status-code layer — but the status is *in* it, and on
+        // OpenRouter it is routinely a transient upstream fault the retry loop already knows what
+        // to do with.
         if let Some(error) = chunk.error {
             return Err(error.into_failure(chunk.provider.as_deref()));
         }
-        // ⚠️ The usage frame is the *last* one and carries an empty `choices` array. Take it before
-        // looking at choices, or an endpoint that also sets `[DONE]` on it loses the numbers.
+        // The usage frame is the *last* one and carries an empty `choices` array.
         if let Some(usage) = chunk.usage {
             self.usage = Some(usage);
         }
 
         for choice in chunk.choices {
-            // Thinking first: a chunk carries one or the other, and on the endpoints that ever send
-            // both together the reasoning is what led to the prose beside it.
+            // Thinking first: a chunk carries one or the other, and on the endpoints that ever
+            // send both together the reasoning is what led to the prose beside it.
             if let Some(text) = choice.delta.reasoning_content.filter(|t| !t.is_empty()) {
                 on_delta(Fragment::Reasoning(&text));
                 self.reasoning.push_str(&text);
@@ -588,13 +468,10 @@ impl StreamAccumulator {
         Ok(false)
     }
 
-    /// ⚠️ **The arguments of one call arrive across many chunks and must be concatenated before
-    /// parsing.** The first fragment carries the id and the name; every one after it carries a few
-    /// more characters of the JSON and nothing else.
+    /// The arguments of one call arrive across many chunks and must be concatenated before
+    /// parsing.
     fn merge_call(&mut self, delta: ToolCallDelta) {
-        // Not every endpoint sends `index`. Zero is the right default for the overwhelmingly common
-        // single-call case, but it would then merge two *different* calls into one — so a fragment
-        // that names an id the slot does not hold starts a new slot instead.
+        // Not every endpoint sends `index`.
         let index = match delta.index {
             Some(index) => index,
             None => match (&delta.id, self.calls.last()) {
@@ -626,14 +503,12 @@ impl StreamAccumulator {
             tool_calls: self
                 .calls
                 .into_iter()
-                // A slot with no name was never a call: an endpoint that sends a sparse `index` leaves
-                // gaps, and `resize` filled them.
+                // A slot with no name was never a call: an endpoint that sends a sparse `index`
+                // leaves gaps, and `resize` filled them.
                 .filter(|call| !call.name.is_empty())
                 .enumerate()
                 .map(|(i, call)| ToolCall {
-                    // An id is required when the result is sent back. Endpoints that omit it entirely
-                    // (some local servers do) get a synthetic one rather than a 400 on the next
-                    // request; the only requirement is that it is unique within the message.
+                    // An id is required when the result is sent back.
                     id: if call.id.is_empty() { format!("call_{i}") } else { call.id },
                     kind: "function".to_string(),
                     function: FunctionCall { name: call.name, arguments: call.arguments },
@@ -653,9 +528,7 @@ struct StreamChunk {
     usage: Option<Usage>,
     #[serde(default)]
     error: Option<ApiError>,
-    /// Which upstream OpenRouter routed this request to. Half the tell that an error frame is its
-    /// envelope, and the only place the name appears when `error.metadata` omits it — which, in the
-    /// incident this was written for, it did. See [`ApiError::is_openrouter`].
+    /// Which upstream OpenRouter routed this request to.
     #[serde(default)]
     provider: Option<String>,
 }
@@ -672,11 +545,8 @@ struct StreamChoice {
 struct MessageDelta {
     #[serde(default)]
     content: Option<String>,
-    /// A reasoning model's thinking, which arrives on a channel of its own rather than in `content`.
-    ///
-    /// ⚠️ **The field has two spellings in the wild and neither is in OpenAI's own schema.** LM
-    /// Studio, vLLM and DeepSeek send `reasoning_content`; OpenRouter sends `reasoning`. An endpoint
-    /// that sends neither is the ordinary case and leaves this `None`.
+    /// A reasoning model's thinking, which arrives on a channel of its own rather than in
+    /// `content`.
     #[serde(default, alias = "reasoning")]
     reasoning_content: Option<String>,
     #[serde(default)]
@@ -706,7 +576,7 @@ struct FunctionDelta {
 pub struct ApiError {
     #[serde(default)]
     pub message: String,
-    /// ⚠️ **A string on OpenAI (`"insufficient_quota"`) and an *integer* on OpenRouter (`504`).**
+    /// A string on OpenAI (`"insufficient_quota"`) and an *integer* on OpenRouter (`504`).
     /// Neither is wrong — the field is in nobody's schema — and typing it as one of them made the
     /// other unparseable: an integer here failed the whole chunk, so an upstream provider timing
     /// out was reported as our own parser being broken.
@@ -749,11 +619,6 @@ impl std::fmt::Display for ErrorCode {
 
 /// The `metadata` object on an OpenRouter error, which is how a routed request says *which*
 /// upstream provider failed and how.
-///
-/// ⚠️ **`raw` is deliberately not read.** It is the upstream's own error body, often a whole nested
-/// JSON document, and everything in the message below is published to every open browser and
-/// written to `transcript.jsonl`. Unknown keys are ignored rather than fatal, for the reason the
-/// whole of this change exists.
 #[derive(Debug, Deserialize)]
 pub struct OpenRouterErrorMetadata {
     #[serde(default)]
@@ -764,16 +629,6 @@ pub struct OpenRouterErrorMetadata {
 
 impl ApiError {
     /// Whether this is OpenRouter's upstream-error envelope rather than a bare OpenAI-style one.
-    ///
-    /// ⚠️ **The scoping decision for this whole mechanism, and it is deliberately not a config
-    /// flag.** `OPENAI_BASE_URL` is any OpenAI-compatible endpoint and [`LlmConfig`] has no vendor
-    /// concept, so what is recognised is the *frame*: a chunk-level `provider` or an
-    /// `error.metadata`, neither of which anything else sends. An endpoint that sends a bare
-    /// `{"error": {…}}` keeps the old behaviour untouched, so no other provider's failures start
-    /// being retried on the strength of a number we decided to trust. Sniffing the envelope rather
-    /// than the URL also survives a proxy in front of OpenRouter.
-    ///
-    /// [`LlmConfig`]: crate::llm::config::LlmConfig
     fn is_openrouter(&self, chunk_provider: Option<&str>) -> bool {
         self.metadata.is_some() || chunk_provider.is_some_and(|name| !name.is_empty())
     }
@@ -789,10 +644,6 @@ impl ApiError {
     }
 
     /// The human half: `Nvidia: Provider timed out after 47709ms`.
-    ///
-    /// The code is appended only when it is *not* a status — a status is already printed by
-    /// [`LlmError::Http`]'s own `Display`, and saying `504` twice in one sentence is noise, while
-    /// `insufficient_quota` is the most useful word in the whole error.
     pub fn describe(&self, chunk_provider: Option<&str>) -> String {
         let error_type = self
             .metadata
@@ -821,13 +672,6 @@ impl ApiError {
 
     /// The failure this error frame is, which is the whole point of parsing it: a status carried
     /// inside a 200 is the same status the non-200 path already keys its retries on.
-    ///
-    /// ⚠️ **A 504 here must not become [`LlmError::Timeout`], despite the word.** `Timeout` means
-    /// *our* deadline expired while the endpoint is still working on the request, which is exactly
-    /// why it is not retryable — the retry queues behind the very generation it replaces. This is
-    /// the opposite: OpenRouter has already given up on the upstream provider and said so, so
-    /// there is nothing left running at the far end and another attempt is the ordinary transient
-    /// retry.
     fn into_failure(self, chunk_provider: Option<&str>) -> LlmError {
         let message = self.describe(chunk_provider);
         let status = match self.is_openrouter(chunk_provider) {
@@ -836,9 +680,8 @@ impl ApiError {
             false => None,
         };
         match status {
-            // ⚠️ No headers exist mid-stream, so this rate limit is *undated* — which is the
-            // "keep the ordinary backoff" case rather than the "park the run" one. See
-            // `reset_at_ms` and `Worker::park_until`.
+            // No headers exist mid-stream, so this rate limit is *undated* — which is the "keep
+            // the ordinary backoff" case rather than the "park the run" one.
             Some(429) => LlmError::RateLimited { resets_at_ms: None, message },
             Some(status) => LlmError::Http { status, message },
             None => LlmError::Protocol(format!("the endpoint reported: {message}")),
@@ -847,32 +690,17 @@ impl ApiError {
 }
 
 /// Pull the human half out of an error body, falling back to the body itself when it is not the
-/// shape we expected — which for a proxy or a gateway it very often is not.
-/// When a 429's quota reopens, in Unix milliseconds, from the two headers that can say so.
-///
-/// `Retry-After` wins when both are present: it is the standard one, it is a *delta* and so cannot
-/// be wrong about our clock, and an endpoint that sends both means the same thing by them.
-///
-/// ⚠️ **`X-RateLimit-Reset` has no agreed unit and the three in the wild are trivially
-/// distinguishable, so the unit is sniffed from the magnitude rather than assumed.** OpenRouter
-/// sends Unix *milliseconds*; several OpenAI-compatible servers send Unix *seconds*; others send
-/// *seconds from now*. Reading a Unix-second timestamp as a delta parks the run until the year
-/// 58000, and reading a delta as a timestamp resumes instantly and hammers the endpoint — so the
-/// failure is bad in both directions and worth the three-way test. The boundary is deliberately
-/// crude: no legitimate delta is 10^9 seconds (32 years) and no legitimate timestamp is below it.
-///
-/// ⚠️ **`None` is not "no limit", it is "the endpoint did not say"** — the caller keeps its ordinary
-/// backoff for that, rather than treating an undated 429 as a reason to park.
+/// shape we expected — which for a proxy or a gateway it very often is not. When a 429's quota
+/// reopens, in Unix milliseconds, from the two headers that can say so.
 pub fn reset_at_ms(retry_after: Option<&str>, reset: Option<&str>, now_ms: u64) -> Option<u64> {
-    // `Retry-After` may also be an HTTP-date. It is not worth parsing one: no OpenAI-compatible
-    // endpoint has been seen to send it, and `X-RateLimit-Reset` below is the fallback when this
-    // does not parse as a number.
+    // `Retry-After` may also be an HTTP-date.
     if let Some(seconds) = retry_after.and_then(|value| value.trim().parse::<u64>().ok()) {
         return Some(now_ms.saturating_add(seconds.saturating_mul(1000)));
     }
     let reset = reset?.trim().parse::<u64>().ok()?;
     match reset {
-        // Unix milliseconds: 10^12 ms is 2001, and anything smaller cannot be a millisecond stamp.
+        // Unix milliseconds: 10^12 ms is 2001, and anything smaller cannot be a millisecond
+        // stamp.
         _ if reset >= 1_000_000_000_000 => Some(reset),
         // Unix seconds.
         _ if reset >= 1_000_000_000 => Some(reset.saturating_mul(1000)),
@@ -896,11 +724,7 @@ pub fn describe_error_body(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    /// ⚠️ A rendered map is `detail: "high"` and up to forty-five times a screenshot's price. The
-    /// flat 85 that was charged for every image is what [`Usage::estimate`] feeds
-    /// `Accounting::occupancy`, and therefore what decides when the history is compacted — so
-    /// under-pricing a map does not cost money, it stops a genuinely full context from ever being
-    /// summarised on an endpoint that reports no `usage` of its own.
+    /// A rendered map is `detail: "high"` and up to forty-five times a screenshot's price.
     #[test]
     fn a_high_detail_map_is_not_priced_like_a_screenshot() {
         use super::{image_tokens, ImageDetail, IMAGE_TOKENS};
@@ -908,7 +732,8 @@ mod tests {
         assert_eq!(image_tokens(ImageDetail::Low, 480, 432), IMAGE_TOKENS);
 
         // Pallet Town, Celadon and Route 17 — the median map, a big city, and the long thin route
-        // that is the worst case, because a narrow strip is scaled *up* until its short side is 768.
+        // that is the worst case, because a narrow strip is scaled *up* until its short side is
+        // 768.
         assert_eq!(image_tokens(ImageDetail::High, 344, 330), 765);
         assert_eq!(image_tokens(ImageDetail::High, 856, 586), 1105);
         assert!(image_tokens(ImageDetail::High, 344, 2314) > 3_000);
@@ -940,9 +765,6 @@ mod tests {
         completion
     }
 
-    /// §7.1's ⚠️: the arguments of one call arrive across many chunks. Split at every awkward place —
-    /// mid-key, mid-string, on a brace — because the endpoint splits on token boundaries and has no
-    /// idea where the JSON's are.
     #[test]
     fn parses_fragmented_tool_call_arguments() {
         let completion = drain(&[
@@ -969,8 +791,6 @@ mod tests {
         assert_eq!(call.arguments().unwrap()["id"], "PalletTown:5,6:Warp");
     }
 
-    /// §7.1: one assistant message may carry several calls, interleaved by `index`. This is the shape
-    /// that makes `read_party` and `read_map` answerable from one observation.
     #[test]
     fn parallel_tool_calls_are_kept_apart_even_interleaved() {
         let completion = drain(&[
@@ -986,9 +806,6 @@ mod tests {
         assert_eq!(completion.tool_calls[1].id, "b");
     }
 
-    /// ⚠️ Endpoint compatibility (§17 risk 3). An endpoint that sends no `index`, no id and no usage
-    /// must still produce a well-formed call — with an id, because the tool result cannot be sent
-    /// back without one.
     #[test]
     fn a_minimal_endpoint_still_yields_a_usable_call() {
         let completion = drain(&[
@@ -1010,9 +827,8 @@ mod tests {
     }
 
     /// A reasoning model streams its thinking on a channel of its own, and the two must not be
-    /// concatenated: `content` is what goes back into the history, `reasoning` is what the page shows
-    /// and then collapses. Before this the field was simply an unknown key and serde dropped it — the
-    /// model looked silent for the whole turn and the reply was empty prose plus a tool call.
+    /// concatenated: `content` is what goes back into the history, `reasoning` is what the page
+    /// shows and then collapses.
     #[test]
     fn reasoning_is_a_separate_channel_from_the_reply() {
         let completion = drain(&[
@@ -1027,16 +843,15 @@ mod tests {
         assert_eq!(completion.content, "Heading north.", "the thinking is not part of the reply");
         assert_eq!(completion.tool_calls.len(), 1);
 
-        // ⚠️ It is billed as completion tokens even though it never enters the history, so the
+        // It is billed as completion tokens even though it never enters the history, so the
         // estimator has to count it — this model spends most of a turn's output on it.
         let with = Usage::estimate(&[], &completion);
         let without = Usage::estimate(&[], &Completion { reasoning: String::new(), ..completion });
         assert!(with.completion_tokens > without.completion_tokens, "{with:?} vs {without:?}");
     }
 
-    /// ⚠️ The field has two spellings and neither is OpenAI's: LM Studio, vLLM and DeepSeek send
-    /// `reasoning_content`, OpenRouter sends `reasoning`. A stream carrying the other one must not
-    /// silently lose the thought.
+    /// The field has two spellings and neither is OpenAI's: LM Studio, vLLM and DeepSeek send
+    /// `reasoning_content`, OpenRouter sends `reasoning`.
     #[test]
     fn the_other_spelling_of_the_reasoning_field_is_read_too() {
         let completion = drain(&[
@@ -1046,8 +861,8 @@ mod tests {
         assert_eq!(completion.reasoning, "Thinking about it.");
     }
 
-    /// Two different calls arriving with no `index` at all must not be concatenated into one — the id
-    /// is the only thing distinguishing them.
+    /// Two different calls arriving with no `index` at all must not be concatenated into one —
+    /// the id is the only thing distinguishing them.
     #[test]
     fn indexless_calls_split_on_a_new_id() {
         let completion = drain(&[
@@ -1059,8 +874,8 @@ mod tests {
         assert_eq!(names, ["read_map", "read_bag"]);
     }
 
-    /// Keep-alive comments, `event:` lines and blank separators are all normal traffic and none of
-    /// them are data.
+    /// Keep-alive comments, `event:` lines and blank separators are all normal traffic and none
+    /// of them are data.
     #[test]
     fn non_data_lines_are_ignored() {
         let completion = drain(&[
@@ -1088,15 +903,6 @@ mod tests {
             .expect_err("an error frame is not a completion")
     }
 
-    /// ⚠️ **The incident this whole mechanism was written for**, verbatim off the deployed run's
-    /// transcript. Two separate faults in one line: `code` is an *integer*, which failed the whole
-    /// chunk and reported an upstream provider timing out as our own parser being malformed; and
-    /// the 504 it carries is the textbook transient failure that the retry loop already exists for
-    /// and never saw, because the status was on the wrong side of a 200.
-    ///
-    /// ⚠️ And it is an `Http`, never an [`LlmError::Timeout`], despite the word: `Timeout` is *our*
-    /// deadline expiring on a request the endpoint is still working, which is why that one is not
-    /// retried. Here the far end has already given up and said so.
     #[test]
     fn an_openrouter_upstream_error_is_a_retryable_status_not_a_parse_failure() {
         let failure = error_frame(concat!(
@@ -1115,11 +921,7 @@ mod tests {
         assert!(!text.contains("unparseable"), "the parser is not the thing that went wrong: {text}");
     }
 
-    /// ⚠️ **The guard for the scoping decision.** The status classification is OpenRouter's, keyed
-    /// on OpenRouter's own envelope — a chunk-level `provider` or an `error.metadata` — because
-    /// `OPENAI_BASE_URL` is any OpenAI-compatible endpoint and a bare `{"error": {…}}` from one of
-    /// them must not start being retried on the strength of a number we decided to trust. A frame
-    /// with neither keeps exactly the old behaviour.
+    /// The guard for the scoping decision.
     #[test]
     fn a_bare_error_frame_is_still_only_a_protocol_error() {
         let failure = error_frame(r#"{"choices":[],"error":{"code":503,"message":"overloaded"}}"#);
@@ -1139,9 +941,8 @@ mod tests {
         }
     }
 
-    /// The universal half of the fix: `code` is a string on OpenAI and a number on OpenRouter, and
-    /// a name rather than a status on both. Reading it is never fatal; only a *status* decides
-    /// anything.
+    /// The universal half of the fix: `code` is a string on OpenAI and a number on OpenRouter,
+    /// and a name rather than a status on both.
     #[test]
     fn an_error_code_is_read_whether_it_is_a_number_or_a_string() {
         assert_eq!(ErrorCode::Number(504).status(), Some(504));
@@ -1164,9 +965,8 @@ mod tests {
         assert_eq!(format!("{failure}"), "the endpoint returned 502: Nvidia: upstream died");
     }
 
-    /// ⚠️ A mid-stream 429 is a rate limit and an *undated* one: no headers exist inside a body, so
-    /// there is nothing to park until. It keeps the ordinary backoff, and must not reach
-    /// `Worker::park_until`, which would stop the emulator on a deadline nobody sent.
+    /// A mid-stream 429 is a rate limit and an *undated* one: no headers exist inside a body, so
+    /// there is nothing to park until.
     #[test]
     fn an_openrouter_rate_limit_is_a_rate_limit_and_not_a_park() {
         let failure = error_frame(concat!(
@@ -1192,8 +992,8 @@ mod tests {
         assert!(!failure.is_retryable(), "{failure}");
     }
 
-    /// An error frame that says nothing at all is rare and horrible to debug, so whatever it *did*
-    /// carry becomes the message rather than an empty sentence.
+    /// An error frame that says nothing at all is rare and horrible to debug, so whatever it
+    /// *did* carry becomes the message rather than an empty sentence.
     #[test]
     fn an_error_with_no_message_still_says_something() {
         let failure = error_frame(r#"{"provider":"Nvidia","error":{"metadata":{"error_type":"timeout"}}}"#);
@@ -1229,8 +1029,8 @@ mod tests {
         assert!(matches!(failure, LlmError::Cancelled), "{failure}");
     }
 
-    /// The request is what the endpoint is most likely to reject, so pin its shape: no nulls where a
-    /// key should be absent, and `stream_options` present so `usage` comes back at all.
+    /// The request is what the endpoint is most likely to reject, so pin its shape: no nulls
+    /// where a key should be absent, and `stream_options` present so `usage` comes back at all.
     #[test]
     fn the_request_serialises_to_the_documented_shape() {
         let request = ChatRequest {
@@ -1278,16 +1078,10 @@ mod tests {
         assert!(json["messages"][0].get("tool_calls").is_none());
         assert_eq!(json["messages"][2]["tool_call_id"], "c1");
         assert_eq!(json["messages"][2]["role"], "tool");
-        // An ordinary message's content is a bare string, not a one-element array. The multi-part
-        // form is legal everywhere in principle and rejected in several places in practice, so it is
-        // used only where it is needed — see `an_image_rides_on_a_user_message`.
+        // An ordinary message's content is a bare string, not a one-element array.
         assert_eq!(json["messages"][0]["content"], "be brief");
     }
 
-    /// ⚠️ **W5's screenshot trap.** The picture cannot go on the `tool` message that answered the
-    /// call — OpenAI allows only text parts there and several compatible endpoints reject an image
-    /// outright — so it follows as a `user` message. This pins the shape that goes on the wire and,
-    /// with it, that a tool result stays a plain string.
     #[test]
     fn an_image_rides_on_a_user_message_in_the_multi_part_form() {
         let message = Message::user_with_image("look at this", "data:image/png;base64,AAAA".to_string());
@@ -1300,8 +1094,6 @@ mod tests {
         assert_eq!(json["content"][1]["image_url"]["url"], "data:image/png;base64,AAAA");
         assert_eq!(json["content"][1]["image_url"]["detail"], "low");
 
-        // …and it round-trips, because a history that has been through a compaction (W6) is rebuilt
-        // from these types rather than kept as JSON.
         assert_eq!(serde_json::from_value::<Message>(json).expect("deserialises"), message);
 
         assert_eq!(message.text(), Some("look at this"), "the caption is still readable as prose");
@@ -1309,9 +1101,7 @@ mod tests {
         assert!(!Message::user("no picture here").has_image());
     }
 
-    /// ⚠️ A base64 payload is four thousand characters and about eighty tokens. Estimating it as text
-    /// would overstate a screenshot by fifty times and trip the context trim on a history that is
-    /// nowhere near full.
+    /// A base64 payload is four thousand characters and about eighty tokens.
     #[test]
     fn an_image_is_estimated_by_the_flat_rate_rather_than_by_its_length() {
         let caption = "look at this";
@@ -1330,8 +1120,6 @@ mod tests {
         );
         assert_eq!(describe_error_body("<html>502 Bad Gateway</html>"), "<html>502 Bad Gateway</html>");
 
-        // The same widening the mid-stream frame needed: an integer code used to fail this parse
-        // outright and fall through to the raw body, and the provider that failed is worth saying.
         assert_eq!(
             describe_error_body(
                 r#"{"error":{"code":504,"message":"Provider timed out","metadata":{"provider_name":"Nvidia"}}}"#
@@ -1340,9 +1128,7 @@ mod tests {
         );
     }
 
-    /// ⚠️ **A tool call the model wrote badly must not be able to poison the conversation.** It goes
-    /// into the history and back out on every later request, so `arguments` that are not a JSON
-    /// object are rejected for ever after rather than once. See [`history_safe`].
+    /// A tool call the model wrote badly must not be able to poison the conversation.
     #[test]
     fn a_tool_call_that_is_not_a_json_object_cannot_reach_the_history() {
         use super::{Message, ToolCall, FunctionCall};
@@ -1362,29 +1148,24 @@ mod tests {
         // zero-parameter tool) and a fragment cut off mid-object.
         assert_eq!(sent(""), "{}");
         assert_eq!(sent(r#"{"id": "PalletTown:5"#), "{}");
-        // JSON, but not an object. `arguments` is specified as one and strict providers enforce it.
+        // JSON, but not an object.
         assert_eq!(sent("[1, 2]"), "{}");
         assert_eq!(sent("\"walk north\""), "{}");
 
-        // ⚠️ And a good call is left **exactly** as the model wrote it: re-serialising would sort the
+        // And a good call is left exactly as the model wrote it: re-serialising would sort the
         // keys, rewording the model's own history and moving the token count for no reason.
         let good = r#"{"id":"PalletTown:5,6:Warp","summary":"heading to Route 1"}"#;
         assert_eq!(sent(good), good);
 
-        // ⚠️ The call itself survives whatever happens to its arguments. Dropping it would orphan the
-        // `tool_result` that answers it, which is the invariant one-step rollback rests on.
+        // The call itself survives whatever happens to its arguments.
         let message = Message::assistant(String::new(), vec![call("{oops")]);
         assert_eq!(message.tool_calls.len(), 1);
         assert_eq!(message.tool_calls[0].id, "call_1");
     }
 
-    /// ⚠️ The three units `X-RateLimit-Reset` is sent in, which are told apart by magnitude alone.
-    /// Getting this wrong is silent and bad in both directions: a Unix-second stamp read as a delta
-    /// parks the run for thirty years, and a delta read as a stamp resumes instantly into the same
-    /// 429. See [`reset_at_ms`].
+    /// The three units `X-RateLimit-Reset` is sent in, which are told apart by magnitude alone.
     #[test]
     fn a_rate_limit_reset_is_read_in_whichever_unit_it_was_sent() {
-        // 2026-08-14T12:00:00Z, as milliseconds and as seconds.
         const NOW: u64 = 1_786_824_000_000;
         let at = |value: &str| super::reset_at_ms(None, Some(value), NOW);
 
@@ -1395,17 +1176,17 @@ mod tests {
         // Seconds from now.
         assert_eq!(at("600"), Some(NOW + 600_000));
 
-        // `Retry-After` wins when both are present: it is a delta, so it cannot be wrong about our
-        // clock, and an endpoint sending both means the same thing by them.
+        // `Retry-After` wins when both are present: it is a delta, so it cannot be wrong about
+        // our clock, and an endpoint sending both means the same thing by them.
         assert_eq!(super::reset_at_ms(Some("30"), Some("1786824600000"), NOW), Some(NOW + 30_000));
-        // ...but only when it parses. An HTTP-date falls through to the header that is a number.
+        // ...but only when it parses.
         assert_eq!(
             super::reset_at_ms(Some("Fri, 14 Aug 2026 12:10:00 GMT"), Some("600"), NOW),
             Some(NOW + 600_000),
         );
 
-        // ⚠️ `None` is "the endpoint did not say", which the caller must not read as "no limit":
-        // it keeps its ordinary backoff for that case rather than parking the run.
+        // `None` is "the endpoint did not say", which the caller must not read as "no limit": it
+        // keeps its ordinary backoff for that case rather than parking the run.
         assert_eq!(super::reset_at_ms(None, None, NOW), None);
         assert_eq!(super::reset_at_ms(None, Some("soon"), NOW), None);
     }

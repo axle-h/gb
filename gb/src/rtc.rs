@@ -1,41 +1,13 @@
-//! **D5.** The MBC3 real-time clock.
-//!
-//! Two `0x0F`/`0x10` cartridge types carry a clock chip with its own crystal and battery, which
-//! keeps counting while the console is off. Its five registers replace cartridge RAM at
-//! `0xA000..=0xBFFF` when `0x08..=0x0C` is written to the bank register:
-//!
-//! | Bank | Register |
-//! |---|---|
-//! | `0x08` | seconds, 0-59 |
-//! | `0x09` | minutes, 0-59 |
-//! | `0x0A` | hours, 0-23 |
-//! | `0x0B` | day counter, low 8 bits |
-//! | `0x0C` | bit 0 = day counter bit 8, **bit 6 = halt**, **bit 7 = day carry** |
-//!
-//! # Why this is an offset and not a counter
-//!
-//! The clock runs on wall time, not on emulated cycles — it must advance while the emulator is
-//! closed. So the state is a **`base`: the Unix second at which the counter read zero**
-//! (gambatte's `rtc.cpp`), and the counter is `now - base`. Writing a register moves `base`;
-//! nothing ticks.
-//!
-//! # ⚠️ The time source is injectable, and it has to be
-//!
-//! Reading `SystemTime::now()` directly from the emulator would make every fixture-driven test in
-//! this repo non-deterministic — a replay would produce different register values on every run.
-//! [`TimeSource::Fixed`] is what tests and replays use. It is an enum rather than a boxed trait
-//! for the same reason [`crate::mbc::Mapper`] is: [`crate::mmu::MMU`] derives `Clone`, `PartialEq`,
-//! `Encode` and `Decode`, and a trait object supplies none of them.
+//! D5.
 
 use bincode::{Decode, Encode};
 
 /// Where the clock reads wall time from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub enum TimeSource {
-    /// The host clock. What a real cartridge does, and the default.
+    /// The host clock.
     System,
-    /// A fixed instant in Unix seconds, moved only by [`Rtc::set_time_source`]. **Use this in
-    /// anything that must replay identically.**
+    /// A fixed instant in Unix seconds, moved only by [`Rtc::set_time_source`].
     Fixed(u64),
 }
 
@@ -59,7 +31,7 @@ pub struct RtcRegisters {
     pub hours: u8,
     /// The full 9-bit day counter, 0-511.
     pub days: u16,
-    /// Bit 7 of `0x0C`: the day counter has passed 511 at least once. **Sticky** — only a write
+    /// Bit 7 of `0x0C`: the day counter has passed 511 at least once. Sticky — only a write
     /// clears it, which is how a game detects a year-long absence.
     pub day_carry: bool,
     /// Bit 6 of `0x0C`: counting is stopped.
@@ -73,20 +45,13 @@ const DAY_COUNTER_MODULUS: u64 = 512;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub struct Rtc {
     /// Unix second at which the running counter read zero.
-    ///
-    /// ⚠️ **Signed on purpose.** A guest may set the clock to a time *later* than the host's, and
-    /// then the instant the counter read zero is before the epoch. An unsigned `base` with a
-    /// saturating subtraction silently clamps that to zero and the write is lost — which is
-    /// exactly what happened the first time this was wired through the MMU.
     base: i64,
-    /// The counter's value at the moment it was halted. Meaningless while running.
     halted_at: u64,
     halted: bool,
     /// Sticky, and deliberately not derived from the counter: the counter wraps every 512 days
     /// and cannot tell you that it did.
     day_carry: bool,
-    /// What `0xA000` shows. Hardware freezes the register file on latch so a guest can read five
-    /// registers without one rolling over underneath it.
+    /// What `0xA000` shows.
     latched: RtcRegisters,
     /// The `0x6000..=0x7FFF` latch sequence needs a `0` then a `1`; this is the last value seen.
     last_latch: u8,
@@ -121,20 +86,16 @@ impl Rtc {
         }
     }
 
-    /// Swap the time source, **rebasing so the counter reads the same across the swap**. This is
-    /// what pins a clock that is already running.
-    ///
-    /// ⚠️ It is *not* how you make time pass — that is [`Rtc::advance`]. Rebasing means setting a
-    /// later `Fixed` instant here moves nothing, which is exactly the trap that made the first
-    /// draft of this module's tests all pass vacuously.
+    /// Swap the time source, rebasing so the counter reads the same across the swap. This is what
+    /// pins a clock that is already running.
     pub fn set_time_source(&mut self, source: TimeSource) {
         let counter = self.counter();
         self.source = source;
         self.set_counter(counter);
     }
 
-    /// Let `seconds` of wall time pass on a **pinned** clock. A no-op on a system clock, which
-    /// moves on its own.
+    /// Let `seconds` of wall time pass on a pinned clock. A no-op on a system clock, which moves
+    /// on its own.
     pub fn advance(&mut self, seconds: u64) {
         if let TimeSource::Fixed(now) = self.source {
             self.source = TimeSource::Fixed(now + seconds);
@@ -195,16 +156,12 @@ impl Rtc {
                     | if r.halted { 0x40 } else { 0 }
                     | if r.day_carry { 0x80 } else { 0 }
             }
-            // Not a clock register. An open bus reads high.
+            // Not a clock register.
             _ => 0xFF,
         }
     }
 
     /// Write one of the five registers.
-    ///
-    /// ⚠️ A write hits the **live** clock as well as the latched copy. Hardware has one register
-    /// file; the latch only gates what a *read* sees, so setting the time through it must move the
-    /// counter or the next latch would undo the write.
     pub fn write(&mut self, register: u8, value: u8) {
         let mut r = self.registers_now();
         match register {
@@ -233,10 +190,8 @@ impl Rtc {
         self.latched = r;
     }
 
-    /// Gambatte's `.rtc` sidecar: the base time as **4 bytes, big-endian**. Kept for interop with
+    /// Gambatte's `.rtc` sidecar: the base time as 4 bytes, big-endian. Kept for interop with
     /// existing save directories — that is the only reason the format is this and not bincode.
-    /// A base before the epoch cannot be expressed in the sidecar's unsigned 32 bits and clamps
-    /// to zero. Only reachable with an artificially pinned clock; a system clock is never near it.
     pub fn to_gambatte_bytes(&self) -> [u8; 4] {
         (self.base.clamp(0, u32::MAX as i64) as u32).to_be_bytes()
     }
@@ -272,7 +227,7 @@ mod tests {
         assert_eq!(rtc.read(0x0C), 0, "no high day bit, not halted, no carry");
     }
 
-    /// ⚠️ The registers freeze on latch. Without this a guest reading five registers in sequence
+    /// The registers freeze on latch. Without this a guest reading five registers in sequence
     /// could see 00:00:59 roll to 00:01:00 between two of them and record 00:00:00.
     #[test]
     fn reads_are_frozen_until_the_next_latch() {
@@ -339,8 +294,8 @@ mod tests {
         assert_eq!((rtc.read(0x09), rtc.read(0x08)), (2, 40), "resumed from 100s, not from 10100s");
     }
 
-    /// ⚠️ A write must move the *live* counter, not just the latched copy — otherwise the next
-    /// latch silently undoes it.
+    /// A write must move the *live* counter, not just the latched copy — otherwise the next latch
+    /// silently undoes it.
     #[test]
     fn a_write_survives_the_next_latch() {
         let mut rtc = Rtc::pinned(1_000_000);
@@ -369,8 +324,7 @@ mod tests {
         assert_eq!(rtc.read(0x0C) & 0x80, 0, "acknowledged");
     }
 
-    /// ⚠️ Pinning a running clock preserves what it reads; it does not rewind it. Making time
-    /// pass is [`Rtc::advance`], and conflating the two makes every test above pass vacuously.
+    /// Pinning a running clock preserves what it reads; it does not rewind it.
     #[test]
     fn pinning_a_running_clock_preserves_the_counter() {
         let mut rtc = Rtc::pinned(0);
@@ -383,7 +337,7 @@ mod tests {
         assert_eq!((rtc.read(0x0A), rtc.read(0x09), rtc.read(0x08)), before);
     }
 
-    /// ⚠️ Regression: a guest may set the clock **later than the host's own time**, which puts the
+    /// Regression: a guest may set the clock later than the host's own time, which puts the
     /// instant the counter read zero before the epoch. With an unsigned base and a saturating
     /// subtraction the write was silently lost.
     #[test]

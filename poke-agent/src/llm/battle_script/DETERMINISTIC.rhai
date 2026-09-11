@@ -10,7 +10,7 @@
 // strategy `full_playthrough` finishes with.
 
 fn damaging_pp(moves) {
-    // ⚠️ `power > 0` is a near-miss for the policy's `is_damaging_move`, which also counts the five
+    // `power > 0` is a near-miss for the policy's `is_damaging_move`, which also counts the five
     // fixed-damage moves (Seismic Toss, Night Shade, Sonicboom, Dragon Rage, Psywave). None of them
     // is a starter's move and all five would only make this more willing to fight on.
     let now = 0;

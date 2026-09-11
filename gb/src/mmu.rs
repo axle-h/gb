@@ -32,15 +32,11 @@ pub const WRAM_BANKS: usize = 8;
 pub const WRAM_WINDOW: usize = WRAM_BANK_SIZE * 2;
 
 /// `0xFEA0..=0xFEFF` on CGB is three 8-byte blocks of RAM, each mirrored four times across its
-/// own 32-byte span. Unlike DMG — where the whole region is write-protected and reads `0x00` —
-/// it holds what is written to it.
+/// own 32-byte span. Unlike DMG — where the whole region is write-protected and reads `0x00` — it
+/// holds what is written to it.
 pub const UNUSABLE_BLOCK: usize = 8;
 pub const UNUSABLE_BLOCKS: usize = 3;
 
-/// Power-on contents of that region, taken byte for byte from gambatte's committed hardware dump
-/// `test/hwtests/fexx_ffxx_dumper_cgb.bin`, whose `0xA0..=0xFF` is exactly these three patterns
-/// repeated four times each. The DMG dump beside it is all zeroes, which is where the `0x00`
-/// A13 settled on came from.
 pub const UNUSABLE_CGB: [u8; UNUSABLE_BLOCK * UNUSABLE_BLOCKS] = [
     0x08, 0x01, 0xEF, 0xDE, 0x06, 0x4A, 0xCD, 0xBD, // 0xFEA0..=0xFEBF
     0x00, 0x90, 0xF7, 0x7F, 0xC0, 0xB1, 0xBC, 0xFB, // 0xFEC0..=0xFEDF
@@ -55,9 +51,7 @@ fn unusable_offset(address: u16) -> usize {
 }
 
 /// Round a ROM image up to a whole power-of-two number of 16 KB banks, filling with `0xFF` — the
-/// value an unmapped bus reads back. Gambatte does the same (`cartridge.cpp:638-652`) and for the
-/// same reason: it makes every in-range bank index land on real memory, so a cartridge whose
-/// header over-states its size can no longer index past the buffer.
+/// value an unmapped bus reads back.
 fn pad_rom(data: &[u8]) -> Vec<u8> {
     let banks = (data.len().div_ceil(ROM_BANK_SIZE)).max(2).next_power_of_two();
     let mut padded = Vec::with_capacity(banks * ROM_BANK_SIZE);
@@ -71,61 +65,49 @@ pub struct MMU {
     data: Vec<u8>,
     header: CartHeader,
     ram_banks: Vec<[u8; RAM_BANK_SIZE]>,
-    /// **D2.** The cartridge's memory bank controller — the source of truth for the three cached
-    /// fields below, which exist only to keep the mapper off the read path. See
-    /// [`MMU::refresh_bank_cache`].
+    /// D2.
     mapper: Mapper,
     ram_enabled: bool,
     rom_bank_register: usize,
     ram_bank_register: usize,
-    /// What `0xA000..=0xBFFF` addresses. Derived from `mapper`, refreshed with the rest of the
-    /// cache; not serialised, because the mapper it comes from is.
+    /// What `0xA000..=0xBFFF` addresses.
     ram_target: RamTarget,
-    /// The bank at `0x0000..=0x3FFF`. Zero on every mapper but MBC1 in mode 1 — see
-    /// [`Mbc::rom_bank_low`]. Cached as a byte offset so the read path is one add.
+    /// The bank at `0x0000..=0x3FFF`.
     rom_bank_low_offset: usize,
     /// MBC2's 512-nibble RAM needs mirroring and masking; see [`Mbc::ram_is_nibble_wide`].
     ram_is_nibble_wide: bool,
-    /// Eight 4 KB banks. A DMG only ever addresses the first two, so `work_ram[..0x2000]` is
-    /// exactly the old flat array — see [`MMU::work_ram`].
+    /// Eight 4 KB banks.
     work_ram: [u8; WRAM_BANK_SIZE * WRAM_BANKS],
-    /// `SVBK` (`FF70`), 1..=7. Never anything but 1 on DMG or in CGB compatibility mode.
+    /// `SVBK` (`FF70`), 1..=7.
     work_ram_bank: usize,
     high_ram: [u8; 0x7F], // 128 bytes of high RAM
-    /// Which console this is. A construction-time property; it is not guest state and is not
-    /// serialised (a save state carries its `cgb` section instead).
+    /// Which console this is.
     model: Model,
     color_mode: ColorMode,
     /// `KEY1` (`FF4D`) bit 0: the guest has asked for a speed switch on the next `STOP`.
     speed_switch_armed: bool,
-    /// `KEY1` bit 7: the CPU is running at 8 MHz. See [`MMU::update`] for what that means for the
-    /// peripherals.
+    /// `KEY1` bit 7: the CPU is running at 8 MHz.
     double_speed: bool,
     /// Odd M-cycle carried over when halving the CPU clock for the peripherals in double speed.
-    /// Without it, a run of single-cycle instructions would round every one of them down to zero.
     double_speed_carry: bool,
     hdma: Hdma,
     /// `FF72`, `FF73`, `FF74`, `FF75` — undocumented CGB scratch registers with no known effect.
     undocumented: [u8; 4],
-    /// `SC` bit 1: the CGB's 32x serial clock. Held here rather than inside [`Serial`] so the
-    /// already-shipped `timer` save-state section keeps its shape.
+    /// `SC` bit 1: the CGB's 32x serial clock.
     serial_fast: bool,
     /// The three 8-byte blocks behind `0xFEA0..=0xFEFF` on CGB, where the region is ordinary
-    /// mirrored RAM rather than the write-protected zeroes a DMG returns. See [`UNUSABLE_CGB`].
+    /// mirrored RAM rather than the write-protected zeroes a DMG returns.
     unusable: [u8; UNUSABLE_BLOCK * UNUSABLE_BLOCKS],
     ppu: PPU,
     serial: Serial,
     divider: Divider,
     timer: Timer,
     interrupt_enable: InterruptFlags,
-    /// Bits 5-7 of IE. Not wired to any interrupt, but hardware still stores and returns them.
+    /// Bits 5-7 of IE.
     interrupt_enable_upper: u8,
     interrupt_request: InterruptFlags,
     joypad_register: JoypadRegister,
     audio: Audio,
-    /// **The absolute clock** (C1). M-cycles since the machine was constructed, counted at the CPU
-    /// rate — so in CGB double speed it advances twice as fast as the video clock, exactly as the
-    /// CPU does. Every `catch_up` in the machine is against this one number.
     now: u64,
 }
 
@@ -150,11 +132,6 @@ pub struct IrqSection {
 
 /// Contents of the `timer` save-state section: everything clocked off the divider, plus serial,
 /// which shares its clock domain.
-///
-/// C1 gave all three an absolute clock stamp, but this section still carries the **pre-C1 field
-/// list** — the stamp is derived (it is always [`MMU::now`]) and comes back from the `sched`
-/// section instead. That is what let the absolute clock land without regenerating a single one of
-/// the 91 committed fixtures.
 #[derive(Debug, Clone, Decode, Encode)]
 pub struct TimerSection {
     pub divider: DividerSnapshot,
@@ -184,19 +161,16 @@ pub struct CgbSection {
 }
 
 pub const CART_SECTION_VERSION: u16 = 1;
-/// Bumped to 2 by B2, which appended work-RAM banks 2-7. Field 1 keeps its v1 shape — banks 0
-/// and 1, all a DMG has — so states written before CGB support still decode untouched.
+/// Bumped to 2 by B2, which appended work-RAM banks 2-7. Field 1 keeps its v1 shape — banks 0 and
+/// 1, all a DMG has — so states written before CGB support still decode untouched.
 pub const WRAM_SECTION_VERSION: u16 = 2;
 pub const HRAM_SECTION_VERSION: u16 = 1;
-/// Bumped to 2 by A13, which appended IE's upper three bits.
 pub const IRQ_SECTION_VERSION: u16 = 2;
 pub const TIMER_SECTION_VERSION: u16 = 1;
 pub const JOYP_SECTION_VERSION: u16 = 1;
-/// New in C1. Absent from every state written before it, in which case the clock restarts at zero
-/// — which is not observable: nothing depends on the epoch, only on the intervals between events.
 pub const SCHED_SECTION_VERSION: u16 = 1;
 /// New in D2. Absent from every state written before it, in which case the mapper is rebuilt from
-/// the effective bank numbers in the `cart` section — see [`MMU::read_sections`].
+/// the effective bank numbers in the `cart` section — see `MMU::read_sections`.
 pub const MBC_SECTION_VERSION: u16 = 1;
 
 impl MMU {
@@ -208,9 +182,7 @@ impl MMU {
             rom_bank_register: self.rom_bank_register,
             ram_bank_register: self.ram_bank_register,
         })?;
-        // **D2.** The mapper's *raw* registers, which the `cart` section cannot carry: it has
-        // always held the effective bank numbers, and an MBC1 mode bit or MBC5 ninth bit does not
-        // survive that projection. New section, so nothing already shipped changes shape.
+        // D2.
         writer.write(labels::MBC, MBC_SECTION_VERSION, &self.mapper)?;
         let mut window = [0u8; WRAM_WINDOW];
         window.copy_from_slice(&self.work_ram[..WRAM_WINDOW]);
@@ -260,10 +232,7 @@ impl MMU {
             self.rom_bank_register = section.rom_bank_register;
             self.ram_bank_register = section.ram_bank_register;
         }
-        // **D2.** Absent from all 91 committed fixtures, and from every state written before this
-        // section existed — in which case the mapper adopts the effective bank numbers the `cart`
-        // section does carry. That is exact for Pokémon Red's MBC3, whose register is its
-        // effective bank; see [`Mapper::restore_effective`].
+        // D2.
         match reader.read::<Mapper>(labels::MBC)? {
             Some((_version, mapper)) => self.mapper = mapper,
             None => self.mapper.restore_effective(
@@ -308,8 +277,6 @@ impl MMU {
         if let Some((_version, joypad_register)) = reader.read::<JoypadRegister>(labels::JOYP)? {
             self.joypad_register = joypad_register;
         }
-        // Absent from every state written before Phase B, in which case the machine keeps the
-        // CGB defaults it was constructed with — all of which are "this is a DMG".
         if let Some(mut fields) = reader.section(labels::CGB)? {
             self.ppu.read_cgb_fields(&mut fields)?;
             if let Some(section) = fields.field::<CgbSection>()? {
@@ -325,11 +292,8 @@ impl MMU {
         }
         self.ppu.read_sections(reader)?;
         self.audio.read_sections(reader)?;
-        // ⚠️ **Last, and after the `cgb` section has been read**, so it overwrites whatever palette
-        // RAM the state carried. See [`MMU::install_compat_boot_palette`]: in compatibility mode the
-        // palette is the boot ROM's and the cartridge cannot change it, so a state written by a
-        // *DMG* — which is every fixture in this repo and every `state.gbst` on a deployed volume —
-        // would otherwise restore an all-white palette over it and blank the screen.
+        // Last, and after the `cgb` section has been read, so it overwrites whatever palette RAM
+        // the state carried.
         self.install_compat_boot_palette();
         Ok(())
     }
@@ -355,16 +319,13 @@ impl MMU {
 
         let color_mode = ColorMode::of(model, &header);
         // MBC2's 512 nibbles live on the mapper, and its header declares no banks at all — so it
-        // is the one cartridge whose RAM is not described by byte `0x149`. See
-        // [`CartType::has_builtin_ram`].
+        // is the one cartridge whose RAM is not described by byte `0x149`.
         let ram_bank_count = if header.cart_type().has_builtin_ram() {
             1
         } else {
             header.ram_banks()
         };
-        // **B11.** Battery-backed RAM powers up as `0xFF`, not zeroes — an erased or never-written
-        // cell reads high. A game that checks SRAM for a valid save sees a different pattern
-        // either way, so this is the state a fresh cartridge actually presents.
+        // B11.
         let ram_banks = Vec::from_iter((0..ram_bank_count).map(|_| [0xFF; RAM_BANK_SIZE]));
         let data = pad_rom(data);
         let mapper = Mapper::new(header.cart_type(), BankCounts {
@@ -412,42 +373,20 @@ impl MMU {
         Ok(mmu)
     }
 
-    /// The state the boot ROM leaves behind. `gb` starts the cartridge directly rather than
-    /// executing a boot ROM, so anything the boot ROM would have installed has to be applied here.
-    ///
-    /// Today that is exactly one thing, and it is the point of Phase B: in **CGB compatibility
-    /// mode** the boot ROM writes a palette chosen from the cartridge title into CGB palette RAM
-    /// and sets `OPRI` for DMG sprite priority (SameBoy `cgb_boot.asm`, `EmulateDMG`). Everything
-    /// else the boot ROM does — the logo check, the intro animation, the register block — either
-    /// has no observable effect here or is already covered by [`crate::registers::RegisterSet`].
+    /// The state the boot ROM leaves behind.
     fn apply_boot_state(&mut self) {
-        // **B11.** The I/O registers every boot ROM leaves behind, DMG and CGB alike. `gb` started
-        // with `LCDC = 0x80` (the LCD on and nothing else) and all three palettes zeroed, which is
-        // a **white** background palette — so the first frames a game saw were wrong until it
-        // wrote its own. `0xFC` maps colour 0 to white and 1-3 to black, which is what the boot
-        // ROM sets to draw the Nintendo logo.
+        // B11.
         self.ppu.lcd_control_mut().set(0x91);
         self.ppu.palette_mut().background_mut().set_from_byte(0xFC);
-        // ⚠️ The object palettes are genuinely *uninitialised* on hardware — the boot ROM never
-        // writes them. `0xFF` is what Pan Docs' power-up table records and what the DMG usually
-        // powers up with; no game reads them before writing them.
+        // The object palettes are genuinely *uninitialised* on hardware — the boot ROM never
+        // writes them.
         self.ppu.palette_mut().object0_mut().set_from_byte(0xFF);
         self.ppu.palette_mut().object1_mut().set_from_byte(0xFF);
 
         self.install_compat_boot_palette();
     }
 
-    /// The boot ROM's title-derived palette, installed into CGB palette RAM. A no-op on anything
-    /// that is not a DMG cartridge in a Game Boy Color.
-    ///
-    /// ⚠️ **In compatibility mode this is not initial state, it is a constant.** `cgb_features` is
-    /// false there, so `FF68`-`FF6B` are unmapped and the cartridge can never write a palette — the
-    /// boot ROM's choice is what the machine displays for its whole life. That is why
-    /// [`MMU::read_sections`] re-installs it rather than trusting what a save state carried: a state
-    /// captured on a **DMG** carries that machine's CGB palette RAM, which is
-    /// [`crate::cgb_palette::PaletteBank::default`] — all-ones, i.e. **white** — and restoring it
-    /// paints the boot palette out. The screen then renders every shade as white, which looks like a
-    /// blank display rather than like a save-state bug.
+    /// The boot ROM's title-derived palette, installed into CGB palette RAM.
     fn install_compat_boot_palette(&mut self) {
         if self.color_mode != ColorMode::CgbCompat {
             return;
@@ -467,8 +406,8 @@ impl MMU {
         self.double_speed
     }
 
-    /// Return to power-on state, **preserving the cartridge and its battery-backed RAM** — the
-    /// same contract as gambatte's `GB::reset` (`gambatte.cpp:79-89`). Everything reset here must
+    /// Return to power-on state, preserving the cartridge and its battery-backed RAM — the same
+    /// contract as gambatte's `GB::reset` (`gambatte.cpp:79-89`). Everything reset here must
     /// match what [`MMU::from_rom`] constructs, or `Core::reset` will not produce a machine equal
     /// to a fresh one.
     pub fn reset(&mut self) {
@@ -499,8 +438,7 @@ impl MMU {
         self.interrupt_request = InterruptFlags::default();
         self.joypad_register = JoypadRegister::default();
         self.audio = Audio::default();
-        // The clock restarts with the machine. Every peripheral stamp was just reset to zero with
-        // it, so leaving `now` where it was would put them all in the future.
+        // The clock restarts with the machine.
         self.now = 0;
         // `data`, `header` and `ram_banks` are deliberately untouched: the cartridge does not
         // leave the slot, and its RAM is battery-backed.
@@ -516,38 +454,23 @@ impl MMU {
     }
 
     /// Select the ROM bank at `0x4000..=0x7FFF` directly, bypassing the mapper.
-    ///
-    /// This exists for tests and for the Pokémon layer's ROM reads. **The guest never reaches it**
-    /// — a cartridge write goes to [`Mapper::rom_write`], which is where the per-mapper register
-    /// widths and bank-0 rules live (D2). The value is still wrapped, never clamped (D1).
     pub fn set_rom_bank_register(&mut self, value: usize) {
         self.rom_bank_register = value & (self.rom_bank_count() - 1);
     }
 
     /// Adopt whatever the mapper now says the memory map looks like.
-    ///
-    /// ⚠️ **This cache is why the mapper never sees a read.** `MMU::read` resolves
-    /// `0x4000..=0x7FFF` inline off `rom_bank_register` (C6, and `perf`-critical); routing that
-    /// through a mapper would put a match on the hottest path in the emulator. Writes to
-    /// `0x0000..=0x7FFF` are rare, so refreshing three fields after each one is free. Every field
-    /// set here is derived — the mapper is the source of truth.
     fn refresh_bank_cache(&mut self) {
         self.rom_bank_register = self.mapper.rom_bank();
         self.rom_bank_low_offset = self.mapper.rom_bank_low() * ROM_BANK_SIZE;
         self.ram_enabled = self.mapper.ram_enabled();
         self.ram_target = self.mapper.ram_target();
         self.ram_is_nibble_wide = self.mapper.ram_is_nibble_wide();
-        // `ram_bank_register` is what the `cart` save-state section carries, so it only tracks a
-        // real bank; an RTC selection leaves it where it was.
         if let RamTarget::Bank(bank) = self.ram_target {
             self.ram_bank_register = bank;
         }
     }
 
     /// Where an address in `0xA000..=0xBFFF` lands in the selected cartridge-RAM bank.
-    ///
-    /// ⚠️ MBC2's RAM is **512 bytes mirrored across the whole 8 KB window**, so it needs its own
-    /// wrap; every other mapper's is the flat offset.
     #[inline]
     fn cart_ram_offset(&self, address: u16) -> usize {
         let offset = (address - 0xA000) as usize;
@@ -561,11 +484,6 @@ impl MMU {
     }
 
     /// Pin the clock to a fixed instant.
-    ///
-    /// ⚠️ **Anything that has to replay identically must call this.** The default source is the
-    /// host clock, so two runs of the same input produce different register values — which would
-    /// make a fixture-driven test flaky in a way that only shows up sometimes. See
-    /// [`crate::rtc::TimeSource`].
     pub fn set_rtc_time_source(&mut self, source: TimeSource) {
         if let Some(rtc) = self.mapper.rtc_mut() {
             rtc.set_time_source(source);
@@ -573,14 +491,12 @@ impl MMU {
     }
 
     /// Banks actually backed by data. Derived from the loaded image rather than from header byte
-    /// `0x148`, which cartridges are free to lie about. [`MMU::set_data`] keeps the image padded
-    /// to a whole power-of-two number of banks, so this is always exact and at least 2.
+    /// `0x148`, which cartridges are free to lie about.
     pub fn rom_bank_count(&self) -> usize {
         (self.data.len() / ROM_BANK_SIZE).max(2)
     }
 
-    /// What the mapper wraps against. Both counts come from what was actually allocated, never
-    /// from the header.
+    /// What the mapper wraps against.
     fn bank_counts(&self) -> BankCounts {
         BankCounts { rom: self.rom_bank_count(), ram: self.ram_banks.len() }
     }
@@ -610,10 +526,10 @@ impl MMU {
                 pointer < ROM_BANK_SIZE as u16,
                 "Pointer {:04X} is invalid for bank {}", pointer, bank
             );
-            // bank 0 or a raw offset into rom bank > 0
+            // Bank 0 or a raw offset into rom bank > 0
             self.rom_data(bank, pointer as usize, length)
         } else if pointer >= ROM_BANK_SIZE as u16 && pointer < ROM_BANK_SIZE as u16 * 2 {
-            // correct for raw MMU address
+            // Correct for raw MMU address
             self.rom_data(bank, pointer as usize - ROM_BANK_SIZE, length)
         } else {
             panic!("Pointer {:04X} is invalid for bank {}", pointer, bank)
@@ -671,18 +587,13 @@ impl MMU {
     }
 
     /// The `0xC000..=0xDFFF` window as one flat slice. On DMG that is all of work RAM and this is
-    /// byte-for-byte the array it always was; on CGB it is bank 0 followed by bank **1**, not by
-    /// whatever `SVBK` currently selects. The Pokémon layer reads DMG game state through this.
+    /// byte-for-byte the array it always was; on CGB it is bank 0 followed by bank 1, not by
+    /// whatever `SVBK` currently selects.
     pub fn work_ram(&self) -> &[u8] {
         &self.work_ram[..WRAM_WINDOW]
     }
 
     /// Where an address in `0xC000..=0xDFFF` lands in the flat array, following `SVBK`.
-    ///
-    /// The trailing mask is not defensive — it is what lets the compiler prove the index is in
-    /// range and drop the bounds check. `work_ram_bank` is a plain `usize` field, so without it
-    /// every work-RAM access in the interpreter pays for a branch it can never take. Measured:
-    /// this and the matching masks in the PPU are worth ~10% of core throughput.
     #[inline]
     fn work_ram_offset(&self, address: u16) -> usize {
         let offset = (address & 0x1FFF) as usize;
@@ -733,9 +644,9 @@ impl MMU {
         self.timer.enable(self.now);
     }
 
-    /// A `STOP` on a CGB with `KEY1` bit 0 set switches the CPU between 4 MHz and 8 MHz instead of
-    /// stopping, and resets `DIV` as it does so. Returns whether the switch happened, i.e. whether
-    /// the caller should *not* enter stop mode.
+    /// A `STOP` on a CGB with `KEY1` bit 0 set switches the CPU between 4 MHz and 8 MHz instead
+    /// of stopping, and resets `DIV` as it does so. Returns whether the switch happened, i.e.
+    /// whether the caller should *not* enter stop mode.
     pub fn try_speed_switch(&mut self) -> bool {
         if !self.color_mode.cgb_features() || !self.speed_switch_armed {
             return false;
@@ -754,8 +665,7 @@ impl MMU {
         self.audio.set_instruction_length(machine_cycles);
     }
 
-    /// Source reads for a VRAM DMA. Hardware cannot copy *out* of VRAM or out of the OAM/IO
-    /// region; both read back as `0xFF`.
+    /// Source reads for a VRAM DMA.
     fn vram_dma_source(&self, address: u16) -> u8 {
         match address {
             0x8000..=0x9FFF | 0xE000..=0xFFFF => 0xFF,
@@ -763,11 +673,7 @@ impl MMU {
         }
     }
 
-    /// GDMA: the whole block at once. See [`Hdma`] for what this does *not* model — the CPU
-    /// stall.
-    ///
-    /// Out of line, like every other DMA path here: `MMU::update` runs once per instruction, and
-    /// letting these inline into it grew it by 60% and cost ~4% of core throughput on its own.
+    /// GDMA: the whole block at once.
     #[cold]
     #[inline(never)]
     fn run_general_dma(&mut self, blocks: u8) {
@@ -781,8 +687,7 @@ impl MMU {
         self.hdma.advance(blocks);
     }
 
-    /// HDMA: one `0x10`-byte block, at the start of each HBlank. Out of line — see
-    /// [`MMU::run_general_dma`].
+    /// HDMA: one `0x10`-byte block, at the start of each HBlank.
     #[cold]
     #[inline(never)]
     fn run_hblank_dma(&mut self) {
@@ -794,18 +699,12 @@ impl MMU {
     }
 
     /// The CGB register block, `FF4C`-`FF7F`, behind one unguarded match arm.
-    ///
-    /// **Kept out of line deliberately.** Spreading fifteen `if self.color_mode.cgb_features()`
-    /// guards through `MMU::read`'s address match stops LLVM building a jump table for it, and
-    /// every memory access in the machine pays for that. Measured at ~10% of core throughput on
-    /// the CPU-bound workloads. Guards are the cost, not the branches — the same conditions
-    /// inside a function body are free.
     #[cold]
     fn read_cgb_register(&self, address: u16) -> u8 {
         if !self.color_mode.cgb_features() {
             // In compatibility mode the boot ROM has locked the cartridge into the DMG register
-            // set, so all of these read as unmapped — except the undocumented block, which is
-            // CGB *hardware* rather than a CGB *feature*.
+            // set, so all of these read as unmapped — except the undocumented block, which is CGB
+            // *hardware* rather than a CGB *feature*.
             return match address {
                 0xFF72..=0xFF74 if self.model.is_cgb() => self.undocumented[(address - 0xFF72) as usize],
                 0xFF75 if self.model.is_cgb() => 0x8F | self.undocumented[3],
@@ -860,8 +759,7 @@ impl MMU {
             0xFF6A => self.ppu.cgb_object_palettes_mut().set_index(value),
             0xFF6B => self.ppu.cgb_object_palettes_mut().write(value),
             0xFF6C => self.ppu.set_object_priority_register(value),
-            // Bank 0 selects bank 1 — hardware has no way to map bank 0 twice. gambatte applies
-            // this fixup in two places (`memory.cpp:1074-1079`, `memptrs.cpp:146-150`).
+            // Bank 0 selects bank 1 — hardware has no way to map bank 0 twice.
             0xFF70 => self.work_ram_bank = ((value & 0x07) as usize).max(1),
             0xFF72..=0xFF74 => self.undocumented[(address - 0xFF72) as usize] = value,
             0xFF75 => self.undocumented[3] = value & 0x70,
@@ -870,7 +768,7 @@ impl MMU {
     }
 
     /// The OAM DMA controller owns the OAM bus, so it writes through the privileged path rather
-    /// than the CPU-facing, mode-gated one. Out of line — see [`MMU::run_general_dma`].
+    /// than the CPU-facing, mode-gated one.
     #[cold]
     #[inline(never)]
     fn run_oam_dma(&mut self, transfer: crate::lcd_dma::DmaTransfer) {
@@ -880,7 +778,7 @@ impl MMU {
         }
     }
 
-    /// update internal state of the MMU, should be called every CPU cycle
+    /// Update internal state of the MMU, should be called every CPU cycle
     pub fn update(&mut self, delta_machine_cycles: MachineCycles) {
         if delta_machine_cycles == MachineCycles::ZERO {
             return; // no cycles to update
@@ -891,10 +789,7 @@ impl MMU {
         }
 
         // In double speed the CPU runs at 8 MHz while the video and audio hardware does not, so
-        // they see half the elapsed M-cycles. DIV and the timer are *not* divided: they are
-        // clocked from the CPU, so they keep pace with it and the APU frame sequencer, which
-        // hangs off DIV, stays at 512 Hz in real time exactly as hardware does. The carry bit
-        // makes the halving exact rather than rounding every odd cycle away.
+        // they see half the elapsed M-cycles.
         let video_cycles = if self.double_speed {
             let total = delta_machine_cycles.m_cycles() + u64::from(self.double_speed_carry);
             self.double_speed_carry = total % 2 == 1;
@@ -913,7 +808,7 @@ impl MMU {
         }
         self.audio.update(video_cycles, div_clocks);
 
-        // consume pending, an interrupt is triggered on a rising edge
+        // Consume pending, an interrupt is triggered on a rising edge
         for interrupt in InterruptType::all() {
             let interrupt_pending = match interrupt {
                 InterruptType::Joypad => self.joypad_register.consume_pending_activation(),
@@ -934,16 +829,6 @@ impl MMU {
     }
 
     /// When each peripheral next does something observable, in absolute m-cycles on [`MMU::now`].
-    ///
-    /// **Built on demand rather than maintained.** The eager form — resyncing the schedule from
-    /// each peripheral inside [`MMU::update`] — was measured at **−6% throughput** across all
-    /// three A9 workloads, which is the whole of C1's budget spent on a cache nothing reads yet.
-    /// Maintenance only pays once the run loop queries the schedule more often than the
-    /// peripherals move it; today the one caller is C2's HALT skip, once per idle span.
-    ///
-    /// ⚠️ **This is a promise the HALT fast-path relies on.** Anything that can raise an interrupt,
-    /// or that a later step could observe, must appear here or [`crate::core::Core::skip_halt`]
-    /// will jump straight over it. See each arm below for why it is a complete list.
     pub fn schedule(&self) -> Schedule {
         let mut sched = Schedule::default();
         sched.set(Ev::Timer, self.timer.next_event());
@@ -957,23 +842,15 @@ impl MMU {
             sched.set(Ev::Apu, self.now + self.cpu_cycles_from_video(apu));
         }
         // Host input arrives between `run` slices, so a joypad activation raised before the slice
-        // would otherwise wait out a whole idle span before being consumed. Making it due *now*
-        // drops the skip back to a single cycle, which is what the pre-C2 driver did.
+        // would otherwise wait out a whole idle span before being consumed.
         if self.joypad_register.is_activation_pending() {
             sched.set(Ev::Interrupt, self.now);
         }
-        // [`Ev::OamDma`] is deliberately absent. A transfer in flight copies more bytes per call
-        // when the window is longer, but the only thing that reads OAM is the PPU's mode-2 scan —
-        // which is a mode transition, so [`Ev::Video`] already bounds the skip short of it. HDMA
-        // is the same story: it is paced by the mode 3 → 0 edge.
+        // [`Ev::OamDma`] is deliberately absent.
         sched
     }
 
     /// How many CPU M-cycles it takes the video clock to advance by `video_cycles`.
-    ///
-    /// In double speed [`MMU::update`] hands the video hardware `(delta + carry) / 2`, so the
-    /// exact answer is `2v - carry` — **not** `2v`, which would land a cycle *late* whenever the
-    /// carry is set and let a HALT skip step over the very event it was bounded by.
     fn cpu_cycles_from_video(&self, video_cycles: u64) -> u64 {
         if self.double_speed {
             video_cycles * 2 - u64::from(self.double_speed_carry)
@@ -982,8 +859,6 @@ impl MMU {
         }
     }
 
-    /// C7: one `and` and a `trailing_zeros`, where this used to be a five-iteration scan run once
-    /// per CPU instruction from [`crate::core::Core::interrupt`].
     #[inline]
     pub fn interrupt_pending(&self) -> Option<InterruptType> {
         self.interrupt_request.highest_priority(self.interrupt_enable)
@@ -996,14 +871,7 @@ impl MMU {
 }
 
 impl ROM for MMU {
-    /// **C6.** The four regions almost every access lands in, resolved inline; everything else
-    /// behind one out-of-line call.
-    ///
-    /// This is the shape gambatte's `Memory::read` has (`memory.h:76`) —
-    /// `rmem(p >> 12) ? rmem(p >> 12)[p] : nontrivial_read(p, cc)` — reached without moving VRAM
-    /// out of [`PPU`], which owns it. `perf` measured the old single 25-arm `match` at 5.1% of the
-    /// emulator, and a quarter of *that* was the call and return: it was too big to inline, so
-    /// every memory access the CPU made was a real function call.
+    /// C6.
     #[inline(always)]
     fn read(&self, address: u16) -> u8 {
         match address {
@@ -1021,20 +889,20 @@ impl ROM for MMU {
 
 impl MMU {
     /// Everything [`ROM::read`] does not resolve inline: VRAM, cartridge RAM, OAM, the whole I/O
-    /// block. Out of line on purpose — see that method.
+    /// block.
     #[inline(never)]
     fn read_uncommon(&self, address: u16) -> u8 {
-        // https://gbdev.io/pandocs/Memory_Map.html
+        // Https://gbdev.io/pandocs/Memory_Map.html
         match address {
-            // The low bank — usually 0, but MBC1 mode 1 slides it. See `Mbc::rom_bank_low`.
+            // The low bank — usually 0, but MBC1 mode 1 slides it.
             0x0000..=0x3FFF => self.data[self.rom_bank_low_offset + address as usize],
-            // rom bank 1-n
+            // Rom bank 1-n
             0x4000..=0x7FFF => {
-                // https://gbdev.io/pandocs/MBC1.html#40007fff--rom-bank-01-7f-read-only
+                // Https://gbdev.io/pandocs/MBC1.html#40007fff--rom-bank-01-7f-read-only
                 let bank_offset = self.rom_bank_register * ROM_BANK_SIZE;
                 self.data[bank_offset + (address - 0x4000) as usize]
             }
-            // vram
+            // Vram
             0x8000..=0x9FFF => self.ppu.read_vram(address - 0x8000),
             // External RAM — or, on an MBC3 with a timer, the clock registers in its place (D5).
             0xA000..=0xBFFF => match self.ram_target {
@@ -1052,17 +920,14 @@ impl MMU {
             // Work RAM, and its echo — which mirrors the *banked* window, SVBK included.
             0xC000..=0xDFFF | 0xE000..=0xFDFF => self.work_ram[self.work_ram_offset(address)],
             0xFE00..=0xFE9F => self.ppu.read_oam(address - 0xFE00), // OAM (Object Attribute Memory)
-            // The unusable region. DMG returns 0x00 here, not 0xFF — settled by gambatte's
-            // committed hardware dump `test/hwtests/fexx_ffxx_dumper_dmg08.bin`, which is all
-            // zeros at offsets 0xA0..0xFF. On CGB the same dump shows ordinary mirrored RAM.
+            // The unusable region.
             0xFEA0..=0xFEFF => {
                 if self.model.is_cgb() { self.unusable[unusable_offset(address)] } else { 0x00 }
             }
             0xFF00 => 0xC0 | self.joypad_register.get(), // joypad register — bits 6-7 unused, read 1
-            // D9: mid-transfer, `SB` shows the bits already shifted out. See `Serial::data_at`.
+            // D9: mid-transfer, `SB` shows the bits already shifted out.
             0xFF01 => self.serial.data_at(self.now, self.serial_fast),
-            // SC: bits 1-6 read 1 on DMG. On CGB bit 1 is the 32x clock-speed select and is
-            // real, so only bits 2-6 are stuck high there.
+            // SC: bits 1-6 read 1 on DMG.
             0xFF02 => {
                 if self.model.is_cgb() {
                     0x7C | self.serial.control() | (u8::from(self.serial_fast) << 1)
@@ -1095,7 +960,7 @@ impl MMU {
             // wired to any interrupt but still hold what was written.
             0xFFFF => self.interrupt_enable.get() | self.interrupt_enable_upper,
             _ => {
-                // ignore
+                // Ignore
                 0xFF
             }
         }
@@ -1103,9 +968,7 @@ impl MMU {
 }
 
 impl RAM for MMU {
-    /// The write-side twin of [`ROM::read`] — same reasoning, same shape. Only work RAM and high
-    /// RAM are resolved inline: a write to anything else is either a mapper command or a
-    /// peripheral register, and none of those are hot.
+    /// The write-side twin of [`ROM::read`] — same reasoning, same shape.
     #[inline(always)]
     fn write(&mut self, address: u16, value: u8) {
         match address {
@@ -1120,19 +983,16 @@ impl RAM for MMU {
 }
 
 impl MMU {
-    /// Everything [`RAM::write`] does not resolve inline. Out of line on purpose.
+    /// Everything [`RAM::write`] does not resolve inline.
     #[inline(never)]
     fn write_uncommon(&mut self, address: u16, value: u8) {
         match address {
-            // **D2.** The whole cartridge-register space, decoded by the mapper rather than here.
-            // This used to be three hardcoded arms — MBC1's register layout with MBC3's width —
-            // and `0x6000..=0x7FFF` was silently dropped, so MBC1 mode-select and the MBC3 RTC
-            // latch were both no-ops.
+            // D2.
             0x0000..=0x7FFF => {
                 self.mapper.rom_write(address, value);
                 self.refresh_bank_cache();
             }
-            // vram
+            // Vram
             0x8000..=0x9FFF => self.ppu.write_vram(address - 0x8000, value),
             0xA000..=0xBFFF => match self.ram_target {
                 RamTarget::Bank(bank) => {
@@ -1194,7 +1054,7 @@ impl MMU {
                 self.interrupt_enable_upper = value & 0xE0;
             }
             _ => {
-                // ignore
+                // Ignore
             }
         }
     }
@@ -1205,8 +1065,6 @@ mod tests {
     use crate::roms::blargg_cpu::ROM;
     use super::*;
 
-    /// A13: unused register bits read as 1 on hardware. `gb` returned them as 0, so guest code
-    /// testing them saw the wrong answer.
     #[test]
     fn unused_io_bits_read_as_one() {
         let mut mmu = MMU::from_rom(crate::roms::blargg_cpu::ROM).unwrap();
@@ -1250,9 +1108,6 @@ mod tests {
         }
     }
 
-    /// A7: the transfer used to run through the mode-gated `write_oam` using the PPU mode from
-    /// the *previous* step, so a DMA started while the PPU was in mode 2 or 3 had all 160 bytes
-    /// silently discarded. Pokémon Red only DMAs during VBlank, which is why it never surfaced.
     #[test]
     fn oam_dma_delivers_during_mode_3() {
         use crate::lcd_status::LcdMode;
@@ -1282,8 +1137,6 @@ mod tests {
         assert_eq!(mmu.ppu.oam(), expected.as_slice(), "OAM did not receive the transfer");
     }
 
-    /// The gate on VRAM/OAM used to be `|| dma.is_active()`, which made them *more* accessible
-    /// during a transfer — the opposite of hardware.
     #[test]
     fn oam_dma_blocks_cpu_access_rather_than_granting_it() {
         use crate::lcd_status::LcdMode;
@@ -1300,9 +1153,6 @@ mod tests {
         assert_eq!(mmu.ppu.oam()[0], 0x00);
     }
 
-    /// A5: `set_rom_bank_register` used to clamp against header byte `0x148`, not against the
-    /// bytes actually loaded. A cartridge claiming 64 banks with 32 KB on disk hard-panicked on
-    /// the first high-bank read.
     #[test]
     fn truncated_rom_does_not_panic() {
         let full = crate::test_fixtures::POKERED;
@@ -1340,11 +1190,7 @@ mod tests {
         assert_eq!(mmu.read(0x0100), full[0x0100]);
     }
 
-    /// D1: an out-of-range bank **wraps**, it does not saturate.
-    ///
-    /// This is the trace from the plan's A17, which root-caused the combined `dmg_sound.gb` hang:
-    /// blargg's runner walks its sub-tests by writing the index to the bank register, and on a
-    /// four-bank cartridge the fourth write has to land on bank 0, where the terminator lives.
+    /// D1: an out-of-range bank wraps, it does not saturate.
     #[test]
     fn an_out_of_range_rom_bank_wraps() {
         // MBC1, 64 KB, four banks — blargg's combined audio suite.
@@ -1365,13 +1211,7 @@ mod tests {
         assert_eq!(mmu.rom_bank_register, 1);
     }
 
-    /// D1/D2: the register width comes from the mapper. pokered is MBC3 with 64 banks, so it needs
-    /// **seven** bits — masking everything to MBC1's five would break the live path.
-    ///
-    /// ⚠️ **D1 asserted bank 0 for the write of 64 here and that was wrong.** D1 applied one
-    /// uniform remap-then-wrap to every mapper, which is MBC1's order; gambatte's MBC3 is
-    /// `max(reg & (n-1), 1)` — wrap **then** remap — so no MBC3 selection can reach bank 0. D2
-    /// gave each mapper its own rule and this expectation moved with it.
+    /// D1/D2: the register width comes from the mapper.
     #[test]
     fn the_rom_bank_register_width_is_per_mapper() {
         let mut mmu = MMU::from_rom(crate::test_fixtures::POKERED).unwrap();
@@ -1393,8 +1233,7 @@ mod tests {
         assert_eq!(mmu.rom_bank_register, 1);
     }
 
-    /// D1: **MBC5 is the exception** — bank 0 is a legal selection there and is not remapped.
-    /// No MBC5 cartridge is committed, so this re-badges one: only header byte `0x147` decides.
+    /// D1: MBC5 is the exception — bank 0 is a legal selection there and is not remapped.
     #[test]
     fn mbc5_does_not_remap_bank_zero() {
         let mut rom = crate::test_fixtures::POKERED.to_vec();
@@ -1407,12 +1246,8 @@ mod tests {
         assert_eq!(mmu.read(0x4000), mmu.read(0x0000), "...so the two halves show the same bank");
     }
 
-    /// **D5** end to end: on an MBC3 with a timer, `0x08..=0x0C` swaps the clock registers into
-    /// the cartridge-RAM window in place of a bank.
-    ///
-    /// No MBC3+timer cartridge is committed, so this re-badges pokered — only header byte `0x147`
-    /// decides. The clock is pinned, because the default source is the host clock and this test
-    /// must replay identically.
+    /// D5 end to end: on an MBC3 with a timer, `0x08..=0x0C` swaps the clock registers into the
+    /// cartridge-RAM window in place of a bank.
     #[test]
     fn an_mbc3_timer_maps_its_clock_over_cartridge_ram() {
         let mut rom = crate::test_fixtures::POKERED.to_vec();
@@ -1436,8 +1271,8 @@ mod tests {
         assert_eq!(mmu.read(0xA000), 0x11, "...and RAM was never touched");
     }
 
-    /// ⭐ Pokémon Red is `0x13` — MBC3 with **no** timer — so none of the clock code runs on the
-    /// live path, and `0x08` is just another RAM-bank selection.
+    /// Pokémon Red is `0x13` — MBC3 with no timer — so none of the clock code runs on the live
+    /// path, and `0x08` is just another RAM-bank selection.
     #[test]
     fn pokemon_red_has_no_clock() {
         let mmu = MMU::from_rom(crate::test_fixtures::POKERED).unwrap();
@@ -1445,11 +1280,7 @@ mod tests {
         assert!(mmu.rtc().is_none());
     }
 
-    /// D1/D2: the RAM-bank register wraps too. `dmg_sound.gb` is MBC1 and declares one bank, and
-    /// its runner is free to select four.
-    ///
-    /// The `0x6000` write matters: MBC1 only routes its 2-bit register to RAM in **mode 1**, so
-    /// without it this would be selecting ROM bank bits and testing nothing.
+    /// D1/D2: the RAM-bank register wraps too.
     #[test]
     fn an_out_of_range_ram_bank_wraps() {
         let mut mmu = MMU::from_rom(crate::roms::blargg_dmg_sound::ROM).unwrap();
@@ -1465,13 +1296,9 @@ mod tests {
         assert_eq!(mmu.read(0xA000), 3, "every selection aliased to the one bank that exists");
     }
 
-    /// Phase B. `cgb_acid::ROM` has `0x143 = 0xC0` (CGB exclusive) so it gets the full register
-    /// set; `POKERED` has `0x143 = 0x00` and therefore runs in compatibility mode, where the boot
-    /// ROM has locked the cartridge out of every CGB register.
     mod cgb {
         use super::*;
         
-
         fn cgb() -> MMU {
             MMU::new(crate::roms::cgb_acid::ROM, Model::Cgb).unwrap()
         }
@@ -1488,8 +1315,7 @@ mod tests {
             assert_eq!(MMU::new(crate::roms::cgb_acid::ROM, Model::Dmg).unwrap().color_mode(), ColorMode::Dmg);
         }
 
-        /// B2. `SVBK = 0` selects bank **1** — hardware cannot map bank 0 into the switchable
-        /// slot. gambatte applies the same fixup in two places (`memory.cpp:1074-1079`).
+        /// B2.
         #[test]
         fn svbk_bank_zero_selects_bank_one() {
             let mut mmu = cgb();
@@ -1523,8 +1349,7 @@ mod tests {
             }
         }
 
-        /// `MMU::work_ram` is what the Pokémon layer reads DMG game state through. It must stay
-        /// the flat `0xC000..=0xDFFF` window — banks 0 and 1 — no matter what `SVBK` selects.
+        /// `MMU::work_ram` is what the Pokémon layer reads DMG game state through.
         #[test]
         fn the_flat_work_ram_view_ignores_svbk() {
             let mut mmu = cgb();
@@ -1538,7 +1363,7 @@ mod tests {
             assert_eq!(mmu.read_wram_slice(0xD000, 1).unwrap(), &[0x11]);
         }
 
-        /// B2. Two VRAM banks, and `PPU::vram` still means bank 0.
+        /// B2.
         #[test]
         fn vram_banks_are_independent() {
             let mut mmu = cgb();
@@ -1559,7 +1384,7 @@ mod tests {
             assert_eq!(mmu.ppu().vram_banked(1)[0], 0x22);
         }
 
-        /// B3. Palette RAM through the bus, including auto-increment and the read-back masks.
+        /// B3.
         #[test]
         fn palette_ram_round_trips_through_the_registers() {
             let mut mmu = cgb();
@@ -1600,8 +1425,8 @@ mod tests {
             }
         }
 
-        /// ⭐ B5's other half: in compatibility mode the cartridge cannot reach palette RAM, but
-        /// the boot ROM has already filled it, and that is what colours the screen.
+        /// B5's other half: in compatibility mode the cartridge cannot reach palette RAM, but the
+        /// boot ROM has already filled it, and that is what colours the screen.
         #[test]
         fn compatibility_mode_gets_the_boot_palette_it_cannot_write() {
             let mut mmu = compat();
@@ -1617,16 +1442,7 @@ mod tests {
             assert_eq!(&mmu.ppu().cgb_background_palettes().data()[..8], &expected.background);
         }
 
-        /// ⚠️ **A save state written by a DMG must not blank a CGB's screen.**
-        ///
-        /// Every committed fixture and every `state.gbst` on a deployed volume is a DMG capture, and
-        /// a DMG's CGB palette RAM is [`crate::cgb_palette::PaletteBank::default`] — all-ones, which
-        /// is **white**. Restoring that section into a compatibility-mode machine used to paint the
-        /// boot ROM's palette out, so the whole screen rendered white while the game underneath it
-        /// played perfectly: found in a CGB `full_playthrough` (2026-08-13), where the fixtures
-        /// captured before the `cgb` section existed rendered in colour and the ones captured after
-        /// it rendered blank. There is nothing to repair it from outside, either — compatibility
-        /// mode refuses palette writes, which is the test above.
+        /// A save state written by a DMG must not blank a CGB's screen.
         #[test]
         fn a_dmg_save_state_does_not_blank_a_compatibility_mode_screen() {
             let expected = crate::boot_palette::for_cartridge(crate::test_fixtures::POKERED);
@@ -1654,7 +1470,7 @@ mod tests {
             assert_eq!(mmu.ppu().cgb_background_palettes(), &crate::cgb_palette::PaletteBank::default());
         }
 
-        /// B7. `KEY1` arms the switch; `STOP` performs it and resets `DIV`.
+        /// B7.
         #[test]
         fn key1_switches_speed_on_stop() {
             let mut mmu = cgb();
@@ -1676,9 +1492,7 @@ mod tests {
             assert!(!mmu.is_double_speed(), "and back again");
         }
 
-        /// The point of double speed: the CPU runs twice as fast *relative to the PPU*. DIV is
-        /// clocked from the CPU and so is not divided — which is what keeps the APU frame
-        /// sequencer at 512 Hz in real time.
+        /// The point of double speed: the CPU runs twice as fast *relative to the PPU*.
         #[test]
         fn double_speed_halves_the_video_clock_but_not_div() {
             /// Scanlines advanced, unwrapped past `LY`'s 154-line wrap so the two runs are
@@ -1704,9 +1518,8 @@ mod tests {
                 (scanlines, mmu.divider().value())
             }
 
-            // Twice the CPU cycles at double speed must render exactly as much as half as many
-            // at single speed. Stating it as a ratio rather than an absolute count keeps the
-            // assertion independent of where in a scanline the PPU happens to start.
+            // Twice the CPU cycles at double speed must render exactly as much as half as many at
+            // single speed.
             let (single, single_div) = advance(false, 20_000);
             let (double, double_div) = advance(true, 40_000);
             assert!(single > 100, "test is vacuous unless the PPU actually ran ({single} scanlines)");
@@ -1719,7 +1532,7 @@ mod tests {
             assert_ne!(single_div, double_div, "...so twice the CPU cycles is twice the DIV");
         }
 
-        /// B8. GDMA copies the whole block the moment `FF55` is written.
+        /// B8.
         #[test]
         fn general_purpose_dma_copies_immediately() {
             let mut mmu = cgb();
@@ -1740,7 +1553,7 @@ mod tests {
             }
         }
 
-        /// B8. HDMA copies exactly one block per HBlank, and no more.
+        /// B8.
         #[test]
         fn hblank_dma_copies_one_block_per_scanline() {
             let mut mmu = cgb();
@@ -1792,8 +1605,7 @@ mod tests {
             }
         }
 
-        /// B9. On CGB the unusable region is ordinary RAM, mirrored every 8 bytes within each
-        /// 32-byte span; its power-on contents come from gambatte's hardware dump.
+        /// B9.
         #[test]
         fn the_unusable_region_is_mirrored_ram_on_cgb() {
             let mut mmu = cgb();
@@ -1808,13 +1620,12 @@ mod tests {
             assert_eq!(mmu.read(0xFEB8), 0x5A);
             assert_ne!(mmu.read(0xFEC0), 0x5A, "...but not across the 32-byte boundary");
 
-            // DMG is unchanged: write-protected zeroes (A13).
             let mut dmg = MMU::from_rom(crate::roms::cgb_acid::ROM).unwrap();
             dmg.write(0xFEA0, 0x5A);
             assert_eq!(dmg.read(0xFEA0), 0x00);
         }
 
-        /// B9. The undocumented CGB scratch registers, and their read-back masks.
+        /// B9.
         #[test]
         fn undocumented_registers_hold_what_is_written() {
             let mut mmu = cgb();
@@ -1835,7 +1646,7 @@ mod tests {
             }
         }
 
-        /// B9. `SC` bit 1 selects the CGB's 32x shift clock, and only exists there.
+        /// B9.
         #[test]
         fn serial_runs_32x_faster_when_asked() {
             fn transfer_cycles(mut mmu: MMU, control: u8) -> u64 {

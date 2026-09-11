@@ -1,18 +1,4 @@
-//! **W3** — the badge sprite sheet, `GET /api/badges.png`.
-//!
-//! Eight 16×16 badges side by side, 128×16, decoded out of the cartridge by
-//! [`poke_agent::pokemon::badge_gfx`] the first time the endpoint is asked for. Nothing is committed and
-//! nothing is read from disk: the art comes from the same ROM bytes the emulator boots.
-//!
-//! **The four shades are inverted on the way out**, and that is a decision rather than an accident.
-//! On the trainer card a badge is dark line art on a *white* background; dropped onto this page's
-//! near-black panel it would be either a bright white chip or — if the background were simply made
-//! transparent — a black outline on black, i.e. invisible. Inverting the tone ramp and making the
-//! background transparent gives light line art on a dark page, which is what the rest of the UI
-//! looks like. The page is dark by decision (`color-scheme: dark`), so there is no second theme this
-//! has to serve.
-//!
-//! Earned vs. not is the client's business — same sheet, less opacity.
+//! The badge sprite sheet, `GET /api/badges.png`.
 
 use std::sync::OnceLock;
 
@@ -21,8 +7,7 @@ use axum::response::{IntoResponse, Response};
 
 use poke_agent::pokemon::badge_gfx::{BADGE_COUNT, BADGE_PX, badge_shades};
 
-/// Tone-inverted, as RGBA. Index 0 is the badge's background and goes fully transparent; 3 is its
-/// outline and comes out brightest. The three visible levels are the page's own greys.
+/// Tone-inverted, as RGBA.
 const SHADES: [[u8; 4]; 4] = [
     [0x00, 0x00, 0x00, 0x00],
     [0x8B, 0x94, 0xA2, 0xFF],
@@ -55,8 +40,8 @@ fn encode() -> Vec<u8> {
     png.into_inner()
 }
 
-/// `GET /api/badges.png`. Immutable: the sheet is a function of the cartridge, so a viewer may cache
-/// it for as long as it likes.
+/// `GET /api/badges.png`. Immutable: the sheet is a function of the cartridge, so a viewer may
+/// cache it for as long as it likes.
 pub async fn badges() -> Response {
     (
         [

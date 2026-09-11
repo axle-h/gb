@@ -58,11 +58,9 @@ pub fn render() -> Result<(), String> {
     let audio_spec = audio_queue.spec();
     audio_queue.resume();
 
-    // The APU resamples itself, band-limited, straight to the sink's rate — see `audio::blip`. The
-    // rate is not part of the serialised state, so it has to be re-applied here (and again after any
-    // load_state).
+    // The APU resamples itself, band-limited, straight to the sink's rate — see `audio::blip`.
     gb.core_mut().mmu_mut().audio_mut().set_output_sample_rate(audio_spec.freq as u32);
-    // One UI iteration's worth of audio, with generous headroom. Reused every frame.
+    // One UI iteration's worth of audio, with generous headroom.
     let mut audio_scratch = vec![0.0f32; audio_spec.freq as usize / 8 * 2];
 
     // Create texture creator for LCD rendering
@@ -134,7 +132,7 @@ pub fn render() -> Result<(), String> {
                             previous_wram.copy_from_slice(gb.core().mmu().work_ram());
                         }
                         Keycode::F3 => {
-                            // compare wram to previous wram
+                            // Compare wram to previous wram
                             let current_wram = gb.core().mmu().work_ram();
                             let diff = current_wram.into_iter()
                                 .zip(previous_wram.iter())
@@ -164,10 +162,6 @@ pub fn render() -> Result<(), String> {
                         }
                         Keycode::F10 => {
                             let pokemon_api = PokemonApi::new(&mut gb);
-                            // println!("{:?}", pokemon_api.player_state());
-                            // println!("{:?}", pokemon_api.pokemon_party());
-                            //println!("{:?}", pokemon_api.map_state());
-                            // pokemon_api.game_state()?;
                             println!("{:?}", pokemon_api.on_screen_text(false));
                         },
                         Keycode::W => {
@@ -223,9 +217,7 @@ pub fn render() -> Result<(), String> {
         }
 
         // Keep the resampler in step with the emulation speed, otherwise fast-forwarding just
-        // out-runs the audio device and backs its queue up. Derived from `cycle_duration` rather
-        // than from the key that was pressed, so it tracks the speed the emulator is *actually*
-        // targeting — `REALTIME_CYCLE_DURATION / 5` truncates to 190 ns, which is 5.016x, not 5x.
+        // out-runs the audio device and backs its queue up.
         if cycle_duration != applied_cycle_duration {
             applied_cycle_duration = cycle_duration;
             let speed = REALTIME_CYCLE_DURATION.as_secs_f64() / cycle_duration.as_secs_f64();
@@ -247,12 +239,8 @@ pub fn render() -> Result<(), String> {
         if min_cycles > MachineCycles::ZERO {
             let actual_cycles;
             if agent_running {
-                // ⚠️ **`agent.run`, not `gb.run` and one `update`** — one agent tick per
-                // `AGENT_RESOLUTION` of emulated time rather than one per rendered frame. This loop
-                // is paced at 60 Hz and F-key fast-forward multiplies what a frame is worth, so at
-                // 5× `min_cycles` is ~83 ms and the agent would be deciding at 12 Hz against a game
-                // running at full speed — which walks the player straight past every corner. See
-                // `PokemonAgent::run`.
+                // `agent.run`, not `gb.run` and one `update` — one agent tick per
+                // `AGENT_RESOLUTION` of emulated time rather than one per rendered frame.
                 let result;
                 (actual_cycles, result) = pokemon_agent.run(&mut gb, &mut map_cache, min_cycles);
                 if let Err(agent_error) = result {
@@ -331,4 +319,3 @@ pub fn render() -> Result<(), String> {
 
     Ok(())
 }
-

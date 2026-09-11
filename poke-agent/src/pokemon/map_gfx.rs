@@ -1,44 +1,5 @@
-//! The graphics a *map* is drawn from: tileset sheets, overworld sprite sheets, and the game's own
-//! font — all read out of the cartridge the binary already carries.
-//!
-//! This is [`crate::pokemon::rom_gfx`]'s job one level up. `rom_gfx` knows where a ROM pointer's
-//! bytes are and how to turn 2bpp into shade indices; this module knows which pointers a map needs
-//! and how pokered's tables are laid out. Neither knows what any of it looks like — colour belongs
-//! to the caller, which is [`crate::llm::map_image`] for the picture the model is sent, exactly as
-//! it is `src/web/` for the badges and the Pokédex.
-//!
-//! Nothing here touches the MMU. Every read is against the `POKERED` `&'static [u8]`, which is what
-//! lets the LLM worker thread render a map while the emulator thread carries on running the game.
-//!
-//! # The three tables
-//!
-//! **`Tilesets`** (`03:47be`), 12 bytes per entry, indexed by [`TileSetId`]:
-//! `db BANK(GFX); dw Block, GFX, Coll; db counter×3; db grass; db animation`. The `GFX` pointer is
-//! the one [`crate::pokemon::map_metadata::MMU::read_tileset_header`] historically skipped, and it
-//! is what turns a block map into pixels. Bank is shared with the blockset — the two are assembled
-//! back to back in the same section.
-//!
-//! **`SpriteSheetPointerTable`** (`05:7b27`), 4 bytes per entry, indexed by
-//! [`PictureId`]` - 1`: `dw gfx; db byte_count; db BANK(gfx)`. A walking NPC is 12 tiles; an item
-//! ball, a boulder or a sleeping gambler is 4.
-//!
-//! **`SpriteFacingAndAnimationTable`** (`01:4000`), 4 bytes per entry
-//! (`dw tile_ids, dw oam_layout`), indexed by facing-and-frame. Entry `facing + frame`, and
-//! [`SpriteFacing`]'s values are already `0/4/8/C`, so the standing frame is entry `facing` at byte
-//! offset `facing * 4`. ⚠️ **Read the OAM layout rather than assuming it**: the four tiles' screen
-//! positions *and* the horizontal flip that makes "facing right" out of the left-facing art both
-//! come from that second pointer. `.FlippedOAM` swaps the left and right columns as well as setting
-//! `OAM_XFLIP`, so mirroring the assembled 16×16 by hand is right only by coincidence.
-//!
-//! # ⚠️ A tileset sheet can run off the end of its bank
-//!
-//! `LoadTilesetTilePatternData` copies a fixed `MAP_TILESET_SIZE` (`$60`) tiles into `vTileset`
-//! whatever the tileset's real size, so several sheets legitimately overrun their own label — into
-//! the blockset that follows, and for `Underground` (`1b:7d60`, 672 bytes short of `$8000`) past the
-//! end of the bank entirely. On hardware that reads whatever is mapped there and it never matters,
-//! because no map references a tile id that high. Here the sheet is **clamped to the bank** and
-//! [`tileset_tile`] answers a blank tile for an id past the end, so a malformed blockset draws a
-//! hole rather than panicking on the emulator's behalf.
+//! The graphics a *map* is drawn from: tileset sheets, overworld sprite sheets, and the game's
+//! own font — all read out of the cartridge the binary already carries.
 
 use crate::pokemon::font::FONT_BYTES;
 use crate::pokemon::map_header::TileSetId;
@@ -54,12 +15,13 @@ pub const TILESET_TILES: usize = 0x60;
 /// An overworld sprite is 2×2 tiles.
 pub const SPRITE_PX: usize = 16;
 
-// ── The tileset table ────────────────────────────────────────────────────────────────────────────
+// ── The tileset table
+// ────────────────────────────────────────────────────────────────────────────
 
 /// One row of pokered's `Tilesets`.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct TilesetEntry {
-    /// The ROM bank holding **both** the blockset and the graphics.
+    /// The ROM bank holding both the blockset and the graphics.
     pub bank: u8,
     /// `<Tileset>_Block` — block id → 16 tile ids.
     pub blocks: u16,
@@ -89,8 +51,6 @@ pub fn tileset_entry(tileset: TileSetId) -> TilesetEntry {
     }
 }
 
-/// `tileset`'s 2bpp tile sheet, clamped to the end of its bank (see the module note on the
-/// deliberate overrun). Tile `n` is at `[n * TILE_BYTES ..]` for as far as it goes.
 pub fn tileset_sheet(tileset: TileSetId) -> &'static [u8] {
     let entry = tileset_entry(tileset);
     let bytes = rom_slice(DmgPointer { bank: DmgBank::ROM { bank: entry.bank }, address: entry.gfx });
@@ -110,24 +70,16 @@ fn sheet_tile(sheet: &[u8], index: usize) -> [u8; 64] {
     }
 }
 
-// ── Overworld sprites ────────────────────────────────────────────────────────────────────────────
+// ── Overworld sprites
+// ────────────────────────────────────────────────────────────────────────────
 
 /// One NPC standing still, 16×16 shade indices, row-major.
-///
-/// ⚠️ **Shade `0` is transparent**, as it is for every overworld sprite on the hardware — it is the
-/// surround, not white. A caller that paints it draws each person in a box.
 #[derive(Copy, Clone)]
 pub struct NpcSprite {
     pub shades: [u8; SPRITE_PX * SPRITE_PX],
 }
 
 /// The standing frame of `picture` facing `facing`, or `None` if the picture id has no sheet.
-///
-/// ⚠️ **An immobile sprite has one frame and no facing.** Item balls, boulders, the fossil and the
-/// sleeping gamblers have 4-tile sheets, and pokered handles them by jumping to the second half of
-/// `SpriteFacingAndAnimationTable`, every row of which is `.StandingDown`. A sheet too short for the
-/// requested facing therefore falls back to the down-facing tiles rather than reading a neighbour's
-/// graphics, which is what indexing blindly would do.
 pub fn npc_sprite(picture: PictureId, facing: SpriteFacing) -> Option<NpcSprite> {
     const SPRITE_ENTRY_SIZE: u16 = 4;
     let entry = rom_slice(
@@ -139,11 +91,7 @@ pub fn npc_sprite(picture: PictureId, facing: SpriteFacing) -> Option<NpcSprite>
     let sheet = rom_slice(DmgPointer { bank: DmgBank::ROM { bank }, address: gfx });
     let sheet = &sheet[..sheet.len().min(byte_count)];
 
-    // ⚠️ **The whole entry falls back, layout included.** An immobile sprite is four tiles, so the
-    // left-facing frame's ids (`$08`–`$0b`) do not exist for one — and pokered's answer is to skip
-    // to the second half of the table, every row of which is `.StandingDown, .NormalOAM`. Swapping
-    // only the tile ids and keeping `.FlippedOAM` would draw a right-facing item ball as a
-    // *mirrored* one, which is a different picture, not the same picture.
+    // The whole entry falls back, layout included.
     let fits = |frame: &([u8; 4], _)| frame.0.iter().all(|&id| (id as usize + 1) * TILE_BYTES <= sheet.len());
     let frame = facing_frame(facing);
     let (tile_ids, layout) = match fits(&frame) {
@@ -157,7 +105,7 @@ pub fn npc_sprite(picture: PictureId, facing: SpriteFacing) -> Option<NpcSprite>
         let pixels = sheet_tile(sheet, tile_id as usize);
         for y in 0..TILE_PX {
             for x in 0..TILE_PX {
-                // ⚠️ The flip is per tile *and* the layout has already swapped the columns.
+                // The flip is per tile *and* the layout has already swapped the columns.
                 let source = match attributes & OAM_XFLIP {
                     0 => pixels[y * TILE_PX + x],
                     _ => pixels[y * TILE_PX + (TILE_PX - 1 - x)],
@@ -169,13 +117,12 @@ pub fn npc_sprite(picture: PictureId, facing: SpriteFacing) -> Option<NpcSprite>
     Some(NpcSprite { shades })
 }
 
-/// Hardware OAM's horizontal-flip bit. The attribute byte in `SpriteFacingAndAnimationTable` mixes
-/// it with pokered's own pseudo-flags (`FACING_END` = 1, `UNDER_GRASS` = 2), which do not collide.
+/// Hardware OAM's horizontal-flip bit.
 const OAM_XFLIP: u8 = 0x20;
 
 /// The four tile ids and the `(y, x, attributes)` of each, for one standing frame — read from the
-/// ROM's own table rather than transcribed, so "facing right is facing left, mirrored" is a fact the
-/// cartridge states rather than one this file assumes.
+/// ROM's own table rather than transcribed, so "facing right is facing left, mirrored" is a fact
+/// the cartridge states rather than one this file assumes.
 fn facing_frame(facing: SpriteFacing) -> ([u8; 4], [(u8, u8, u8); 4]) {
     let entry = rom_slice(pokered_symbols::SpriteFacingAndAnimationTable + facing as u16 * 4);
     let bank = pokered_symbols::SpriteFacingAndAnimationTable.bank;
@@ -192,7 +139,8 @@ fn facing_frame(facing: SpriteFacing) -> ([u8; 4], [(u8, u8, u8); 4]) {
     (tile_ids, layout)
 }
 
-// ── The game's own font ──────────────────────────────────────────────────────────────────────────
+// ── The game's own font
+// ──────────────────────────────────────────────────────────────────────────
 
 /// The number of glyphs `FontGraphics` holds.
 pub const GLYPHS: usize = FONT_BYTES.len() / TILE_BYTES;
@@ -204,23 +152,12 @@ const FIRST_GLYPH: u8 = 0x80;
 /// The font tile index that draws `c`, or `None` for anything the sheet has no glyph for —
 /// including a space, which is `$7F` and lives in `TextBoxGraphics`, not here. Callers draw those
 /// as a blank cell.
-///
-/// ⚠️ **The forward direction of this map already exists** as
-/// [`crate::pokemon::font::render_font_string`], and `sprite`/`nickname` writing already goes
-/// through [`PokemonString::from_string`] — so this reuses the latter rather than adding a third
-/// copy of the charmap. `the_font_round_trips_through_the_decoder` pins the two together.
 pub fn glyph_index(c: char) -> Option<u8> {
     let code = *PokemonString::from_string(&c.to_string()).0.first()?;
     code.checked_sub(FIRST_GLYPH)
 }
 
 /// A glyph as a stencil: `true` where there is ink.
-///
-/// ⚠️ **The font is 1bpp** — `FontGraphics` is 0x400 bytes of one bit per pixel, and
-/// [`FONT_BYTES`] is the compile-time doubling of it into the 2bpp form the hardware wants. A mask
-/// is therefore the honest shape, and it is also what keeps drawing light text on a dark plate from
-/// being the palette inversion `src/web/sprites.rs` forbids: a stencil has no fill to negate, so the
-/// ink colour is a choice, not a flip.
 pub fn glyph_mask(index: u8) -> [bool; 64] {
     debug_assert!((index as usize) < GLYPHS, "the font has {GLYPHS} glyphs, not {index}");
     let pixels = sheet_tile(&FONT_BYTES, index as usize);
@@ -247,13 +184,10 @@ mod tests {
         (0..=23u8).map(|id| TileSetId::from_repr(id).expect("24 tilesets"))
     }
 
-    /// The proof that `gfx` is read from the right two bytes of the row, rather than the assertion
-    /// that it looks plausible: `build.rs` emits a constant for every `::`-exported label in the
-    /// disassembly, so the table this module parses can be checked against the linker's own answer
-    /// for all three pointers of all twenty-four tilesets.
-    ///
-    /// Same idea as `mon_gfx`'s `the_decompressor_matches_upstreams_own_2bpp` — compare against
-    /// something upstream generated, not against yesterday's output.
+    /// The proof that `gfx` is read from the right two bytes of the row, rather than the
+    /// assertion that it looks plausible: `build.rs` emits a constant for every `::`-exported
+    /// label in the disassembly, so the table this module parses can be checked against the
+    /// linker's own answer for all three pointers of all twenty-four tilesets.
     #[test]
     fn the_tileset_table_agrees_with_the_generated_symbols() {
         let expected: Vec<(TileSetId, DmgPointer, DmgPointer, DmgPointer)> = vec![
@@ -286,8 +220,7 @@ mod tests {
         }
     }
 
-    /// Every tileset draws something. Catches a `gfx` pointer read one byte out, which would still
-    /// land inside the table and still decode — as noise.
+    /// Every tileset draws something.
     #[test]
     fn every_tileset_sheet_is_drawn_art() {
         for tileset in all_tilesets() {
@@ -309,9 +242,8 @@ mod tests {
         }
     }
 
-    /// The `Underground` tileset's graphics are 672 bytes from the end of bank `$1b`, and the game
-    /// copies `$600`. Clamping is what stops that being a panic; this is the case that proves the
-    /// clamp is exercised rather than theoretical.
+    /// The `Underground` tileset's graphics are 672 bytes from the end of bank `$1b`, and the
+    /// game copies `$600`.
     #[test]
     fn a_tileset_that_overruns_its_bank_is_clamped_not_panicked() {
         let sheet = tileset_sheet(TileSetId::Underground);
@@ -347,8 +279,7 @@ mod tests {
         assert!(walkers > 40 && immobile > 5, "{walkers} walkers, {immobile} immobile");
     }
 
-    /// Right is left, mirrored — and the cartridge is what says so. If pokered ever pointed
-    /// `.FlippedOAM` somewhere else this would go red rather than quietly drawing the wrong art.
+    /// Right is left, mirrored — and the cartridge is what says so.
     #[test]
     fn right_is_left_mirrored() {
         let left = npc_sprite(PictureId::Oak, SpriteFacing::Left).expect("Oak walks").shades;
@@ -362,9 +293,7 @@ mod tests {
         assert_ne!(left, right, "a symmetric sprite would pass the above vacuously");
     }
 
-    /// The new reverse charmap against the existing forward one. Neither can drift without this
-    /// failing, which is the whole reason the reverse direction reuses `PokemonString` rather than
-    /// transcribing `charmap.asm` a third time.
+    /// The new reverse charmap against the existing forward one.
     #[test]
     fn the_font_round_trips_through_the_decoder() {
         let mut checked = 0;

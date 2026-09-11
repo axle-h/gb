@@ -1,26 +1,9 @@
-//! Tests for workstream `gifts` — see `docs/postgame-coverage-plan.md` §6-G and
-//! [`crate::pokemon::postgame::gifts`].
-//!
-//! Rooted on **B's** output rather than `postgame-phase0.bin`: the gifts are in Cinnabar, Pewter,
-//! Saffron and Celadon, so Fly is the difference between one step and a cross-Kanto walk — the same
-//! reasoning C's and F's rows give.
 
 use super::super::*;
 
-/// Workstream B's output (§9): Fuchsia City, Fly on Articuno, the Bicycle in the bag (16/20), party
-/// Venusaur / Articuno / Vaporeon / Slowpoke, ¥41,209, dex 7 owned / 112 seen.
 const FLY_BIKE: &[u8] = include_bytes!("../../data/postgame-fly-bike.bin");
 
-/// **Task G1** — revive the **Helix Fossil** into an **Omanyte** at the Cinnabar Lab.
-///
-/// The agent has carried that fossil since Mt Moon and has never handed it over. The mechanic is a
-/// two-visit one — the scientist takes it, then wants you to "go for a walk", and the walk is
-/// literally `CinnabarIsland_Script` running once (`scripts/CinnabarIsland.asm:6` resets
-/// `EVENT_LAB_STILL_REVIVING_FOSSIL`), so the leg leaves the building and comes back.
-///
-/// Assertions are on both ends of the trade: the fossil is a key item, so its *disappearance* proves
-/// the bespoke fossil-choice menu was driven rather than cancelled, and the Omanyte proves the second
-/// visit landed. ~1 min of game time.
+/// Task G1 — revive the Helix Fossil into an Omanyte at the Cinnabar Lab.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_revive_the_helix_fossil() {
@@ -46,11 +29,7 @@ fn can_revive_the_helix_fossil() {
 /// G1's output: Cinnabar Island, Omanyte lv30 in the party (5), the Helix Fossil spent.
 const OMANYTE: &[u8] = include_bytes!("../../data/postgame-omanyte.bin");
 
-/// **Task G2** — the **Old Amber** out of the Pewter Museum, revived into an **Aerodactyl**.
-///
-/// The one species in the game behind a *building* the agent has never opened. Two observables in
-/// one leg, checked in order: the amber lands in the bag (the museum half), then the party gains an
-/// Aerodactyl (the lab half, which is G1's two-visit mechanic again with the other fossil).
+/// Task G2 — the Old Amber out of the Pewter Museum, revived into an Aerodactyl.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_the_old_amber_and_revive_it() {
@@ -75,27 +54,11 @@ fn can_get_the_old_amber_and_revive_it() {
     fixture.save_state_named("src/pokemon/data/postgame-aerodactyl.bin").unwrap();
 }
 
-/// G2's output: Cinnabar Island, party **6** (Venusaur / Articuno / Vaporeon / Slowpoke / Omanyte /
+/// G2's output: Cinnabar Island, party 6 (Venusaur / Articuno / Vaporeon / Slowpoke / Omanyte /
 /// Aerodactyl), both fossils spent, dex 9 owned.
 const AERODACTYL: &[u8] = include_bytes!("../../data/postgame-aerodactyl.bin");
 
-/// **Task G3** — the **Lapras** the rescued Silph employee has been holding all along.
-///
-/// Deliberately run with a **full party**, which makes this the other half of the gift path: with no
-/// room, `_GivePokemon` takes the `SendNewMonToBox` branch instead of `AddPartyMon`. F proved the
-/// party branch by driving the naming screen for a prize Abra; this drives the branch F only read.
-///
-/// ❗ F's §11 entry says the box branch "skips the naming entirely". It does not —
-/// `SendNewMonToBox` ends with its own `predef AskName` (`engine/items/item_effects.asm:2731-2733`),
-/// so **both** branches name, and the nickname assertion below is what pins that: a default name
-/// would mean the screen never ran and the agent got lucky.
-///
-/// ⚠️ **It has since become the guard for a second thing, and it is the only test in the suite that
-/// can be.** The nickname prompt is a yes/no, and it arrives moments after the Silph Co lift has
-/// left `wTextBoxID` reading `ListMenuBox` — so this is the one place where a menu-shape test that
-/// believes a *lingering* id, on a rule that runs at every text box, answers B and silently declines
-/// the nickname. That is exactly what the first draft of `MENU_HANDOVER_TICKS` did. If this fails
-/// with two identical `LAPRAS` strings, look at `MenuEvidence` before anything else.
+/// Task G3 — the Lapras the rescued Silph employee has been holding all along.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn a_full_party_sends_the_silph_lapras_to_the_box() {
@@ -122,15 +85,10 @@ fn a_full_party_sends_the_silph_lapras_to_the_box() {
     fixture.save_state_named("src/pokemon/data/postgame-lapras.bin").unwrap();
 }
 
-/// G3's output: Saffron City, party 6, **Lapras in box 1**, dex 10 owned.
+/// G3's output: Saffron City, party 6, Lapras in box 1, dex 10 owned.
 const LAPRAS: &[u8] = include_bytes!("../../data/postgame-lapras.bin");
 
-/// **Task G4** — the **Fighting Dojo**: beat the Karate Master, take a **Hitmonlee**.
-///
-/// The dojo is a whole room of the game the agent has never entered, and the reward is the plan's
-/// only *choice* — the two Poké Balls at the back are mutually exclusive, so Hitmonchan is gone for
-/// this cartridge the moment this leg passes. The counterpart to G3: a slot is banked first so the
-/// gift takes the `AddPartyMon` branch and the party count is what moves.
+/// Task G4 — the Fighting Dojo: beat the Karate Master, take a Hitmonlee.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_beat_the_karate_master_and_take_a_hitmonlee() {
@@ -162,25 +120,11 @@ fn can_beat_the_karate_master_and_take_a_hitmonlee() {
 /// dex 11 owned.
 const HITMONLEE: &[u8] = include_bytes!("../../data/postgame-hitmonlee.bin");
 
-/// **Task G7** — the five Silph floors the main quest skips, and everything left on them.
-///
-/// Ten item balls against **five** free bag slots, which is what makes this more than a walk: Phase
-/// 0's item PC is used first to bank six dead entries, three of them **key items** (the S.S. Ticket,
-/// Lift Key and Silph Scope are all spent). That composition — `deposit_item` feeding `CollectItem`
-/// — is the only thing in this workstream that needed the bag to be managed at all, and it is the
-/// scenario §2 calls the plan's founding blocker.
-///
-/// 2F and 8F carry no items, so they are asserted by *arrival*: they are two of the 96 never-visited
-/// maps and riding to them is the coverage. ~4 min of game time, most of it Rocket trainers.
+/// Task G7 — the five Silph floors the main quest skips, and everything left on them.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_clear_the_skipped_silph_floors() {
-    /// Six entries nothing needs again: the S.S. Anne has sailed, the Rocket Hideout lift and the
-    /// Pokémon Tower are done, and the party out-levels anything on these floors by forty. The
-    /// The quantity must be the **whole stack** — a bag *slot* is freed only when its last unit
-    /// leaves, and freeing slots is the only thing this leg cares about. `ALL` overshoots on purpose:
-    /// `ItemPcState::new` clamps to what is actually held, so the leg does not have to know or track
-    /// the counts (and it did not — nine Great Balls had become eight; see §11).
+    /// Six entries nothing needs again: the S.S.
     const ALL: u8 = u8::MAX;
     const BANK: &[(ItemId, u8)] = &[(ItemId::SSTicket, 1), (ItemId::LiftKey, 1), (ItemId::SilphScope, 1),
                                     (ItemId::GreatBall, ALL), (ItemId::Revive, ALL), (ItemId::FullRestore, ALL)];
@@ -213,17 +157,11 @@ fn can_clear_the_skipped_silph_floors() {
     fixture.save_state_named("src/pokemon/data/postgame-silph-floors.bin").unwrap();
 }
 
-/// G7's output: Saffron City, bag 19/20 with the ten Silph items, PC storage holding the six banked
-/// entries, party healed.
+/// G7's output: Saffron City, bag 19/20 with the ten Silph items, PC storage holding the six
+/// banked entries, party healed.
 const SILPH_FLOORS: &[u8] = include_bytes!("../../data/postgame-silph-floors.bin");
 
-/// **Task G8a** — the two Saffron TM gifts, one of which has to be *bought*.
-///
-/// `MrPsychicsHouse` hands over TM29 for nothing. The Copycat wants a **Poké Doll**, and her script
-/// is the trap: with no doll it prints one text box and ends, identical from the outside to a
-/// successful conversation. So the leg buys the doll at `CeladonMart4F` first and asserts **TM31**,
-/// which cannot arrive any other way. Two more never-visited maps (`CopycatsHouse1F/2F`,
-/// `MrPsychicsHouse`) fall out of it. ~3 min of game time.
+/// Task G8a — the two Saffron TM gifts, one of which has to be *bought*.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_collect_the_saffron_tm_gifts() {
@@ -255,15 +193,7 @@ fn can_collect_the_saffron_tm_gifts() {
 /// G8a's output: Saffron City with TM29 + TM31, ¥44,384.
 const GIFTS: &[u8] = include_bytes!("../../data/postgame-gifts.bin");
 
-/// **Task G8b** — the **Day Care**, the last unexercised mechanic in G.
-///
-/// Deposit a mon, collect it, pay. The two things that make it work without a party-menu driver are
-/// in [`PolicyStep::daycare_steps`]: the lead is what an A-mash deposits (so the HM-carrying Venusaur
-/// has to step aside first, or the gentleman refuses), and a *second* conversation would collect the
-/// mon straight back — which is why this is the one leg in the file that queues a single `Interact`.
-///
-/// Money is the assertion that matters: the party count returning to six proves the mon came back,
-/// but only the ¥100 proves it came back through the counter rather than never having left.
+/// Task G8b — the Day Care, the last unexercised mechanic in G.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_leave_a_pokemon_at_the_day_care() {
@@ -298,40 +228,11 @@ fn can_leave_a_pokemon_at_the_day_care() {
     fixture.save_state_named("src/pokemon/data/postgame-daycare.bin").unwrap();
 }
 
-/// ⭐ **The Day Care does not board a Pokémon nobody chose — every time, rather than sometimes.**
-///
-/// The leg above hands the gentleman a mon through [`PolicyStep::PartyScript`], a
-/// `DeterministicPolicy`-only driver that navigates the party menu itself. That driver is not on the
-/// deployed path: a model takes a `talk to` row, and what then answers the menu is the agent.
-/// `DaycareGentlemanText` calls `DisplayPartyMenu` **without resetting `wCurrentMenuItem`**, so an
-/// A-mash boards whatever the cursor was left on — for good, on a choice the model never made and
-/// `FieldMoveRequest` has no way to express.
-///
-/// ⚠️ **What this replaces is a coin flip rather than a confirm, and that is the finding.** Measured
-/// with `PokemonAgent::party_menu` removed: this conversation's party list was **bounced** (the
-/// gentleman answers "All right then, come again.") while the Cerulean trader's, in the same agent
-/// state, was **confirmed** — the hand-over rule only looks for a stray menu in a window after a box
-/// opens, and whether a conversation gets to its party list inside that window is a matter of how
-/// long the conversation took. An irreversible action decided by timing is the thing being removed.
-///
-/// ⚠️ **Hitmonlee has to be in front or the test proves nothing**, and the constant below says why.
-///
-/// ⚠️ **And this test passes with the driver removed as well, which is the coin flip seen from the
-/// other side.** The hand-over rule happens to catch *this* conversation's party list, so what is
-/// pinned here is the **property** — the party comes back as it went in — rather than the mechanism
-/// that now guarantees it. The tests that fail without `PokemonAgent::party_menu` are the trades:
-/// `branch_points::a_trade_finds_the_give_species_wherever_it_is_in_the_party` and
-/// `trades::every_in_game_trade_can_be_made_by_talking_to_the_trader`. This one is here so that a
-/// future change to that driver cannot quietly start boarding Pokémon instead.
+/// The Day Care does not board a Pokémon nobody chose — every time, rather than sometimes.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn talking_to_the_day_care_does_not_board_a_pokemon_nobody_chose() {
-    /// Hitmonlee, the one party member with **no HM move**.
-    ///
-    /// ⚠️ **Leaving Venusaur in front proves nothing and looks like a pass.** The gentleman refuses a
-    /// mon that knows an HM outright (`scripts/Daycare.asm`), so a run whose lead carries Cut is
-    /// declined by the *cartridge* and the party comes back unchanged whatever the agent does. The
-    /// first version of this test did exactly that.
+    /// Hitmonlee, the one party member with no HM move.
     const HM_FREE_SLOT: u8 = 5;
 
     let mut steps = PolicyStep::daycare_steps(HM_FREE_SLOT);
@@ -344,9 +245,7 @@ fn talking_to_the_day_care_does_not_board_a_pokemon_nobody_chose() {
     let mut fixture = TestFixture::new(GIFTS, Duration::from_mins(45), steps);
     let money_before = fixture.game_state().money;
     fixture.run_until(|s| s.map.map == Map::Daycare);
-    // ⚠️ **After the shuffle, not before it.** `MovePokemonToFront` is what puts the HM-free mon
-    // under the cursor, and the party this test says must not change is the one the gentleman is
-    // actually being shown.
+    // After the shuffle, not before it.
     let party_before: Vec<_> = fixture.run_until(|s| s.pokemon[0].species == PokemonSpecies::Hitmonlee)
         .pokemon.iter().map(|mon| mon.species).collect();
 
@@ -366,25 +265,7 @@ fn talking_to_the_day_care_does_not_board_a_pokemon_nobody_chose() {
 /// G8b's output: Route 5, party 6 with Hitmonlee back from the Day Care, ¥44,284.
 const DAYCARE: &[u8] = include_bytes!("../../data/postgame-daycare.bin");
 
-/// **Task G8c** — the **Name Rater**, and the last three never-visited rooms.
-///
-/// The Name Rater reuses G8b's [`PartyScript`] driver wholesale — same stale-cursor party menu, a
-/// different completion test.
-///
-/// ⚠️ **Which mon to rename is the whole design of this test**, and the obvious choice is wrong.
-/// `DeterministicPolicy` draws nicknames without replacement, but the picker is re-seeded per leg,
-/// so every leg's *first* draw is the same name — and five of this party's six are already called
-/// it, from the legs that caught them. Renaming one of those is invisible. **Articuno is the only
-/// uniquely-named member** ("Leslee", from the main quest), so it is the only slot whose rename can
-/// be observed at all.
-///
-/// That also makes the cursor assertion work: the entry fixture's `wCurrentMenuItem` is **0**, left
-/// there by G8b's deposit, so a driver that failed to move it would rename **Venusaur** and leave
-/// Articuno untouched — which is exactly what the two assertions below distinguish.
-///
-/// ⚠️ The rename runs through the ordinary naming screen, so `assert_naming_screen` takes the
-/// agent's state away from the driver mid-conversation and never gives it back. That is fine and
-/// worth knowing: the *effect* still lands, so this waits on the nickname, not on the driver.
+/// Task G8c — the Name Rater, and the last three never-visited rooms.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_rename_a_pokemon_and_visit_the_last_rooms() {
@@ -410,7 +291,6 @@ fn can_rename_a_pokemon_and_visit_the_last_rooms() {
         "slot 0 was renamed — the cursor was never driven off its stale position");
     println!("slot {RENAME_SLOT}: \"{target_before}\" → \"{}\"", name_of(&renamed, RENAME_SLOT as usize));
 
-    // The three text-only rooms, asserted by arrival: they are on §2's never-visited list.
     for room in [Map::ViridianSchoolHouse, Map::CeladonHotel, Map::CeladonChiefHouse] {
         let state = fixture.run_until(|s| s.map.map == room);
         println!("visited {:?} @ {}", room, state.map.player_position);

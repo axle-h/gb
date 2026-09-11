@@ -13,44 +13,10 @@ use crate::pokemon::tile::{HiddenObject, MetaTile};
 #[derive(Debug, Clone, Default)]
 pub struct MetaTileMap {
     pub player_position: Point8,
-    /// ⚠️ **False while a map transition is in flight, and everything that draws a conclusion from
-    /// [`Self::player_position`] has to check it.**
-    ///
-    /// There are two of these and they are the same lie told at different lengths. The longer one is
-    /// a map-load earlier and runs for 26 agent ticks on an ordinary warp, four times that at the
-    /// Safari Zone gate: [`map_header_is_loaded`](crate::pokemon::map_metadata::map_header_is_loaded)
-    /// carries its argument and why the ten-byte header comparison is the test. The shorter one is
-    /// the single tick below.
-    ///
-    /// Crossing a map connection *northward* or *westward* leaves `wYCoord`/`wXCoord` holding
-    /// **255** — the ROM's own −1 — for one agent tick, before `CheckMapConnections` switches
-    /// `wCurMap` and rebases the coordinates. `wCurMap` is therefore still the **old** map while the
-    /// coordinate is already off its edge, and [`Self::new`]'s clamp (which has to stay: it is what
-    /// keeps the tile indexing in bounds) turns that −1 into a perfectly plausible square at the
-    /// **opposite** edge of the map.
-    ///
-    /// ⭐ **That fiction cost a walk that had already arrived.** C3's frontier walk aborted three
-    /// connections with `NoRoute` — `Route2:8,0` "standing at (8, 73)", `Route2:9,0` at (9, 73),
-    /// `ViridianCity:19,0` at (19, 37) — every one of them a target on row 0 and a reported position
-    /// on the last row, because that is what `(255 + north_extra).min(height - 1)` is. From the
-    /// wrong end of the map the BFS reaches nothing, `connection_action` answers `None`, and the
-    /// agent reports "there is no route to the way into PewterCity" about a walk that was in
-    /// PewterCity on the next tick. It is the same false sentence
-    /// [`OverworldActionAbortedReason::DidNotArrive`](crate::pokemon::agent::OverworldActionAbortedReason::DidNotArrive)
-    /// was split out to stop printing, and a deployed run went hunting a pathfinder bug over it.
-    ///
-    /// Southward and eastward crossings are **not** affected and must not be caught by this: there
-    /// the coordinate goes one *past* the last row, which lands on the connection strip and is a
-    /// real, reachable tile. Only the underflow lies.
+    /// False while a map transition is in flight, and everything that draws a conclusion from
+    /// [`Self::player_position`] has to check it.
     pub position_settled: bool,
     /// The player is on the water rather than on foot (`wWalkBikeSurfState == 2`).
-    ///
-    /// ⚠️ **It changes which warps can be fired, and that is the whole reason it is here.**
-    /// `home/overworld.asm`'s `.noDirectionChange` branches on this byte *before* it looks at a
-    /// collision: on foot, walking into a wall while standing on a warp entry falls through
-    /// `ExtraWarpCheck` into `CheckWarpsCollision` and warps; surfing, `CollisionCheckOnWater`
-    /// answers and the next instruction is `jp c, OverworldLoop`. `CheckWarpsCollision` is not on
-    /// the surfing path at all. See the `route.is_empty()` arm of [`Self::actions`].
     pub surfing: bool,
     pub player_direction: PlayerFacingDirection,
     pub map: Map,
@@ -58,149 +24,88 @@ pub struct MetaTileMap {
     pub height: usize,
     pub meta_tiles: Vec<MetaTile>,
     /// Bottom-left raw tile ID of each meta-tile (parallel to `meta_tiles`). Used to evaluate
-    /// `tile_pair_collisions` during BFS. `0xFF` for border/connection cells.
+    /// `tile_pair_collisions` during BFS.
     pub raw_tile_ids: Vec<u8>,
-    /// This map's tileset. Kept so per-tileset ROM tables can be consulted against `raw_tile_ids` —
-    /// currently [`crate::pokemon::map_header::TileSetId::warp_tile_ids`], via [`Self::is_step_on_warp`].
+    /// This map's tileset. Kept so per-tileset ROM tables can be consulted against `raw_tile_ids`
+    /// — currently [`crate::pokemon::map_header::TileSetId::warp_tile_ids`], via
+    /// [`Self::is_step_on_warp`].
     pub tileset: crate::pokemon::map_header::TileSetId,
     /// Unordered raw-tile-ID pairs the player may not walk between in this tileset (elevation
     /// boundaries from pokered `TilePairCollisionsLand`). Empty for most tilesets.
     pub tile_pair_collisions: Vec<(u8, u8)>,
     /// [`Self::walkable_bits`]'s answer, computed at most once per instance.
-    ///
-    /// ⚠️ **Once per *tick*, which is what this is really saying**, because `agent::observe_state`
-    /// rebuilds the whole map from RAM every tick and paints its overlays on. A boulder floor asks
-    /// for a plan once per (boulder, target) pair, and the bitmap is O(width x height) — computing
-    /// it per pair rather than per map was 8 of the 11 boulder searches' worth of the cost the
-    /// cache was added to remove.
     walkable_cache: std::cell::OnceCell<Vec<u64>>,
-    /// The pairs that apply when **water is on either side** of the move — mounting Surf, stepping
+    /// The pairs that apply when water is on either side of the move — mounting Surf, stepping
     /// ashore, or moving while surfing (pokered `TilePairCollisionsWater`). In the Cavern tileset
     /// this is `($14, $05)`: inside Seafoam the player can only get on/off the water at a shore
     /// tile, never straight off a plain cave floor.
     pub tile_pair_collisions_water: Vec<(u8, u8)>,
     pub sprites: Vec<Sprite>,
     /// Each person's square and the tile they are standing on top of — see
-    /// [`CurrentMap::underfoot`](crate::pokemon::map_metadata::CurrentMap::underfoot). Read only by
-    /// [`Self::row_blocked_by_people`].
+    /// [`CurrentMap::underfoot`](crate::pokemon::map_metadata::CurrentMap::underfoot). Read only
+    /// by [`Self::row_blocked_by_people`].
     pub underfoot: Vec<(Point8, MetaTile)>,
-    /// Unique `(destination_map, destination_position)` pairs reachable via warp tiles.
-    /// Keyed on destination position so that two staircase/door warps that lead to
-    /// *different* positions within the same destination map (e.g. Mt Moon B1F) each
-    /// produce a separate `OverworldAction`.
+    /// Unique `(destination_map, destination_position)` pairs reachable via warp tiles. Keyed on
+    /// destination position so that two staircase/door warps that lead to *different* positions
+    /// within the same destination map (e.g. Mt Moon B1F) each produce a separate
+    /// `OverworldAction`.
     pub warp_targets: HashSet<(Map, Point8)>,
     pub connection_targets: HashSet<Map>,
     /// Arrow (spinner) tiles → the tile the forced slide deposits the player on. Stepping onto an
-    /// arrow tile hands control to the game, which slides the player along a fixed path (decoded from
-    /// the ROM `RocketHideout{2,3}ArrowTilePlayerMovement` tables). The BFS treats stepping onto an
-    /// arrow as landing at its destination. Empty for maps without arrow tiles.
+    /// arrow tile hands control to the game, which slides the player along a fixed path (decoded
+    /// from the ROM `RocketHideout{2,3}ArrowTilePlayerMovement` tables).
     pub spinners: HashMap<Point8, Point8>,
-    /// `wMovementFlags`' `BIT_STANDING_ON_WARP`: whether the player's last completed **step** landed
+    /// `wMovementFlags`' `BIT_STANDING_ON_WARP`: whether the player's last completed step landed
     /// on a warp entry.
-    ///
-    /// ⭐ **The one thing that says whether leaning on a wall can fire the warp underfoot.** See
-    /// [`CurrentMap::standing_on_warp`](crate::pokemon::map_metadata::CurrentMap::standing_on_warp)
-    /// for the cartridge's side. It is the third of these live bits, beside [`Self::surfing`] and
-    /// `is_step_on_warp`, and all three answer the same question — *how does this entry actually
-    /// fire from here* — which is why they are tested together in one place.
     pub standing_on_warp: bool,
-    /// Squares on this map whose warp the map's own **script** cancels, in this map's padded
+    /// Squares on this map whose warp the map's own script cancels, in this map's padded
     /// coordinates. See [`map_warp_gate_specs`](crate::pokemon::map_metadata) for the argument;
     /// [`Self::warp_trigger`] answers `Impossible` for them, which is what keeps the row out of
     /// [`Self::actions`] and out of `OverworldMovement`'s border-warp arm at the same time.
-    ///
-    /// ⚠️ **It has to be `warp_trigger` and not `actions`, and that is lesson 10 of
-    /// `docs/coverage-plan.md` §7.2**: a rule the map layer and the agent both encode has to be
-    /// fixed where both of them read it, or the second one is invisible from a unit test.
     pub script_cancelled_warps: Vec<Point8>,
-    /// True when the player can Surf **here**: Soul Badge, a party mon that knows Surf, and not being
-    /// force-ridden on the bike (`IsSurfingAllowed` refuses Surf on Cycling Road, and Routes 16–18 run
-    /// along the sea, so believing otherwise routes the BFS straight down the water). When set, the BFS
-    /// treats `Water` tiles as passable so routes cross water; the agent mounts Surf at the land↔water
-    /// boundary. Set by `game_state()` after construction (the map builder has no party access).
-    ///
-    /// `IsSurfingAllowed`'s *other* refusal — Seafoam's "current is much too fast" shore tiles — is
-    /// modelled separately as [`Self::no_surf_mount`], because it is per-tile rather than per-map.
+    /// True when the player can Surf here: Soul Badge, a party mon that knows Surf, and not being
+    /// force-ridden on the bike (`IsSurfingAllowed` refuses Surf on Cycling Road, and Routes
+    /// 16–18 run along the sea, so believing otherwise routes the BFS straight down the water).
+    /// When set, the BFS treats `Water` tiles as passable so routes cross water; the agent mounts
+    /// Surf at the land↔water boundary.
     pub can_surf: bool,
-    /// The best fishing rod in the bag, or `None` when there is not one. Set by `game_state()` after
-    /// construction for the same reason [`Self::can_surf`] is — the map builder has no bag access —
-    /// and read by [`Self::actions`], which offers a `MetaTile::Fish` row only when it is `Some` and
-    /// this map has water the player can face.
+    /// The best fishing rod in the bag, or `None` when there is not one. Set by `game_state()`
+    /// after construction for the same reason [`Self::can_surf`] is — the map builder has no bag
+    /// access — and read by [`Self::actions`], which offers a `MetaTile::Fish` row only when it
+    /// is `Some` and this map has water the player can face.
     pub best_rod: Option<crate::pokemon::postgame::fishing::Rod>,
-    /// True when the player can Cut **here**: the Cascade Badge and a party mon that knows Cut
+    /// True when the player can Cut here: the Cascade Badge and a party mon that knows Cut
     /// (`GameState::can_use_cut`). Set by `game_state()` after construction, for the same reason
     /// [`Self::can_surf`] is — the map builder has no party access.
-    ///
-    /// ⚠️ **It gates the cut-tree entries `actions()` emits, and that is not cosmetic.** A `CutTree`
-    /// action is a walk that ends *facing* a tree, and the only thing to do from there is the Cut
-    /// field move — which, without the move or the badge, opens the party menu onto a mon that has
-    /// no CUT entry and never comes back out. The deployed run found it: eleven turns on Route 2 with
-    /// no badges at all, `cut got no answer from the game for 60s` each time, and the model
-    /// reasonably concluded the game was broken. An action nobody can carry out is worse than a
-    /// missing one, so it is not offered.
     pub can_cut: bool,
-    /// True when the player can use **Strength** here: the Rainbow Badge and a party mon that knows
+    /// True when the player can use Strength here: the Rainbow Badge and a party mon that knows
     /// it. Set by `game_state()` after construction, for the same reason [`Self::can_cut`] is.
-    ///
-    /// ⚠️ **It gates the boulder rows `actions()` emits, and it is the same argument `can_cut`
-    /// carries one obstacle along.** A push row is a walk to the square beside a boulder followed by
-    /// a shove; without the move or the badge the shove moves nothing and says nothing
-    /// (`TryPushingBoulder` returns on the very first `bit BIT_STRENGTH_ACTIVE`), so the row is an
-    /// invitation into a silent sixty-second stall. What the turn says instead is that the boulders
-    /// are there and which half is missing — see `prompt::situation`.
-    ///
-    /// ⚠️ **Not the same question as `GameState::strength_active`**, which is whether Strength has
-    /// been armed from the party menu *on this map* and is cleared by every map change. That one is
-    /// the driver's business: `AgentState::PushingBoulder` arms it itself.
     pub can_strength: bool,
     /// Is Bill waiting inside his own machine?
-    ///
-    /// ⚠️ **The one hidden object in the table that is gated, and the gate is the whole point.**
-    /// `EVENT_BILL_SAID_USE_CELL_SEPARATOR` is set and `EVENT_USED_CELL_SEPARATOR_ON_BILL` is not,
-    /// which is exactly the window in which pressing that PC does something. Outside it the press
-    /// opens a storage menu with no tool behind it, which is the row `overworld_menu` withholds
-    /// `MetaTile::Pc` for. Same shape as [`Self::can_cut`], and on the map rather than in
-    /// `llm::tools` for the same reason: one place to be right rather than two.
     pub bill_cell_separator: bool,
-    /// Strength boulder-switch tiles on this map (invisible pressure plates, from the ROM map scripts):
-    /// push a boulder onto one to open its barrier. Exposed so a policy (deterministic or LLM) can
-    /// discover *where* to push without hardcoding coordinates. Empty for maps with no Strength puzzle.
+    /// Strength boulder-switch tiles on this map (invisible pressure plates, from the ROM map
+    /// scripts): push a boulder onto one to open its barrier. Exposed so a policy (deterministic
+    /// or LLM) can discover *where* to push without hardcoding coordinates.
     pub strength_switches: Vec<Point8>,
-    /// Floor-hole tiles on this map (Victory Road 3F): the player can fall through one to the floor
-    /// below, and pushing a boulder onto one drops it there (revealing a hidden boulder). Also modelled
-    /// as `MetaTile::Warp` for routing (see `apply_victory_road_holes`); this list is for discovery.
+    /// Floor-hole tiles on this map (Victory Road 3F): the player can fall through one to the
+    /// floor below, and pushing a boulder onto one drops it there (revealing a hidden boulder).
+    /// Also modelled as `MetaTile::Warp` for routing (see `apply_victory_road_holes`); this list
+    /// is for discovery.
     pub holes: Vec<Point8>,
-    /// Land tiles the player may not mount Surf from (Seafoam B4F's (7,11) — "The current is much too
-    /// fast!"). One-way: stepping ashore onto them is still allowed. See [`no_surf_mount_table`].
+    /// Land tiles the player may not mount Surf from (Seafoam B4F's (7,11) — "The current is much
+    /// too fast!"). One-way: stepping ashore onto them is still allowed.
     pub no_surf_mount: HashSet<Point8>,
-    // ⚠️ **There was a `hidden_items` here**, decoded from the ROM's own two tables and corrected
-    // for the connection strip. It is gone with the rest of hidden-item collection (2026-09-03): the
-    // policy step that read it went, and so did the `interact` tool that shared its driver. See
-    // `crate::pokemon::postgame::aides`' module docs for why. Nothing in the game is behind a hidden
-    // item, so no route lost anything.
-    /// Whether standing in this map's tall grass can produce a wild encounter at all —
-    /// `wGrassRate != 0`. See [`CurrentMap::grass_encounter_rate`] for why this is not the same
-    /// question as whether the map *has* grass tiles.
+    // There was a `hidden_items` here, decoded from the ROM's own two tables and corrected for
+    // the connection strip.
     pub has_grass_encounters: bool,
     /// The metadata these tiles were classified from, kept so anything that wants the map's
     /// *pixels* — [`crate::pokemon::map_gfx`] and the picture the model is sent — can reach the
     /// block map, the blockset and the connection strips without re-reading the MMU.
-    ///
-    /// ⚠️ **The point is that it is the *same* metadata**, not an equivalent one. It carries the
-    /// runtime block map for the eleven maps in `map_uses_runtime_blocks` and the door overlays
-    /// already applied, so a renderer using it cannot draw a wall where `meta_tiles` says there is
-    /// an open door. Re-reading it through `PokemonApi` could, and would also pay
-    /// `find_outdoor_entry_map`'s scan of up to 248 map headers.
-    ///
-    /// ⚠️ `Option` only because this struct derives `Default` (and so does [`GameState`], which
-    /// `postgame::fishing`'s tests construct). [`MapMetadata`] has no `Default` and must not gain
-    /// one — a default block map is a map of nothing that renders as a plausible empty room.
     pub metadata: Option<std::sync::Arc<crate::pokemon::map_metadata::MapMetadata>>,
 }
 
-/// Strength boulder-switch tiles per map (raw object/script coords, no connection offset), from the
-/// pokered map scripts (e.g. `VictoryRoad1F.asm` `.SwitchCoords`). Pushing a boulder onto a switch runs
-/// its `ReplaceTileBlock` (opens a barrier). Add other Strength maps (Seafoam, Rock Tunnel…) here.
+/// Strength boulder-switch tiles per map (raw object/script coords, no connection offset), from
+/// the pokered map scripts (e.g. `VictoryRoad1F.asm` `.SwitchCoords`).
 fn strength_switch_table(map: Map) -> &'static [(u8, u8)] {
     match map {
         Map::VictoryRoad1F => &[(17, 13)],
@@ -210,13 +115,12 @@ fn strength_switch_table(map: Map) -> &'static [(u8, u8)] {
     }
 }
 
-/// Floor-hole tiles per map (raw coords): a boulder pushed onto one falls to the floor below — and so
-/// does the player. Also modelled as `MetaTile::Warp` (see `apply_victory_road_holes` /
-/// `apply_seafoam_holes`) so BFS routes through them.
+/// Floor-hole tiles per map (raw coords): a boulder pushed onto one falls to the floor below —
+/// and so does the player.
 fn hole_table(map: Map) -> &'static [(u8, u8)] {
     match map {
         Map::VictoryRoad3F => &[(23, 15)],
-        // pokered `Seafoam{1,2,3,4}HolesCoords`.
+        // Pokered `Seafoam{1,2,3,4}HolesCoords`.
         Map::SeafoamIslands1F  => &[(17, 6), (24, 6)],
         Map::SeafoamIslandsB1F => &[(18, 6), (23, 6)],
         Map::SeafoamIslandsB2F => &[(19, 6), (22, 6)],
@@ -225,11 +129,8 @@ fn hole_table(map: Map) -> &'static [(u8, u8)] {
     }
 }
 
-/// Land tiles from which the game refuses to let the player *mount* Surf, even though they sit next
-/// to water (raw coords). Only Seafoam Islands B4F has one: pokered `IsSurfingAllowed` prints
-/// "The current is much too fast!" at (7,11) — the floor's single shore tile — until both boulders
-/// have been dropped into the B4F holes. Stepping *ashore* there is still fine, so the restriction is
-/// one-way (land → water) and the BFS applies it in that direction only.
+/// Land tiles from which the game refuses to let the player *mount* Surf, even though they sit
+/// next to water (raw coords).
 fn no_surf_mount_table(map: Map) -> &'static [(u8, u8)] {
     match map {
         Map::SeafoamIslandsB4F => &[(7, 11)],
@@ -237,10 +138,9 @@ fn no_surf_mount_table(map: Map) -> &'static [(u8, u8)] {
     }
 }
 
-/// Arrow-tile → slide-destination tables for the spinner-floor maps (raw map coords), decoded from
-/// the ROM movement RLE tables (`RocketHideout{2,3}ArrowTilePlayerMovement`, read backwards;
-/// PAD_DOWN=+y, UP=−y, LEFT=−x, RIGHT=+x). Interior maps have no connection border, so these raw
-/// coords need no west/north offset.
+/// Arrow-tile → slide-destination tables for the spinner-floor maps (raw map coords), decoded
+/// from the ROM movement RLE tables (`RocketHideout{2,3}ArrowTilePlayerMovement`, read backwards;
+/// PAD_DOWN=+y, UP=−y, LEFT=−x, RIGHT=+x).
 fn spinner_table(map: Map) -> &'static [(u8, u8, u8, u8)] {
     match map {
         Map::RocketHideoutB2F => &[
@@ -257,8 +157,9 @@ fn spinner_table(map: Map) -> &'static [(u8, u8, u8, u8)] {
             (13,16,17,16),(14,11,16,11),(14,15,18,15),(14,17,18,15),(14,19,18,15),(15,16,17,16),
             (15,18,15,22),(16,13,16,11),(17,12,17,16),(18,16,18,15),
         ],
-        // Viridian Gym (Giovanni / Earth Badge), decoded from `ViridianGymArrowTilePlayerMovement`
-        // (all single-segment `db PAD_DIR, N`): each arrow at (x,y) slides N tiles → (tx,ty).
+        // Viridian Gym (Giovanni / Earth Badge), decoded from
+        // `ViridianGymArrowTilePlayerMovement` (all single-segment `db PAD_DIR, N`): each arrow
+        // at (x,y) slides N tiles → (tx,ty).
         Map::ViridianGym => &[
             (19,11,19,2),  // UP 9
             (19,1,11,1),   // LEFT 8
@@ -277,141 +178,77 @@ fn spinner_table(map: Map) -> &'static [(u8, u8, u8, u8)] {
     }
 }
 
-
 /// How the cartridge can be made to take a warp entry the player is standing on. See
 /// [`MetaTileMap::warp_trigger`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarpTrigger {
-    /// The tile is a door or a warp tile in its own right: arriving on it warps, no button needed.
+    /// The tile is a door or a warp tile in its own right: arriving on it warps, no button
+    /// needed.
     StepOn,
-    /// It warps only while this direction is held, either as the last step of the walk onto it or as
-    /// a bump into the wall from on top of it.
+    /// It warps only while this direction is held, either as the last step of the walk onto it or
+    /// as a bump into the wall from on top of it.
     HoldDirection(JoypadButton),
-    /// Nothing triggers it from this side. The warp entry exists so that *leaving* the far map lands
-    /// the player here; it is not a way in.
+    /// Nothing triggers it from this side.
     Impossible,
     /// The check depends on a tile this model does not hold, so nothing is claimed either way.
-    ///
-    /// ⚠️ **`_GetTileAndCoordsInFrontOfPlayer` reads the on-screen tilemap, not the map.** A player
-    /// on the edge of a map facing out is looking at the **border block**, which is a real tile with
-    /// a real id and is drawn from the map header's border byte rather than from the block map. So
-    /// an entry on row 0 or on the last column cannot be proved dead from `raw_tile_ids` alone, and
-    /// several real doors sit exactly there: the S.S. Anne's gangway to Vermilion Dock at (26, 0),
-    /// Rock Tunnel 1F's north mouth, and the front door of Cerulean's badge house, whose SHIP
-    /// tileset sends it down the tile-in-front arm that a house would not have taken. Calling those
-    /// impossible would have taken the only door out of each of them.
     Unknown,
 }
 
-/// One way off this map into an adjacent one: a **run of touching edge tiles**, not a tile.
-///
-/// ⚠️ **The group is the unit because the tiles are not choices.** A map's border strip into its
-/// neighbour can be dozens of tiles wide, and stepping onto any tile of one run lands the player in
-/// the same place, so listing them individually would be forty rows of one decision. What *is* a
-/// decision is which run. Route 14's east edge is open at rows 0, 1, 2, 4, 6, 8 and 10; row 6 is a
-/// six-tile pocket whose only way west is through a trainer's body, and rows 4 and 8 are the road.
-/// The deployed run of 2026-09-02 crossed into that pocket, walked back to Route 13, crossed again
-/// and landed in it a second time, because the nearest crossing was the only one anything offered.
+/// One way off this map into an adjacent one: a run of touching edge tiles, not a tile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Crossing {
     /// The tile to leave by, in this map's action-id coordinates. The reachable member of the run
-    /// nearest the player when there is one, so the id names a square that can actually be walked to.
+    /// nearest the player when there is one, so the id names a square that can actually be walked
+    /// to.
     pub at: Point8,
     /// Where it lands on the far map, in that map's raw coordinates. Paired with `at` because
-    /// [`MetaTileMap::connection_action`] is keyed on it, and two runs into the same map differ only
-    /// here.
+    /// [`MetaTileMap::connection_action`] is keyed on it, and two runs into the same map differ
+    /// only here.
     pub to_position: Point8,
     /// Whether any tile of the run can be walked to from where the player is standing.
-    ///
-    /// ⚠️ **This is the field the whole type exists for.** `connection_targets` is header
-    /// connectivity: it says Cerulean touches Route 5, which is true and was not the question. The
-    /// question is whether the player, standing on the terrace they are standing on, can get to the
-    /// edge that leads there, and for 65 turns of the deployed run the answer was no while every
-    /// read said yes.
     pub reachable: bool,
-    /// How many tiles the run holds. Only used to keep the wider run first when two are otherwise
-    /// equal, on the reasoning that a one-tile gap in a wall is more often a pocket than a road.
+    /// How many tiles the run holds.
     pub tiles: usize,
 }
 
 /// What the search charges for a step from land onto water, in walking steps.
-///
-/// ⚠️ **Measured, not picked.** A Surf mount is the whole START→POKéMON→mon→SURF menu chain plus the
-/// cartridge's own mount animation and the scripted step onto the water: about 150 agent ticks
-/// against roughly 14 for one walking step, so ten steps is what it actually costs, and the encounter
-/// roll on that scripted step is thrown in free. The number decides one thing — how far the search
-/// will walk round a piece of water rather than get on it — and both sides of it are load-bearing.
-/// Too low and it goes back to crossing Route 21's islands and Cinnabar's harbour a mount at a time.
-/// Too high and it walks the long way round a lake that Surf crosses in three tiles, which is slower
-/// in exactly the way this is meant to avoid.
 const SURF_MOUNT_COST: u32 = 10;
 
-/// The answer to one `solve_boulder_push_tracking` question, and everything that answer depends on.
-///
-/// ⭐ **The whole reason this type exists is that `actions()` runs on every 20 ms agent tick.** A
-/// boulder floor emits one goal row per target, and each row's existence is a capped BFS over
-/// boulder *layouts* — so the menu was paying `boulders x targets` searches fifty times a second to
-/// re-derive an answer that only changes when a boulder actually moves. Measured on the committed
-/// fixtures: **11.4 ms per `actions()` call on Seafoam B3F and 3.1 ms on Victory Road 1F, against
-/// 82 us on a map with no boulders.** A tick is 20 ms of *game* time and costs about 0.4 ms of wall
-/// clock to emulate, so 11.4 ms of menu-building dropped the whole agent from ~48x real time to
-/// **1.9x**; the coverage walk of 2026-09-07 spent 73 minutes of wall clock to buy 2.3 game-hours
-/// of a 24-hour budget and stopped with the frontier wide open.
-///
-/// ⚠️ **Every field is something the search actually reads, and nothing here is a hash.** A hashed
-/// key would trade a wrong plan for a few bytes, and a wrong plan is a boulder shoved somewhere
-/// nobody asked for; the comparison on a hit is a few hundred bytes and it is exact.
+/// The answer to one `solve_boulder_push_tracking` question, and everything that answer depends
+/// on.
 #[derive(PartialEq, Eq, Hash)]
 struct PlanKey {
     /// Covers `raw_tile_ids` and `tile_pair_collisions`, which `pair_blocked` and
     /// `boulder_push_terrain_refusal` read and which are fixed for a given map.
-    ///
-    /// ⚠️ **The assumption is that a raw tile can only change under a `MetaTile` that changes with
-    /// it.** It holds for the one thing on these floors that does change — a Strength barrier
-    /// opening turns an `Obstacle` into an `Empty`, which `walkable` below sees.
     map: Map,
     /// Two bits per tile, in reading order: may the player stand here, may a boulder land here.
-    /// Derived from `meta_tiles` through exactly the `floor` and `dest_floor` predicates the search
-    /// uses, so an overlay the agent paints on (`cut_tiles`, `turned_back_tiles`) invalidates the
-    /// entry and a change the search cannot see does not.
     walkable: Vec<u64>,
-    /// The visible boulders, in the search's own canonical order (`tracked` first when there is one).
+    /// The visible boulders, in the search's own canonical order (`tracked` first when there is
+    /// one).
     layout: Vec<Point8>,
-    /// ⭐ **The player's *component*, not their square** — the lowest tile they can reach with this
-    /// layout as walls. This is the field that makes the cache work at all: the player moves every
-    /// tick and the region they are standing in almost never does, and the search itself already
-    /// keys its states this way (`norm(&reach(..))`), so collapsing them here loses nothing.
+    /// The player's *component*, not their square — the lowest tile they can reach with this
+    /// layout as walls.
     component: Point8,
     tracked: Option<Point8>,
     target: Point8,
 }
 
 thread_local! {
-    /// ⚠️ **Thread-local rather than a field on `MetaTileMap`, because the map is rebuilt from RAM
-    /// every tick** (`agent::observe_state` re-reads it and then paints its overlays on), so a
-    /// cache living on the struct would be thrown away before it was ever read a second time.
-    ///
-    /// Cleared wholesale rather than evicted one at a time: entries are only interesting while the
-    /// player is on the floor they describe, a floor contributes a couple of dozen, and the cost of
-    /// being wrong about which to keep is one search.
     static PLAN_CACHE: std::cell::RefCell<std::collections::HashMap<PlanKey, Option<Vec<(Point8, JoypadButton)>>>>
         = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-/// Entries kept before the cache is emptied. A boulder floor with four boulders and two targets
-/// contributes about a dozen per distinct layout, and a puzzle is a few dozen layouts.
+/// Entries kept before the cache is emptied.
 const PLAN_CACHE_CAP: usize = 4_096;
 
-/// Every `(map, landing)` a warp tile in `tiles` leads to. Two staircases into the same map at
-/// different landings are two targets; see [`MetaTileMap::warp_targets`].
+/// Every `(map, landing)` a warp tile in `tiles` leads to.
 fn warp_targets_of(tiles: &[MetaTile]) -> HashSet<(Map, Point8)> {
     tiles.iter()
         .filter_map(|t| if let MetaTile::Warp { to_map, to_position } = t { Some((*to_map, *to_position)) } else { None })
         .collect()
 }
 
-/// Every adjacent map `tiles` touches, by land or by water. Water connections (a surfable map edge)
-/// are crossings too — surfacing them is what lets `actions()` produce a route to surf across.
+/// Every adjacent map `tiles` touches, by land or by water.
 fn connection_targets_of(tiles: &[MetaTile]) -> HashSet<Map> {
     tiles.iter()
         .filter_map(|t| match t {
@@ -427,13 +264,7 @@ impl MetaTileMap {
         let dimensions = map.metadata.dimensions();
         let width  = dimensions.full_width();
         let height = dimensions.full_height();
-        // Clamp to valid tile coordinates. During map transitions wXCoord/wYCoord can
-        // briefly hold values outside the new map's bounds; adding connection-strip
-        // offsets can make them worse. Clamping prevents out-of-bounds tile accesses.
-        //
-        // ⚠️ **The clamp stays and `position_settled` is how the lie it tells is caught.** It is a
-        // bounds guard on `meta_tiles` indexing and removing it is an out-of-range panic; what it
-        // cannot do is say that the number it produced is a fiction. See the field's own note.
+        // Clamp to valid tile coordinates.
         let unclamped_x = map.player_position.x as usize + dimensions.west_extra;
         let unclamped_y = map.player_position.y as usize + dimensions.north_extra;
         let px = unclamped_x.min(width.saturating_sub(1)) as u8;
@@ -496,8 +327,6 @@ impl MetaTileMap {
     }
 
     /// A direction to an `Empty` (freely walkable, not pair-blocked) neighbour of `pos`, if any.
-    /// Used to step off a warp tile the player is standing on so it can be re-triggered by
-    /// stepping back on.
     fn walkable_neighbor_dir(&self, pos: Point8) -> Option<JoypadButton> {
         let neighbors = [
             (JoypadButton::Down,  Point8 { x: pos.x,                 y: pos.y.wrapping_add(1) }),
@@ -517,12 +346,6 @@ impl MetaTileMap {
     /// True if the player may not step between meta-tiles `a` and `b` because their bottom-left
     /// raw tile IDs form a forbidden pair in this tileset. The check is symmetric, matching
     /// `CheckForTilePairCollisions`.
-    ///
-    /// Which table applies depends on whether water is involved, exactly as in pokered: moving on
-    /// foot uses `TilePairCollisionsLand` (`CollisionCheckOnLand`), while getting on the water
-    /// (`UsedSurf`), stepping back off it, and every move made while surfing
-    /// (`CollisionCheckOnWater`) use `TilePairCollisionsWater`. So if either end of this edge is a
-    /// water tile, the water table governs it.
     pub(crate) fn pair_blocked(&self, a: Point8, b: Point8) -> bool {
         let is_water = |p: Point8| matches!(
             self.meta_tiles[p.x as usize + p.y as usize * self.width],
@@ -544,10 +367,10 @@ impl MetaTileMap {
         self.meta_tiles[point.x as usize + point.y as usize * self.width]
     }
 
-    /// True if the warp on `point` is the kind that fires the moment you **step onto** it
+    /// True if the warp on `point` is the kind that fires the moment you step onto it
     /// (`CheckWarpsNoCollision`), rather than the map-edge kind that needs the outward direction
-    /// pressed. See [`crate::pokemon::map_header::TileSetId::warp_tile_ids`] for why the two cannot be
-    /// told apart by position.
+    /// pressed. See [`crate::pokemon::map_header::TileSetId::warp_tile_ids`] for why the two
+    /// cannot be told apart by position.
     pub fn is_step_on_warp(&self, point: Point8) -> bool {
         let index = point.x as usize + point.y as usize * self.width;
         self.raw_tile_ids.get(index)
@@ -563,8 +386,7 @@ impl MetaTileMap {
         }
     }
 
-    /// Follow the arrow-tile chain from `pos` to the tile the forced slide finally rests on. Returns
-    /// `pos` unchanged if it isn't an arrow tile. Bounded against pathological cycles.
+    /// Follow the arrow-tile chain from `pos` to the tile the forced slide finally rests on.
     fn resolve_spinner(&self, pos: Point8) -> Point8 {
         let mut cur = pos;
         for _ in 0..64 {
@@ -576,19 +398,12 @@ impl MetaTileMap {
         cur
     }
 
-
     pub fn player_tile(&self) -> MetaTile {
         self.tile_at(self.player_position)
     }
 
-    /// Returns every warp and connection tile that is reachable by BFS from the player
-    /// position, together with its expanded-coordinate position in the map.
-    ///
-    /// Unlike [`actions`], this does **not** deduplicate by destination map — multiple
-    /// warp tiles leading to different entry points of the same destination map are all
-    /// returned.  This is required by the world-graph builder, which must discover every
-    /// reachable (source_tile, destination) pair so it does not miss cave sections that
-    /// are only accessible via "non-nearest" warps.
+    /// Returns every warp and connection tile that is reachable by BFS from the player position,
+    /// together with its expanded-coordinate position in the map.
     pub fn all_reachable_warps_and_connections(&self) -> Vec<(Point8, MetaTile)> {
         let (dist, _) = self.bfs_from_player();
         self.meta_tiles
@@ -604,31 +419,19 @@ impl MetaTileMap {
             .collect()
     }
 
-    /// The set of tiles reachable from the player (debug/diagnostic aid for maze mapping).
-    /// Every tile the player can **route to** from where they are standing.
-    ///
-    /// ⚠️ **Not the tiles they can stand on.** This is the key set of [`Self::bfs_from_player`],
-    /// which records every neighbour of an open square and only declines to *expand* the ones that
-    /// cannot be walked through — because a route has to be allowed to end at a door, a counter, a
-    /// cut tree or a person, none of which the player ever occupies. So a wall touching open floor
-    /// is in here, and the only things missing are tiles walled in on every side.
-    ///
-    /// A caller that wants "where can I actually go" has to subtract the walls itself; see
-    /// [`crate::llm::map_image`]'s `draw_unreachable`, which shipped the picture of the mistake.
+    /// The set of tiles reachable from the player (debug/diagnostic aid for maze mapping). Every
+    /// tile the player can route to from where they are standing.
     pub fn reachable_tiles(&self) -> std::collections::HashSet<Point8> {
         self.bfs_from_player().0.into_keys().collect()
     }
 
-    /// A wander action to the farthest reachable WALKABLE tile: walking (or Surfing) there triggers a
-    /// per-step encounter on a cave/water map that has no grass and no reachable cave object to pace toward
-    /// (e.g. entering Seafoam in a pocket away from the boulders). Only Empty/Grass/Water destinations are
-    /// considered — never a Warp/Connection tile (stepping onto one would leave the map). `None` if the only
-    /// reachable tile is the player's own.
+    /// A wander action to the farthest reachable WALKABLE tile: walking (or Surfing) there
+    /// triggers a per-step encounter on a cave/water map that has no grass and no reachable cave
+    /// object to pace toward (e.g. entering Seafoam in a pocket away from the boulders). Only
+    /// Empty/Grass/Water destinations are considered — never a Warp/Connection tile (stepping
+    /// onto one would leave the map).
     pub fn wander_action(&self) -> Option<crate::pokemon::actions::OverworldAction> {
-        // ⚠️ **Steps, not the price `bfs_from_player` reports.** This wants the tile that takes the
-        // most *walking* to reach, because walking is what rolls for an encounter; measured on the
-        // price, every water tile would gain [`SURF_MOUNT_COST`] and a mixed map would send the
-        // trainee out to sea to pace on the nearest wave instead of walking the floor.
+        // Steps, not the price `bfs_from_player` reports.
         let (_, steps, _) = self.search_from_player();
         let dest = steps.iter()
             .filter(|(p, _)| matches!(
@@ -643,33 +446,17 @@ impl MetaTileMap {
         })
     }
 
-    /// The raw tile id `CheckForCollisionWhenPushingBoulder` refuses a boulder onto **by id**, as a
-    /// special case sitting beside the tileset's own collision list. It is compared regardless of
-    /// tileset, and in the only ones a boulder is ever on — every Strength puzzle in the game is
-    /// Cavern, on Victory Road and in the Seafoam Islands — it is the staircase, which is why the
-    /// refusal calls it one. Stairs are walkable, so nothing else about the tile says no: this is
-    /// the constant that cost a deployed run its Victory Road, at (5, 13) on VictoryRoad1F, one
-    /// square north of the boulder at (5, 14).
+    /// The raw tile id `CheckForCollisionWhenPushingBoulder` refuses a boulder onto by id, as a
+    /// special case sitting beside the tileset's own collision list.
     const BOULDER_STAIRS_TILE: u8 = 0x15;
 
-    /// The two refusals a boulder push gets **that ordinary walking does not**, given the tile the
-    /// player would be standing on and the tile the boulder would be pushed onto: `Some(reason)` if
-    /// the cartridge would refuse.
-    ///
-    /// One implementation with two callers that need different halves of it — `solve_boulder_push`
-    /// wants the yes/no, because it simulates layouts the live map does not have and so cannot ask
-    /// [`Self::boulder_push_refusal`]; the refusal wants the sentence. They must never drift, which
-    /// is the whole reason this is not written out twice.
-    ///
-    /// ⚠️ **The tile pair the cartridge tests is (the player's tile, the destination), which are two
-    /// squares apart.** `CheckForCollisionWhenPushingBoulder` calls `GetTileTwoStepsInFrontOfPlayer`
-    /// — which overwrites `wTileInFrontOfPlayer` with the tile two ahead — and then
-    /// `CheckForTilePairCollisions2`, which compares that against `wTilePlayerStandingOn`. The
-    /// boulder's own tile is never in it. This used to test (boulder, destination), which is a
-    /// different pair on any cliff a boulder is standing on the edge of.
+    /// The two refusals a boulder push gets that ordinary walking does not, given the tile the
+    /// player would be standing on and the tile the boulder would be pushed onto: `Some(reason)`
+    /// if the cartridge would refuse.
     fn boulder_push_terrain_refusal(&self, stand: Point8, dest: Point8) -> Option<String> {
-        // Two rules, two sentences: they are refused at the same moment and are nothing alike, and a
-        // model told "a step up or down" about a staircase will look for a cliff that is not there.
+        // Two rules, two sentences: they are refused at the same moment and are nothing alike,
+        // and a model told "a step up or down" about a staircase will look for a cliff that is
+        // not there.
         if self.raw_tile_ids[dest.x as usize + dest.y as usize * self.width] == Self::BOULDER_STAIRS_TILE {
             return Some(format!(
                 "there are stairs at ({}, {}), and a boulder will not go onto stairs", dest.x, dest.y));
@@ -683,10 +470,6 @@ impl MetaTileMap {
     }
 
     /// Every boulder actually standing on this map, in reading order.
-    ///
-    /// ⚠️ **Visible ones only.** A hidden boulder (Victory Road 2F keeps one until a 3F boulder
-    /// falls through a hole onto it) is not physically there, so naming it in the turn would point
-    /// the model at a square with nothing on it — the same rule `solve_boulder_push` filters on.
     pub fn boulders(&self) -> Vec<Point8> {
         let mut found: Vec<Point8> = self.sprites.iter()
             .filter(|s| s.name.starts_with("Boulder") && !s.hidden)
@@ -695,31 +478,8 @@ impl MetaTileMap {
         found
     }
 
-    /// Where the player can get to **in order to shove a boulder**, with the step that got them
-    /// there — a flood fill from where they stand, and deliberately not [`Self::bfs_from_player`].
-    ///
-    /// ⚠️ **The routing BFS records a warp tile but never expands *through* one, and Victory Road's
-    /// puzzle cannot be solved without walking over its entrance warps.** VR1F's entrance is
-    /// (8, 17) and (9, 17), plain cave floor `$21` that warps only when a direction is held into the
-    /// map edge — `solve_boulder_push`'s `floor` has counted them as walkable all along, with a
-    /// comment saying that excluding them "was the bug that made VR1F look unsolvable", and it is
-    /// right: excluded, the solver cannot solve that floor from its *starting* layout either.
-    /// `boulder_push_refusal` never learned it. So the planner and the menu disagreed about one
-    /// square, and the deployed run of 2026-09-04 paid for the disagreement: with its boulder on
-    /// (9, 16) the solver's next step was `Up`, pushed from (9, 17) — and the menu, unable to reach
-    /// (9, 17), offered `Down` and nothing else. Down puts the boulder on row 17, the bottom of the
-    /// map, where there is nowhere to stand on the far side and it can never be pushed again. The
-    /// model saw it coming — *"this pushes it DOWN to (9,17), the warp tile — dead. But it's the
-    /// only option"* — and had to take it, because it was.
-    ///
-    /// ⚠️ **A warp is walked over, never *into*.** Two rules keep that honest, and they are the
-    /// reason this can expand through warps where the routing BFS may not. A `StepOn` warp fires on
-    /// arrival whatever direction you came from, so it is not a square anybody can stand on; and a
-    /// `HoldDirection` warp fires on a collision while standing on it, so the one thing that must
-    /// never happen is arriving on one *in the direction that fires it*. Entering VR1F's (8, 17)
-    /// from (8, 16) is a step Down at the bottom edge, which is exactly how that warp is taken —
-    /// `actions()` takes it that way on purpose. Entering the same square from (7, 17) holding Right
-    /// is not, and that is the way round this fill finds.
+    /// Where the player can get to in order to shove a boulder, with the step that got them there
+    /// — a flood fill from where they stand, and deliberately not [`Self::bfs_from_player`].
     fn push_search(&self) -> (std::collections::HashSet<Point8>,
                               HashMap<Point8, (Point8, JoypadButton)>) {
         use std::collections::{HashSet, VecDeque};
@@ -736,12 +496,7 @@ impl MetaTileMap {
             for dir in [JoypadButton::Up, JoypadButton::Down, JoypadButton::Left, JoypadButton::Right] {
                 let Some(next) = self.step(at, dir) else { continue };
                 if !standable(next) || self.pair_blocked(at, next) { continue }
-                // ⚠️ **Only ask a *warp* what fires it.** `warp_trigger` answers for any square —
-                // it is "what would make a warp here go", not "is there one" — and on the bottom row
-                // of a map that is `HoldDirection(Down)` for plain floor and for walls alike. Asked
-                // of every tile, this rule sealed off the whole of VictoryRoad1F's row 17, including
-                // the two ordinary squares at (6, 17) and (7, 17) that are the only way round to the
-                // entrance warps in the first place.
+                // Only ask a *warp* what fires it.
                 if matches!(self.tile_at(next), MetaTile::Warp { .. })
                     && self.warp_trigger(next) == WarpTrigger::HoldDirection(dir) { continue }
                 if seen.insert(next) {
@@ -753,10 +508,11 @@ impl MetaTileMap {
         (seen, came)
     }
 
-    /// The walk to a square a boulder can be shoved from, under [`Self::push_search`]'s rules rather
-    /// than `route_to`'s — which is the same disagreement one layer down: `AgentState::PushingBoulder`
-    /// routed with `route_to`, so even a push the menu offered could have been a walk the driver could
-    /// not make, and it drops to `Idle` without a word when it cannot find one.
+    /// The walk to a square a boulder can be shoved from, under `Self::push_search`'s rules
+    /// rather than `route_to`'s — which is the same disagreement one layer down:
+    /// `AgentState::PushingBoulder` routed with `route_to`, so even a push the menu offered could
+    /// have been a walk the driver could not make, and it drops to `Idle` without a word when it
+    /// cannot find one.
     pub fn route_to_push_tile(&self, dest: Point8) -> Option<Vec<JoypadButton>> {
         let (seen, came) = self.push_search();
         if !seen.contains(&dest) { return None }
@@ -770,21 +526,16 @@ impl MetaTileMap {
         Some(route)
     }
 
-    /// Every one-tile shove on this map the cartridge would actually carry out, as
-    /// `(boulder, direction, the square it is pushed from)`.
-    ///
-    /// ⚠️ **This is `actions()`'s boulder section and it must stay one flood fill.** Nine boulders
-    /// on a Victory Road floor is thirty-six questions, each of which wants to know whether the
-    /// square it would be pushed from can be walked to; `boulder_push_refusal_inner` therefore takes
-    /// the reachable set rather than computing one, and this is where it is computed once. The same
-    /// lesson `nearest_castable_water` cost a whole deployed run of stutter — see its ⚠️.
+    /// Every one-tile shove on this map the cartridge would actually carry out, as `(boulder,
+    /// direction, the square it is pushed from)`.
     pub fn boulder_pushes(&self) -> Vec<(Point8, JoypadButton, Point8)> {
         self.boulder_pushes_within(&self.push_search().0)
     }
 
-    /// [`Self::boulder_pushes`] against a [`Self::push_search`] already run, which is what
-    /// `actions()` calls: it wants the came-from map as well, to build each row's walk, and a second
-    /// flood fill per tick is the cost `nearest_castable_water` learned about the hard way.
+    /// [`Self::boulder_pushes`] against a `Self::push_search` already run, which is what
+    /// `actions()` calls: it wants the came-from map as well, to build each row's walk, and a
+    /// second flood fill per tick is the cost `nearest_castable_water` learned about the hard
+    /// way.
     pub fn boulder_pushes_within(&self, reach: &std::collections::HashSet<Point8>)
         -> Vec<(Point8, JoypadButton, Point8)> {
         let mut pushes = vec![];
@@ -812,21 +563,6 @@ impl MetaTileMap {
 
     /// Why the cartridge would refuse to shove the boulder at `boulder` one tile in `dir`, in a
     /// sentence the model can act on — or `None` if it would move.
-    ///
-    /// ⚠️ **A refused push is silent, and silence is a sixty-second stall.** pokered's
-    /// `TryPushingBoulder` answers every one of these by falling into `ResetBoulderPushFlags` and
-    /// returning: no message, no animation, nothing on screen at all. `AgentState::PushingBoulder`
-    /// completes only when the boulder leaves its tile, so it holds the direction until
-    /// `agent::DRIVER_ESCAPE_SILENCE` and reports "got no answer from the game for
-    /// 60s", which reads as a malfunction — the same mistake `teach_refusal` and
-    /// `item_use::field_use_refusal` were written to stop making. The deployed run of 2026-09-02
-    /// filed five issue reports about it against the one boulder at (5, 14) on VictoryRoad1F, whose
-    /// north neighbour is a staircase, and got no further into Victory Road.
-    ///
-    /// Every rule is a conjunct, so the order is only about which sentence comes back first: the
-    /// destination has to be on the map, then clear of every other sprite and passable in this
-    /// tileset, then neither of [`Self::boulder_push_terrain_refusal`]'s two, and finally the tile
-    /// the shove happens from has to be walkable to.
     pub fn boulder_push_refusal(&self, boulder: Point8, dir: JoypadButton) -> Option<String> {
         let name = self.sprites.iter()
             .find(|s| s.name.starts_with("Boulder") && !s.hidden && s.position == boulder)
@@ -837,27 +573,19 @@ impl MetaTileMap {
                  on this map.", boulder.x, boulder.y));
         };
         // One flood fill for all four directions: the "and these do work" clause asks about three
-        // more pushes, and each of them needs to know whether the tile it would be shoved from can
-        // be walked to. ⚠️ [`Self::push_search`], never `reachable_tiles` — the difference is a
-        // whole floor of Victory Road; see that function.
+        // more pushes, and each of them needs to know whether the tile it would be shoved from
+        // can be walked to.
         let reach = self.push_search().0;
         let refused = |why: String| {
-            // ⚠️ **Naming the directions that do work is the half that matters.** A bare "no" leaves
-            // a model with four squares to guess between and nothing said about which, and the last
-            // one it tried is the one it reads back on its next request; a run that is told "east or
-            // west" pushes east. `teach_refusal` names who *can* take the move for the same reason.
+            // Naming the directions that do work is the half that matters.
             let ways: Vec<&str> = [(JoypadButton::Up, "up"), (JoypadButton::Down, "down"),
                                    (JoypadButton::Left, "left"), (JoypadButton::Right, "right")]
                 .into_iter()
                 .filter(|(d, _)| *d != dir && self.boulder_push_refusal_inner(boulder, *d, &reach).is_none())
                 .map(|(_, w)| w).collect();
             let rest = match ways.as_slice() {
-                // ⚠️ **A boulder with nowhere to go is a *reset*, not a dead end, and saying only
-                // the first half is how a model decides the game is broken.** Gen 1 keeps nothing
-                // about where a boulder has been shoved to: the sprites come off the map's own
-                // object data every time `LoadMapData` runs, so walking out and back undoes every
-                // push on the floor. `endgame::leaving_a_map_puts_its_boulders_back` is the proof,
-                // taken on the save state of the run that needed to be told this.
+                // A boulder with nowhere to go is a *reset*, not a dead end, and saying only the
+                // first half is how a model decides the game is broken.
                 [] => "It cannot be pushed any way at all from where it is standing. Leaving this \
                        map and coming back puts every boulder on it back where it started, which is \
                        the way to undo a push that went wrong.".to_string(),
@@ -876,15 +604,14 @@ impl MetaTileMap {
         let Some(dest) = self.step(boulder, dir) else {
             return Some(format!("the edge of {} is there", self.map));
         };
-        // The tile the player has to stand on to shove it, one square the other way. If that is off
-        // the map there is nowhere to push from and the shove can never happen.
+        // The tile the player has to stand on to shove it, one square the other way.
         let Some(stand) = self.step(boulder, opposite_dir(dir)) else {
             return Some(format!("there is nowhere to stand on the far side, at the edge of {}", self.map));
         };
         match self.tile_at(dest) {
             // A hole is a legitimate destination — Victory Road 3F and Seafoam B3F are solved by
-            // dropping a boulder through one — so a warp tile is passable here where it is not for
-            // `dest_floor`'s ordinary floor.
+            // dropping a boulder through one — so a warp tile is passable here where it is not
+            // for `dest_floor`'s ordinary floor.
             MetaTile::Empty | MetaTile::Grass | MetaTile::Warp { .. } => {}
             MetaTile::Sprite(who) => return Some(format!("{who} is standing in the way at ({}, {})", dest.x, dest.y)),
             other => return Some(format!("({}, {}) is {other}", dest.x, dest.y)),
@@ -892,31 +619,10 @@ impl MetaTileMap {
         if let Some(refusal) = self.boulder_push_terrain_refusal(stand, dest) {
             return Some(refusal);
         }
-        // ⚠️ **Not one of the cartridge's checks, and it has to be here anyway.** A shove happens by
-        // walking into the boulder, so a push tile the player cannot get to is a push that can never
-        // be attempted — `AgentState::PushingBoulder` finds no route, drops to `Idle` without a
-        // word, and the policy asks for the identical push again. It is also the difference between
-        // a boulder that is merely awkward and one that is *stuck*, which on a Strength puzzle is
-        // the whole answer: on VictoryRoad1F a boulder shoved north into the alcove at (5, 14) seals
-        // the only way to the tile it would have to be pushed back from.
-        //
-        // ⚠️ **Two questions, and asking only the second one let the bug straight through.**
-        // [`Self::reachable_tiles`] is the key set of `bfs_from_player`, which records every
-        // *neighbour* of an open square and declines only to expand the ones that cannot be walked
-        // through — its own doc comment says so — because a route has to be allowed to end at a
-        // door, a counter or a person. So a wall touching floor is in it, and `reach.contains` alone
-        // says yes to standing inside the wall. A deployed run was offered, and accepted, a push
-        // left on a boulder whose right-hand neighbour was solid rock: there was nowhere to stand,
-        // the shove was never attempted, and the silence was the sixty seconds this whole function
-        // exists to avoid. The tile has to be one the player can *occupy* first, which is the same
-        // `floor` predicate `solve_boulder_push` uses (a coordinate warp is floor: VR1F's entrance
-        // warps are plain cave floor and a boulder is legitimately pushed past them).
+        // Not one of the cartridge's checks, and it has to be here anyway.
         match self.tile_at(stand) {
             MetaTile::Empty | MetaTile::Grass => {}
-            // ⚠️ **A warp entry is floor unless it fires on the step onto it.** Victory Road's
-            // puzzle is unsolvable without standing on its entrance squares, which are plain cave
-            // floor that warps only on a held direction — see [`Self::push_search`]. One that warps
-            // on arrival is a square nobody can be standing on.
+            // A warp entry is floor unless it fires on the step onto it.
             MetaTile::Warp { .. } if self.warp_trigger(stand) != WarpTrigger::StepOn => {}
             MetaTile::Warp { to_map, .. } => return Some(format!(
                 "({}, {}) is the way to {to_map} and you would be taken there the moment you stepped \
@@ -935,56 +641,27 @@ impl MetaTileMap {
         None
     }
 
-    /// Multi-boulder Sokoban: plan a sequence of one-tile pushes that lands *some* boulder on `switch`.
-    /// Each entry is `(boulder_position_before_that_push, push_direction)`; returns `None` if no boulder
-    /// can reach the switch. Boulders are the sprites named "Boulder …".
-    ///
-    /// **All** visible boulders move in a single search, which matters wherever one boulder blocks the
-    /// player's approach to another. Seafoam B3F is the case that forced it: the boulder at (5,14) seals
-    /// the only corridor to (3,14), and (3,14) is the one tile from which the boulder at (3,15) can be
-    /// pushed south into the hole at (3,16). A per-boulder search (each treating the rest as walls)
-    /// declares that floor unsolvable, which is what it did before this was generalised.
-    ///
-    /// The state is `(all boulder positions, the player's connected component)` — the component matters
-    /// because the same layout is a different position depending on which side of a boulder the player is
-    /// stranded on. It is canonicalised by its lexicographically-smallest reachable tile. After a push
-    /// the player stands on the pushed boulder's old tile, so the component is recomputed from there.
-    ///
-    /// Bounded by `MAX_STATES`: BFS over boulder layouts is exponential in the boulder count, and this
-    /// runs every agent tick while a boulder step is active. Hitting the cap returns `None` (an
-    /// unsolvable-looking floor) rather than growing without limit.
+    /// Multi-boulder Sokoban: plan a sequence of one-tile pushes that lands *some* boulder on
+    /// `switch`. Each entry is `(boulder_position_before_that_push, push_direction)`; returns
+    /// `None` if no boulder can reach the switch. Boulders are the sprites named "Boulder …".
     pub fn solve_boulder_push(&self, switch: Point8) -> Option<Vec<(Point8, JoypadButton)>> {
         self.solve_boulder_push_tracking(None, switch)
     }
 
-    /// [`Self::solve_boulder_push`], for **one named boulder** rather than whichever gets there first.
-    ///
-    /// ⭐ **Two boulders and two holes need this, and nothing said so until Seafoam B3F said it.**
-    /// "Get *some* boulder onto this target" is the right question on a floor with one target and
-    /// the wrong one wherever there are several: the scripted route dropped a boulder into the first
-    /// Seafoam hole, the planner having freely chosen which, and the second hole was then
-    /// unreachable by the one left — a complete BFS answering `None` on a floor that was solvable
-    /// ten pushes earlier. The row has to name the boulder or the decision is ambiguous, and it is
-    /// just as ambiguous for a model as for the scripted route.
+    /// [`Self::solve_boulder_push`], for one named boulder rather than whichever gets there
+    /// first.
     pub fn solve_boulder_push_for(&self, boulder: Point8, switch: Point8)
         -> Option<Vec<(Point8, JoypadButton)>> {
         self.solve_boulder_push_tracking(Some(boulder), switch)
     }
 
-    /// ⚠️ **`tracked` is kept at index 0 and only the tail is canonicalised.** The search sorts the
-    /// layout after every push so that two boulders swapping places is one state rather than two —
-    /// which is what keeps it inside `MAX_STATES`, and which throws identity away. Holding one
-    /// boulder out of the sort keeps the state space small for the others and still answers "can
-    /// *this* one get there".
+    /// `tracked` is kept at index 0 and only the tail is canonicalised.
     fn solve_boulder_push_tracking(&self, tracked: Option<Point8>, switch: Point8)
         -> Option<Vec<(Point8, JoypadButton)>> {
         use std::collections::{HashMap, HashSet, VecDeque};
-        /// Layouts explored before giving up. Real floors settle in the low thousands; the cap only
-        /// fires on a pathological map, and keeps the search's memory in the low megabytes.
+        /// Layouts explored before giving up.
         const MAX_STATES: usize = 50_000;
-        // Only *visible* boulders are physically present and pushable. A hidden boulder (e.g. Victory
-        // Road 2F's boulder that stays hidden until a 3F boulder falls through a hole onto it) must be
-        // ignored, or the solver plans pushes of a phantom sprite that can never actually move.
+        // Only *visible* boulders are physically present and pushable.
         let mut boulders: Vec<Point8> = self.sprites.iter()
             .filter(|s| s.name.starts_with("Boulder") && !s.hidden)
             .map(|s| s.position).collect();
@@ -997,9 +674,8 @@ impl MetaTileMap {
             boulders[1..].sort_by_key(|p| (p.y, p.x));
         }
         // `self.tile_at` reports the *live* boulder sprites as occupied, but the solver simulates
-        // boulders moving — so the tile UNDER any boulder's STARTING position must count as floor (the
-        // solver tracks occupancy itself). Without this, a boulder's own starting tile stays a phantom
-        // wall after it has (in simulation) been pushed away.
+        // boulders moving — so the tile UNDER any boulder's STARTING position must count as floor
+        // (the solver tracks occupancy itself).
         let initial: HashSet<Point8> = boulders.iter().copied().collect();
         let dirs = [(0i32, -1i32, JoypadButton::Up), (0, 1, JoypadButton::Down),
                     (-1, 0, JoypadButton::Left), (1, 0, JoypadButton::Right)];
@@ -1008,23 +684,17 @@ impl MetaTileMap {
             let (x, y) = (p.x as i32 + dx, p.y as i32 + dy);
             inb(x, y).then(|| Point8 { x: x as u8, y: y as u8 })
         };
-        // A tile the player may STAND ON to push a boulder: ordinary floor, and also inter-map warp
-        // tiles. The player can legitimately stand on a coordinate-warp (e.g. Victory Road 1F's entrance
-        // warps at (8,17)/(9,17), plain cave floor $21) and push a boulder past it — the warp only fires
-        // when moving *onto* it toward the warp, not when pushing up into a boulder (VR1F is Cavern, so
-        // `ExtraWarpCheck` = `IsWarpTileInFrontOfPlayer`, and the tile in front when pushing is not a
-        // warp tile). Excluding warps here was the bug that made VR1F look unsolvable.
+        // A tile the player may STAND ON to push a boulder: ordinary floor, and also inter-map
+        // warp tiles.
         let floor = |p: Point8| initial.contains(&p)
             || matches!(self.tile_at(p), MetaTile::Empty | MetaTile::Grass | MetaTile::Warp { .. });
-        // A tile a BOULDER may be pushed onto: ordinary floor (or a tile vacated by a boulder), or the
-        // explicit `switch` target itself — this lets the caller aim a boulder at a hole tile (a
-        // `MetaTile::Warp`) to drop it to the floor below (Victory Road 3F, Seafoam B3F), which normal
-        // floor rules would reject. Any other warp/ladder is off-limits.
+        // A tile a BOULDER may be pushed onto: ordinary floor (or a tile vacated by a boulder),
+        // or the explicit `switch` target itself — this lets the caller aim a boulder at a hole
+        // tile (a `MetaTile::Warp`) to drop it to the floor below (Victory Road 3F, Seafoam B3F),
+        // which normal floor rules would reject.
         let dest_floor = |p: Point8| p == switch || initial.contains(&p)
             || matches!(self.tile_at(p), MetaTile::Empty | MetaTile::Grass);
-        // Tiles the player can reach from `from` with this layout's boulders as walls. Respects
-        // tile-pair collisions (cave "cliffs") exactly like real player movement — without this,
-        // vacating a boulder could wrongly appear to open a barrier the player can't cross.
+        // Tiles the player can reach from `from` with this layout's boulders as walls.
         let reach = |bs: &[Point8], from: Point8| -> HashSet<Point8> {
             let mut seen = HashSet::from([from]);
             let mut q = VecDeque::from([from]);
@@ -1041,24 +711,7 @@ impl MetaTileMap {
         };
         let norm = |set: &HashSet<Point8>| -> Point8 { *set.iter().min_by_key(|p| (p.y, p.x)).unwrap() };
 
-        // ⭐ **An optimistic pre-filter, because an *unsolvable* pair is what costs the cap.**
-        //
-        // The real search only answers "no" by exhausting `MAX_STATES` layouts, and most pairs on a
-        // floor are hopeless — a boulder in the north-west corner and a hole in the south-east are
-        // not going to meet whatever else happens. Emitting a row per (boulder, target) pair asks
-        // that question `boulders × targets` times on **every 20 ms tick**, which measured at 444 s
-        // for a test that had taken 1.56 s.
-        //
-        // So first ask a much easier question: could this boulder reach the target *if no other
-        // boulder existed and the player could stand wherever it liked*? That is one small BFS over
-        // a single boulder's positions.
-        //
-        // ⚠️ **Admissible, which is the only property that makes it safe.** Every constraint it
-        // drops is one that can only ever *remove* a move, so any real solution is still a path in
-        // this relaxed graph. A `false` therefore means "certainly unsolvable" and can be trusted to
-        // withhold the row; a `true` means "worth the real search" and decides nothing. It can never
-        // withhold a row that was actually takeable, which is the failure mode that matters — a menu
-        // that hides the way on is what made Victory Road unplayable in the first place.
+        // An optimistic pre-filter, because an *unsolvable* pair is what costs the cap.
         let could_possibly_reach = |from: Point8| -> bool {
             let mut seen = HashSet::from([from]);
             let mut q = VecDeque::from([from]);
@@ -1066,9 +719,9 @@ impl MetaTileMap {
                 if b == switch { return true; }
                 for &(dx, dy, _) in &dirs {
                     let (Some(side), Some(dest)) = (mv(b, -dx, -dy), mv(b, dx, dy)) else { continue };
-                    // The player has to be able to *stand* behind it and the boulder has to be able
-                    // to *land* in front: both are properties of the terrain alone, so they hold
-                    // however the other boulders are arranged.
+                    // The player has to be able to *stand* behind it and the boulder has to be
+                    // able to *land* in front: both are properties of the terrain alone, so they
+                    // hold however the other boulders are arranged.
                     if !floor(side) || !dest_floor(dest) { continue }
                     if self.boulder_push_terrain_refusal(side, dest).is_some() { continue }
                     if seen.insert(dest) { q.push_back(dest); }
@@ -1076,11 +729,8 @@ impl MetaTileMap {
             }
             false
         };
-        // ⭐ **Answered from `PLAN_CACHE` when this exact floor has been asked before**, which on a
-        // 20 ms tick loop is almost always. See `PlanKey` for what "exact" has to mean and for the
-        // measurements that made this necessary. The player's starting component is computed here
-        // rather than inside the search because the key needs it either way, and the search is then
-        // seeded from the same flood fill.
+        // Answered from `PLAN_CACHE` when this exact floor has been asked before, which on a 20
+        // ms tick loop is almost always.
         let start_reach = reach(&boulders, self.player_position);
         let key = PlanKey {
             map: self.map,
@@ -1092,12 +742,10 @@ impl MetaTileMap {
         };
         if let Some(hit) = PLAN_CACHE.with(|c| c.borrow().get(&key).cloned()) { return hit }
 
-        // The search proper, in a closure so that both of its exits land in the cache below rather
-        // than each remembering to.
+        // The search proper, in a closure so that both of its exits land in the cache below
+        // rather than each remembering to.
         let search = || {
-        // ⚠️ **Inside the closure, so that a "no" is cached too.** The pre-filter is a BFS per
-        // (boulder, target) pair and most pairs on a floor are hopeless, so an unsolvable pair is
-        // exactly the one that must not be re-answered fifty times a second.
+        // Inside the closure, so that a "no" is cached too.
         match tracked {
             // One named boulder: it alone has to be able to get there.
             Some(t) => if !could_possibly_reach(t) { return None },
@@ -1106,8 +754,8 @@ impl MetaTileMap {
         }
 
         type Key = (Vec<Point8>, Point8);           // (boulder layout, player component)
-        // The component is only known once a state is popped (it needs a flood fill), so dedup happens
-        // at pop time and the queue carries the parent link to record on first arrival.
+        // The component is only known once a state is popped (it needs a flood fill), so dedup
+        // happens at pop time and the queue carries the parent link to record on first arrival.
         let mut visited: HashSet<Key> = HashSet::new();
         let mut came: HashMap<Key, (Key, Point8, JoypadButton)> = HashMap::new();
         let mut q: VecDeque<(Vec<Point8>, Point8, Option<(Key, Point8, JoypadButton)>)> =
@@ -1143,14 +791,13 @@ impl MetaTileMap {
             for (i, &b) in bs.iter().enumerate() {
                 for &(dx, dy, dir) in &dirs {
                     let (Some(side), Some(dest)) = (mv(b, -dx, -dy), mv(b, dx, dy)) else { continue };
-                    // The player must be able to reach the tile behind the boulder, the destination must
-                    // be plain floor, and the two extra refusals pokered
+                    // The player must be able to reach the tile behind the boulder, the
+                    // destination must be plain floor, and the two extra refusals pokered
                     // `CheckForCollisionWhenPushingBoulder` adds — a staircase, and an elevation
                     // boundary — must not apply.
                     if !r.contains(&side) || bs.contains(&dest) || !dest_floor(dest) { continue; }
-                    // ⚠️ **`side`, not `b`** — the cartridge tests the player's tile against the
-                    // destination, and the staircase rule with it. See
-                    // [`Self::boulder_push_terrain_refusal`].
+                    // `side`, not `b` — the cartridge tests the player's tile against the
+                    // destination, and the staircase rule with it.
                     if self.boulder_push_terrain_refusal(side, dest).is_some() { continue; }
                     let mut next = bs.clone();
                     next[i] = dest;
@@ -1179,11 +826,6 @@ impl MetaTileMap {
     }
 
     /// Two bits per tile in reading order: may the player stand here, may a boulder land here.
-    ///
-    /// ⚠️ **Exactly the `floor` and `dest_floor` predicates `solve_boulder_push_tracking` uses,
-    /// minus their boulder-layout term**, which [`PlanKey`] carries separately. Anything else about
-    /// `meta_tiles` is invisible to the search, so leaving it out is what lets a plan survive an NPC
-    /// two rooms away taking a step.
     fn walkable_bits(&self) -> &[u64] {
         self.walkable_cache.get_or_init(|| {
         let mut bits = vec![0u64; (self.width * self.height * 2).div_ceil(64)];
@@ -1202,9 +844,10 @@ impl MetaTileMap {
         })
     }
 
-    /// The shortest walking route (button sequence) from the player to an arbitrary reachable tile,
-    /// or `None` if unreachable. Used to position the player next to a boulder before a Strength push
-    /// (the standard `actions()` routes only target *typed* tiles, not arbitrary floor positions).
+    /// The shortest walking route (button sequence) from the player to an arbitrary reachable
+    /// tile, or `None` if unreachable. Used to position the player next to a boulder before a
+    /// Strength push (the standard `actions()` routes only target *typed* tiles, not arbitrary
+    /// floor positions).
     pub fn route_to(&self, dest: Point8) -> Option<Vec<JoypadButton>> {
         let (dist, came_from) = self.bfs_from_player();
         if !dist.contains_key(&dest) { return None; }
@@ -1218,33 +861,14 @@ impl MetaTileMap {
         Some(route)
     }
 
-    /// One [`Self::bfs_from_player`], for a caller that is about to ask
-    /// [`Self::route_to_face_within`] about many targets. See that method for why the loop must not
-    /// run its own search per target.
+    /// One `Self::bfs_from_player`, for a caller that is about to ask
+    /// [`Self::route_to_face_within`] about many targets. See that method for why the loop must
+    /// not run its own search per target.
     pub fn search_for_faces(&self) -> (HashMap<Point8, u32>, HashMap<Point8, (Point8, JoypadButton)>) {
         self.bfs_from_player()
     }
 
     /// Search from `player_position` outward.
-    ///
-    /// Returns `(dist, came_from)` where `dist[p]` is the cheapest way to reach `p` and
-    /// `came_from[p]` is the `(previous_position, direction)` before it on that route.
-    ///
-    /// ⚠️ **`dist` is a *price*, not a step count, and the only thing that is not free is getting on
-    /// the water.** Every ordinary step costs 1; a step from land onto `Water` or `ConnectionWater`
-    /// costs [`SURF_MOUNT_COST`] more, because the agent has to stop and drive
-    /// START→POKéMON→mon→SURF before it can take it. Callers that ask "which of these is nearest"
-    /// (`actions`, `crossings`, `connection_action`, `route_to_face_dir`) all want that price rather
-    /// than a step count — a land bridge two steps further off beats a river seam — so they read this
-    /// unchanged. [`Self::wander_action`] is the one caller that genuinely means *steps*, and it takes
-    /// them from [`Self::search_from_player`]'s third map instead.
-    ///
-    /// ⚠️ **A bucket queue, so a map with no water routes exactly as it did under the plain BFS this
-    /// replaced.** Bucket *n* holds the frontier at price *n* and is drained FIFO, so when every edge
-    /// costs 1 the buckets are the BFS layers and the order within one is the BFS queue order — and
-    /// `came_from` is written on first discovery in both. That property is the whole reason for the
-    /// bucket queue over a binary heap, whose tie-breaking would quietly re-shape every route on every
-    /// map in the game.
     fn bfs_from_player(&self) -> (HashMap<Point8, u32>, HashMap<Point8, (Point8, JoypadButton)>) {
         let (dist, _, came_from) = self.search_from_player();
         (dist, came_from)
@@ -1262,16 +886,13 @@ impl MetaTileMap {
         let mut settled: HashSet<Point8> = HashSet::new();
         let mut buckets: Vec<VecDeque<Point8>> = vec![VecDeque::new()];
 
-        // If the player is standing on an arrow tile (mid-slide), the forced movement will carry them
-        // to its rest destination — start the search from there.
+        // If the player is standing on an arrow tile (mid-slide), the forced movement will carry
+        // them to its rest destination — start the search from there.
         let start = self.resolve_spinner(self.player_position);
         dist.insert(start, 0);
         steps.insert(start, 0);
         buckets[0].push_back(start);
 
-        // Record the edge into `to` if it is the cheapest way there so far, and say whether it was.
-        // A terminal tile (a door, a wall, a person) goes through this too — it is a place a route may
-        // *end* — and the caller then declines to queue it.
         macro_rules! relax {
             ($from:expr, $to:expr, $dir:expr, $edge:expr) => {{
                 let price = dist[&$from] + $edge;
@@ -1284,8 +905,9 @@ impl MetaTileMap {
             }};
         }
 
-        // Buckets are grown on demand: the highest price any tile can carry is one step per square
-        // plus one mount per land→water boundary crossed, which is bounded but not worth computing.
+        // Buckets are grown on demand: the highest price any tile can carry is one step per
+        // square plus one mount per land→water boundary crossed, which is bounded but not worth
+        // computing.
         fn push(buckets: &mut Vec<VecDeque<Point8>>, price: u32, p: Point8) {
             let i = price as usize;
             if buckets.len() <= i { buckets.resize(i + 1, VecDeque::new()); }
@@ -1295,8 +917,8 @@ impl MetaTileMap {
         let mut bucket = 0usize;
         while bucket < buckets.len() {
             while let Some(pos) = buckets[bucket].pop_front() {
-                // A stale copy: this tile was queued at this price and then found more cheaply, or it
-                // has already been expanded. Either way there is nothing left to do with it.
+                // A stale copy: this tile was queued at this price and then found more cheaply,
+                // or it has already been expanded.
                 if dist[&pos] != bucket as u32 || !settled.insert(pos) { continue; }
                 let neighbors = [
                     (JoypadButton::Up,    Point8 { x: pos.x,                    y: pos.y.wrapping_sub(1) }),
@@ -1308,24 +930,8 @@ impl MetaTileMap {
                 for (dir, nb) in neighbors {
                     if nb.x as usize >= self.width || nb.y as usize >= self.height { continue; }
 
-                    // Intra-map teleporter (the Saffron Gym warp maze): stepping onto `nb` warps the
-                    // player to `to_position` on *this same map*. Like a spinner, the player never stops
-                    // on the pad — record an edge from `pos` (press `dir`) → the landing tile and continue
-                    // the search from there, so routes cross the maze automatically. Routes are recomputed
-                    // each tick, so after the warp the follower simply re-plans from the new room. (Regular
-                    // inter-map warps stay terminal — handled in the `else` branch below.)
-                    //
-                    // ⚠️ **Tested *before* the `settled` guard, and that ordering is the whole of
-                    // Saffron Gym.** For every other tile, a settled neighbour has nothing left to
-                    // teach: it has been expanded and its own price is final. A pad is different,
-                    // because the node the edge leads to is not the pad but its landing — so skipping
-                    // a settled pad throws away the only way out of the room. The case that made it
-                    // matter is the pad the player is **standing on**: it is settled at price 0 as
-                    // the search's own root, so the coverage walk of 2026-09-09 stood on Saffron
-                    // Gym's (1, 5) — whose landing is the centre room, the only way to Sabrina — and
-                    // read back that there was no route to her, to the Gym Guide, or to the door
-                    // out. Every room in that gym is entered by exactly one pad, so one skipped edge
-                    // takes a ninth of the map away.
+                    // Intra-map teleporter (the Saffron Gym warp maze): stepping onto `nb` warps
+                    // the player to `to_position` on *this same map*.
                     if let MetaTile::Warp { to_map, to_position }
                         = self.meta_tiles[nb.x as usize + nb.y as usize * self.width]
                         && to_map == self.map
@@ -1335,20 +941,15 @@ impl MetaTileMap {
                         {
                             push(&mut buckets, dist[&to_position], to_position);
                         }
-                        // ⚠️ **The pad itself is deliberately *not* relaxed**, so it never gets a
-                        // `dist` entry of its own and never becomes a place a route may end. It is
-                        // one square with two meanings — "step on it and be taken away" and "be put
-                        // here by its partner" — and one `Point8` key cannot hold both prices. See
-                        // `actions()`'s `pad_approach`, which prices a pad row by the square you step
-                        // onto it *from* rather than by the pad.
+                        // The pad itself is deliberately *not* relaxed, so it never gets a `dist`
+                        // entry of its own and never becomes a place a route may end.
                         continue;
                     }
 
                     if settled.contains(&nb) { continue; }
 
-                    // Arrow (spinner) tile: stepping onto `nb` hands control to the game, which slides the
-                    // player to a fixed destination. Record an edge from `pos` (press `dir`) → that
-                    // destination; the player never stops on the arrow itself.
+                    // Arrow (spinner) tile: stepping onto `nb` hands control to the game, which
+                    // slides the player to a fixed destination.
                     if self.spinners.contains_key(&nb) {
                         let dest = self.resolve_spinner(nb);
                         if relax!(pos, dest, dir, 1) { push(&mut buckets, dist[&dest], dest); }
@@ -1358,9 +959,8 @@ impl MetaTileMap {
                     let tile = &self.meta_tiles[nb.x as usize + nb.y as usize * self.width];
 
                     if let MetaTile::Jump(jump_dir) = tile {
-                        // The player never stands on a Jump tile — they either jump over it
-                        // (one button press, two tiles of movement) or are blocked.
-                        // Jump tiles are never added to `dist`; only the landing position is.
+                        // The player never stands on a Jump tile — they either jump over it (one
+                        // button press, two tiles of movement) or are blocked.
                         let can_jump = matches!((dir, jump_dir),
                             (JoypadButton::Down,  JumpDirection::South) |
                             (JoypadButton::Left,  JumpDirection::West)  |
@@ -1369,11 +969,7 @@ impl MetaTileMap {
                         if can_jump {
                             if let Some(landing) = step_one(nb, dir, self.width, self.height) {
                                 let landing_tile = &self.meta_tiles[landing.x as usize + landing.y as usize * self.width];
-                                // Only record the landing if the player can actually stand on it. A
-                                // blocked landing means the ledge is not traversable from here — recording
-                                // it anyway would both invent a phantom route step (the agent presses the
-                                // jump direction into an immovable ledge forever) and mark the tile as
-                                // visited, hiding any genuine path that reaches it another way.
+                                // Only record the landing if the player can actually stand on it.
                                 let landing_blocked = matches!(landing_tile,
                                     MetaTile::Obstacle | MetaTile::Sprite(_) | MetaTile::Water |
                                     MetaTile::ConnectionWater(_) | MetaTile::Jump(_)
@@ -1385,41 +981,24 @@ impl MetaTileMap {
                         }
                     } else {
                         // Elevation boundary: the player cannot step between certain tile pairs
-                        // even though both are passable (e.g. Cavern $20↔$05). Skip this edge so
-                        // `nb` may still be reached from a non-blocked neighbour.
+                        // even though both are passable (e.g. Cavern $20↔$05).
                         if self.pair_blocked(pos, nb) { continue; }
                         // Getting ON the water is refused from certain shore tiles (Seafoam B4F's
-                        // (7,11), where the current is "much too fast"). One-way — coming ashore there
-                        // is fine — so only skip the land → water direction.
+                        // (7,11), where the current is "much too fast").
                         if self.no_surf_mount.contains(&pos)
                             && matches!(tile, MetaTile::Water | MetaTile::ConnectionWater(_))
                             && !matches!(here, MetaTile::Water | MetaTile::ConnectionWater(_))
                         {
                             continue;
                         }
-                        // ⚠️ **Getting on the water is the one step that is not one step.** Walking
-                        // from land onto water means stopping to drive START→POKéMON→mon→SURF, which is
-                        // about [`SURF_MOUNT_COST`] walking steps of game time, plus the encounter roll on
-                        // the auto-step the mount ends with. Priced at 1, the search took every water
-                        // short cut it was offered and paid a mount for it: the deployed run of
-                        // 2026-09-03 crossed Route 21 straight up x = 7, which runs over the two little
-                        // islands at y = 25/26, so it dismounted onto sand and remounted twice for a
-                        // detour of *two tiles* — and each remount, before `Surfing::resume`, also threw
-                        // the walk away and cost a request. Water→water and water→land stay at 1: coming
-                        // ashore is free, and a player already surfing pays nothing to carry on.
+                        // Getting on the water is the one step that is not one step.
                         let mounting = !matches!(here, MetaTile::Water | MetaTile::ConnectionWater(_))
                             && matches!(tile, MetaTile::Water | MetaTile::ConnectionWater(_));
                         let edge = if mounting { 1 + SURF_MOUNT_COST } else { 1 };
                         if !relax!(pos, nb, dir, edge) { continue; }
-                        // Warp and Connection tiles are terminal: the player can reach one but cannot
-                        // walk *through* it, because stepping onto it fires the transition. Not
-                        // queueing them keeps routes to a specific warp from crossing (and triggering)
-                        // a different warp/connection en route.
-                        //
-                        // Water is normally terminal too — but when the player can Surf, plain `Water`
-                        // becomes a pass-through node so routes can cross it (the agent mounts Surf at the
-                        // land→water boundary). `ConnectionWater` stays terminal: stepping onto it while
-                        // surfing crosses to the connected map (a crossing target, like `Connection`).
+                        // Warp and Connection tiles are terminal: the player can reach one but
+                        // cannot walk *through* it, because stepping onto it fires the
+                        // transition.
                         if self.is_pass_through(*tile) {
                             push(&mut buckets, dist[&nb], nb);
                         }
@@ -1431,14 +1010,8 @@ impl MetaTileMap {
         (dist, steps, came_from)
     }
 
-    /// True if the player can stand on this tile **and walk on from it** — the predicate
+    /// True if the player can stand on this tile and walk on from it — the predicate
     /// [`Self::bfs_from_player`] queues a relaxed neighbour on.
-    ///
-    /// The complement is a *terminal*: a wall, a person, a door, a counter. Those are still given a
-    /// `dist` entry, because a route may end at one — the whole of `actions()` is routes that end at
-    /// terminals — they are simply never expanded from. Water is the one that moves between the two
-    /// lists: it is a wall on foot and a corridor with Surf up.
-    ///
     fn is_pass_through(&self, tile: MetaTile) -> bool {
         let surfable_water = self.can_surf && matches!(tile, MetaTile::Water);
         surfable_water || !matches!(tile,
@@ -1447,53 +1020,22 @@ impl MetaTileMap {
             | MetaTile::Warp { .. } | MetaTile::Connection { .. })
     }
 
-    /// Fixed PC-tile coordinates on this map — see [`pc_locations_for`]. `actions()` emits a
-    /// face-and-A route to each.
+    /// Fixed PC-tile coordinates on this map — see [`pc_locations_for`].
     fn pc_locations(&self) -> &'static [Point8] {
         pc_locations_for(self.map)
     }
 
     /// Does this map draw tall grass anywhere, reachable or not?
-    ///
-    /// ⚠️ **"Has grass" and "has encounters" are different questions and confusing them loops the
-    /// grind for ever.** A cave has `has_grass_encounters` true and no `MetaTile::Grass` at all,
-    /// because pokered points `wGrassTile` at the cave floor and every step rolls; a route has both.
-    /// So a route where no grass is *reachable* is a map the trainee cannot be levelled on, while a
-    /// cave with no grass is the ordinary case — and only this tells them apart.
     pub fn has_grass_tiles(&self) -> bool {
         self.meta_tiles.iter().any(|tile| *tile == MetaTile::Grass)
     }
 
-    /// Fixed hidden-object sites on this map — see [`hidden_objects_for`]. `actions()` emits a row
-    /// per reachable one, the same way it does for a PC.
+    /// Fixed hidden-object sites on this map — see [`hidden_objects_for`].
     fn hidden_objects(&self) -> &'static [HiddenObjectSite] {
         hidden_objects_for(self.map)
     }
 
     /// Every row this map offers, from where the player is standing.
-    ///
-    /// ⚠️ **No rows at all while the player's square is a fiction.** Every row here is a *route*
-    /// from [`Self::player_position`], so a position that is not a position mints a menu of walks
-    /// from nowhere — see [`Self::position_settled`]. On the 255-underflow tick that came out empty
-    /// anyway, because the BFS from the far edge of the map reaches nothing; on the map-load tick it
-    /// did not, because the stale coordinate is an ordinary-looking square well inside the new map's
-    /// walls, and the coverage walk of 2026-09-09 was offered three rows on the far side of the
-    /// Safari Zone's pond and failed on the first of them.
-    ///
-    /// An empty menu is a case the turn already handles: `llm::prompt` answers it with "nothing —
-    /// the agent can reach no action from here, `wait` and look again", which is exactly true for
-    /// the tick it is said on.
-    ///
-    /// ⚰️ **Holding the agent's turn instead was tried and reverted, and the reason is worth
-    /// keeping.** Not polling the policy at all while
-    /// [`map_header_is_loaded`](crate::pokemon::map_metadata::map_header_is_loaded) is false is
-    /// tidier — no wasted request, not even an empty one — and it is what `blackout_in_flight`
-    /// does one state over. But a black-out is a rare event and this is **every door in the game**:
-    /// the window is 26 ticks on an ordinary warp, and deferring the poll by that much re-rolled
-    /// the wild encounter in `postgame::items::can_use_the_stat_items_and_a_poke_doll_in_battle`
-    /// from a Pidgey to a Rattata, whose Tail Whip held the Defense stage the leg asserts on at
-    /// neutral. `full_playthrough` is the same replay over a whole game. The rows are what was
-    /// wrong; the timing was not.
     pub fn actions(&self) -> Vec<OverworldAction> {
         if !self.position_settled {
             return vec![];
@@ -1504,10 +1046,7 @@ impl MetaTileMap {
         let reconstruct = |dest: Point8, came_from: &HashMap<Point8, (Point8, JoypadButton)>| -> Vec<JoypadButton> {
             let mut route = vec![];
             let mut pos = dest;
-            // Walk back to the BFS root (the node with no predecessor). The root is normally the
-            // player's position, but when the player is mid-slide on an arrow tile the BFS is rooted
-            // at the slide's rest destination instead — so stop on the first node without a
-            // `came_from` entry rather than testing against `player_position`.
+            // Walk back to the BFS root (the node with no predecessor).
             while let Some(&(prev, dir)) = came_from.get(&pos) {
                 route.push(dir);
                 pos = prev;
@@ -1537,46 +1076,12 @@ impl MetaTileMap {
         let mut actions = vec![];
 
         for (warp_to_map, warp_to_pos) in &self.warp_targets {
-            // ⚠️ **A teleport pad whose landing is underfoot is not a row.** There is nothing to go
-            // to, and the agent's arrival test for an intra-map warp is `player_position ==
-            // to_position` — so offering it would report a walk that never happened. Every landing
-            // in Saffron Gym is itself a pad, so a player standing on one always has exactly one of
-            // these to withhold.
-            //
-            // ⚰️ **Pricing a pad by the square you step onto it *from* was written here and taken
-            // out again.** It reads better than what the BFS does — a pad has no `dist` entry of its
-            // own, only its landing does, so the route to a pad is "be teleported onto it" and then
-            // the `route.is_empty()` arm below re-fires it with a step off and back. But no map in
-            // the game needs it: all three that carry intra-map warps (`SaffronGym` 30,
-            // `SilphCo3F` 2, `SilphCo8F` 2) pair their pads one-to-one, so every pad is some pad's
-            // landing and is in `dist` already. A second pricing path that nothing can reach is a
-            // second pricing path that nothing can test.
+            // A teleport pad whose landing is underfoot is not a row.
             if *warp_to_map == self.map && self.player_position == *warp_to_pos { continue }
 
             let Some((tile, dest)) = nearest(&|t| matches!(t, MetaTile::Warp { to_map, to_position }
                 if to_map == warp_to_map && to_position == warp_to_pos)) else { continue };
-            // ⚠️ **W5 — a warp entry the cartridge will not open is worse than no row.** See
-            // [`Self::warp_trigger`]: Route 8's east gate has two entries and only one of them is a
-            // way in, and Silph Co 1F carries one that pokered's own source labels
-            // `; inaccessible` — plain floor, no warp tile, nothing to press. Offering one costs
-            // sixty seconds of holding a direction at a wall; the coverage walk of 2026-09-09 spent
-            // exactly that on Silph Co 1F in all three of the regions that reach it.
-            //
-            // ⚰️ **This used to drop a dud only when another warp on the map led to the same
-            // place**, on the argument that `warp_trigger` is a transcription and a false negative
-            // in it would take away the only door out of somewhere. That was the right caution and
-            // it was hiding a real false negative: what the guard was actually protecting was
-            // **Pokémon Mansion 3F's three floor holes**, the only way onto 1F's right side and so
-            // to the Secret Key. They are `FACILITY $11`, which is in the cartridge's *other*
-            // step-on table (`TileSetId::warp_pad_and_hole_tile_ids`) and not the one this model
-            // read. Naming that table moved them to `StepOn` and left the guard with nothing to
-            // guard: `an_impossible_warp_is_one_the_cartridge_really_will_not_open` walks all 248
-            // maps and pins the whole list at four, every one of them a dud.
-            //
-            // ⚠️ `WarpTrigger::Unknown` is **not** dropped and that distinction is load-bearing.
-            // Cerulean's badge house has a front and a back door, both on the map edge where this
-            // model cannot see the tile in front; an earlier draft called them impossible and left
-            // the house with no exit at all. Unsure is not the same as no.
+            // A warp entry the cartridge will not open is worse than no row.
             let trigger = self.warp_trigger(dest);
             if trigger == WarpTrigger::Impossible { continue }
             let (_, came_from) = best_dist_from(&dest).unwrap();
@@ -1595,61 +1100,16 @@ impl MetaTileMap {
 
             if route.is_empty() {
                 match trigger {
-                    // ⚠️ **Surfing, the held button does nothing, and this is the cartridge's own
-                    // branch rather than a guess.** `home/overworld.asm`'s `.noDirectionChange`
-                    // tests `wWalkBikeSurfState` for `$02` *before* it checks anything: on foot a
-                    // collision on a warp entry runs `ExtraWarpCheck` and `CheckWarpsCollision`,
-                    // while `.surfing` calls `CollisionCheckOnWater` and the very next instruction
-                    // is `jp c, OverworldLoop`. So the only route left is `CheckWarpsNoCollision`,
-                    // which runs on a completed *step*, and for a `HoldDirection` entry the step
-                    // has to be the one `IsPlayerFacingEdgeOfMap` accepts — i.e. in `dir`. Off the
-                    // way you came, then back the way the cartridge wants.
-                    //
-                    // ⭐ Seafoam Islands is the whole of this: `SeafoamIslandsB3F:21,17:Warp` and
-                    // `B4F:21,17` are water at the bottom edge of a current channel, and the
-                    // coverage walk of 2026-09-09 sat on one of them holding Down for 60 s of game
-                    // time. Measured on the dropped state: Down for 120 ticks moves nothing, and
-                    // Up-then-Down warps. The neighbouring `20,17` entry passed every sweep because
-                    // the walk happened to surf *onto* it from above and the arrival fired it.
-                    //
-                    // ⚠️ Unlike the `StepOn` dance below this cannot pick any walkable neighbour:
-                    // the square behind the entry is the only one a step in `dir` can come from. If
-                    // it is not water the entry cannot be fired from the water at all, which is the
-                    // cartridge's rule and not this function's — the row stays, and it stays
-                    // honest, because a `HoldDirection` row that is silently dropped is how a floor
-                    // loses its only way out (see the `ways_to` ⚠️ above).
-                    // ⚠️ **Two different reasons the outward press cannot work, and both end in
-                    // the same step off and step back.** A surfing player never reaches
-                    // `CheckWarpsCollision` at all (the ⚠️ below); a player standing on an entry
-                    // with `BIT_STANDING_ON_WARP` **clear** does reach `.noDirectionChange` and is
-                    // turned away by its `bit BIT_STANDING_ON_WARP` test one instruction earlier.
-                    // The second is how a player who **warped** onto the square got there rather
-                    // than walking onto it, which is every elevator in the game: the Silph Co
-                    // elevator's (1, 3) and (2, 3) are exactly the squares you land on coming in,
-                    // and the coverage walk of 2026-09-10 leaned Down on one for 60 s of game time
-                    // while `wMovementFlags` read `$00` throughout.
-                    //
-                    // Stepping back on is a completed step, which is `CheckWarpsNoCollision`'s own
-                    // path: it sets the bit, `ExtraWarpCheck` passes because the step arrived facing
-                    // outward, and the held direction satisfies the `PAD_CTRL_PAD` test. Measured on
-                    // the walk's dropped state: 60 ticks of Down move nothing, Up then Down warps.
+                    // Surfing, the held button does nothing, and this is the cartridge's own
+                    // branch rather than a guess.
                     WarpTrigger::HoldDirection(dir) if self.surfing || !self.standing_on_warp => {
                         route.push(opposite_dir(dir));
                         route.push(dir);
                     }
-                    // ⚠️ **One held button, not a step off and a step back.** Standing on the entry
-                    // with `BIT_STANDING_ON_WARP` already set, walking into the wall in front is a
-                    // *collision* on a warp tile, which `home/overworld.asm` sends straight to
-                    // `ExtraWarpCheck` and `CheckWarpsCollision`. It needs no room to step into, and
-                    // it survives the route being re-derived every tick — which the step-off dance
-                    // did not, because each tick recomputed a two-step route and only ever pressed
-                    // its head. That is the shuffle a deployed run did for 60 s at the Route 8 gate.
-                    // The surfing arm above does not have that problem: its step back *is* the
-                    // trigger, so the warp fires on arrival and there is no second lap.
+                    // One held button, not a step off and a step back.
                     WarpTrigger::HoldDirection(dir) => route.push(dir),
-                    // A door tile warps on the step onto it and needs no direction, so step off to a
-                    // genuinely walkable neighbour and step back. A real `Empty` neighbour, because
-                    // defaulting to Down can walk into a wall and jam.
+                    // A door tile warps on the step onto it and needs no direction, so step off
+                    // to a genuinely walkable neighbour and step back.
                     WarpTrigger::StepOn | WarpTrigger::Impossible | WarpTrigger::Unknown => {
                         let step_off = self.walkable_neighbor_dir(dest).unwrap_or_else(|| opposite_dir(enter_dir));
                         route.push(step_off);
@@ -1662,8 +1122,7 @@ impl MetaTileMap {
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile, route });
         }
 
-
-        // 2. Routes to sprites (route to an adjacent empty tile, then face the sprite)
+        // 2.
         for sprite in self.sprites.iter().filter(|s| !s.hidden) {
             let sp = sprite.position;
             // Direct adjacent positions (player is one tile from sprite).
@@ -1675,8 +1134,6 @@ impl MetaTileMap {
             ];
             // Counter-mediated positions: if the tile adjacent to the sprite is a Counter
             // (talking-over tile), also add the position one more step further away.
-            // The player stands there, faces the counter, presses A — pokered then looks
-            // through the counter to interact with the sprite behind it.
             let counter_extra: Vec<(PlayerFacingDirection, Point8)> = direct.iter()
                 .filter_map(|(face_dir, adj)| {
                     let ax = adj.x as usize;
@@ -1715,26 +1172,7 @@ impl MetaTileMap {
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Sprite(sprite.name), route });
         }
 
-        // 3. Routes to map connections (nearest reachable connection tile per adjacent map).
-        //    A *specific* landing (e.g. to avoid a dead-end pocket) is requested via
-        //    `connection_action(to_map, to_position)`, kept out of this hot path so the common
-        //    nearest-crossing behaviour — and the whole-game run's timing — is unchanged.
-        //
-        //    ⚠️ **A water crossing is only offered when the player can Surf.** `ConnectionWater` is
-        //    reachable from the shore whether or not anything in the party can mount it — the BFS
-        //    records it as a terminal neighbour — so without Surf the row is a walk to the water's
-        //    edge and a bump into the sea. Same rule as the cut trees below, for the same reason.
-        //    ⭐ **One row per *kind*, not one per map, and the difference is Cerulean Cave.** This
-        //    used to take the nearest crossing of either kind, so wherever a land bridge and a
-        //    surfable edge both lead to the same neighbour the bridge always won and the water was
-        //    unaskable. Route 24 → Cerulean is the case: the footbridge is two steps away, and the
-        //    river seam beside it is the **only** way into the half of Cerulean that holds the cave
-        //    — the Fly landing, the gym and the marts are all east of a lake and a solid wall at
-        //    x=8, the door is west of it, and no land route joins them. Three maps sat `unreached`
-        //    on every sweep in this plan's history for want of this row, and the ROM cross-check
-        //    named it every time: `CeruleanCity (5, 12) → CeruleanCave1F: on the grid, no sibling,
-        //    and never a row`. `Self::water_connection_action` has said so in its own doc comment
-        //    since it was written; what it lacked was a caller in the menu.
+        // 3.
         for to_map in &self.connection_targets {
             let by_land = nearest(&|t| match t {
                 MetaTile::Connection { to_map: m, .. } => m == to_map,
@@ -1763,53 +1201,19 @@ impl MetaTileMap {
             }
         }
 
-        // 4. Walk-in-grass (nearest reachable grass tile).
-        //
-        // ⚠️ **Only where something can actually come out of it.** Every town and city draws real
-        // tall grass and has `wGrassRate == 0`, so this used to offer an action whose entire purpose
-        // — provoke a wild encounter — was impossible to fulfil. Taking it puts the agent into
-        // `PacingForEncounters`, which leaves on a map change or on failing to walk, and a healthy
-        // pace in empty grass is neither: it wedged the deployed run in Pallet Town for eleven
-        // minutes and would have paced there for ever.
+        // 4.
         if self.has_grass_encounters && let Some((_, dest)) = nearest(&|t| *t == MetaTile::Grass) {
             let route = reconstruct(dest, &full_from);
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Grass, route });
         }
 
-        // 6. Fishing — stand on the shore, face the water, cast.
-        //
-        // ⚠️ **Three gates, and each one is a row the game would refuse.** A rod in the bag, because
-        // `FishingInit` needs the item; a tileset in `WaterTilesets`, because the ROM checks that
-        // before it looks at the tile in front and a map that fails it answers every cast with "Not
-        // the time to use that!"; and water with a reachable `Empty` neighbour, because a cast is
-        // made from land. That is the same rule the `CutTree` and `ConnectionWater` rows keep, for
-        // the reason the system prompt gives: an action the cartridge silently declines is worse
-        // than no action, because nothing about the refusal tells the policy to stop asking.
-        //
-        // ⚠️ **One row, not one per shore.** Every other section here emits the nearest of its kind
-        // and this is no different: which puddle is cast into changes nothing, since the fishing
-        // group is per *map*.
-        //
-        // The route ends facing the water and there is no `A`: pressing A at water does nothing, and
-        // the cast is a bag chain the `Fishing` driver owns. The agent picks that driver up when the
-        // walk arrives — see `AgentState::OverworldMovement`'s empty-route arm.
+        // 6.
         if let Some(rod) = self.best_rod
             && crate::pokemon::postgame::fishing::tileset_holds_water(self.tileset)
             && let Some(water) = crate::pokemon::postgame::fishing::nearest_castable_water(self)
         {
-            // ⚠️ **This is [`Self::route_to_face_within`]'s body inlined, and that the two agree is
-            // load-bearing rather than incidental.** `fishing::nearest_castable_water` chose `water`
-            // by asking `route_to_face_within` for a route and keeping only the ones that stay on
-            // land; the shore square that route ends on is whatever this `min_by_key` picks, because
-            // it is the same `bfs_from_player` prices over the same `adj` in the same order, and a
-            // bucket queue's ties break the same way twice. So the walk to a fishing row never has a
-            // water tile under any button but its last.
-            //
-            // ⭐ **And the last button is a *turn*, not a step**, which is the whole of the fishing
-            // silence of 2026-09-09: the agent's Surf-mount arm could not tell one from the other,
-            // mounted on the face, and put the player on the pond it had been sent to cast into. See
-            // `tests::a_fishing_rows_last_button_faces_the_water_rather_than_entering_it` and the
-            // ⚠️ on that arm in `AgentState::OverworldMovement`.
+            // This is [`Self::route_to_face_within`]'s body inlined, and that the two agree is
+            // load-bearing rather than incidental.
             let adj: [(PlayerFacingDirection, Point8); 4] = [
                 (PlayerFacingDirection::Down,  Point8 { x: water.x,                   y: water.y.saturating_sub(1) }),
                 (PlayerFacingDirection::Up,    Point8 { x: water.x,                   y: water.y + 1               }),
@@ -1837,21 +1241,9 @@ impl MetaTileMap {
             }
         }
 
-        // 5. PC tiles (hidden-object interactables): route to the tile below the PC, face up, press A.
-        //    Mirrors the sprite-interaction routing (a PC is not a sprite, so it is keyed by fixed
-        //    coordinate rather than found in the sprite list).
+        // 5.
         for &pc in self.pc_locations() {
-            // **The only usable approach is from directly below, facing up.** Not because of the
-            // `SPRITE_FACING_UP` in the hidden-event table — that argument does not restrict
-            // anything, and the `ANY_FACING` comment in `data/events/hidden_events.asm` says so
-            // explicitly; matching is purely on the tile in front of the player. It is the
-            // *routines* that check: both `OpenPokemonCenterPC` and `BillsHousePC` open with
-            // `ld a, [wSpritePlayerStateData1FacingDirection] / cp SPRITE_FACING_UP / ret nz`.
-            //
-            // That makes a side approach a silent no-op — the object matches and is dispatched, and
-            // the routine returns without drawing anything — so the agent stands there pressing A
-            // forever. Approaching a Pokémon Center PC from the west is *nearer* than from below, so
-            // a plain nearest-adjacent-tile search picks exactly the one that cannot work.
+            // The only usable approach is from directly below, facing up.
             let dest = Point8 { x: pc.x, y: pc.y + 1 };
             if (dest.x as usize) >= self.width || (dest.y as usize) >= self.height { continue }
             if !matches!(self.meta_tiles[dest.x as usize + dest.y as usize * self.width], MetaTile::Empty) { continue }
@@ -1868,22 +1260,12 @@ impl MetaTileMap {
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Pc, route });
         }
 
-        // 5b. Hidden objects — gym bins, vending machines, the Game Corner poster, Mansion statues.
-        //     Routed exactly like a PC because the cartridge dispatches them the same way
-        //     (`CheckForHiddenEvent` on the tile in front of the player), with one difference: a PC
-        //     is only ever approached from below, and these carry the approach the routine behind
-        //     them actually demands. A statue checks `SPRITE_FACING_UP` like the PCs do; a bin and a
-        //     bg-event sign check nothing, so any side that can be reached will do.
-        //
-        //     ⚠️ **Not derived from the tileset, for the same reason `pc_locations_for` is not.** A
-        //     hidden object is drawn as the wall it is hiding in, so nothing in the block map tells
-        //     one from ordinary scenery; the table is transcribed and tested against the
-        //     disassembly.
+        // 5b.
         for (index, site) in self.hidden_objects().iter().enumerate() {
             if site.object == HiddenObject::CellSeparator && !self.bill_cell_separator { continue }
-            // Numbered within this map's table, over the whole table rather than per object kind, so
-            // a bin's ordinal is its `wGymTrashCanIndex` plus one and a row's number never shifts
-            // because something unrelated was added beside it.
+            // Numbered within this map's table, over the whole table rather than per object kind,
+            // so a bin's ordinal is its `wGymTrashCanIndex` plus one and a row's number never
+            // shifts because something unrelated was added beside it.
             let ordinal = index as u8 + 1;
             // Below/above/left/right, each with the button that ends up facing the object.
             let approaches: [(Option<Point8>, JoypadButton, PlayerFacingDirection); 4] = [
@@ -1914,15 +1296,7 @@ impl MetaTileMap {
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Switch { object: site.object, ordinal }, route });
         }
 
-        // 6. Cut trees: route to a walkable tile adjacent to a CutTree and face it (no A), and let
-        //    `AgentState::CuttingTree` do the cut — the row is the whole thing, exactly as a boulder
-        //    row and a fishing row are. One action per reachable-adjacent tree, and each carries the
-        //    tree it is about (`MetaTile::Cut { at }`) rather than sharing one anonymous tile: see
-        //    the ⚠️ on that variant for what the shared one cost.
-        //
-        //    ⚠️ **Only when Cut can actually be used** — see [`Self::can_cut`]. The action ends facing
-        //    a tree and nothing else, so without the move and the badge it is an invitation into a
-        //    party menu with no CUT in it.
+        // 6.
         let cut_trees: Vec<Point8> = match self.can_cut {
             false => Vec::new(),
             true => self.meta_tiles.iter().enumerate()
@@ -1958,89 +1332,26 @@ impl MetaTileMap {
                 destination: dest, tile: MetaTile::Cut { at: tree }, route });
         }
 
-        // 7. Boulder pushes: route to the square a boulder can be shoved from, face it, and let
-        //    `AgentState::PushingBoulder` do the rest — including arming Strength, which is why
-        //    there is no separate row and no separate tool call for that.
-        //
-        //    ⚠️ **Only pushes the cartridge would actually carry out**, which is the whole of
-        //    [`Self::boulder_push_refusal`] asked of all four directions at once. A refused shove is
-        //    refused in *silence*, so a row for one is sixty seconds of holding a direction at a
-        //    boulder that will never move; that is the stall the deployed run of 2026-09-02 filed
-        //    five issue reports about, and offering the refusals as menu rows would be the same bug
-        //    with a nicer interface. The rows that survive are the decisions a player actually has.
-        //
-        //    ⚠️ **And only when Strength can be used at all** — see [`Self::can_strength`], the same
-        //    rule the cut trees above keep.
-        //
-        //    ⚠️ **One flood fill for every boulder on the floor.** `boulder_pushes` computes the
-        //    reachable set once and asks all four directions of every boulder against it; this runs
-        //    on every 20 ms agent tick, and Victory Road 2F has three boulders.
-        //
-        //    The sprite scan comes first because the set below is a copy of the whole reachable
-        //    region, and past the Rainbow Badge `can_strength` is true on every map in the game
-        //    while boulders are on five of them.
+        // 7.
         if self.can_strength && self.sprites.iter().any(|s| !s.hidden && s.name.starts_with("Boulder")) {
-            // ⚠️ **The row's walk comes from [`Self::push_search`] rather than from the BFS above**,
-            // and it has to: the routing BFS will not expand through a warp tile, and the square
-            // Victory Road's puzzle has to be pushed from is one. A row routed the ordinary way
-            // simply did not exist, which left a deployed run holding one push and no way to decline
-            // it. `AgentState::PushingBoulder` re-derives the same walk through
-            // `route_to_push_tile`, so the row and the driver agree.
+            // The row's walk comes from [`Self::push_search`] rather than from the BFS above, and
+            // it has to: the routing BFS will not expand through a warp tile, and the square
+            // Victory Road's puzzle has to be pushed from is one.
             let (reach, came) = self.push_search();
 
-            // ⭐ **The Strength rows name the goal, not the shove: put a boulder on a switch, or
-            // into a hole.** One decision for
-            // the whole Sokoban, planned by `solve_boulder_push` — the same capped BFS the scripted
-            // route has used for the whole game — instead of N paid shoves with a chance to seal the
-            // floor at each one.
-            //
-            // ⚠️ **There is deliberately no per-shove row any more.** `MetaTile::Boulder { at, push }`
-            // emitted one row per legal direction of every boulder — up to a dozen on a Victory Road
-            // floor, none of which says which makes progress. That is the wrong unit of decision and
-            // the record is unambiguous: `llm::prompt` twice tried to explain the puzzle in prose
-            // instead and had to withdraw both attempts, one of them sending a deployed run up from
-            // 2F and straight back down twenty times, while two more filed issue reports asking
-            // whether the switch coordinates were wrong. See `MetaTile::BoulderGoal`.
-            //
-            // ⚠️ **Only where it is solvable from the layout in front of us**, which is what
-            // `solve_boulder_push` returning `Some` means. That is the same rule the cut trees and
-            // the water crossings keep, and on this floor it matters most: a promised row the agent
-            // cannot carry out is exactly what made Victory Road unplayable for three deployed runs.
-            //
-            // ⚠️ **Holes as well as switches.** Seafoam Islands' boulders are pushed into holes to
-            // slow the current and Victory Road 3F drops one through onto the floor below; neither
-            // is a pressure plate, and both are the same decision.
+            // The Strength rows name the goal, not the shove: put a boulder on a switch, or into
+            // a hole.
             let targets = self.strength_switches.iter().map(|at| (*at, false))
                 .chain(self.holes.iter().map(|at| (*at, true)));
-            // ⚠️ **One row per target, not one per (boulder, target) pair — and that is a measured
-            // retreat rather than a preference.** Naming the boulder in the row makes a two-boulder,
-            // two-hole floor unambiguous, which Seafoam B3F needs; enumerating the pairs to find out
-            // which are solvable does not fit here. `actions()` runs on **every 20 ms tick**, an
-            // *unsolvable* pair costs the search's whole `MAX_STATES` cap to establish, and there is
-            // no cheap way to know which pairs those are: an admissible pre-filter has to ignore the
-            // other boulders, which on an open cave floor says "possibly" to nearly everything.
-            // Measured at 444 s for a test that took 1.56 s, and 164 s with the filter.
-            //
-            // So the row still *names* a boulder — the driver commits to it and cannot switch
-            // halfway — but it is the one this plan happens to use rather than every one that could.
+            // One row per target, not one per (boulder, target) pair — and that is a measured
+            // retreat rather than a preference.
             for (at, hole) in targets {
                 // Already done: a boulder is sitting on it, so there is no decision left here.
                 if self.boulders().contains(&at) { continue }
-                // Is this target reachable by *anything*? One search, and the cheap way to withhold
-                // the row on a floor that is genuinely finished.
+                // Is this target reachable by *anything*?
                 if self.solve_boulder_push(at).is_none() { continue }
-                // ⭐ **Then the *nearest* boulder that can actually do it, not whichever the planner
-                // reached for first.** "Get some boulder onto this target" is the wrong question on a
-                // floor with several targets: Seafoam B3F has two holes, and solving the first with
-                // the boulder the second one needed leaves a complete search answering "unsolvable"
-                // on a floor that was fine ten pushes earlier. The scripted route stalled there for
-                // its whole budget.
-                //
-                // ⚠️ **Nearest-first is a heuristic and the cost is why.** Asking which assignment
-                // keeps every other target solvable is the exact per-(boulder, target) enumeration
-                // that measured 444 s against a 1.56 s baseline in a function that runs every 20 ms.
-                // Nearest-first usually succeeds on its first try, so it costs about one extra
-                // search, and on these floors each hole's own boulder is the one beside it.
+                // Then the *nearest* boulder that can actually do it, not whichever the planner
+                // reached for first.
                 let mut candidates = self.boulders();
                 candidates.sort_by_key(|b| (b.x as i32 - at.x as i32).abs() + (b.y as i32 - at.y as i32).abs());
                 let Some((which, plan)) = candidates.into_iter()
@@ -2050,7 +1361,8 @@ impl MetaTileMap {
                 let Some(stand) = self.step(boulder, opposite_dir(push)) else { continue };
                 if !reach.contains(&stand) { continue }
                 // The walk is to the *first* push of the plan; the driver re-plans from there and
-                // keeps going, so this route is what the row promises rather than the whole solution.
+                // keeps going, so this route is what the row promises rather than the whole
+                // solution.
                 let mut route = reconstruct(stand, &came);
                 if route.is_empty() {
                     let facing: JoypadButton = self.player_direction.into();
@@ -2068,29 +1380,9 @@ impl MetaTileMap {
     }
 
     /// What it takes to make the warp entry at `at` actually fire, as the cartridge decides it.
-    ///
-    /// ⚠️ **W5 — a warp entry is not the same thing as a door, and the difference stalled a
-    /// deployed run for a minute of game time at a gate it was standing on.** `home/overworld.asm`
-    /// only warps a player already on a warp entry if one of two things holds:
-    /// `IsPlayerStandingOnDoorTileOrWarpTile`, which is the tile's own id against the tileset's list
-    /// ([`TileSetId::warp_tile_ids`]) and fires with no button at all; or `ExtraWarpCheck`, which
-    /// needs a direction held *and* either the tile in front to be a warp carpet
-    /// ([`TileSetId::warp_carpet_tile_ids`], "function 2") or the player to be at the edge of the
-    /// map facing out ("function 1"). Route 8's two east-gate entries are $2C at (9, 9) and $39 at
-    /// (9, 10); neither is a door tile, the tile west of (9, 10) is a carpet and the tile west of
-    /// (9, 9) is not, so one of the two doors on that gate is a door the game will not open.
-    ///
-    /// ⚠️ **This is a *sufficient* condition for the trigger, not for arriving.** It says nothing
-    /// about whether the player can walk to `at`; that is the BFS's job.
-    ///
-    /// ⚠️ **Nor does it know whether the player is on foot.** `HoldDirection` is the tile's answer,
-    /// and a surfing player cannot use it — the collision path it names is not on the surfing side
-    /// of `home/overworld.asm`'s branch. [`Self::surfing`] carries that, and [`Self::actions`]
-    /// builds the different route.
     pub fn warp_trigger(&self, at: Point8) -> WarpTrigger {
-        // ⭐ **A script that cancels the warp beats every tile test below**, because it runs after
-        // them: the staircase really is a step-on warp and the cartridge really does undo it. See
-        // [`Self::script_cancelled_warps`].
+        // A script that cancels the warp beats every tile test below, because it runs after them:
+        // the staircase really is a step-on warp and the cartridge really does undo it.
         if self.script_cancelled_warps.contains(&at) {
             return WarpTrigger::Impossible;
         }
@@ -2100,14 +1392,14 @@ impl MetaTileMap {
         if self.tileset.warp_tile_ids().contains(&here)
             // …or the other table that does the same job: warp pads and floor holes, read by
             // `IsPlayerStandingOnWarpPadOrHole` rather than by
-            // `IsPlayerStandingOnDoorTileOrWarpTile`. See `TileSetId::warp_pad_and_hole_tile_ids`.
+            // `IsPlayerStandingOnDoorTileOrWarpTile`.
             || self.tileset.warp_pad_and_hole_tile_ids().contains(&here)
         {
             return WarpTrigger::StepOn;
         }
         // `ExtraWarpCheck`'s dispatch, in its own order: SS Anne 3F takes function 1 whatever its
-        // tileset says, four named maps take function 2 whatever theirs says, and only then does the
-        // tileset decide.
+        // tileset says, four named maps take function 2 whatever theirs says, and only then does
+        // the tileset decide.
         let reads_the_tile_in_front = match self.map {
             Map::SSAnne3F => false,
             Map::RocketHideoutB1F | Map::RocketHideoutB2F | Map::RocketHideoutB4F
@@ -2115,8 +1407,7 @@ impl MetaTileMap {
             _ => self.tileset.warp_check_reads_the_tile_in_front(),
         };
         if !reads_the_tile_in_front {
-            // `IsPlayerFacingEdgeOfMap`: at the edge, facing out. Every map this arm covers is an
-            // interior, which has no connection strips, so the padded grid and the raw one agree.
+            // `IsPlayerFacingEdgeOfMap`: at the edge, facing out.
             let out = if at.y == 0 { Some(PlayerFacingDirection::Up) }
                 else if at.y as usize == self.height.saturating_sub(1) { Some(PlayerFacingDirection::Down) }
                 else if at.x == 0 { Some(PlayerFacingDirection::Left) }
@@ -2151,28 +1442,9 @@ impl MetaTileMap {
         }
     }
 
-    /// True when `row` is missing from [`Self::actions`] **only because somebody is standing in the
-    /// way**: put everybody except the row's own subject back where the map says the floor is, and
+    /// True when `row` is missing from [`Self::actions`] only because somebody is standing in the
+    /// way: put everybody except the row's own subject back where the map says the floor is, and
     /// the row comes back.
-    ///
-    /// ⭐ **"There is no route" and "there is a person on it" are opposite claims and the walk acts
-    /// on them differently.** A route is what people stand on, and Gen 1 fills its one-tile
-    /// corridors with wanderers — so a row can vanish for a second or two and return untouched. The
-    /// sweep of 2026-09-10 scored two defects in `CeladonChiefHouse` alone, a room whose two
-    /// corridors are one tile wide with a Rocket in one and the Chief in the other: it said *"there
-    /// is no route to Sailor"*, then *"there is no route to the warp to CeladonCity"*, and then took
-    /// that same warp on the very next turn. Meanwhile a warp pokered's own table labels
-    /// `; inaccessible` is a real absence and should still say so at once, which is why this is a
-    /// question rather than a bigger number: see [`MAX_ROUTE_BLOCKED_TICKS`] in `agent.rs`.
-    ///
-    /// ⚠️ **The subject stays where they are.** A walk *to* a person is a walk to that person, so
-    /// lifting them off the map would delete the row rather than restore it, and every sprite row
-    /// would answer "yes, blocked" for ever.
-    ///
-    /// ⚠️ **Not `Empty` under them — [`Self::underfoot`]'s actual tile.** A doormat with a shopper
-    /// on it is the case this exists for, and a warp written over with floor is a door the
-    /// counterfactual cannot find either. `warp_targets` and `connection_targets` are derived from
-    /// the tiles, so they are recomputed with them.
     pub fn row_blocked_by_people(&self, row: MetaTile) -> bool {
         let subject = match row {
             MetaTile::Sprite(name) => Some(name),
@@ -2180,11 +1452,7 @@ impl MetaTileMap {
         };
         let lift: Vec<(Point8, MetaTile)> = self.underfoot.iter().copied()
             .filter(|(p, _)| match self.tile_at(*p) {
-                // ⚠️ **A boulder is a sprite and is not a person.** It is standing exactly where it
-                // was left and will still be there in thirty seconds, so a row behind one is a real
-                // absence — buying it the long bound would spend half a minute of a walk's budget
-                // waiting for a rock to move. `Boulder …` is the same name test
-                // `MetaTileMap::actions` uses to decide whether to offer a Strength goal.
+                // A boulder is a sprite and is not a person.
                 MetaTile::Sprite(who) => Some(who) != subject && !who.starts_with("Boulder"),
                 _ => true,
             })
@@ -2193,8 +1461,8 @@ impl MetaTileMap {
             return false;
         }
         let mut cleared = self.clone();
-        // ⚠️ The cache is `walkable_bits`' answer for *this* map, and the whole point here is a
-        // different one. A clone carries it, so it has to go.
+        // The cache is `walkable_bits`' answer for *this* map, and the whole point here is a
+        // different one.
         cleared.walkable_cache = std::cell::OnceCell::new();
         for (at, was) in lift {
             cleared.meta_tiles[at.x as usize + at.y as usize * cleared.width] = was;
@@ -2206,12 +1474,6 @@ impl MetaTileMap {
 
     /// Every distinct way off this map into `to_map`, one [`Crossing`] per run of touching edge
     /// tiles, nearest-reachable first and then in reading order.
-    ///
-    /// ⚠️ **Land crossings only.** A `ConnectionWater` seam has no `to_position` to disambiguate on
-    /// (the game decides where the player surfaces), it is offered by
-    /// [`Self::water_connection_action`] instead, and without Surf it is scenery rather than a way
-    /// out. Counting one here would report a shore as a crossing the player cannot reach, which is
-    /// the false alarm the `Blocked here: Water` line was deleted for.
     pub fn crossings(&self, to_map: Map) -> Vec<Crossing> {
         use std::collections::{HashSet, VecDeque};
         let (dist, _) = self.bfs_from_player();
@@ -2247,8 +1509,7 @@ impl MetaTileMap {
                 }
             }
             // The tile that names the run: the reachable one nearest the player if the run can be
-            // reached at all, otherwise the first in reading order. Naming an unreachable member of
-            // a reachable run would mint an id `connection_action` then declines to route to.
+            // reached at all, otherwise the first in reading order.
             let named = run.iter().copied()
                 .filter(|p| dist.contains_key(p))
                 .min_by_key(|p| (dist[p], p.y, p.x))
@@ -2272,18 +1533,8 @@ impl MetaTileMap {
         crossings
     }
 
-    /// What the region the player can walk in **ends on**: the kinds of impassable tile that touch
+    /// What the region the player can walk in ends on: the kinds of impassable tile that touch
     /// it, commonest first, as noun phrases fit to drop into a sentence.
-    ///
-    /// ⚠️ **Read off the BFS's own key set, which is why it costs nothing.** `reachable_tiles` is
-    /// deliberately the set of squares the search *touched*, walls included — a route has to be
-    /// allowed to end at a door, a counter, a tree or a person — so the impassable members of it are
-    /// exactly the wall of the room, already computed. See that method's ⚠️.
-    ///
-    /// ⚠️ **Plain walls are not reported.** Every region in the game is bounded by scenery, so
-    /// "walls" is true everywhere and answers nothing; what the model can act on is the boundary it
-    /// might get *through* — a tree that Cut clears, a ledge that only goes one way, water that
-    /// needs Surf, somebody standing in the gap.
     pub fn boundary_blockers(&self) -> Vec<&'static str> {
         let mut counts: Vec<(&'static str, usize)> = vec![];
         for at in self.reachable_tiles() {
@@ -2304,11 +1555,12 @@ impl MetaTileMap {
         counts.into_iter().map(|(noun, _)| noun).collect()
     }
 
-    /// Build the action that crosses a connection to `to_map` landing at raw `to_position`, if that
-    /// specific connection tile is reachable. Kept out of `actions()` (which emits only the nearest
-    /// crossing per adjacent map) so `EnterMap { to_position }` can target a particular landing — e.g.
-    /// to avoid a dead-end pocket at the nearest crossing (Route 13→14 row 6) — without bloating the
-    /// per-step action list (which, emitted per-edge, perturbs `route_toward`/grind navigation).
+    /// Build the action that crosses a connection to `to_map` landing at raw `to_position`, if
+    /// that specific connection tile is reachable. Kept out of `actions()` (which emits only the
+    /// nearest crossing per adjacent map) so `EnterMap { to_position }` can target a particular
+    /// landing — e.g. to avoid a dead-end pocket at the nearest crossing (Route 13→14 row 6) —
+    /// without bloating the per-step action list (which, emitted per-edge, perturbs
+    /// `route_toward`/grind navigation).
     pub fn connection_action(&self, to_map: Map, to_position: Point8) -> Option<OverworldAction> {
         let (full_dist, full_from) = self.bfs_from_player();
         let (dest, tile) = self.meta_tiles.iter().enumerate()
@@ -2334,17 +1586,7 @@ impl MetaTileMap {
         Some(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile, route })
     }
 
-    /// The goal row for **one named boulder** onto `at`, built on demand.
-    ///
-    /// ⭐ **`actions()` emits one row per target and this names the boulder**, for the same reason
-    /// `connection_action` exists beside the connection rows: the menu carries the common case and a
-    /// caller that means something more specific asks for it. A hand-tuned route knows which boulder
-    /// it means — Seafoam B3F has two holes and spending the wrong boulder on the first leaves the
-    /// second unreachable — while a model choosing off the menu does not have to care.
-    ///
-    /// ⚠️ **Also what the agent re-derives a walk-in-flight from.** The route is recomputed every
-    /// tick from wherever the player now stands, so a goal that is not the one `actions()` happens to
-    /// emit still has to be findable, exactly as a specific connection landing does.
+    /// The goal row for one named boulder onto `at`, built on demand.
     pub fn boulder_goal_action(&self, boulder: Point8, at: Point8, hole: bool)
         -> Option<OverworldAction> {
         if !self.can_strength { return None }
@@ -2377,17 +1619,8 @@ impl MetaTileMap {
         route
     }
 
-    /// Route to the nearest reachable **water** edge into `to_map` — a `ConnectionWater` tile, crossed
-    /// by Surfing off the map edge.
-    ///
-    /// The companion to [`Self::connection_action`], and needed for the same reason: `actions()` emits
-    /// exactly one crossing per adjacent map, the nearest one, so wherever a land bridge and a water
-    /// edge both lead to the same map the land bridge always wins and the water edge is unaskable.
-    /// Route 24 → Cerulean is the case that motivated it: the footbridge is two steps away, while the
-    /// river seam beside it is the *only* way into the half of Cerulean that holds Cerulean Cave.
-    ///
-    /// `ConnectionWater` carries no landing position (the game decides where you surface), so unlike
-    /// `connection_action` there is nothing to disambiguate on — this returns the nearest such edge.
+    /// Route to the nearest reachable water edge into `to_map` — a `ConnectionWater` tile,
+    /// crossed by Surfing off the map edge.
     pub fn water_connection_action(&self, to_map: Map) -> Option<OverworldAction> {
         let (full_dist, full_from) = self.bfs_from_player();
         let (dest, tile) = self.meta_tiles.iter().enumerate()
@@ -2431,17 +1664,6 @@ impl MetaTileMap {
 
     /// What an `A` press here would actually talk to: the tile in front, or the one *behind* it
     /// when that is a [`MetaTile::Counter`] and a person is standing there.
-    ///
-    /// ⚠️ **Gen 1 talks over a counter** — `wTilesetTalkingOverTiles`, which is what `Counter` is
-    /// read from — and that is how a Pokémon Centre nurse, a mart clerk, a gym receptionist and
-    /// every desk in the game are spoken to. The player is never adjacent to one of them, so
-    /// [`Self::tile_in_front`] answers `Counter` and anything asking "is the thing I walked over
-    /// for what I am now facing" gets `false` for every conversation held across a desk.
-    /// [`Self::actions`] already routes to the far side (its `counter_extra` positions), so the
-    /// two would otherwise disagree about the very interaction one of them set up.
-    ///
-    /// The counter itself is the answer when there is nobody behind it — a desk with no one at it
-    /// is what the player is facing, and nothing else is in play.
     pub fn interaction_in_front(&self) -> Option<(Point8, MetaTile)> {
         let (at, tile) = self.tile_in_front()?;
         if tile != MetaTile::Counter { return Some((at, tile)); }
@@ -2453,44 +1675,22 @@ impl MetaTileMap {
     }
 
     /// Route the player to a walkable (`Empty`) tile adjacent to `target` and turn to face it.
-    /// Returns the button sequence (movement steps + a final turn), which is empty if the player is
-    /// already adjacent and facing. Returns `None` if no walkable tile adjacent to `target` is
-    /// reachable. Unlike `actions()`, this works for a *dynamic* hidden-object tile whose position
-    /// is not known at map-build time (e.g. a gym trash can chosen from RAM).
+    /// Returns the button sequence (movement steps + a final turn), which is empty if the player
+    /// is already adjacent and facing.
     pub fn route_to_face(&self, target: Point8) -> Option<Vec<JoypadButton>> {
         self.route_to_face_dir(target, None)
     }
 
-    /// Like `route_to_face`, but if `required` is `Some(dir)` only the approach that ends with the
-    /// player facing `dir` is considered. Needed for hidden-object switches (Pokémon Mansion statues)
-    /// that only trigger when the player faces them from a specific direction — approaching from any
-    /// other adjacent tile faces the wrong way and pressing A does nothing.
+    /// Like `route_to_face`, but if `required` is `Some(dir)` only the approach that ends with
+    /// the player facing `dir` is considered. Needed for hidden-object switches (Pokémon Mansion
+    /// statues) that only trigger when the player faces them from a specific direction —
+    /// approaching from any other adjacent tile faces the wrong way and pressing A does nothing.
     pub fn route_to_face_dir(&self, target: Point8, required: Option<PlayerFacingDirection>) -> Option<Vec<JoypadButton>> {
         let (dist, came_from) = self.bfs_from_player();
         self.route_to_face_within(&dist, &came_from, target, required)
     }
 
     /// [`Self::route_to_face_dir`] against a search somebody else has already run.
-    ///
-    /// ⚠️ **A `route_to_face` is a whole Dijkstra, so a caller that asks about every tile of a map
-    /// is quadratic in the tile count — and one of them was.** `fishing::nearest_castable_water`
-    /// sweeps the map for the nearest water it can cast at, and called `route_to_face` per water
-    /// tile; `actions()` calls that, and the route follower re-derives `actions()` **every 20 ms
-    /// agent tick**. On Route 23 (369 water tiles) that measured **117 ms per tick against a 20 ms
-    /// budget**, and it was Surf that made it visible, because water is a pass-through node only
-    /// once the party can mount it, which triples what each of those 369 searches has to explore
-    /// (1490 reachable tiles against 551).
-    ///
-    /// ⚠️ **It does not look like slow motion, it looks like a stutter**, which is why it went
-    /// unrecognised as a performance fault. `host.rs` publishes **one video frame per loop
-    /// iteration** and each iteration emulates up to `MAX_CATCHUP` of game time, so an iteration
-    /// that spends 1.5 s of wall clock on twelve of these ticks advances the game a whole 250 ms —
-    /// about one walking step — and shows the viewer nothing in between. Measured on Route 23 at
-    /// 20 % speed: **1.9 s of wall clock per tile, worst 4.2 s**, against 0.28 s of game time.
-    /// The player jumps a tile, the picture sits still for seconds, the player jumps another tile.
-    ///
-    /// Sweeping through this instead is one search for the lot: the same map measures **0.37 ms**
-    /// and 98 % speed. Anything asking about more than one target wants this.
     pub fn route_to_face_within(
         &self,
         dist: &HashMap<Point8, u32>,
@@ -2537,7 +1737,7 @@ impl Display for MetaTileMap {
 
                 if y as u8 == self.player_position.y
                     && x as u8 == self.player_position.x {
-                    // the player
+                    // The player
                     write!(f, "P")?;
                     continue;
                 }
@@ -2556,9 +1756,9 @@ impl Display for MetaTileMap {
                     MetaTile::Counter => write!(f, "=")?,
                     MetaTile::Switch { .. } => write!(f, "s")?,
                     MetaTile::CutTree => write!(f, "t")?,
-                    // Never in `meta_tiles` either — a push, a cut and a Strength goal are actions
-                    // on the ordinary floor beside the thing they are about, which is drawn as
-                    // itself.
+                    // Never in `meta_tiles` either — a push, a cut and a Strength goal are
+                    // actions on the ordinary floor beside the thing they are about, which is
+                    // drawn as itself.
                     MetaTile::Cut { .. } | MetaTile::BoulderGoal { .. } => write!(f, "_")?,
                     MetaTile::Pc      => write!(f, "p")?,
                     MetaTile::Grass   => write!(f, "g")?,
@@ -2587,23 +1787,11 @@ fn step_one(pos: Point8, dir: JoypadButton, width: usize, height: usize) -> Opti
     }
 }
 
-/// Fixed PC-tile coordinates on `map` — hidden events the player faces (from below) and presses A on.
-///
-/// PCs are not derivable from the tileset: a PC is a `hidden_event`, so nothing distinguishes its
-/// tile from the wall it is drawn on. This table is transcribed from pokered
-/// `data/events/hidden_events.asm`, cross-referenced against `HiddenEventMaps` so each event list is
-/// attributed to the right map. That cross-reference is what made it trustworthy when the lists were
-/// labelled by hand and the labels had drifted (`SafariZoneRestHouse2` was really
-/// `SAFARI_ZONE_WEST_REST_HOUSE`, `CinnabarLab4` really `CINNABAR_LAB_FOSSIL_ROOM`); upstream now
-/// keys each list by the map constant itself (`hidden_events_for SAFARI_ZONE_WEST_REST_HOUSE`), so
-/// the labels agree with the cross-reference rather than contradicting it.
-///
-/// Every entry in the file that runs `OpenPokemonCenterPC`, `OpenRedsPC` or `BillsHousePC` is here;
-/// there are 22 of them across 21 maps.
+/// Fixed PC-tile coordinates on `map` — hidden events the player faces (from below) and presses A
+/// on.
 pub fn pc_locations_for(map: Map) -> &'static [Point8] {
     /// The overwhelmingly common case: the PC on the back wall of a Pokémon Center, right of the
-    /// healing counter. The Celadon Hotel and three of the four Safari rest houses reuse the same
-    /// Pokémon-Center layout and so share it.
+    /// healing counter.
     const CENTRE_PC: &[Point8] = &[Point8 { x: 13, y: 3 }];
 
     match map {
@@ -2617,8 +1805,7 @@ pub fn pc_locations_for(map: Map) -> &'static [Point8] {
 
         // Bill's cell-separator PC — used mid-SS-Ticket script (stand at (1,5) facing up + A).
         Map::BillsHouse => &[Point8 { x: 1, y: 4 }],
-        // The player's own bedroom PC. Note this one runs `OpenRedsPC`, whose menu leads with an
-        // ITEM entry the Pokémon-Center PC does not have.
+        // The player's own bedroom PC.
         Map::RedsHouse2F => &[Point8 { x: 0, y: 1 }],
         Map::CeladonMansion2F => &[Point8 { x: 0, y: 5 }],
         Map::IndigoPlateauLobby => &[Point8 { x: 15, y: 7 }],
@@ -2630,24 +1817,16 @@ pub fn pc_locations_for(map: Map) -> &'static [Point8] {
     }
 }
 
-/// One hidden object the player can press A on, and how the cartridge insists on being approached.
+/// One hidden object the player can press A on, and how the cartridge insists on being
+/// approached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HiddenObjectSite {
-    /// The tile the player ends up **facing**, which is the one the ROM matches on. It is never
+    /// The tile the player ends up facing, which is the one the ROM matches on. It is never
     /// walkable: a hidden object is drawn as the wall or the scenery it hides in.
     pub at: Point8,
     pub object: HiddenObject,
-    /// The direction the player must be facing, where the routine behind the object checks. `None`
-    /// means any side that can be reached will do.
-    ///
-    /// ⚠️ **The `SPRITE_FACING_*` argument in `hidden_events.asm` is not this and does not restrict
-    /// anything** — `data/events/hidden_events.asm` says so itself, and matching is purely on the
-    /// tile in front. It is the *routines* that check, so this column is transcribed from the
-    /// handler rather than from the table: `Mansion?Script_Switches` opens
-    /// `cp SPRITE_FACING_UP / ret nz`, and `GymTrashScript` and the bg-event signs open with no such
-    /// test at all. Getting it wrong is silent — a side approach is dispatched and returns without
-    /// drawing anything, so the agent stands there pressing A for ever. That is the same trap
-    /// [`pc_locations_for`] carries.
+    /// The direction the player must be facing, where the routine behind the object checks.
+    /// `None` means any side that can be reached will do.
     pub facing: Option<PlayerFacingDirection>,
 }
 
@@ -2659,27 +1838,6 @@ impl HiddenObjectSite {
 
 /// Every hidden object on `map` that a playthrough has to press, transcribed from pokered's
 /// `data/events/hidden_events.asm` and `data/maps/objects/*.asm`.
-///
-/// ⚠️ **This is a *shortlist*, and the omissions are the design.** The ROM's hidden-object tables
-/// also hold slot machines, town signs, gym statues, the Pokédex rating machine and every hidden
-/// item in the game. A sign is text the turn already puts on screen; a hidden item is invisible by
-/// construction, so a row pointing at one is the game's own secret given away; a slot machine is a
-/// menu with no tool behind it, which is the mistake `MetaTile::Pc` spent a release making. What is
-/// here is what a run **cannot finish without**:
-///
-/// - **Vermilion Gym's fifteen bins.** Two hold the switches that open Lt. Surge's door, and which
-///   two is re-rolled every time the first is found. No Thunder Badge without them.
-/// - **The Celadon Mart roof drink machines.** The Saffron gate guards want a drink and there is
-///   nowhere else in the game to buy one. No Saffron, so no Silph Co and no Marsh Badge.
-/// - **The Game Corner poster.** It is the only way into the Rocket Hideout, so no Silph Scope, no
-///   Pokémon Tower, no Poké Flute and no way past either Snorlax.
-/// - **The Pokémon Mansion statues.** They toggle the gates between the Secret Key and the door, so
-///   no Volcano Badge.
-///
-/// ⚠️ **The coordinates are `(x, y)` even though the macro reads `hidden_event Y, X`.** The
-/// disassembly's own argument order is the opposite of the one every coordinate in this file uses,
-/// and `bg_event 10, 1, …VENDING_MACHINE1` against `DeterministicPolicy`'s proven
-/// `UseVendingMachine { at: (10, 1) }` is what pins which way round it goes.
 pub fn hidden_objects_for(map: Map) -> &'static [HiddenObjectSite] {
     use HiddenObject::{Poster, Statue, TrashCan, VendingMachine};
     const UP: Option<PlayerFacingDirection> = Some(PlayerFacingDirection::Up);
@@ -2726,16 +1884,8 @@ pub fn hidden_objects_for(map: Map) -> &'static [HiddenObjectSite] {
     }
 }
 
-/// The floor panel on `map` and the floors its menu lists, in menu order — `None` for the 245 maps
-/// that are not a lift.
-///
-/// Transcribed from each lift's `*ElevatorWarpMaps` table in pokered `scripts/`, which is the list
-/// `DisplayElevatorFloorMenu` draws, so the index of a map here **is** the cursor row the driver has
-/// to land on.
-///
-/// ⚠️ **A menu index is not a thing to ask a model for.** `FieldMove::UseElevator` takes one because
-/// `DeterministicPolicy` writes routes against a table it can see; a model naming `SilphCo5F` and
-/// having it turned into `4` here cannot be off by one, and does not have to be told the order.
+/// The floor panel on `map` and the floors its menu lists, in menu order — `None` for the 245
+/// maps that are not a lift.
 pub fn elevator_for(map: Map) -> Option<(Point8, &'static [Map])> {
     const ROCKET: &[Map] = &[Map::RocketHideoutB1F, Map::RocketHideoutB2F, Map::RocketHideoutB4F];
     const CELADON: &[Map] = &[
@@ -2748,7 +1898,7 @@ pub fn elevator_for(map: Map) -> Option<(Point8, &'static [Map])> {
         Map::SilphCo11F,
     ];
     match map {
-        // ⚠️ B3F is missing on purpose: the hideout's lift serves three floors and the stairs serve
+        // B3F is missing on purpose: the hideout's lift serves three floors and the stairs serve
         // the fourth, which is the cartridge's arrangement rather than an omission here.
         Map::RocketHideoutElevator => Some((Point8 { x: 1, y: 1 }, ROCKET)),
         Map::CeladonMartElevator   => Some((Point8 { x: 3, y: 0 }, CELADON)),
@@ -2780,9 +1930,7 @@ fn opposite_dir(dir: JoypadButton) -> JoypadButton {
 mod pc_location_tests {
     use super::*;
 
-    /// Every Pokémon Center has a PC, and it is at the same place in all of them. Before task 0.3 of
-    /// the postgame plan, `pc_locations` knew only Bill's house, so the agent could not reach a PC
-    /// anywhere it would actually want one.
+    /// Every Pokémon Center has a PC, and it is at the same place in all of them.
     #[test]
     fn every_pokemon_center_has_a_pc() {
         const CENTRES: &[Map] = &[
@@ -2796,13 +1944,8 @@ mod pc_location_tests {
         }
     }
 
-    /// ⚠️ **The bins have to be the ones the puzzle itself numbers, and a transposed `(x, y)` is the
-    /// failure this catches.** `hidden_events.asm` writes the pair the other way round from every
-    /// coordinate in this file, and both readings land inside Vermilion Gym, so a swap would produce
-    /// fifteen rows that route, walk and press A on the wrong tiles for ever.
-    /// [`trash_can_position`](crate::pokemon::trash_can_position) is derived independently — it is
-    /// what `DeterministicPolicy` turns `wFirstLockTrashCanIndex` into — so agreeing with it is a
-    /// real second opinion rather than the same transcription read twice.
+    /// The bins have to be the ones the puzzle itself numbers, and a transposed `(x, y)` is the
+    /// failure this catches.
     #[test]
     fn the_gym_bins_are_the_ones_the_puzzle_numbers() {
         let bins = hidden_objects_for(Map::VermilionGym);
@@ -2818,11 +1961,7 @@ mod pc_location_tests {
         }
     }
 
-    /// The rest of the table, against the disassembly. ⚠️ **The facing column is the half that fails
-    /// silently**: a statue approached from the side is dispatched and returns without drawing
-    /// anything, so the agent stands there pressing A until `DRIVER_ESCAPE_SILENCE`. Every
-    /// `Mansion?Script_Switches` opens `cp SPRITE_FACING_UP / ret nz`; the bg-event machines and the
-    /// poster open with no such test.
+    /// The rest of the table, against the disassembly.
     #[test]
     fn hidden_objects_are_where_the_disassembly_says() {
         use PlayerFacingDirection::Up;
@@ -2845,13 +1984,14 @@ mod pc_location_tests {
         // Bill's is the same tile `pc_locations_for` names, counted twice on purpose.
         assert_eq!(sites(Map::BillsHouse), vec![(Point8 { x: 1, y: 4 }, HiddenObject::CellSeparator, Some(Up))]);
         assert_eq!(pc_locations_for(Map::BillsHouse), &[Point8 { x: 1, y: 4 }]);
-        // A Pokémon Centre has a PC and no hidden object, which is what keeps the two tables apart.
+        // A Pokémon Centre has a PC and no hidden object, which is what keeps the two tables
+        // apart.
         assert!(hidden_objects_for(Map::CeruleanPokecenter).is_empty());
         assert!(hidden_objects_for(Map::PalletTown).is_empty());
     }
 
     /// The three lifts, and the floors each one's own `*ElevatorWarpMaps` table lists — in order,
-    /// because the index **is** the cursor row `DisplayElevatorFloorMenu` lands on.
+    /// because the index is the cursor row `DisplayElevatorFloorMenu` lands on.
     #[test]
     fn the_lifts_serve_the_floors_the_disassembly_lists() {
         assert_eq!(
@@ -2889,10 +2029,10 @@ mod boulder_solver_tests {
     use super::*;
     use crate::pokemon::sprite::{Sprite, PictureId};
 
-    /// Build a synthetic `MetaTileMap` from ASCII: `#`=wall, `.`=floor, `P`=player, `S`=switch(floor),
-    /// `W`=an inter-map warp tile (walkable — the player may stand on it to push), digits `1..9`=boulders,
-    /// `=`=a counter (for the reach-over-a-desk test below; the solver never meets one).
-    /// Returns the map + the switch position.
+    /// Build a synthetic `MetaTileMap` from ASCII: `#`=wall, `.`=floor, `P`=player,
+    /// `S`=switch(floor), `W`=an inter-map warp tile (walkable — the player may stand on it to
+    /// push), digits `1..9`=boulders, `=`=a counter (for the reach-over-a-desk test below; the
+    /// solver never meets one).
     fn from_ascii(rows: &[&str]) -> (MetaTileMap, Point8) {
         let h = rows.len();
         let w = rows[0].len();
@@ -2955,8 +2095,8 @@ mod boulder_solver_tests {
 
     #[test]
     fn solves_two_push_around_corner() {
-        // Boulder (2,2) → up to (2,1) [player below] → right to (3,1)=switch [player must go AROUND to
-        // (1,1)]. Exercises the player-component completeness of the solver.
+        // Boulder (2,2) → up to (2,1) [player below] → right to (3,1)=switch [player must go
+        // AROUND to (1,1)].
         let (map, switch) = from_ascii(&["#####", "#..S#", "#.1.#", "#P..#", "#####"]);
         let sol = map.solve_boulder_push(switch).expect("should solve the around-corner push");
         assert_eq!(sol.last().unwrap().1, JoypadButton::Right);
@@ -2966,29 +2106,21 @@ mod boulder_solver_tests {
     #[test]
     fn solves_push_while_standing_on_warp() {
         // The VR1F crux in miniature: the switch (2,1) can only be reached by pushing the boulder
-        // (2,2) UP, which requires the player to stand DIRECTLY BELOW it at (2,3) — and that tile is a
-        // warp (like VR1F's entrance warp at (8,17)). The player may legitimately stand on it to push.
-        // Before the fix the solver excluded warp tiles from standable floor and reported no solution.
+        // (2,2) UP, which requires the player to stand DIRECTLY BELOW it at (2,3) — and that tile
+        // is a warp (like VR1F's entrance warp at (8,17)).
         let (map, switch) = from_ascii(&["#####", "#.S.#", "#.1.#", "#PW.#", "#####"]);
         let sol = map.solve_boulder_push(switch).expect("must solve by standing on the warp tile");
         assert_eq!(sol.last().unwrap(), &(Point8 { x: 2, y: 2 }, JoypadButton::Up));
     }
 
-    /// ⭐ **A fishing row's route ends by *facing* the water: the last button is a turn, and no
-    /// button before it steps onto water at all.**
-    ///
-    /// That is the fact `AgentState::OverworldMovement`'s Surf-mount arm has to know. It mounts when
-    /// the next step is onto water, it could not tell this turn from a crossing, and so it mounted on
-    /// the last button of every fishing walk that had to turn to face the shore. The player was put
-    /// on the pond and `FishingInit` then refused the cast for surfing: 35 `Fish` ids reporting
-    /// nothing at all on the 2026-09-09 coverage baseline. The arm now suppresses the mount for a
-    /// `Fish` row outright, which is only sound because of the shape below and because
-    /// `fishing::nearest_castable_water` will not name a shore that has to be surfed to.
+    /// A fishing row's route ends by *facing* the water: the last button is a turn, and no button
+    /// before it steps onto water at all.
     #[test]
     fn a_fishing_rows_last_button_faces_the_water_rather_than_entering_it() {
-        // One puddle with land all round it, the party able to Surf so the search is free to cross,
-        // and the player approaching from a direction that is not the one it will end up facing —
-        // which is what makes the turn a button of its own rather than the last walking step.
+        // One puddle with land all round it, the party able to Surf so the search is free to
+        // cross, and the player approaching from a direction that is not the one it will end up
+        // facing — which is what makes the turn a button of its own rather than the last walking
+        // step.
         let (mut map, _) = from_ascii(&[
             "#######",
             "#....P#",
@@ -3029,17 +2161,13 @@ mod boulder_solver_tests {
             "and the last button is the turn toward the water, not a step into it: {:?}", fish.route);
     }
 
-    /// ⚠️ **A nurse, a clerk and a receptionist are all talked to *over* something.** The route
-    /// `actions()` builds for one stops a tile short and faces the counter, so the plain tile in
-    /// front is `Counter` and never the person — which is what reported every conversation in a
-    /// Pokémon Centre as "✗ gave up on Nurse: it was interrupted".
+    /// A nurse, a clerk and a receptionist are all talked to *over* something.
     #[test]
     fn an_interaction_reaches_over_a_counter() {
         // Player at (2,3), counter at (2,2), the person behind it at (2,1).
         let (mut map, _) = from_ascii(&["#####", "#.1.#", "#.=.#", "#.P.#", "#####"]);
         // `from_ascii` leaves a sprite's own cell walkable, because the boulder solver moves
-        // sprites about and reads them from `sprites`. A map built from the ROM overlays them
-        // (`MapMetadata::meta_tiles`), which is the grid this answers off.
+        // sprites about and reads them from `sprites`.
         map.meta_tiles[2 + map.width] = MetaTile::Sprite("Boulder 1");
 
         map.player_direction = PlayerFacingDirection::Up;
@@ -3069,9 +2197,11 @@ mod boulder_solver_tests {
 
     #[test]
     fn reports_unsolvable() {
-        // Boulder walled so it can only wobble left/right in a 1-wide slot, never reaching the switch.
+        // Boulder walled so it can only wobble left/right in a 1-wide slot, never reaching the
+        // switch.
         let (map, switch) = from_ascii(&["#######", "#.....#", "#.###.#", "#.#1#.#", "#.#.#.#", "#..P.S#", "#######"]);
-        // The boulder at (3,3) sits in a vertical dead-end; the switch (5,5) is unreachable for it.
+        // The boulder at (3,3) sits in a vertical dead-end; the switch (5,5) is unreachable for
+        // it.
         assert!(map.solve_boulder_push(switch).is_none());
     }
 }

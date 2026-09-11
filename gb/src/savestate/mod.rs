@@ -1,69 +1,17 @@
 //! Sectioned save-state container.
-//!
-//! # Wire format
-//!
 //! ```text
 //! "GBST" | u16 container_version (LE) | lz4_prepend_size { section* }
 //!
 //! section := label bytes | 0x00 | u32 payload_len (LE) | payload[payload_len]
 //! payload := u16 section_version (LE) | bincode(value)*
 //! ```
-//!
-//! The point of the labels is tolerance, in both directions:
-//!
-//! * an **unknown label** is skipped — a reader can load a state written by a newer build that
-//!   declares sections it has never heard of;
-//! * a **missing label** is not an error — the component keeps whatever value the machine being
-//!   loaded into already had (in practice `Default`, since you load into a freshly constructed
-//!   machine).
-//!
-//! ## The rules for changing serialised state
-//!
-//! A section's payload is a *sequence* of bincode values, not one blob. That is what makes
-//! growth cheap — the reader stops when it runs out of values, and ignores any it does not
-//! recognise.
-//!
-//! * **Adding a section** — just add it. Free, forever. Old readers skip the label; old files
-//!   simply lack it and the component keeps its current value. This is always available and is
-//!   the least intrusive option.
-//!
-//! * **Adding a field to an existing section** — do **not** add it to the section struct, which
-//!   is positional and frozen once shipped. Append it as an extra *value* and bump that section's
-//!   version constant:
-//!
-//!   ```ignore
-//!   // writing
-//!   writer.write_fields(labels::DMA, DMA_SECTION_VERSION /* now 2 */, |fields| {
-//!       fields.field(&self.state)?;   // v1
-//!       fields.field(&self.pos)        // appended in v2
-//!   })?;
-//!
-//!   // reading
-//!   let Some(mut fields) = reader.section(labels::DMA)? else { return Ok(()) };
-//!   if let Some(state) = fields.field::<Option<LcdDmaState>>()? { self.state = state; }
-//!   if let Some(pos)   = fields.field::<u8>()?                  { self.pos = pos; }
-//!   ```
-//!
-//!   A v1 payload yields `None` for `pos`; a v1 *reader* handed a v2 payload stops after
-//!   `state`. Both directions work, and **no fixture needs regenerating** either way.
-//!
-//! * **Changing a field's type or size** — bump the section version and branch on
-//!   [`FieldReader::version`], or (usually simpler) retire the label and introduce a new one.
-//!
-//! What you must *not* do is change an already-shipped value's shape in place — reorder a section
-//! struct's fields, or change one's type — without bumping the version. bincode is positional and
-//! has no schema migration of any kind.
-//!
-//! Sections reserved for later phases (`cgb`, `sched`, `mbc`) are simply not written yet. An
-//! absent section costs zero bytes, so declaring the taxonomy up front is free.
 
 use std::collections::HashMap;
 
 use bincode::config::Configuration;
 use bincode::{Decode, Encode};
 
-/// Container magic. Chosen so it cannot collide with a pre-container save state, whose first four
-/// bytes were an lz4 uncompressed-length prefix (`"GBST"` would be a 1.4 GB payload).
+/// Container magic.
 const MAGIC: &[u8; 4] = b"GBST";
 
 /// Bumped only if the *container framing* changes — not when a section changes.
@@ -92,12 +40,9 @@ pub mod labels {
     /// Joypad register.
     pub const JOYP: &str = "joyp";
 
-    // --- Reserved. Nothing writes these yet; readers already tolerate them. ---
-    /// Phase B: speed switch, VBK/SVBK, CGB palette RAM, HDMA.
+    // --- Reserved.
     pub const CGB: &str = "cgb";
-    /// Phase C: absolute clock and the event schedule.
     pub const SCHED: &str = "sched";
-    /// Phase D: mapper-specific state and RTC.
     pub const MBC: &str = "mbc";
 }
 
@@ -115,18 +60,13 @@ impl SectionWriter {
         Self { stream: Vec::new() }
     }
 
-    /// Append a single-value section. This is the common case; [`SectionWriter::write_fields`]
-    /// is the general form.
+    /// Append a single-value section. This is the common case; [`SectionWriter::write_fields`] is
+    /// the general form.
     pub fn write<T: Encode>(&mut self, label: &str, version: u16, value: &T) -> Result<(), String> {
         self.write_fields(label, version, |fields| fields.field(value))
     }
 
     /// Append a section whose payload is a *sequence* of independently decoded values.
-    ///
-    /// This is how a field is added to an existing section without invalidating states that
-    /// predate it: emit the original struct as the first value and each later addition as its
-    /// own value, then bump the section version. A reader of an older payload simply runs out of
-    /// values — see [`FieldReader::field`].
     pub fn write_fields<F>(&mut self, label: &str, version: u16, fill: F) -> Result<(), String>
     where
         F: FnOnce(&mut FieldWriter) -> Result<(), String>,
@@ -252,8 +192,7 @@ impl SectionReader {
     }
 
     /// Decode a single-value section. `Ok(None)` means the section is absent, which is not an
-    /// error — the caller should leave its state untouched. Any values appended by a later
-    /// version are ignored, which is what makes this reader forward compatible.
+    /// error — the caller should leave its state untouched.
     pub fn read<T: Decode<()>>(&self, label: &str) -> Result<Option<(u16, T)>, String> {
         let Some(mut fields) = self.section(label)? else {
             return Ok(None);
@@ -297,7 +236,6 @@ impl FieldReader<'_> {
 
     /// Decode the next value. `Ok(None)` means the payload is exhausted — i.e. this state was
     /// written before the field was appended, so the caller should keep its current value:
-    ///
     /// ```ignore
     /// // `pos` was appended in dma section version 2.
     /// if let Some(pos) = fields.field::<u8>()? {
@@ -360,11 +298,10 @@ mod tests {
     }
 
     /// The append path, in both directions: a v2 reader must cope with a v1 payload, and a v1
-    /// reader with a v2 payload. This is the mechanism A7 (and every later field addition)
-    /// depends on, so it is tested rather than assumed.
+    /// reader with a v2 payload.
     #[test]
     fn appended_fields_are_compatible_both_ways() {
-        // v1: one value. v2: the same value plus an appended one.
+        // V1: one value.
         let v1 = {
             let mut w = SectionWriter::new();
             w.write("grow", 1, &probe()).unwrap();
@@ -430,7 +367,7 @@ mod tests {
     fn game_boy_tolerates_extra_and_missing_sections() {
         let mut gb = GameBoy::dmg_hello_world();
         gb.run(MachineCycles::from_m(200_000));
-        // dmg-acid2 never touches high RAM, so give the `hram` section something distinctive to
+        // Dmg-acid2 never touches high RAM, so give the `hram` section something distinctive to
         // carry — otherwise the "missing section" half of this test would be vacuous.
         for (i, address) in (0xFF80u16..=0xFFFE).enumerate() {
             gb.core_mut().mmu_mut().write(address, i as u8 ^ 0xA5);
@@ -446,7 +383,7 @@ mod tests {
         loaded.load_state(&with_extra).expect("extra section must be skipped");
         assert_eq!(gb, loaded);
 
-        // Backward: drop a section entirely. The component keeps the target machine's value.
+        // Backward: drop a section entirely.
         let mut writer = SectionWriter::new();
         gb.write_sections(&mut writer).unwrap();
         let without_hram = strip_section(writer.finish(), labels::HRAM);
@@ -487,14 +424,11 @@ mod tests {
         out
     }
 
-    /// Phase B added a `cgb` section and grew `wram` and `ppu` by appending a field to each. All
-    /// three have to survive a round trip, or a CGB save state silently loses its banking.
     #[test]
     fn a_cgb_machine_round_trips_its_extra_state() {
         let mut gb = GameBoy::cgb(crate::roms::cgb_acid::ROM);
         gb.run(MachineCycles::from_m(400_000));
 
-        // Touch every Phase B register so none of them can round-trip by being at its default.
         for (address, value) in [
             (0xFF70u16, 0x05), // SVBK
             (0xFF4F, 0x01),    // VBK
@@ -528,9 +462,6 @@ mod tests {
         assert_eq!(loaded.core().mmu().read(0xFF4D) & 0x01, 1, "the armed speed switch survives");
     }
 
-    /// The `wram` and `ppu` sections grew by *appending*, so a state written before Phase B must
-    /// still load — with the banks it never had left at zero. `every_committed_fixture_decodes`
-    /// proves the 91 real fixtures do; this proves the mechanism, by synthesising a v1 payload.
     #[test]
     fn a_pre_cgb_state_loads_with_its_missing_banks_zeroed() {
         use crate::mmu::{WRAM_WINDOW, WRAM_SECTION_VERSION};
@@ -539,8 +470,8 @@ mod tests {
         gb.run(MachineCycles::from_m(200_000));
         gb.core_mut().mmu_mut().write(0xD000, 0x5C);
 
-        // Re-emit the container with `wram` written the way a v1 build would have: one value,
-        // the 8 KB window, and nothing after it.
+        // Re-emit the container with `wram` written the way a v1 build would have: one value, the
+        // 8 KB window, and nothing after it.
         let mut writer = SectionWriter::new();
         gb.write_sections(&mut writer).unwrap();
         let full = SectionReader::parse(&writer.finish()).unwrap();
@@ -586,9 +517,7 @@ mod tests {
         out
     }
 
-    /// Every committed fixture must decode with the *current* section layout. This lives in the
-    /// default tier deliberately: it turns a layout break into a two-second failure here rather
-    /// than a baffling `slow-tests` failure an hour later.
+    /// Every committed fixture must decode with the *current* section layout.
     #[test]
     fn every_committed_fixture_decodes() {
         let dir = crate::test_fixtures::fixture_dir();

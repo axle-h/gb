@@ -1,7 +1,3 @@
-//! **W4** — the LLM half of `docs/llm-web-playthrough-plan.md`: an OpenAI-compatible client, the
-//! tool surface it is offered, and the worker thread that turns one decision point into one
-//! completion.
-//!
 //! ```text
 //!   emulator thread                         worker thread (this module)
 //!   ───────────────                         ───────────────────────────
@@ -14,19 +10,6 @@
 //!            ▼
 //!        Decision   ◄──TurnOutcome────────  a terminal tool call ends the turn
 //! ```
-//!
-//! Two rules hold the whole thing up, and both are §7 of the plan:
-//!
-//! 1. **Every turn ends with exactly one terminal tool call.** Enforced by scoping the `tools` array
-//!    to the decision kind being asked ([`tools::for_kind`]), by restating the contract in the system
-//!    prompt *and* in every turn request ([`prompt`]), and by a nudge-then-force fallback in the
-//!    worker.
-//! 2. **A turn is keyed by the decision kind it answers**, and a poll for a different kind cancels
-//!    it. That is what makes it safe for the emulator to keep running while the model thinks: a
-//!    battle decision can never be applied to an overworld state.
-//!
-//! Nothing here is async. The worker is a plain `std::thread` blocking on a channel, and `ureq`
-//! streams the response body through `impl Read`.
 
 pub mod accounting;
 pub mod battle_report;
@@ -50,48 +33,28 @@ pub use config::LlmConfig;
 /// Everything that can go wrong between here and the endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmError {
-    /// A non-2xx response. Carries the status because the retry policy is keyed on it.
+    /// A non-2xx response.
     Http { status: u16, message: String },
     /// The connection, DNS, TLS, or a body that stopped arriving mid-stream.
     Transport(String),
     /// The endpoint accepted the request and did not answer inside `GB_REQUEST_TIMEOUT_SECS`.
-    ///
-    /// ⚠️ **Deliberately not a [`Self::Transport`], and deliberately not retryable.** The two look
-    /// alike and are opposites: a connection that never opened consumed no work at the far end, so
-    /// another attempt is free; a request that was *accepted* is being worked on, and llama.cpp says
-    /// so when we hang up — "Stopping generation... (If the model is busy processing the prompt, it
-    /// will finish first.)". On an endpoint that serves one request at a time, a retry therefore
-    /// queues **behind the very request it is replacing** and cannot be faster than waiting would
-    /// have been. It can only add a second piece of work nobody is waiting for.
     Timeout(String),
     /// A 429, with the moment the quota reopens when the endpoint said so (Unix milliseconds).
-    ///
-    /// ⚠️ **Its own variant rather than an `Http { status: 429 }`, and for the reason [`Self::Timeout`]
-    /// is not a [`Self::Transport`]**: a rate limit is the one failure where *the retry is itself the
-    /// problem*. Every attempt is another request counted against the very quota that is exhausted,
-    /// so a backoff loop against a daily cap spends four more of an allowance that has already run
-    /// out and fails four more times doing it. What the endpoint hands back instead is a *time*, and
-    /// waiting for it is the only thing that can work.
-    ///
-    /// `resets_at_ms` is `None` when the endpoint rate-limited us without saying when it would stop.
-    /// That case keeps the old behaviour — a short exponential backoff — because a limit with no
-    /// stated reset is far more often a per-minute one than a daily one.
     RateLimited { resets_at_ms: Option<u64>, message: String },
-    /// A 200 whose content was not what the protocol says. Retrying will not help.
+    /// A 200 whose content was not what the protocol says.
     Protocol(String),
-    /// The decision this turn was answering is no longer the question being asked (§7.3).
     Cancelled,
 }
 
 impl LlmError {
-    /// Whether another attempt is worth making. Rate limits and server faults are transient by
-    /// definition; a 400 means the request was wrong and will be wrong again.
+    /// Whether another attempt is worth making.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http { status, .. } => *status == 408 || *status == 429 || *status >= 500,
             Self::Transport(_) => true,
             // Transient by definition — but see `stream_with_retries`, which will not *spend*
-            // attempts on one that carries a reset further away than the backoff could ever reach.
+            // attempts on one that carries a reset further away than the backoff could ever
+            // reach.
             Self::RateLimited { .. } => true,
             // See the variant's own note: the far end still has this request.
             Self::Timeout(_) => false,
@@ -126,25 +89,22 @@ impl std::error::Error for LlmError {}
 mod tests {
     use super::*;
 
-    /// ⚠️ The distinction this whole variant exists for. A connection that never opened and a
-    /// request the endpoint is still working on are both "no answer yet", and treating them the same
-    /// is what turned one slow turn into five abandoned generations queued behind each other on a
-    /// server that runs one at a time.
+    /// The distinction this whole variant exists for.
     #[test]
     fn a_timeout_is_not_retried_but_a_broken_connection_is() {
         assert!(!LlmError::Timeout("no answer".into()).is_retryable());
         assert!(LlmError::Transport("connection refused".into()).is_retryable());
 
-        // The rest of the table is unchanged: rate limits and server faults are transient, a 400 is
-        // the request being wrong and will be wrong again.
+        // The rest of the table is unchanged: rate limits and server faults are transient, a 400
+        // is the request being wrong and will be wrong again.
         assert!(LlmError::Http { status: 429, message: String::new() }.is_retryable());
         assert!(LlmError::Http { status: 503, message: String::new() }.is_retryable());
         assert!(!LlmError::Http { status: 400, message: String::new() }.is_retryable());
         assert!(!LlmError::Cancelled.is_retryable());
     }
 
-    /// The message reaches the operator through a `Notice` and the transcript, so it has to say which
-    /// of the two happened rather than "could not reach the endpoint" for both.
+    /// The message reaches the operator through a `Notice` and the transcript, so it has to say
+    /// which of the two happened rather than "could not reach the endpoint" for both.
     #[test]
     fn a_timeout_says_the_endpoint_took_the_request() {
         let said = format!("{}", LlmError::Timeout("waited 180s".into()));

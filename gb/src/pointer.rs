@@ -66,7 +66,7 @@ impl SubAssign<u16> for DmgPointer {
 
 impl Display for DmgPointer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // print in rgblink format e.g. '00:cd2e'
+        // Print in rgblink format e.g. '00:cd2e'
         write!(f, "{:02}:{:04X}", self.bank.id(), self.address)
     }
 }

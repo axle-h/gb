@@ -8,7 +8,7 @@ impl PokemonString {
     pub const TERMINATOR: u8 = 0x50;
 
     pub fn from_slice(slice: &[u8]) -> Self {
-        // read until terminated
+        // Read until terminated
         let mut vec = Vec::new();
         for &b in slice {
             if b == Self::TERMINATOR {
@@ -21,12 +21,12 @@ impl PokemonString {
     }
 
     pub fn from_string(string: &str) -> Self {
-        // https://bulbapedia.bulbagarden.net/wiki/Character_encoding_(Generation_I)
+        // Https://bulbapedia.bulbagarden.net/wiki/Character_encoding_(Generation_I)
         let graphemes = string.graphemes(true);
         let mut vec = Vec::new();
         for grapheme in graphemes {
             let byte = if grapheme.bytes().count() > 1 {
-                // unicode
+                // Unicode
                 match grapheme {
                     "ァ" => 0xE9,
                     "ゥ" => 0xEA,
@@ -40,7 +40,7 @@ impl PokemonString {
                     _ => 0x00
                 }
             } else {
-                // ascii
+                // Ascii
                 let char = grapheme.bytes().next().unwrap();
                 match char {
                     b'A'..=b'Z' => (char - b'A') + 0x80,
@@ -74,7 +74,7 @@ impl PokemonString {
     }
 
     pub fn to_string(&self, trainer_name: &str, rival_name: &str) -> Result<String, String> {
-        // https://bulbapedia.bulbagarden.net/wiki/Character_encoding_(Generation_I)
+        // Https://bulbapedia.bulbagarden.net/wiki/Character_encoding_(Generation_I)
         let mut utf8 = vec![];
         let mut last_char_empty = false;
         for &byte in self.0.iter() {

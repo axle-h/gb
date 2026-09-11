@@ -18,13 +18,9 @@ impl DMGColor {
         self.to_lcd().to_rgb()
     }
 
-    /// The shade as it reaches the frame buffer on **DMG**. `FF/AA/55/00` is what `gb` has always
+    /// The shade as it reaches the frame buffer on DMG. `FF/AA/55/00` is what `gb` has always
     /// emitted, and it is also the ramp `c-sp/game-boy-test-roms` documents for its reference
     /// screenshots, so every committed PNG depends on these four values exactly.
-    ///
-    /// Note that `0xAA` is **not** expressible as a 5-bit channel widened back to 8
-    /// (`(21 << 3) | (21 >> 2)` is `0xAD`), which is why the frame buffer holds 24-bit colour
-    /// rather than RGB555 — see [`LcdColor`].
     pub const fn to_lcd(self) -> LcdColor {
         match self {
             DMGColor::White => LcdColor::rgb(0xFF, 0xFF, 0xFF),
@@ -36,14 +32,6 @@ impl DMGColor {
 }
 
 /// One frame-buffer pixel: 24-bit colour packed as `0x00RRGGBB`.
-///
-/// B4 widened the frame buffer from a 2-bit DMG shade to this. 24 bits rather than the CGB's
-/// native RGB555 for one reason: DMG's `0xAA` grey has no 5-bit representation, so storing RGB555
-/// would silently shift every existing reference screenshot by three units. Widening at the point
-/// the colour is *chosen* keeps DMG output bit-identical and costs nothing — the buffer is derived
-/// state and is not serialised.
-///
-/// gambatte's output buffer is 32-bit for the same reason (`video.h`, `gambatte::uint_least32_t`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct LcdColor(u32);
 
@@ -56,11 +44,6 @@ impl LcdColor {
 
     /// Widen a CGB `0bBBBBBGGGGGRRRRR` colour to 24 bits by replicating each channel's top bits
     /// into the low ones — `(c << 3) | (c >> 2)`, so `31` maps to `0xFF` and `0` to `0x00`.
-    ///
-    /// This is the plain expansion, **not** a colour-correction curve. It is what `cgb-acid2`'s
-    /// committed reference image uses: its palette resolves to `0x6B/0xBD/0xFF`, `0x9C`, `0x73`
-    /// and `0xAD`, each of which is exactly this formula applied to 13, 23, 31, 19, 14 and 21.
-    /// A corrected curve (gambatte's `gbcToRgb32`) would not match it.
     pub const fn from_rgb555(value: u16) -> Self {
         let r = (value & 0x1F) as u8;
         let g = ((value >> 5) & 0x1F) as u8;

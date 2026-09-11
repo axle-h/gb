@@ -43,24 +43,6 @@ pub struct RegisterSet {
 
 impl RegisterSet {
     /// The register file the boot ROM leaves behind.
-    ///
-    /// `gb` never executes a boot ROM, so this stands in for it. **A game detects the console
-    /// from `A`**: `0x11` means a Game Boy Color, and every CGB-aware cartridge branches on it.
-    ///
-    /// ⚠️ **CGB hardware has two different answers**, and which one applies depends on the
-    /// *cartridge*, not just the console. A CGB running a DMG-only cartridge takes the boot ROM's
-    /// `EmulateDMG` path, which overwrites `DE` and `L` on its way out and loads the title
-    /// checksum into `B` — so compatibility mode does **not** share the CGB register file. Getting
-    /// this wrong is invisible in practice (few games read these before setting them) and was
-    /// shipped wrong once already; see the tests below, which pin both.
-    ///
-    /// Sources, in agreement: SameBoy's `cgb_boot.asm` traced through `Preboot`/`EmulateDMG`, and
-    /// Pan Docs' "Power-Up Sequence" CPU-register table, itself confirmed against mooneye's
-    /// `misc/boot_regs-cgb`. Note that **gambatte is wrong here** — `initstate.cpp:1174-1181` uses
-    /// the DMG values for CGB with only `A` and `B` changed — so it is not the reference for this.
-    ///
-    /// The **DMG** values are hardware's as of B11 — see [`RegisterSet::dmg`], whose `F` depends on
-    /// the cartridge header and is *not* the flat `0xB0` most sources claim.
     pub fn boot(color_mode: crate::model::ColorMode, cart: &[u8]) -> Self {
         use crate::model::ColorMode;
         match color_mode {
@@ -81,11 +63,7 @@ impl RegisterSet {
             ColorMode::CgbCompat => {
                 let b = crate::boot_palette::compatibility_b_register(cart);
                 // `EmulateDMG` ends with `ld de, 8` / `ld l, $7C`, and the shared final block
-                // leaves `H` equal to `C`, which is zero — so HL is 0x007C. The exception is the
-                // two cartridges whose palette entry carries SameBoy's `$80` flag ("needs the DMG
-                // boot tilemap"): loading that tilemap leaves HL pointing into VRAM instead. Those
-                // are exactly the entries with title checksum 0x43 and 0x58, both unambiguous, so
-                // testing B is equivalent and is how Pan Docs states the rule.
+                // leaves `H` equal to `C`, which is zero — so HL is 0x007C.
                 let hl: u16 = if b == 0x43 || b == 0x58 { 0x991A } else { 0x007C };
                 Self {
                     a: 0x11,
@@ -103,25 +81,7 @@ impl RegisterSet {
         }
     }
 
-    /// **B11.** The DMG boot ROM's final register block.
-    ///
-    /// ⚠️ **`F` is a function of the cartridge header, and almost every source states it wrong.**
-    /// The boot ROM's last flag-affecting instruction is `add a, [hl]` against the stored header
-    /// checksum at `0x14D`, and it locks up unless the 8-bit result is zero — so:
-    ///
-    /// | `rom[0x14D]` | `F` | of 256 |
-    /// |---|---|---|
-    /// | `0x00` | `0x80` | 1 |
-    /// | non-zero multiple of `0x10` | **`0x90`** | 15 |
-    /// | anything else | `0xB0` | 240 |
-    ///
-    /// ⚠️ **Pan Docs claims `H` and `C` are either both clear or both set.** That is wrong for the
-    /// middle row: `C` is set iff the checksum is non-zero, `H` iff its *low nibble* is — different
-    /// questions. ⚠️ **Gambatte hardcodes `0xB0`** (`initstate.cpp:1179`) and models none of this.
-    ///
-    /// ⭐ `pokered`'s checksum is `0x20`, so Pokémon Red — the cartridge this whole project runs —
-    /// is one of the fifteen and boots with **`F = 0x90`**. `cpu_instrs` (`0x3B`), `dmg-acid2`
-    /// (`0x9F`), `cgb-acid2` (`0xEB`) and `tetris` (`0x0A`) all want `0xB0`.
+    /// B11. The DMG boot ROM's final register block.
     pub fn dmg(cart: &[u8]) -> Self {
         let checksum = cart.get(0x014D).copied().unwrap_or(0);
         Self {
@@ -251,8 +211,7 @@ mod tests {
         assert_eq!(registers.h, 0x01);
     }
 
-    /// **B11.** `F` follows header byte `0x14D`, in three cases — and the middle one is the one
-    /// Pan Docs gets wrong, because `H` tests the low nibble while `C` tests the whole byte.
+    /// B11.
     #[test]
     fn the_boot_flags_follow_the_header_checksum() {
         fn flags_for(checksum: u8) -> u8 {
@@ -332,14 +291,7 @@ mod tests {
         assert_eq!(registers.hl(), 0x0000); // Should wrap around to 0x0000
     }
 
-    /// B9. **A cartridge detects the console from `A`.** `0x11` is a Game Boy Color; anything
-    /// else is not, and a CGB-aware game will take its DMG path.
-    ///
-    /// The rest of the file matters less — few games read `B`/`DE`/`HL` before setting them — but
-    /// it is pinned because **CGB hardware has two answers and the first version of this shipped
-    /// only one of them**, using the CGB-mode file for compatibility mode too. Values from Pan
-    /// Docs' "Power-Up Sequence" table, independently re-derived by tracing SameBoy's
-    /// `cgb_boot.asm`; the two agree exactly.
+    /// B9.
     #[test]
     fn the_boot_register_file_matches_the_boot_rom() {
         use crate::model::ColorMode;
@@ -348,7 +300,7 @@ mod tests {
         assert_eq!(dmg, RegisterSet::dmg(crate::test_fixtures::POKERED));
         assert_eq!(dmg.a, 0x01);
         // B11: `F` is header-derived, and pokered's checksum of 0x20 makes it 0x90 — see
-        // `the_boot_flags_follow_the_header_checksum`. It was a flat 0x80 before B11.
+        // `the_boot_flags_follow_the_header_checksum`.
         assert_eq!(dmg.flags.to_byte(), 0x90);
 
         // A CGB-aware cartridge: the boot ROM's own final block.
@@ -374,8 +326,8 @@ mod tests {
         assert_ne!(cgb, compat, "the two CGB files must not be the same — that was the bug");
     }
 
-    /// `B` is the title checksum only for a **first-party** cartridge — the same licensee check
-    /// that gates the compatibility palette. A third-party cartridge gets `0x00`.
+    /// `B` is the title checksum only for a first-party cartridge — the same licensee check that
+    /// gates the compatibility palette.
     #[test]
     fn the_compatibility_b_register_follows_the_licensee_check() {
         use crate::model::ColorMode;
@@ -389,8 +341,7 @@ mod tests {
     }
 
     /// The two cartridges whose palette entry carries SameBoy's `$80` flag get the DMG boot
-    /// tilemap loaded, which leaves `HL` pointing into VRAM rather than at `0x007C`. Pan Docs
-    /// states the rule on `B`; these are checksums `0x43` and `0x58`.
+    /// tilemap loaded, which leaves `HL` pointing into VRAM rather than at `0x007C`.
     #[test]
     fn the_dmg_tilemap_cartridges_hand_over_hl_pointing_into_vram() {
         use crate::model::ColorMode;

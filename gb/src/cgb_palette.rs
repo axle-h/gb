@@ -9,14 +9,6 @@ pub const PALETTE_COLORS: usize = PALETTE_BYTES / 2;
 
 /// One bank of CGB palette RAM plus its index register — `BCPS`/`BCPD` (`FF68`/`FF69`) for the
 /// background, `OCPS`/`OCPD` (`FF6A`/`FF6B`) for objects.
-///
-/// The raw bytes are authoritative; `colors` is a pre-expanded mirror kept in step on every write
-/// so the pixel path never unpacks RGB555 per pixel (gambatte keeps the same mirror,
-/// `video.h:205-206`). Only the raw bytes are serialised — the mirror is rebuilt on load.
-///
-/// **Mode-3 access blocking is not modelled.** Hardware rejects palette reads and writes during
-/// mode 3; `gb` renders mode 3 as a fixed 172-tick block, so it has nowhere accurate to put the
-/// boundary. Deferred with the rest of the mode-3 timing work (plan §0.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteBank {
     data: [u8; PALETTE_BYTES],

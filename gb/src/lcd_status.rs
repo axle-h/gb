@@ -1,6 +1,6 @@
 use bincode::{Decode, Encode};
 use crate::activation::Activation;
-/// https://gbdev.io/pandocs/STAT.html
+/// Https://gbdev.io/pandocs/STAT.html
 #[derive(Debug, Clone, PartialEq, Eq, Default, Decode, Encode)]
 pub struct LcdStatus {
     ly: u8,   // Current line (read only)
@@ -19,7 +19,7 @@ impl LcdStatus {
     }
 
     pub fn increment_ly(&mut self) -> u8 {
-        // this should only be called by the PPU during rendering
+        // This should only be called by the PPU during rendering
         self.ly += 1;
         if self.ly > 153 {
             self.ly = 0; // wrap around after VBlank
@@ -47,8 +47,7 @@ impl LcdStatus {
         }
         self.mode = mode;
 
-        // check interrupt
-        // TODO emulate STAT blocking
+        // Check interrupt TODO emulate STAT blocking
         self.interrupt_pending |= match mode {
             LcdMode::HBlank => self.hblank_interrupt,
             LcdMode::VBlank => self.vblank_interrupt,
@@ -67,7 +66,7 @@ impl LcdStatus {
     }
 
     pub fn set_stat(&mut self, value: u8) {
-        // only the interrupt flags, bits 3-6, are writable
+        // Only the interrupt flags, bits 3-6, are writable
         self.hblank_interrupt = (value & 0x08) != 0;
         self.vblank_interrupt = (value & 0x10) != 0;
         self.oam_interrupt = (value & 0x20) != 0;

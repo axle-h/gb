@@ -1,47 +1,19 @@
 //! Wild encounter tables, decoded from the ROM.
-//!
-//! Which species a map can produce, at what level, and how often. Added for **H5** of
-//! `docs/postgame-coverage-plan.md` — the Exp.All aide wants 50 species owned, which is a catching
-//! errand, and a catching errand needs to know where things live.
-//!
-//! Derived rather than transcribed, for the reason [`crate::pokemon::world_graph`] builds itself from
-//! ROM headers: the alternative is a table of a few hundred hand-copied rows, and a wrong one does not
-//! error — the agent paces in grass for its whole budget waiting for a species that was never there.
-//! It also keeps the numbers honest. `postgame::safari`'s hunt is fast because it hunts each species
-//! where its slot is fattest, and the same species can sit at 4.3 % on one map and 1.2 % on another;
-//! that is a fact about the ROM, and this is where it comes from.
-//!
-//! # Format
-//!
-//! `WildDataPointers` (bank 3) is one 2-byte pointer per map id. Each entry is
-//! `db grass_rate`, ten `db level, species` slots, `db water_rate`, ten more — except that a **rate of
-//! zero omits its ten slots entirely** (`macros/asserts.asm` asserts exactly that), so the water block
-//! cannot be found at a fixed offset.
-//!
-//! The per-slot probabilities are `WildMonEncounterSlotChances`, a **cumulative** table: a slot's own
-//! share is its threshold minus the previous one. Duplicated species share slots, which is why
-//! [`WildEncounters::species`] sums them.
 
 use crate::pokemon::map::Map;
 use crate::pokemon::roms;
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::symbols::{pokered_symbols, DmgBank, DmgPointer};
 
-/// Cumulative thresholds from `data/wild/probabilities.asm`; slot *i*'s share is
-/// `CHANCES[i] - CHANCES[i-1]` out of 256.
+/// Cumulative thresholds from `data/wild/probabilities.asm`; slot *i*'s share is `CHANCES[i] -
+/// CHANCES[i-1]` out of 256.
 const SLOT_CHANCES: [u16; 10] = [51, 102, 141, 166, 191, 216, 229, 242, 253, 256];
 
-/// Where the EXP yield sits in a 28-byte base-stats entry — byte 9, between the catch rate and the
-/// sprite dimensions. Same entry (and same fixed-width prologue) `crate::pokemon::learnset`'s
-/// `BASE_LEARNSET` counts to 20 over.
+/// Where the EXP yield sits in a 28-byte base-stats entry — byte 9, between the catch rate and
+/// the sprite dimensions.
 const BASE_EXP: usize = 9;
 
 /// `species`' EXP yield, out of the ROM's own base-stats table.
-///
-/// Gen 1 pays `base_exp * level / 7` for a knockout, divided between **every** party member that
-/// took the field during the battle (`engine/battle/core.asm`, `DivideExpDataByNumMonsGainingExp`).
-/// That divisor is the whole reason a grind leads with its trainee rather than switching it in: two
-/// participants is half the experience for twice the turns.
 pub fn base_exp(species: PokemonSpecies) -> u8 {
     crate::pokemon::mon_gfx::base_stats_entry(species)[BASE_EXP]
 }
@@ -49,27 +21,24 @@ pub fn base_exp(species: PokemonSpecies) -> u8 {
 /// One map's wild encounter data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WildEncounters {
-    /// Steps-in-grass encounter rate out of 256. Zero means this map has no grass encounters at all,
-    /// and then `grass` is empty.
+    /// Steps-in-grass encounter rate out of 256. Zero means this map has no grass encounters at
+    /// all, and then `grass` is empty.
     pub grass_rate: u8,
     pub grass: Vec<(u8, PokemonSpecies)>,
-    /// Surfing encounter rate out of 256, and its own ten slots. Every water block in the game uses
-    /// the same ten slots for one or two species.
+    /// Surfing encounter rate out of 256, and its own ten slots. Every water block in the game
+    /// uses the same ten slots for one or two species.
     pub water_rate: u8,
     pub water: Vec<(u8, PokemonSpecies)>,
 }
 
-/// Where an encounter comes from — the two blocks are independent, and reaching the water one needs
-/// Surf.
+/// Where an encounter comes from — the two blocks are independent, and reaching the water one
+/// needs Surf.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Terrain { Grass, Water }
 
 impl WildEncounters {
-    /// Distinct species in `terrain`'s block, each with its **summed** share of an encounter (0.0–1.0)
-    /// and the highest level it appears at, most likely first.
-    ///
-    /// Summed because a species routinely occupies several slots — Route 11's Ekans holds three, which
-    /// is 45 % of the route, not the 19.9 % its best slot would suggest.
+    /// Distinct species in `terrain`'s block, each with its summed share of an encounter
+    /// (0.0–1.0) and the highest level it appears at, most likely first.
     pub fn species(&self, terrain: Terrain) -> Vec<(PokemonSpecies, f64, u8)> {
         let (slots, rate) = match terrain {
             Terrain::Grass => (&self.grass, self.grass_rate),
@@ -96,12 +65,8 @@ impl WildEncounters {
         }
     }
 
-    /// Experience from **one** `terrain` encounter, knocked out by a single Pokémon: each slot's
+    /// Experience from one `terrain` encounter, knocked out by a single Pokémon: each slot's
     /// `base_exp * level / 7` weighted by how often that slot comes up.
-    ///
-    /// ⚠️ Per **slot**, not per species. [`Self::species`] reports a species' *highest* level across
-    /// the slots it holds, which is the right answer for "what can I catch here" and an over-estimate
-    /// for this — Pokémon Mansion B1F's Ditto sits at 32, 38 and 42 in three different slots.
     pub fn expected_exp(&self, terrain: Terrain) -> f64 {
         let (rate, slots) = self.block(terrain);
         if rate == 0 { return 0.0; }
@@ -111,34 +76,17 @@ impl WildEncounters {
         }).sum()
     }
 
-    /// The same experience per **step taken**: `TryDoWildEncounter` rolls once per step on grass, cave
-    /// and water alike against this map's own rate out of 256, so the rate and the payout multiply.
-    ///
-    /// ⚠️ **The correction, not the figure to choose a site on — [`Self::expected_exp`] is.** A grind's
-    /// time goes mostly into battles rather than into walking, and the split is derivable rather than
-    /// felt: the measured gauntlet grind is 1552 wild battles in 1229 s of wall clock, which at this
-    /// emulator's ~50× is about **40 s of cartridge time per encounter cycle** — and at the Pokémon
-    /// Mansion's 10/256 that cycle contains 25.6 steps, which at the cartridge's 16 frames a step is
-    /// **under 7 s of it**. So the battle is four fifths of the cost and the walk to it one fifth, and
-    /// a site paying twice as much a knockout at half the encounter rate still wins.
+    /// The same experience per step taken: `TryDoWildEncounter` rolls once per step on grass,
+    /// cave and water alike against this map's own rate out of 256, so the rate and the payout
+    /// multiply.
     pub fn exp_per_step(&self, terrain: Terrain) -> f64 {
         let (rate, _) = self.block(terrain);
         f64::from(rate) / 256.0 * self.expected_exp(terrain)
     }
 
-    /// The share of `terrain`'s encounters that are **Poison-type**, which is the closest thing to a
-    /// "how often does a walk here end in a poisoned party" number that the encounter table alone can
-    /// answer.
-    ///
-    /// It matters to a grind and to nothing else: Gen 1's overworld poison ticks 1 HP every four steps
-    /// and is cured only at a Centre or with an Antidote, so a site whose wilds poison is a site whose
-    /// trainee eventually falls over and walks home.
-    ///
-    /// ⚠️ **A tiebreaker too, and a small one — do not trade payout for it.** Watching a run grind,
-    /// the walks back to the Centre are the thing that looks like the problem, and measured they are
-    /// not: the Pokémon Mansion is the worst site in the game for poison (half its slots) and the
-    /// whole gauntlet grind still only made **twelve** round trips against 1552 battles. `poison_share`
-    /// is worth reading when two sites are otherwise close, and worth ignoring when they are not.
+    /// The share of `terrain`'s encounters that are Poison-type, which is the closest thing to a
+    /// "how often does a walk here end in a poisoned party" number that the encounter table alone
+    /// can answer.
     pub fn poison_share(&self, terrain: Terrain) -> f64 {
         let (rate, slots) = self.block(terrain);
         if rate == 0 { return 0.0; }
@@ -153,8 +101,8 @@ impl WildEncounters {
 
 }
 
-/// `map`'s wild encounter table, or `None` when it has none at all (every indoor map, and the maps
-/// whose pointer is `NothingWildMons`).
+/// `map`'s wild encounter table, or `None` when it has none at all (every indoor map, and the
+/// maps whose pointer is `NothingWildMons`).
 pub fn encounters(map: Map) -> Option<WildEncounters> {
     let pointers = &pokered_symbols::WildDataPointers;
     let DmgBank::ROM { bank } = pointers.bank else { panic!("WildDataPointers is not in ROM") };
@@ -198,9 +146,9 @@ fn rom_bank_at(bank: u8, address: u16) -> &'static [u8] {
 mod tests {
     use super::*;
 
-    /// Route 11 spelled out against `data/wild/maps/Route11.asm`, including the `_RED` branch — the
-    /// same file assembles a Blue table with Sandshrew where Ekans is, so this also pins that the
-    /// bundled ROM is the Red one.
+    /// Route 11 spelled out against `data/wild/maps/Route11.asm`, including the `_RED` branch —
+    /// the same file assembles a Blue table with Sandshrew where Ekans is, so this also pins that
+    /// the bundled ROM is the Red one.
     #[test]
     fn route11_matches_the_rom() {
         let wild = encounters(Map::Route11).expect("Route 11 has grass");
@@ -208,7 +156,7 @@ mod tests {
         assert_eq!(wild.water_rate, 0, "Route 11 has no water encounters");
         let grass = wild.species(Terrain::Grass);
         // Ekans holds slots 0/2/6 (40.2 %), Spearow 1/4/7 (34.8 %), Drowzee 3/5/8/9 (25.0 %) — so
-        // the *rarest* species here has four of the ten slots. Slot count is not rarity order.
+        // the *rarest* species here has four of the ten slots.
         assert_eq!(grass.iter().map(|(s, _, _)| *s).collect::<Vec<_>>(),
             vec![PokemonSpecies::Ekans, PokemonSpecies::Spearow, PokemonSpecies::Drowzee]);
         let ekans = grass.iter().find(|(s, _, _)| *s == PokemonSpecies::Ekans).unwrap();
@@ -216,7 +164,8 @@ mod tests {
         assert_eq!(ekans.2, 15, "the highest Ekans slot is level 15");
     }
 
-    /// The slot table is cumulative and must end at exactly 256, or every share is wrong by a little.
+    /// The slot table is cumulative and must end at exactly 256, or every share is wrong by a
+    /// little.
     #[test]
     fn slot_shares_sum_to_one() {
         assert_eq!(SLOT_CHANCES[9], 256);
@@ -225,9 +174,8 @@ mod tests {
         assert!((total - 1.0).abs() < 1e-9, "shares summed to {total}");
     }
 
-    /// A water-only map: the grass rate is zero, which means its ten slots are **not in the ROM** and
-    /// the water block starts one byte in. Getting that wrong reads twenty bytes of someone else's
-    /// table and still parses.
+    /// A water-only map: the grass rate is zero, which means its ten slots are not in the ROM and
+    /// the water block starts one byte in.
     #[test]
     fn a_water_only_map_has_no_grass_slots() {
         let wild = encounters(Map::Route19).expect("Route 19 is open sea");
@@ -244,8 +192,8 @@ mod tests {
         assert_eq!(encounters(Map::Route11Gate2F), None);
     }
 
-    /// Bulbasaur's 64 and Chansey's 255 against `data/pokemon/base_stats/`, which is what says byte 9
-    /// is the EXP yield and not the catch rate beside it (Bulbasaur's is 45).
+    /// Bulbasaur's 64 and Chansey's 255 against `data/pokemon/base_stats/`, which is what says
+    /// byte 9 is the EXP yield and not the catch rate beside it (Bulbasaur's is 45).
     #[test]
     fn base_exp_comes_off_the_rom() {
         assert_eq!(base_exp(PokemonSpecies::Bulbasaur), 64);
@@ -254,17 +202,12 @@ mod tests {
         assert_eq!(base_exp(PokemonSpecies::Mew), 64, "Mew's entry is in a bank of its own");
     }
 
-    /// **Every grind site in the game, ranked** — what a route's `GrindUntilLevel` should be pointed
+    /// Every grind site in the game, ranked — what a route's `GrindUntilLevel` should be pointed
     /// at, out of the ROM rather than out of memory.
-    ///
     /// ```text
     /// cargo test --release --features slow-tests --lib -- \
     ///   pokemon::wild::tests::probe_grind_sites --exact --ignored --nocapture
     /// ```
-    ///
-    /// ROM-only and instant. Read the columns together rather than taking the top row: `exp/step` is
-    /// the throughput, `poison` is how much of the *travel* cost the site adds by sending a poisoned
-    /// trainee back to a Pokémon Centre, and neither knows how far the nearest Centre actually is.
     #[test]
     #[cfg(feature = "slow-tests")]
     #[ignore = "probe — run with --ignored --nocapture, see the doc comment"]

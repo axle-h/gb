@@ -1,17 +1,11 @@
 //! Pallet/Viridian → Pewter → Mt Moon → Cerulean → Vermilion.
-//!
-//! The two navigation tests here are in the fast tier: between them they cover forward `EnterMap`
-//! chaining across connections and the warp-graph traversal of a fragmented dungeon, which is the
-//! machinery every later leg is built on. If they pass, a failure further down the chain is about
-//! that leg rather than about routing.
 
 use super::*;
 
 #[test]
 fn can_navigate_to_pewter_city() {
     // Explicit forward navigation (Viridian City → Viridian Forest → Pewter City), the same
-    // single-hop `EnterMap` chain `complete_game_steps` uses. The abstract `goto` form this test
-    // used previously needed the deleted pre-built world graph.
+    // single-hop `EnterMap` chain `complete_game_steps` uses.
     let mut fixture = TestFixture::new(
         include_bytes!("../data/viridian-city-pokemart-shopping.bin"),
         Duration::from_mins(10),
@@ -25,8 +19,6 @@ fn can_navigate_to_pewter_city() {
             PolicyStep::enter(Map::PewterCity),
         ]
     )
-    // **C3 §5.2.** Free, and it is what sizes the rest: a verdict on every action this leg takes,
-    // under the driver that is already here. See `the_coverage_log_reads_an_ordinary_leg`.
     .with_coverage();
 
     fixture.step_until_exhausted();
@@ -34,10 +26,8 @@ fn can_navigate_to_pewter_city() {
     let state = fixture.game_state();
     assert_eq!(state.map.map, Map::PewterCity, "agent should have navigated to Pewter City");
 
-    // ⚠️ **A defect here is the agent failing to do something it had already committed to** — a
-    // route it could not walk, a walk that never arrived, a menu row it offered and could not
-    // execute. It is asserted rather than printed because this leg is the machinery every later one
-    // is built on: if it can walk Viridian Forest at all, it can walk it without one of these.
+    // A defect here is the agent failing to do something it had already committed to — a route it
+    // could not walk, a walk that never arrived, a menu row it offered and could not execute.
     let log = fixture.coverage.as_ref().expect("coverage was asked for");
     println!("[coverage] can_navigate_to_pewter_city: {}", log.summary());
     let hard: Vec<&str> = log
@@ -52,14 +42,7 @@ fn can_navigate_to_pewter_city() {
 }
 
 /// Explicit Mt Moon traversal, discovered from the ROM warp graph + live sprite-resolved
-/// reachability. Mt Moon's floors are fragmented into disjoint walkable components joined only by
-/// warps; the sole route to the Route 4 east exit crosses B2F between the (21,17) and (5,7) warps,
-/// which is plugged by the two fossil item-sprites. Collecting one fossil (which also triggers the
-/// mandatory Super Nerd battle and makes him grab the other fossil) opens the 1-wide passage.
-///
-///   1F(5,5)→B1F(5,5) [comp A] → walk → B1F(21,17)→B2F(21,17)
-///     → collect Helix Fossil (beat Super Nerd, corridor opens)
-///     → walk → B2F(5,7)→B1F(23,3) [comp D] → walk → B1F(27,3)→Route4 → Cerulean
+/// reachability.
 #[test]
 fn can_navigate_mt_moon() {
     let mut fixture = TestFixture::new(
@@ -75,28 +58,19 @@ fn can_navigate_mt_moon() {
     assert_eq!(state.map.map, Map::CeruleanCity, "agent should have navigated to Cerulean City");
 }
 
-/// **Rebuild the root of the committed fixture chain**, from a fresh save to Route 4 outside
+/// Rebuild the root of the committed fixture chain, from a fresh save to Route 4 outside
 /// Cerulean: `at-cerulean.bin`.
-///
-/// ⚠️ **Every fixture in this repo descends from one state no test produced, and that is fine right
-/// up until the mainline party changes.** Swapping the starter changes all of them at once — a leg
-/// that teaches an HM to the starter, grinds a caught mon or leads with one resolves against a party
-/// the old root does not have, and simply waits for ever. So the root has a producer now.
-///
-/// Only under `regen-fixtures`, because it plays about a fifth of the game (~90 s) and asserts
-/// nothing the default tier's `can_navigate_to_pewter_city` and `can_navigate_mt_moon` do not.
-/// Regenerate the chain in order from here — see the `test-suite` skill.
 #[test]
 #[cfg(feature = "slow-tests")]
 #[ignore = "tool: recuts at-cerulean.bin; needs GB_REGEN_FIXTURES=1"]
 fn regen_at_cerulean_fixture() {
     let mut steps = PolicyStep::pallet_to_cerulean_steps();
     steps.extend(PolicyStep::mt_moon_traversal());
-    // ⚠️ **Stop exactly where `game_steps` stops**, which is *inside* the Cerulean Pokémon Centre:
+    // Stop exactly where `game_steps` stops, which is *inside* the Cerulean Pokémon Centre:
     // `cerulean_to_vermilion_steps` opens with `enter(CeruleanCity)`, meaning "walk out of the
     // building", and a fixture saved standing in the city instead makes that step look for a
-    // transition *to* the map it is already on — measured, it walked back out to Route 4 and stalled
-    // trying to reach Route 24 from there.
+    // transition *to* the map it is already on — measured, it walked back out to Route 4 and
+    // stalled trying to reach Route 24 from there.
     steps.extend([
         PolicyStep::enter(Map::CeruleanPokecenter),
         PolicyStep::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
@@ -112,11 +86,7 @@ fn regen_at_cerulean_fixture() {
     println!("ended on {} @ {} — party {:?}", s.map.map, s.map.player_position,
         s.pokemon.iter().map(|p| (p.species, p.level)).collect::<Vec<_>>());
     assert_eq!(s.map.map, Map::CeruleanCity, "should end back out in Cerulean City");
-    // ⚠️ **Assert the *heal*, not just the walk.** `Interact` pops the moment the conversation lands,
-    // which is before the nurse has finished, so a fixture cut there carries the party the run walked
-    // in with. The first version of this root was saved with **Water Gun on 6 of 25 PP**, and the leg
-    // seeded from it lost the Cerulean rival ambush and blacked out to the Mt Moon Centre — from where
-    // a single-hop `EnterMap { Route24 }` cannot resolve and the whole chain stalled at 4 steps.
+    // Assert the *heal*, not just the walk.
     for mon in s.pokemon.iter() {
         assert_eq!(mon.current_hp, mon.stats.hp, "{} should be healed", mon.species);
         for mv in mon.moves.iter().flatten() {
@@ -128,21 +98,13 @@ fn regen_at_cerulean_fixture() {
 }
 
 /// From `at-cerulean.bin` (out of Mt Moon, Boulder Badge, no Cascade yet), the whole middle of
-/// the early game: Nugget Bridge → Bill (SS Ticket) → back → **Misty** → trashed-house bridge →
-/// the Route 25 Oddish → Route 5 → Vermilion.
-///
-/// Route 5 is unreachable from the Cerulean Pokécenter terrace directly (one-way south ledges split
-/// the city; verified ROM-faithful). The real path is the **trashed-house bridge**, which only opens
-/// after meeting Bill (the `CERULEANCITY_GUARD2` guard at raw (27,12) clears): enter the trashed
-/// house from the main terrace, take its back door to land at Cerulean (27,9) — which IS in the
-/// Route-5-reaching terrace — then walk onto Route 5. So: Nugget Bridge → Bill (SS Ticket) → return →
-/// trashed-house bridge → Route 5 → Underground Path → Route 6 → Vermilion.
+/// the early game: Nugget Bridge → Bill (SS Ticket) → back → Misty → trashed-house bridge → the
+/// Route 25 Oddish → Route 5 → Vermilion.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_reach_vermilion() {
     // Exactly the leg folded into `complete_game_steps` (Bill/SS-Ticket → trashed-house bridge →
-    // Vermilion), so this test and the full playthrough stay in lockstep. It subsumes the SS Ticket
-    // hand-off, which is why there is no separate test for it.
+    // Vermilion), so this test and the full playthrough stay in lockstep.
     let mut fixture = TestFixture::new(
         include_bytes!("../data/at-cerulean.bin"),
         Duration::from_mins(40),
@@ -156,23 +118,7 @@ fn can_reach_vermilion() {
     fixture.save_state_named("src/pokemon/data/at-vermilion.bin").unwrap();
 }
 
-/// **The S.S. Ticket, taken entirely through the action menu — the one thing an `LlmPolicy` can
-/// see.** `can_reach_vermilion` above proves the same errand for the *scripted* policy, and proved
-/// nothing about this: it drives the cell separator with `PolicyStep::UsePc`, which resolves
-/// `MetaTile::Pc` straight out of `actions()` and never goes near `llm::tools::overworld_menu`.
-///
-/// ⚠️ **That gap was a hard progression blocker for four months and cost a deployed run its
-/// life.** `overworld_menu` withheld every `MetaTile::Pc` row — correctly, for the storage PCs it
-/// was written about — and Bill's is not storage, it is one press and the only route to the ticket.
-/// No ticket means `EVENT_GOT_SS_TICKET` never fires, so `BillsHouse.asm` never hides
-/// `CERULEANCITY_GUARD2`, who stands on the only approach to the Trashed House door at raw (27,11)
-/// — the only crossing between Cerulean's two terraces. The run of 2026-08-27 walked Cerulean and
-/// Routes 24/25 for four and a half hours of cartridge time and filed six issue reports about it.
-///
-/// So the policy here takes the row and nothing else: `MetaTile::Switch(CellSeparator)`, exactly
-/// what `overworld_menu` renders and `resolve_overworld` re-mints from an id. ⚠️ **Hand-rolled
-/// rather than `DeterministicPolicy`**, which would drive the PC through `UsePc` before the agent
-/// ever saw the row, and pass with the whole thing reverted.
+/// The S.S.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn the_action_menu_alone_gets_the_ss_ticket_from_bill() {
@@ -193,11 +139,7 @@ fn the_action_menu_alone_gets_the_ss_ticket_from_bill() {
     /// Everything but the separator is the scripted route; the separator is the menu row.
     struct MenuPressesTheSeparator {
         inner: DeterministicPolicy,
-        /// ⚠️ **The negative half, and it has to be sampled before the conversation.** Entering the
-        /// map is a step of its own and completes first, so the first poll on `BillsHouse` is
-        /// necessarily before Bill has been spoken to — which is the moment the row must *not* be
-        /// there, or the gate is doing nothing and the test would pass ungated.
-        /// Shared with the test, because `TestFixture` owns the policy once it is boxed.
+        /// The negative half, and it has to be sampled before the conversation.
         row_before_talking: Arc<AtomicU8>,
         pressed: bool,
     }
@@ -263,9 +205,9 @@ fn the_action_menu_alone_gets_the_ss_ticket_from_bill() {
     );
     let state = fixture.run_until(|state| state.bag.contains(&ItemId::SSTicket));
     assert!(state.bag.contains(&ItemId::SSTicket), "the ticket came out of the action menu");
-    // ⚠️ Without this the test passes with the gate deleted, which is the whole reason it is here:
-    // an ungated row is offered on arrival, pressed into a storage menu that does nothing, and the
-    // run merely takes longer to reach the same ticket.
+    // Without this the test passes with the gate deleted, which is the whole reason it is here:
+    // an ungated row is offered on arrival, pressed into a storage menu that does nothing, and
+    // the run merely takes longer to reach the same ticket.
     assert_eq!(
         row_before_talking.load(Ordering::Relaxed),
         ABSENT,

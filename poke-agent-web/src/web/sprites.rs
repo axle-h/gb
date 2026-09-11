@@ -1,13 +1,5 @@
 //! The two PNG endpoints that are neither the badge sheet nor a built asset: a Pokémon's front
 //! sprite, and the favicon.
-//!
-//! Both come out of the cartridge at run time, the same way [`crate::web::badges`] does, and both
-//! are functions of the ROM — so both are `immutable` and encoded exactly once.
-//!
-//! ⚠️ **`/api/pokemon/{dex}/front.png`, not `/api/pokemon/{dex}.png`.** axum's router (matchit) says
-//! it plainly: "Dynamic suffixes are not currently supported" — a parameter has to own its whole
-//! path segment. The shorter form fails when the router is *built*, i.e. at startup, so it would
-//! take the server down rather than 404.
 
 use std::sync::OnceLock;
 
@@ -25,23 +17,8 @@ pub const SPECIES_COUNT: usize = 151;
 /// The favicon is drawn at 2× so it stays crisp on a hidpi tab strip; 16 px doubled is 32.
 const FAVICON_SCALE: usize = 2;
 
-/// The Game Boy's own four shades, as RGBA: 0 is the white a body is filled with, 3 the black it is
-/// outlined in.
-///
-/// ⚠️ **Do not invert this the way [`crate::web::badges`] inverts the badges.** It shipped inverted
-/// once, on the argument that a black outline would vanish against a near-black panel. That argument
-/// is wrong, and the sprites say so: an outline is *bounded by the body's own bright fill*, so it
-/// reads at full contrast — only the outermost contour meets the panel, which just lets the
-/// silhouette sit on the page. What inverting actually does is turn every Pokémon into a
-/// photographic negative of itself, which for filled art is not a palette choice but a different
-/// picture: Gengar came out white-bodied with a dark grin.
-///
-/// A badge inverts well because it *is* line art — there is no fill to negate. That is the whole of
-/// the difference between the two modules, and it is why the favicon (the Poké Ball, below) keeps
-/// its tones too.
-///
-/// Which makes the flood fill below load-bearing rather than a refinement: shade 0 is now opaque
-/// white, so a sprite whose background was not found would be a solid white block.
+/// The Game Boy's own four shades, as RGBA: 0 is the white a body is filled with, 3 the black it
+/// is outlined in.
 const INK: [[u8; 4]; 4] = [
     [0xF2, 0xF5, 0xF9, 0xFF],
     [0xB4, 0xBC, 0xC8, 0xFF],
@@ -51,11 +28,9 @@ const INK: [[u8; 4]; 4] = [
 
 const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
 
-/// The Poké Ball, whose only difference from [`INK`] is that shade 0 is its background rather than
-/// part of it — an overworld sprite is drawn with a transparent colour 0, so there is nothing to
-/// flood-fill. It lands on the browser's tab strip rather than on this page, and that is light on
-/// some machines and dark on others; the ball has a white fill *and* a black outline, so as drawn it
-/// reads on both.
+/// The Poké Ball, whose only difference from [`INK`] is that shade 0 is its background rather
+/// than part of it — an overworld sprite is drawn with a transparent colour 0, so there is
+/// nothing to flood-fill.
 const BALL_INK: [[u8; 4]; 4] = [
     TRANSPARENT,
     [0xF2, 0xF5, 0xF9, 0xFF],
@@ -63,7 +38,8 @@ const BALL_INK: [[u8; 4]; 4] = [
     [0x11, 0x13, 0x18, 0xFF],
 ];
 
-// ── The party sprites ────────────────────────────────────────────────────────────────────────────
+// ── The party sprites
+// ────────────────────────────────────────────────────────────────────────────
 
 /// `GET /api/pokemon/{dex}/front.png` — one 56×56 sprite, keyed on the National Pokédex number
 /// because that is the id a viewer recognises and the one the status heartbeat carries.
@@ -76,11 +52,6 @@ pub async fn front_pic(Path(dex): Path<u16>) -> Response {
 }
 
 /// Every front sprite, encoded once, in Pokédex order.
-///
-/// All 151 together, rather than a per-species cache behind a lock: decompressing and encoding the
-/// lot costs a few hundred kilobytes and a few tens of milliseconds *once*, and a party is six of
-/// them within a second of each other anyway. `badges::sheet()` makes the same trade for the same
-/// reason — the ROM does not change while the process is running.
 fn sprites() -> &'static [Vec<u8>] {
     static SPRITES: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
     SPRITES.get_or_init(|| {
@@ -108,10 +79,6 @@ fn encode_front_pic(species: PokemonSpecies) -> Vec<u8> {
 
 /// Which pixels are *behind* the Pokémon rather than part of it: shade 0, and reachable from the
 /// edge of the canvas through other shade-0 pixels.
-///
-/// ⚠️ **Four-way, not eight-way.** A diagonal step leaks through the single-pixel gap left by any
-/// outline drawn on the diagonal, and the background floods the body — which shows up as one or two
-/// Pokémon out of 151 rendered as an outline, so it is not something a spot check finds.
 fn background_mask(shades: &[u8; PIC_PX * PIC_PX]) -> Vec<bool> {
     let mut background = vec![false; PIC_PX * PIC_PX];
     let mut queue = Vec::new();
@@ -145,14 +112,11 @@ fn background_mask(shades: &[u8; PIC_PX * PIC_PX]) -> Vec<bool> {
     background
 }
 
-// ── The favicon ──────────────────────────────────────────────────────────────────────────────────
+// ── The favicon
+// ──────────────────────────────────────────────────────────────────────────────────
 
-/// `GET /favicon.png` and `GET /favicon.ico` — the overworld Poké Ball, the sprite an item lying on
-/// the floor is drawn with.
-///
-/// Both paths serve the same PNG bytes. Browsers that get the `<link rel="icon">` in `index.html`
-/// ask for the first; anything that asks by convention alone — a bookmark, a feed reader, a scanner
-/// — asks for the second, and would otherwise fall through to the SPA catch-all's 404.
+/// `GET /favicon.png` and `GET /favicon.ico` — the overworld Poké Ball, the sprite an item lying
+/// on the floor is drawn with.
 pub async fn favicon() -> Response {
     png_response(icon()).into_response()
 }
@@ -173,7 +137,8 @@ fn icon() -> &'static [u8] {
     })
 }
 
-// ── Shared ───────────────────────────────────────────────────────────────────────────────────────
+// ── Shared
+// ───────────────────────────────────────────────────────────────────────────────────────
 
 fn encode(image: &image::RgbaImage) -> Vec<u8> {
     let mut png = std::io::Cursor::new(Vec::new());
@@ -223,10 +188,6 @@ mod tests {
 
     /// The whole point of flood-filling from the border rather than simply calling shade 0
     /// transparent: a Pokémon with a white belly must have a belly, not a hole.
-    ///
-    /// It is not a corner case. **Every one of the 151** has shade-0 pixels inside itself — Gen 1
-    /// art fills a body with the background tone and relies on the outline to bound it — so the
-    /// naïve rule would render the entire Pokédex as wireframes.
     #[test]
     fn the_flood_fill_keeps_every_bodys_own_white_opaque() {
         for species in PokemonSpecies::iter() {
@@ -237,8 +198,7 @@ mod tests {
         }
     }
 
-    /// The other half: the fill has to *reach* the surround. A mask that found nothing would pass
-    /// the test above trivially, and every sprite would be a 56×56 opaque block.
+    /// The other half: the fill has to *reach* the surround.
     #[test]
     fn the_background_is_actually_found() {
         let smallest = sprites()
@@ -246,14 +206,12 @@ mod tests {
             .map(|png| decoded(png).pixels().filter(|p| p.0[3] == 0).count())
             .min()
             .expect("151 sprites");
-        // The emptiest of them (Slowbro, which fills its box) leaves 579 of 3136 pixels behind it.
+        // The emptiest of them (Slowbro, which fills its box) leaves 579 of 3136 pixels behind
+        // it.
         assert!(smallest > 400, "the emptiest sprite has only {smallest} transparent pixels of {}", PIC_PX * PIC_PX);
     }
 
-    /// ⚠️ **The direction of the ramp, pinned.** It shipped inverted once — a defensible-sounding
-    /// change (the badges next door do exactly that) which quietly turns every Pokémon into a
-    /// negative of itself. Nothing else here would notice: the sprites stay distinct, opaque and
-    /// transparent in all the right places whichever way round the four colours go.
+    /// The direction of the ramp, pinned.
     #[test]
     fn the_ramp_is_not_inverted() {
         let luminance = |c: [u8; 4]| c[0] as u32 * 2 + c[1] as u32 * 3 + c[2] as u32;
@@ -274,8 +232,8 @@ mod tests {
         assert_eq!(image.dimensions(), (32, 32));
         assert_eq!(image.get_pixel(0, 0).0[3], 0, "the corners are outside the ball");
         assert!(image.pixels().any(|p| p.0[3] == 0xFF), "the ball is entirely transparent");
-        // Both ends of the ramp are present, which is what lets it read on a light *and* a dark tab
-        // strip. Inverting it, or dropping to two tones, would lose one of them.
+        // Both ends of the ramp are present, which is what lets it read on a light *and* a dark
+        // tab strip.
         assert!(image.pixels().any(|p| p.0 == BALL_INK[1]), "no white fill");
         assert!(image.pixels().any(|p| p.0 == BALL_INK[3]), "no dark outline");
     }
@@ -286,4 +244,3 @@ mod tests {
         assert!(std::ptr::eq(sprites(), sprites()), "the sprites should be cached, not re-encoded");
     }
 }
-

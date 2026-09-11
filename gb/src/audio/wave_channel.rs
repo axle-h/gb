@@ -7,26 +7,16 @@ use crate::cycles::MachineCycles;
 
 #[derive(Debug, Clone, Eq, PartialEq, Decode, Encode)]
 pub struct WaveChannel {
-    /// NR30: DAC enable
-    /// bit 7 DAC power (0=Off, 1=On)
+    /// NR30: DAC enable bit 7 DAC power (0=Off, 1=On)
     dac_enabled: bool,
 
-    /// NR31 Length timer
-    /// bits 0-8 Initial length timer
+    /// NR31 Length timer bits 0-8 Initial length timer
     initial_length_timer: u8,
     length_timer: LengthTimer,
 
-    /// NR32 output level
-    /// 2 bits (0-3) nr32
-    /// 00	Mute (No sound)
-    /// 01	100% volume (use samples read from Wave RAM as-is)
-    /// 10	50% volume (shift samples read from Wave RAM right once)
-    /// 11	25% volume (shift samples read from Wave RAM right twice)
     volume_register: u8,
 
-    // NR33 & NR34: frequency & control
-    /// 11 bits (0-2047)
-    /// low 8 bits in NR33, high 3 bits in NR34
+    // NR33 & NR34: frequency & control 11 bits (0-2047) low 8 bits in NR33, high 3 bits in NR34
     period_register: u16,
 
     /// 16 bytes of wave pattern RAM (32 4-bit samples)
@@ -62,13 +52,12 @@ impl Default for WaveChannel {
 
 impl WaveChannel {
     pub fn reset(&mut self) {
-        // wave ram is not touched on reset
+        // Wave ram is not touched on reset
         *self = Self { wave_ram: self.wave_ram, ..Self::default() };
     }
 
     pub fn nr30(&self) -> u8 {
-        // Bit 7: DAC power (0=Off, 1=On)
-        // Bits 0-6: Read as 1
+        // Bit 7: DAC power (0=Off, 1=On) Bits 0-6: Read as 1
         if self.dac_enabled {
             0xFF
         } else {
@@ -90,14 +79,12 @@ impl WaveChannel {
     pub fn set_nr31_length_timer(&mut self, value: u8) {
         self.initial_length_timer = value;
 
-        // the length timer can be reset at any time
+        // The length timer can be reset at any time
         self.length_timer.reset(self.initial_length_timer);
     }
 
     pub fn nr32_output_level(&self) -> u8 {
-        // Bits 0-4: Read as 1
-        // Bits 5-6: Volume code
-        // Bit 7: Read as 1
+        // Bits 0-4: Read as 1 Bits 5-6: Volume code Bit 7: Read as 1
         0x9F | ((self.volume_register & 0b11) << 5)
     }
 
@@ -114,12 +101,7 @@ impl WaveChannel {
         self.reload_period();
     }
 
-    /// Hand the new period to the frequency timer **without disturbing the interval in flight**.
-    /// Hardware reloads the timer from NR33/NR34 as they read at each overflow, so a write part-way
-    /// through a note takes effect at the next reload, not immediately — gambatte gets this by
-    /// recomputing `toPeriod(nr3_, nr4_)` on every catch-up (`channel3.cpp:104`). gb used to latch
-    /// the period at trigger time and never look again, which `09-wave read while on` depends on:
-    /// it triggers at a long period and then drops NR33 to `0xFE` before reading.
+    /// Hand the new period to the frequency timer without disturbing the interval in flight.
     fn reload_period(&mut self) {
         self.frequency_timer.set_frequency(self.period_register);
     }
@@ -145,12 +127,7 @@ impl WaveChannel {
     }
 
     /// Read wave RAM. `access_offset` places the CPU's bus access within the instruction that is
-    /// executing — see [`crate::audio::Audio::set_access_offset`].
-    ///
-    /// While the channel is playing, the CPU does not get the byte it asked for. On DMG the bus is
-    /// only connected for the single tick in which the channel fetches its next sample: hit that
-    /// tick and you read the byte the channel just fetched, miss it and you read `0xFF`
-    /// (gambatte `channel3.h:47-56`). CGB widens that window; that is a B-phase concern.
+    /// executing — see `crate::audio::Audio::set_access_offset`.
     pub fn wave_ram(&self, index: usize, access_offset: u16) -> u8 {
         if !self.active {
             return self.wave_ram[index];
@@ -162,7 +139,7 @@ impl WaveChannel {
     }
 
     /// Write wave RAM, under the same aperture as [`WaveChannel::wave_ram`]: while the channel is
-    /// playing, a write outside the fetch tick is **dropped**, and one inside it lands on the byte
+    /// playing, a write outside the fetch tick is dropped, and one inside it lands on the byte
     /// being fetched rather than the addressed one.
     pub fn set_wave_ram(&mut self, index: usize, value: u8, access_offset: u16) {
         if !self.active {
@@ -175,13 +152,8 @@ impl WaveChannel {
         }
     }
 
-    /// Does a sample fetch land **exactly** on the tick `offset` ticks into the instruction now
-    /// executing? If so, which upcoming fetch is it (1 = the next one)?
-    ///
-    /// The channel fetches every `period` ticks starting `counter` ticks from the instruction
-    /// boundary, and at short periods several of those fall inside a single instruction — the
-    /// blargg tests drive it at `period == 2`, one fetch per M-cycle — so this cannot just compare
-    /// against the next fetch.
+    /// Does a sample fetch land exactly on the tick `offset` ticks into the instruction now
+    /// executing?
     fn fetch_at(&self, offset: u16) -> Option<u16> {
         let counter = self.frequency_timer.counter();
         let period = self.frequency_timer.period();
@@ -203,8 +175,7 @@ impl WaveChannel {
         self.frequency_timer.counter() + self.fetches_by(offset) * self.frequency_timer.period()
     }
 
-    /// Wave-RAM byte the `n`th upcoming fetch reads. A fetch advances the phase and then reads, so
-    /// `n = 1` is one step ahead of [`WaveChannel::current_sample_byte`].
+    /// Wave-RAM byte the `n`th upcoming fetch reads.
     fn fetch_index(&self, n: u16) -> usize {
         (((self.frequency_timer.phase() as u16 + n) & 31) >> 1) as usize
     }
@@ -224,8 +195,8 @@ impl WaveChannel {
         }
     }
 
-    /// See [`crate::audio::square_channel::SquareWaveChannel::digital_level`]. Note the **phase
-    /// parity** in here: a wave-RAM byte holds two nibbles, so advancing the phase changes the
+    /// See [`crate::audio::square_channel::SquareWaveChannel::digital_level`]. Note the phase
+    /// parity in here: a wave-RAM byte holds two nibbles, so advancing the phase changes the
     /// output even when `sample_buffer` has not moved.
     #[inline]
     pub fn digital_level(&self) -> Option<u8> {
@@ -243,7 +214,7 @@ impl WaveChannel {
     pub fn trigger(&mut self, frame_sequencer: &FrameSequencer, access_offset: u16) {
         // DMG wave-RAM corruption: retriggering one tick before a sample fetch copies the byte
         // that fetch was about to read down over the start of wave RAM (gambatte
-        // `channel3.cpp:60-68`). CGB does not do this.
+        // `channel3.cpp:60-68`).
         if self.active && self.dac_enabled
             && self.next_fetch_after(access_offset) == access_offset + 1 {
             // The byte that imminent fetch was about to read, at the phase the channel has
@@ -261,8 +232,8 @@ impl WaveChannel {
         self.length_timer.trigger(frame_sequencer);
         self.frequency_timer.set_frequency(self.period_register);
         // The first fetch is `period + 3` ticks out, and the write's own placement within its
-        // instruction shifts it: the timer counts from the instruction boundary, the write happens
-        // `access_offset` ticks into it.
+        // instruction shifts it: the timer counts from the instruction boundary, the write
+        // happens `access_offset` ticks into it.
         self.frequency_timer.trigger_after(3 + access_offset);
     }
 
@@ -274,7 +245,7 @@ impl WaveChannel {
         if !self.active {
             self.sample_buffer = 0;
 
-            // disabled channels still clock the length counter
+            // Disabled channels still clock the length counter
             if events.is_length_counter() {
                 self.clock_length_timer();
             }
@@ -286,7 +257,7 @@ impl WaveChannel {
         }
 
         if self.active && self.frequency_timer.update(delta) {
-            // overflow, emit a sample
+            // Overflow, emit a sample
             self.sample_buffer = self.current_sample_byte();
         }
     }
@@ -309,20 +280,17 @@ impl WaveChannel {
         self.length_timer.clock(&mut self.active);
         if prev_active && !self.active {
             // Explicitly clear the sample buffer when the length counter disables the channel.
-            // Necessary because the wavetable channel continues to output the current sample buffer
-            // when disabled, as long as the DAC is still enabled
             self.sample_buffer = 0;
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// A channel playing a `period`-tick note, triggered by a write placed `access_offset` ticks
-    /// into its instruction, with wave RAM holding `00 11 22 ... FF`.
+    /// into its instruction, with wave RAM holding `00 11 22 ...
     fn playing(period: u16, access_offset: u16) -> WaveChannel {
         let mut channel = WaveChannel::default();
         for index in 0..16 {
@@ -354,8 +322,6 @@ mod tests {
         assert_eq!(channel.frequency_timer.counter(), 100 + 3 + 4);
     }
 
-    /// A16 / dmg_sound 09. While the channel plays, a read only sees wave RAM on the exact tick
-    /// the channel fetches its next sample; every other tick reads `0xFF`.
     #[test]
     fn a_read_only_lands_on_the_fetch_tick() {
         let channel = playing(2, 0); // counter = 5
@@ -374,8 +340,6 @@ mod tests {
         assert_eq!(channel.wave_ram(9, 4), 0x99);
     }
 
-    /// A16 / dmg_sound 12. Same aperture for writes: outside it the write is lost, inside it the
-    /// write lands on the byte being fetched rather than the addressed one.
     #[test]
     fn a_write_only_lands_on_the_fetch_tick() {
         let mut channel = playing(2, 0); // counter = 5
@@ -387,10 +351,6 @@ mod tests {
         assert_eq!(channel.wave_ram(9, 5), 0xAB, "landed on byte 0, not byte 9");
     }
 
-    /// A16 / dmg_sound 09's real prerequisite. Hardware reloads the frequency timer from
-    /// NR33/NR34 at each overflow, so a period written mid-note takes effect at the **next**
-    /// reload — not immediately, and not only at the next trigger. gb used to latch the period at
-    /// trigger time, which left the channel fetching at the old rate forever.
     #[test]
     fn a_period_written_mid_note_applies_at_the_next_reload() {
         let mut channel = playing(100, 0);
@@ -400,14 +360,12 @@ mod tests {
         assert_eq!(channel.frequency_timer.counter(), 103, "the interval in flight is untouched");
 
         // 103 ticks reach the first fetch, which reloads; the 104th spends one tick of the new
-        // period. With the period latched at trigger the reload would have been 100, not 2.
+        // period.
         advance(&mut channel, 52);
         assert_eq!(channel.frequency_timer.counter(), 1);
         assert_eq!(channel.wave_ram(0, 1), 0x11, "fetch 2 reads byte 1");
     }
 
-    /// A16 / dmg_sound 10. Retriggering exactly one tick before a fetch copies the byte that fetch
-    /// was about to read down over the start of wave RAM. DMG only.
     #[test]
     fn a_retrigger_one_tick_before_a_fetch_corrupts_wave_ram() {
         // Line the channel up so the next fetch is at tick 5 and would read byte 6.

@@ -3,20 +3,14 @@ use bincode::{Decode, Encode};
 /// FF10 — NR10: Channel 1 sweep
 #[derive(Debug, Clone, Default, Eq, PartialEq, Decode, Encode)]
 pub struct Sweep {
-    /// Pace: This dictates how often sweep “iterations” happen, in units of 128 Hz ticks5 (7.8 ms).
-    /// A value of 0 disables the sweep.
-    /// bits 4-6
+    /// Pace: This dictates how often sweep “iterations” happen, in units of 128 Hz ticks5 (7.8
+    /// ms).
     sweep_period: u8,
-    /// Direction: 0 = Addition (period increases); 1 = Subtraction (period decreases)
-    /// bit 3
+    /// Direction: 0 = Addition (period increases); 1 = Subtraction (period decreases) bit 3
     subtraction: bool,
-    /// Individual step: On each iteration, the new period Lt+1 is computed from the current one Lt as follows:
-    /// L[t+1] = L[t] + L[t] / 2^step if direction is 0 (addition)
-    /// L[t+1] = L[t] - L[t] / 2^step if direction is 1 (subtraction)
-    /// bits 0-2
     individual_step: u8,
 
-    // internal state
+    // Internal state
     enabled: bool,
     shadow_period: u16,
     sweep_timer: u8,
@@ -39,9 +33,7 @@ impl Sweep {
         self.subtraction = (value & 0x08) != 0; // Bit 3
         self.individual_step = value & 0x07; // Bits 0-2
 
-        // No reload here. Gambatte has no counterpart, and reloading on an NR10 write can re-arm
-        // a sweep that had already run down — hardware only reloads the timer on trigger and when
-        // the sweep itself clocks.
+        // No reload here.
 
         if self.calculated_with_negate_since_trigger && !self.subtraction {
             // If the negate flag is cleared after frequency was calculated with it set at least
@@ -60,7 +52,8 @@ impl Sweep {
         self.reset_sweep_timer();
         self.enabled = self.sweep_period != 0 || self.individual_step != 0;
 
-        // If the individual step is non-zero, frequency calculation and overflow check are performed immediately.
+        // If the individual step is non-zero, frequency calculation and overflow check are
+        // performed immediately.
         if self.individual_step > 0 {
             self.calculate_period()
         } else {

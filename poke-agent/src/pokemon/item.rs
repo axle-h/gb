@@ -84,24 +84,14 @@ pub enum ItemId {
     MaxEther = 0x51,
     Elixer = 0x52,
     MaxElixer = 0x53,
-    // Field-move HMs (item ids $C4–$C8). Needed to detect/teach Cut, Fly, Surf, etc.
+    // Field-move HMs (item ids $C4–$C8).
     Hm01Cut = 0xC4,
     Hm02Fly = 0xC5,
     Hm03Surf = 0xC6,
     Hm04Strength = 0xC7,
     Hm05Flash = 0xC8,
-    // TMs, 0xC9 (TM01) to 0xFA (TM50), in the cartridge's own order
-    // (`add_tm`, `constants/item_constants.asm`).
-    //
-    // ⚠️ **All fifty are named, and the twelve that used to be here were not enough.** `Bag` drops
-    // every id `ItemId` cannot name, and `observe::bag` is what `read_bag` answers with, so an
-    // unnamed TM was invisible to the model *and* uncounted against the 20-slot ceiling. The
-    // deployed run of 2026-08-27 was told `slots_used: 3` over a bag holding four things, and the
-    // fourth (TM01) turned up on screen with nothing having ever mentioned it; the model filed a
-    // bug about the "unrelated TM34/bag menu prompt" it thought it had triggered. A bag that
-    // silently fills is the worse half: a pickup into a full bag is refused in a way that reads
-    // from outside exactly like a pickup that worked. There is nothing to weigh here, since
-    // `from_repr` and `item_by_name` both pick a variant up for free.
+    // TMs, 0xC9 (TM01) to 0xFA (TM50), in the cartridge's own order (`add_tm`,
+    // `constants/item_constants.asm`).
     Tm01MegaPunch = 0xC9,
     Tm02RazorWind = 0xCA,
     Tm03SwordsDance = 0xCB,
@@ -125,8 +115,8 @@ pub enum ItemId {
     Tm20Rage = 0xDC,
     Tm21MegaDrain = 0xDD,
     Tm22Solarbeam = 0xDE,
-    /// The cheapest of the three **Game Corner prize TMs** at 3300 coins, and so the one
-    /// workstream F proves the prize room's `GiveItem` branch with.
+    /// The cheapest of the three Game Corner prize TMs at 3300 coins, and so the one workstream F
+    /// proves the prize room's `GiveItem` branch with.
     Tm23DragonRage = 0xDF,
     Tm24Thunderbolt = 0xE0,
     Tm25Thunder = 0xE1,
@@ -134,12 +124,9 @@ pub enum ItemId {
     Tm27Fissure = 0xE3,
     /// DIG doubles as a reusable Escape Rope out of any cave.
     Tm28Dig = 0xE4,
-    /// Given away by the old man in `MrPsychicsHouse` for nothing at all.
     Tm29Psychic = 0xE5,
     Tm30Teleport = 0xE6,
-    /// The Copycat's swap for a **Poké Doll**. Her script checks `IsItemInBag POKE_DOLL` and
-    /// silently says nothing else without one, so this TM arriving is the only evidence the doll
-    /// was in hand (`scripts/CopycatsHouse2F.asm:22`).
+    /// The Copycat's swap for a Poké Doll.
     Tm31Mimic = 0xE7,
     Tm32DoubleTeam = 0xE8,
     Tm33Reflect = 0xE9,
@@ -155,10 +142,8 @@ pub enum ItemId {
     Tm42DreamEater = 0xF2,
     Tm43SkyAttack = 0xF3,
     Tm44Rest = 0xF4,
-    /// A free pickup on Route 24 and the **only** paralysis move the party can learn (Slowpoke is
-    /// the sole compatible member). Workstream D throws balls at the legendaries behind it: a
-    /// status ailment is worth 12 off Rand1 in the Gen 1 catch formula, which on a catch-rate-3
-    /// target is the difference between ~2 % and ~9 % per ball. See `postgame::legendaries`.
+    /// A free pickup on Route 24 and the only paralysis move the party can learn (Slowpoke is the
+    /// sole compatible member).
     Tm45ThunderWave = 0xF5,
     Tm46Psywave = 0xF6,
     Tm47Explosion = 0xF7,
@@ -171,11 +156,6 @@ pub enum ItemId {
 impl ItemId {
     /// True for the items pokered's `IsKeyItem` refuses to sell or toss ("I can't put a PRICE on
     /// that!" / "That's too important!").
-    ///
-    /// Transcribed from `data/items/key_items.asm`, which is the authority — it is a flat bit array
-    /// over every item id, and the set is not guessable from the names: the **fossils**, the
-    /// **fishing rods** and the badges are all key items, while the Nugget, the Poké Doll and the
-    /// vending-machine drinks are not. Only ids this enum names are listed; TMs are never key items.
     pub const fn is_key_item(self) -> bool {
         matches!(self,
             Self::TownMap | Self::Bicycle | Self::Surfboard | Self::SafariBall | Self::Pokedex

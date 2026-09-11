@@ -1,11 +1,9 @@
 //! What the encoder has to keep being true.
-//!
-//! The important one is [`the_packets_are_ones_a_browser_can_decode`], and its shape is the whole
-//! lesson of this module — see the comment on it before writing anything similar.
 
 use super::*;
 
-/// 48 kHz, and every tone the tests below listen for is a harmonic-free choice well inside the band.
+/// 48 kHz, and every tone the tests below listen for is a harmonic-free choice well inside the
+/// band.
 const TONES: [f32; 4] = [110.0, 440.0, 659.0, 1320.0];
 
 /// A stand-in for what the cartridge actually produces: square waves and a little noise.
@@ -27,8 +25,6 @@ fn centred(mono: &[f32]) -> Vec<f32> {
 }
 
 /// Energy at one frequency, in dB, by Goertzel.
-///
-/// ⚠️ **Phase-insensitive, and that is the entire point.** See the ⚠️ on the round-trip test.
 fn tone_db(samples: &[f32], frequency: f32) -> f64 {
     let w = 2.0 * std::f64::consts::PI * frequency as f64 / SAMPLE_RATE as f64;
     let (mut re, mut im) = (0.0f64, 0.0f64);
@@ -45,22 +41,11 @@ fn packets_from(encoder: &mut AudioEncoder, stereo: &[f32]) -> Vec<Arc<[u8]>> {
     out
 }
 
-// ── The one that matters ─────────────────────────────────────────────────────────────────────────
+// ── The one that matters
+// ─────────────────────────────────────────────────────────────────────────
 
 /// The packets this module puts on the wire are ones a browser will decode into the sound the
 /// cartridge made — pinned by decoding them back and listening for the tones that went in.
-///
-/// ⚠️ **Measured as spectral energy, never as a sample-wise SNR.** Opus is a transform codec: it has
-/// ~6.5 ms of lookahead, and CELT does not preserve phase at all. A waveform comparison therefore
-/// reports total failure on a perfectly healthy codec — the first version of this check did exactly
-/// that, reporting -3 dB SNR on output that was in fact correct — which is the worst possible answer
-/// to get from the test that guards a young dependency, because it is indistinguishable from the
-/// real bug below.
-///
-/// ⚠️ **This is the test that catches `opus-rs`'s 24 kHz bug**, so it pins [`SAMPLE_RATE`] along
-/// with everything else. At 24 kHz these same assertions fail by ~36 dB while the *loudness* stays
-/// right, which is precisely the failure a listener would struggle to describe and a waveform test
-/// would miss. Run it against any change to the rate, the crate or its version.
 #[test]
 fn the_packets_are_ones_a_browser_can_decode() {
     let mono = chiptune(SAMPLE_RATE as usize * 2);
@@ -93,10 +78,11 @@ fn the_packets_are_ones_a_browser_can_decode() {
     }
 }
 
-// ── Framing ──────────────────────────────────────────────────────────────────────────────────────
+// ── Framing
+// ──────────────────────────────────────────────────────────────────────────────────────
 
 /// A frame is 20 ms and a host tick is ~1 ms, so the accumulator spanning pushes is the ordinary
-/// case. Pushed at ragged sizes, nothing may be lost at the seams and nothing may be emitted early.
+/// case.
 #[test]
 fn the_encoder_frames_across_ragged_pushes() {
     let mut encoder = AudioEncoder::new(DEFAULT_BITRATE);
@@ -130,9 +116,7 @@ fn a_part_frame_waits_for_the_rest_of_it() {
     assert_eq!(packets_from(&mut encoder, &stereo[split..]).len(), 1, "lost the held samples");
 }
 
-/// ⚠️ **Silence has to reach the wire.** `publish_video` may return without sending when nothing
-/// moved on screen; audio may not do the equivalent, because the client's jitter buffer starves on
-/// a stream that merely stops.
+/// Silence has to reach the wire.
 #[test]
 fn a_silent_run_still_produces_packets() {
     let mut encoder = AudioEncoder::new(DEFAULT_BITRATE);
@@ -161,10 +145,9 @@ fn stereo_is_downmixed_by_averaging_rather_than_summing() {
     assert!(peak < 1.2, "a hard-panned-centre DC level came back at {peak:.2}; that is a sum");
 }
 
-// ── Lifecycle ────────────────────────────────────────────────────────────────────────────────────
+// ── Lifecycle
+// ────────────────────────────────────────────────────────────────────────────────────
 
-/// A new run gets a fresh codec, and the partial frame the old run left is not glued to the front
-/// of it.
 #[test]
 fn restart_drops_the_frame_the_previous_run_was_halfway_through() {
     let mut encoder = AudioEncoder::new(DEFAULT_BITRATE);
@@ -191,7 +174,7 @@ fn the_header_says_what_the_page_needs_to_configure_a_decoder() {
     assert_eq!(u16::from_le_bytes(header[10..12].try_into().unwrap()), FRAME_MS as u16);
 }
 
-/// ⚠️ A rate the crate is wrong at must not be reachable by editing one constant and running the
+/// A rate the crate is wrong at must not be reachable by editing one constant and running the
 /// suite: the round-trip test above is the alarm, and this is the label on it.
 #[test]
 fn the_sample_rate_is_one_the_encoder_is_known_good_at() {
@@ -199,18 +182,10 @@ fn the_sample_rate_is_one_the_encoder_is_known_good_at() {
     assert_eq!(FRAME_SAMPLES, 960);
 }
 
-// ── The bitstream, structurally ──────────────────────────────────────────────────────────────────
+// ── The bitstream, structurally
+// ──────────────────────────────────────────────────────────────────
 
 /// What a packet says about itself, read by hand out of its first byte.
-///
-/// ⚠️ **This is the only check here that is evidence about the *bitstream* rather than about the
-/// library.** Everything above round-trips `opus-rs` through `opus-rs`, which a self-consistently
-/// wrong codec passes — and a self-consistently wrong codec is exactly what the 24 kHz bug is. RFC
-/// 6716 §3.1 lays the TOC byte out as `config:5 | s:1 | c:2`, so config 12–15 is CELT-only at 20 ms,
-/// `s` is the stereo flag and `c` is the frame-count code. Fifteen lines, no dependency, and it
-/// fails if the encoder ever quietly starts emitting stereo, a different frame length, or several
-/// frames per packet — each of which would leave the round-trip test perfectly green and the page's
-/// `AudioDecoder` reading 20 ms of audio out of every 40 ms it was handed.
 #[test]
 fn a_packet_says_mono_twenty_milliseconds_on_its_face() {
     let mut encoder = AudioEncoder::new(DEFAULT_BITRATE);
@@ -222,8 +197,8 @@ fn a_packet_says_mono_twenty_milliseconds_on_its_face() {
         let (config, stereo, frames) = (toc >> 3, (toc >> 2) & 1, toc & 3);
         assert_eq!(stereo, 0, "the stereo bit is set on a stream that says it is mono");
         assert_eq!(frames, 0, "code {frames}: more than one frame in a packet the page reads as one");
-        // 20 ms is the fourth frame size in each of the SILK, hybrid and CELT config blocks, so it
-        // is the configs congruent to 3 (mod 4) below 16, and 15 in the CELT block above it.
+        // 20 ms is the fourth frame size in each of the SILK, hybrid and CELT config blocks, so
+        // it is the configs congruent to 3 (mod 4) below 16, and 15 in the CELT block above it.
         let twenty_ms = matches!(config, 3 | 7 | 11 | 15 | 19 | 23 | 27 | 31);
         assert!(twenty_ms, "config {config} is not a 20 ms configuration");
     }

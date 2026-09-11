@@ -1,6 +1,5 @@
 //! The fast tier: individual agent/state-reading mechanics, each from a snapshot that is already
-//! sitting on the thing being tested. Most emulate seconds or nothing at all, so these run on a plain
-//! `cargo test --release`.
+//! sitting on the thing being tested.
 
 use super::*;
 
@@ -41,27 +40,7 @@ fn test_ledge_jump_does_not_abort_overworld_movement() {
     assert!(battle_in_grass, "agent should have successfully navigated into the grass and triggered a battle (if we got here, the ledge jump did not cause a Script abort)")
 }
 
-/// **An arrow tile is the walk being carried out, not a script that ended it.**
-///
-/// The sibling above is the *transient* half of the same mechanism: a ledge jump runs in
-/// `GameMode::Script` for ~660 ms, so `RunningScript` holds a 1000 ms rollback window and restores
-/// the walk when the script ends inside it. A spin tile is the other half and it does not fit —
-/// measured on Rocket Hideout B2F, the six slides between the B3F stairs and the lift run **3.2 s to
-/// 13.9 s**. Every one therefore breached the window, dropped the backup and reported "the game took
-/// over", while `MetaTileMap`'s BFS had deliberately routed *through* that very tile
-/// (`tile_map.rs`'s spinner arm treats stepping onto an arrow as an edge to the slide destination).
-/// The planner and the executor disagreeing about one tile.
-///
-/// The deployed run of 2026-09-02 is the measurement: **535 aborts of 678 walks on B2F and 423 of
-/// 646 on B3F, every one `reason: Script`**, against **one** apiece on B1F and B4F, which are the
-/// two hideout floors with no arrows on them. It got across anyway — each abort leaves the player at
-/// the arrow's destination and the next poll re-plans — so nothing hung and no watchdog fired. That
-/// is why no tier caught it: `DeterministicPolicy` re-answers instantly and for free, so
-/// `full_playthrough` and the Silph Scope leg are green. For `LlmPolicy` each hop is a full request
-/// against the whole history, reported to the model as its action having *failed*.
-///
-/// ⚠️ **The assertion is the abort count, not arrival.** Arrival was always true — that is the whole
-/// reason this survived — so a test that only checked the destination passes on the bug.
+/// An arrow tile is the walk being carried out, not a script that ended it.
 #[test]
 fn an_arrow_tile_carries_the_walk_rather_than_ending_it() {
     let mut fixture = TestFixture::new(
@@ -86,29 +65,14 @@ fn an_arrow_tile_carries_the_walk_rather_than_ending_it() {
     }
 
     let state = fixture.game_state();
-    // ⚠️ **The precondition, or this proves nothing.** A route that never touches an arrow tile
-    // produces no aborts on the broken build either, and B2F's maze is exactly the sort of thing a
-    // re-timed RNG stream can send a walk round the outside of.
+    // The precondition, or this proves nothing.
     assert_eq!(state.map.map, Map::RocketHideoutElevator,
                "should have crossed B2F to the lift, which is only reachable over the arrows");
     assert!(script_aborts.is_empty(),
             "a spin tile is the walk, not a script that ended it — aborted at {script_aborts:?}");
 }
 
-/// ⚠️ **A text box in answer to an A press is the interaction landing, not a failure.**
-///
-/// The route to a sprite ends by facing it and pressing A, and it is re-derived every tick — so once
-/// the player is standing in front of the sprite that route is `[A]` for ever, and the "the route ran
-/// out" branch that completes an ordinary walk is never reached. The *only* signal that talking to
-/// someone worked is the box that opens, which the agent read as an interruption and reported as
-/// `OverworldActionAborted { reason: Textbox }`: "✗ gave up on Scientist 1: it was interrupted",
-/// after a conversation that went perfectly. It reached the model too, in the field the prompt calls
-/// the most useful thing the agent can say.
-///
-/// Both interactions are here rather than in two tests because the second one is the trap: ⚠️ **a PC
-/// tile is not in `meta_tiles`** — it is a hidden event, indistinguishable from the wall it is drawn
-/// on — so the tile in front of a player using one reads as `Obstacle`, and the obvious "is the
-/// thing in front of me the thing I walked to?" test answers no. For PCs only, and silently.
+/// A text box in answer to an A press is the interaction landing, not a failure.
 #[test]
 fn talking_to_a_sprite_is_a_success_not_an_abort() {
     let mut fixture = TestFixture::new(
@@ -122,9 +86,8 @@ fn talking_to_a_sprite_is_a_success_not_an_abort() {
         ],
     );
 
-    // ⚠️ Not `step_until_exhausted`: `Interact` pops when it has *issued* the walk, which can be
-    // before the conversation it asked for has started — the same gap `run_leg` warns about. So this
-    // runs until both outcomes have been emitted, with the fixture's cycle budget as the failsafe.
+    // Not `step_until_exhausted`: `Interact` pops when it has *issued* the walk, which can be
+    // before the conversation it asked for has started — the same gap `run_leg` warns about.
     let mut landed: Vec<AgentEvent> = Vec::new();
     let mut interrupted: Vec<AgentEvent> = Vec::new();
     while landed.len() < 2 {
@@ -149,13 +112,8 @@ fn talking_to_a_sprite_is_a_success_not_an_abort() {
     );
 }
 
-/// The other half, and the reason the check above is on what the player is **facing** rather than on
+/// The other half, and the reason the check above is on what the player is facing rather than on
 /// "the destination was a sprite".
-///
-/// ⚠️ **A text box can open in the middle of a walk without being an answer to anything.** Here the
-/// rival's script fires two tiles short of the aide, at a spot where the tile in front is `Empty` —
-/// so this walk really did give up, and reporting it as a conversation would tell the model it had
-/// talked to someone it never reached. Found by writing the test above against this fixture first.
 #[test]
 fn a_script_that_interrupts_a_walk_is_still_an_abort() {
     let mut fixture = TestFixture::new(
@@ -175,9 +133,6 @@ fn a_script_that_interrupts_a_walk_is_still_an_abort() {
         }
     };
 
-    // ⚠️ **The square is part of the sentence now**, and it is the rival's script cutting the walk
-    // short two tiles from the aide — so this is also the case that shows the coordinate is where
-    // the walk *stopped* rather than where it was headed.
     assert_eq!(
         format!("{outcome}"),
         "✗ gave up on Scientist 1 at (5, 6): the game stopped you to say something",
@@ -185,14 +140,7 @@ fn a_script_that_interrupts_a_walk_is_still_an_abort() {
     );
 }
 
-/// ⚠️ **The person you are talking to is very often not the tile you are facing.** Gen 1 talks
-/// *over* a counter (`wTilesetTalkingOverTiles`), so the route to a nurse, a mart clerk or a gym
-/// receptionist stops one tile short of the ones above and faces the desk instead — leaving the
-/// tile in front `Counter` and the "am I facing what I walked over for" test answering no. Every
-/// heal in every Pokémon Centre was therefore reported as "✗ gave up on Nurse: it was interrupted",
-/// which is the deployed run's most frequent action and the one it repeats most.
-///
-/// `actions()` had always routed across a counter; it was only the landing that did not know.
+/// The person you are talking to is very often not the tile you are facing.
 #[test]
 fn talking_over_a_counter_is_a_success_not_an_abort() {
     let mut fixture = TestFixture::new(
@@ -204,8 +152,8 @@ fn talking_over_a_counter_is_a_success_not_an_abort() {
         ],
     );
 
-    // As above: `Interact` pops when the walk is issued, so run until the outcome is emitted rather
-    // than until the queue empties.
+    // As above: `Interact` pops when the walk is issued, so run until the outcome is emitted
+    // rather than until the queue empties.
     let outcome = 'walk: loop {
         fixture.step();
         for event in fixture.agent.drain_events() {
@@ -234,9 +182,7 @@ fn test_debouncing() {
     fixture.step_until_exhausted();
 }
 
-
 /// Route 1 has tall grass — a WalkInGrass action must be present and route to a Grass tile.
-/// Indoor maps (no wGrassTile) must produce no WalkInGrass action.
 #[test]
 fn test_walk_in_grass_action() {
     {
@@ -311,10 +257,8 @@ fn test_route_1_ledge_routing() {
     let south_row = (map.height - 1) as u8; // Pallet Town connection row
     let north_row = 0u8;                     // Viridian City connection row
 
-    // ── Southward: jump is used ──────────────────────────────────────────────
-    // Pressing Down once from north-of-ledge jumps two tiles (over the ledge),
-    // landing at south-of-ledge. So the south route is exactly 1 step longer
-    // than starting from south-of-ledge.
+    // ── Southward: jump is used ────────────────────────────────────────────── Pressing Down
+    // once from north-of-ledge jumps two tiles (over the ledge), landing at south-of-ledge.
     let north_to_south = shortest_to_connection(north_of_ledge, south_row)
         .expect("Pallet Town reachable from north of ledge via jump");
     let south_to_south = shortest_to_connection(south_of_ledge, south_row)
@@ -326,9 +270,8 @@ fn test_route_1_ledge_routing() {
          1 more than starting just south of it ({south_to_south} steps)"
     );
 
-    // ── Northward: ledge forces a detour ────────────────────────────────────
-    // Ledges block northward movement. A player south of the ledge must navigate
-    // around the entire ledge row, adding many more steps than from north of it.
+    // ── Northward: ledge forces a detour ──────────────────────────────────── Ledges block
+    // northward movement.
     let north_to_north = shortest_to_connection(north_of_ledge, north_row)
         .expect("Viridian City reachable from north of ledge");
     let south_to_north = shortest_to_connection(south_of_ledge, north_row)
@@ -382,8 +325,8 @@ fn test_pallet_town_actions() {
     );
 }
 
-/// When the ViridianCity PokeMART clerk's intro script is running the agent must
-/// advance the conversation by pressing A — not try to navigate around the map.
+/// When the ViridianCity PokeMART clerk's intro script is running the agent must advance the
+/// conversation by pressing A — not try to navigate around the map.
 #[test]
 fn test_viridian_pokemart_script_advances_dialogue() {
     const POKEMART_STATE: &[u8] = include_bytes!("../data/viridian-city-pokemart-during-script.bin");
@@ -395,7 +338,6 @@ fn test_viridian_pokemart_script_advances_dialogue() {
     );
 
     // The save state has the clerk's text box already open.
-    // The game mode must be TextBox or Script — never plain Overworld.
     {
         let mode = fixture.game_state().mode;
         assert!(
@@ -404,8 +346,8 @@ fn test_viridian_pokemart_script_advances_dialogue() {
         );
     }
 
-    // Run the agent: it should press A to advance the dialogue and eventually
-    // return to Overworld mode.
+    // Run the agent: it should press A to advance the dialogue and eventually return to Overworld
+    // mode.
     fixture.step_until_exhausted();
 
     assert_eq!(
@@ -437,7 +379,7 @@ fn test_pokemart_shopping() {
 }
 
 /// The `complete_game_steps` mart sequence — an explicit `Interact(Clerk)` opens the shop, THEN
-/// `BuyFromMart`. Guards the verify-and-retry buy flow (the purchase must register in the bag).
+/// `BuyFromMart`.
 #[test]
 fn test_mart_interact_then_buy() {
     const STATE: &[u8] = include_bytes!("../data/viridian-city-pokemart-shopping.bin");
@@ -457,8 +399,6 @@ fn test_mart_interact_then_buy() {
 }
 
 /// A Cut bush on the path north of Viridian City blocks access to the Fisher.
-/// Without the Cascade Badge and a Pokémon that knows Cut, the bush is an
-/// impassable obstacle and no action to talk to the Fisher should be generated.
 #[test]
 fn test_cut_bush_blocks_fisher_without_cut() {
     const BUSH_STATE: &[u8] = include_bytes!("../data/viridian-city-north-of-bush.bin");
@@ -477,9 +417,8 @@ fn test_cut_bush_blocks_fisher_without_cut() {
     );
 }
 
-
-/// Before the player receives the Pokédex from Oak, `has_pokedex` must be false
-/// and both seen/owned sets must be empty.
+/// Before the player receives the Pokédex from Oak, `has_pokedex` must be false and both
+/// seen/owned sets must be empty.
 #[test]
 fn test_pokedex_empty_before_receiving_pokedex() {
     let mut fixture = TestFixture::new(
@@ -494,9 +433,9 @@ fn test_pokedex_empty_before_receiving_pokedex() {
     assert!(state.pokedex_seen.is_empty(), "wPokedexSeen should be all-zero at game start");
 }
 
-/// Directly writes the EVENT_GOT_POKEDEX bit (bit 37 of wEventFlags) and checks
-/// that `has_pokedex` flips accordingly — tests the bit-address logic independently
-/// of any particular save state's history.
+/// Directly writes the EVENT_GOT_POKEDEX bit (bit 37 of wEventFlags) and checks that
+/// `has_pokedex` flips accordingly — tests the bit-address logic independently of any particular
+/// save state's history.
 #[test]
 fn test_has_pokedex_bit_toggling() {
     let mut fixture = TestFixture::new(ROUTE1_STATE, Duration::from_secs(10), vec![]);
@@ -521,8 +460,6 @@ fn test_has_pokedex_bit_toggling() {
 
 /// Directly writes known species bits into wPokedexOwned/wPokedexSeen and verifies
 /// `read_pokedex_flags` decodes them to the correct `PokemonSpecies` values.
-/// Bulbasaur=dex#1 (byte 0, bit 0), Charmander=dex#4 (byte 0, bit 3),
-/// Squirtle=dex#7 (byte 0, bit 6).
 #[test]
 fn test_pokedex_flag_bit_decoding() {
     let mut fixture = TestFixture::new(ROUTE1_STATE, Duration::from_secs(10), vec![]);
@@ -530,9 +467,6 @@ fn test_pokedex_flag_bit_decoding() {
     let owned_base = pokered_symbols::wPokedexOwned.address;
     // Write byte 0 with bits for Bulbasaur (#1=bit0), Charmander (#4=bit3), Squirtle (#7=bit6)
     // Bit index = dex_number - 1, LSB first.
-    // Bulbasaur: bit 0 → mask 0x01
-    // Charmander: bit 3 → mask 0x08
-    // Squirtle: bit 6 → mask 0x40
     let test_byte: u8 = 0x01 | 0x08 | 0x40; // = 0x49
 
     fixture.gb.core_mut().mmu_mut().write(owned_base, test_byte);
@@ -546,7 +480,6 @@ fn test_pokedex_flag_bit_decoding() {
 }
 
 /// When a wild battle is in progress, the enemy species must appear in `pokedex_seen`.
-/// The game sets the seen flag when the wild encounter begins.
 #[test]
 fn test_pokedex_seen_contains_battle_enemy() {
     let mut fixture = TestFixture::new(BATTLE_STATE, Duration::from_secs(10), vec![]);
@@ -579,9 +512,7 @@ fn test_caught_pokemon_nickname() {
     assert_ne!(weedle.nickname.to_default_string(), "AAAAAAAAAA");
 }
 
-/// The Victory Road 1F Strength puzzle exposes exactly one switch tile and no holes. A pure state
-/// read from a fixture standing on the floor — no emulation, so it stays in the fast tier while the
-/// puzzle itself is solved by `endgame::can_solve_victory_road_1f`.
+/// The Victory Road 1F Strength puzzle exposes exactly one switch tile and no holes.
 #[test]
 fn strength_switches_are_exposed() {
     let mut fixture = TestFixture::new(
@@ -595,17 +526,7 @@ fn strength_switches_are_exposed() {
     assert!(s.map.holes.is_empty(), "VR1F has no holes");
 }
 
-/// `UseRareCandy` on a party slot **other than 0**.
-///
-/// Pinned because it was once reported as broken — *"`UseRareCandy` only works on slot 0; asked for
-/// slot 5 it spins and burns the candy on the wrong mon"* — and that report was **wrong**. What had
-/// actually happened was a mis-read log: the leg that filed it caught a **wild lv21 Voltorb** instead
-/// of the lv40 static one it was walking to, so the candy landed on the right Pokémon and simply took
-/// it to lv22 rather than over its lv30 evolution. The menu chain took 447 ticks, which is normal.
-///
-/// So this test exists to stop that costing anyone else an afternoon. It drives the real chain —
-/// START → ITEM → scroll the bag to a **deep** row → USE → the party menu → slot 5 — against a party
-/// of six, and asserts the level went up on the mon that was asked for and on no other. ~1 s.
+/// `UseRareCandy` on a party slot other than 0.
 #[test]
 fn rare_candy_works_on_a_late_party_slot() {
     const SLOT: usize = 5;
@@ -633,10 +554,8 @@ fn rare_candy_works_on_a_late_party_slot() {
     assert!(fixture.game_state().bag.iter().all(|i| i.id != ItemId::RareCandy), "candy consumed");
 }
 
-/// `PokemonApiTrait::item_price` decodes the ROM's `ItemPrices` table, which the mart driver uses to
-/// size a purchase to the wallet. The table is `table_width 3` BCD **indexed from item id 1**
-/// (MASTER_BALL), so an off-by-one reads the neighbouring item's price and is otherwise invisible —
-/// it would just buy a slightly wrong number of things. Values from `data/items/prices.asm`.
+/// `PokemonApiTrait::item_price` decodes the ROM's `ItemPrices` table, which the mart driver uses
+/// to size a purchase to the wallet.
 #[test]
 fn item_prices_match_the_rom_table() {
     let mut fixture = TestFixture::new(PALLET_TOWN_STATE, Duration::from_secs(1), vec![]);
@@ -650,25 +569,17 @@ fn item_prices_match_the_rom_table() {
     assert_eq!(api.item_price(ItemId::HyperPotion), Some(1500));
     assert_eq!(api.item_price(ItemId::SuperPotion), Some(700));
     assert_eq!(api.item_price(ItemId::WaterStone), Some(2100));
-    // Priced at 0 in the table = no mart sells it; the driver must order these as asked rather than
-    // divide by zero or trim to nothing.
+    // Priced at 0 in the table = no mart sells it; the driver must order these as asked rather
+    // than divide by zero or trim to nothing.
     assert_eq!(api.item_price(ItemId::MasterBall), None);
     assert_eq!(api.item_price(ItemId::TownMap), None);
-    // Past the end of the table entirely — HM/TM ids start at $C4 and are priced elsewhere. Without
-    // the length bound this decoded three bytes of the *next* ROM table as a price.
+    // Past the end of the table entirely — HM/TM ids start at $C4 and are priced elsewhere.
     assert_eq!(api.item_price(ItemId::Hm01Cut), None);
     assert_eq!(api.item_price(ItemId::Tm14Blizzard), None);
 }
 
-// ── W0.4 — the manual-input escape hatch ─────────────────────────────────────────────────────────
-
-/// A queued raw press must reach the game through a path the state machine has no action for at all.
-/// START is the clearest case: no `OverworldAction` can express it, and the agent never presses it of
-/// its own accord in the overworld, so a menu on screen afterwards can only have come from the queue.
-///
-/// Checked on the tick the queue drains, before the agent has resumed and looked at the menu at all.
-/// What it does next is a different property, and `a_menu_left_open_is_closed_rather_than_confirmed`
-/// is where that one lives: it closes the menu rather than pressing into it.
+/// A queued raw press must reach the game through a path the state machine has no action for at
+/// all.
 #[test]
 fn manual_input_presses_a_button_the_agent_never_would() {
     use gb::joypad::JoypadButton;
@@ -686,20 +597,14 @@ fn manual_input_presses_a_button_the_agent_never_would() {
     for _ in 0..MANUAL_INPUT_TICKS_PER_PRESS { fixture.step(); }
     assert_eq!(fixture.agent.manual_input_pending(), 0, "the press should be fully delivered");
 
-    // The START menu is the one thing that can take a standing overworld into `TextBox` without the
-    // player touching anything, and the agent presses START nowhere in the overworld. `on_screen_text`
-    // deliberately cannot corroborate it: the overworld has not loaded `vFont`, so the reader has no
-    // tiles to decode and answers `None` no matter what the menu says.
+    // The START menu is the one thing that can take a standing overworld into `TextBox` without
+    // the player touching anything, and the agent presses START nowhere in the overworld.
     assert_eq!(fixture.api().game_mode(), Some(GameMode::TextBox),
                "START should have opened the menu");
 }
 
-/// The press/hold/release cadence, asserted tick by tick, because both halves of it are load-bearing
-/// and neither is visible in the game state:
-///
-/// - **the hold** is two ticks because one is not enough — see `MANUAL_INPUT_HOLD_TICKS`;
-/// - **the release** is what separates repeats. pokered drives menus off *newly* pressed bits, so a
-///   button held straight through would deliver "A, A" as a single A.
+/// The press/hold/release cadence, asserted tick by tick, because both halves of it are
+/// load-bearing and neither is visible in the game state:
 #[test]
 fn manual_input_holds_then_releases_each_press() {
     use gb::joypad::JoypadButton;
@@ -719,8 +624,8 @@ fn manual_input_holds_then_releases_each_press() {
     assert_eq!(fixture.agent.manual_input_pending(), 0);
 }
 
-/// The cap exists so a confused model cannot hand the agent a hundred buttons and take the game away
-/// from the state machine for seconds at a time. Anything past it is dropped, not queued.
+/// The cap exists so a confused model cannot hand the agent a hundred buttons and take the game
+/// away from the state machine for seconds at a time.
 #[test]
 fn manual_input_queue_is_capped() {
     use gb::joypad::JoypadButton;
@@ -735,22 +640,15 @@ fn manual_input_queue_is_capped() {
     assert_eq!(fixture.agent.manual_input_pending(), MANUAL_INPUT_CAPACITY);
 }
 
-// ── W0.3 / W0.5b — the two policy seams ──────────────────────────────────────────────────────────
-
 /// What [`RecordingPolicy`] saw, shared with the test because the agent owns the policy.
 #[derive(Default)]
 struct Recording {
-    /// `AgentEvent` is `Debug`-only, so the debug rendering is the record. It is enough: the tests
-    /// below ask which *kinds* of event arrived, not what was inside them.
+    /// `AgentEvent` is `Debug`-only, so the debug rendering is the record.
     events: Vec<String>,
-    /// One entry per `service_tools` call: the map it was told about, and how many maps the world
-    /// graph it was handed knew. Enough to prove the triple arrives intact and is the agent's own.
     tool_polls: Vec<(Map, usize)>,
 }
 
-/// A `DeterministicPolicy` that also records what the agent asks of it. Every decision is delegated
-/// unchanged, so the run is identical to the same steps without it — the recording is pure
-/// observation.
+/// A `DeterministicPolicy` that also records what the agent asks of it.
 struct RecordingPolicy {
     inner: DeterministicPolicy,
     log: std::rc::Rc<std::cell::RefCell<Recording>>,
@@ -772,8 +670,8 @@ impl crate::pokemon::policy::Policy for RecordingPolicy {
 
     fn service_tools(&mut self, state: &GameState, api: &mut PokemonApi<'_>,
                      graph: &crate::pokemon::world_graph::WorldGraph) {
-        // Answer the poll the way `LlmPolicy` will: straight out of the observation facade, against
-        // the state already in hand. If this runs, W5's tool dispatch is a match arm over W0.5.
+        // Answer the poll the way `LlmPolicy` will: straight out of the observation facade,
+        // against the state already in hand.
         use crate::pokemon::observe;
         assert_eq!(observe::map_view(state).map, format!("{}", state.map.map),
                    "the facade must describe the state it was given");
@@ -813,14 +711,6 @@ impl crate::pokemon::policy::Policy for RecordingPolicy {
     fn current_step_is_long_running(&self) -> bool { self.inner.current_step_is_long_running() }
 }
 
-/// **W0.3** — every event the agent emits reaches the policy, *including* the ones collected into
-/// `update`'s local `new_events` and drained at the end of the tick. That was the class the plan
-/// warned might be missed; `OverworldActionCompleted` is only ever emitted that way, so seeing one
-/// here is the proof that the drain goes through `event()`.
-///
-/// **W0.5b** — `service_tools` is called at the overworld poll, and the triple it receives is real:
-/// a state that agrees with the map the agent is standing on, and the agent's own world graph rather
-/// than an empty one.
 #[test]
 fn policy_sees_every_event_and_gets_a_tool_poll() {
     // The same short indoor walk as `test_debouncing`: it ends in a warp, so the run emits a text
@@ -846,19 +736,13 @@ fn policy_sees_every_event_and_gets_a_tool_poll() {
              policy too; saw {:?}", log.events);
 }
 
-/// **W5** — the other half of the escape hatch. W0.4 built the queue on the agent and the tests
-/// above fill it by hand; a policy cannot do that, because the agent owns the policy rather than the
-/// other way round. So the agent *pulls*, at the top of every tick, and this is the proof that it
-/// does: a policy that asks for START gets the START menu, without the test ever touching
-/// `queue_manual_input`.
 #[test]
 fn a_policy_can_ask_for_a_raw_press_and_the_agent_delivers_it() {
     use gb::joypad::JoypadButton;
 
     /// Decides at the overworld poll and hands the press over on the tick after, which is exactly
     /// `LlmPolicy`'s shape: a `press_buttons` decision is taken once, parked, and collected next
-    /// tick. Arming at the poll also means the press lands from a *settled* overworld rather than
-    /// from whatever the first tick of the fixture happens to be.
+    /// tick.
     #[derive(Default)]
     struct AsksForStart {
         decided: bool,
@@ -886,8 +770,8 @@ fn a_policy_can_ask_for_a_raw_press_and_the_agent_delivers_it() {
     let mut fixture =
         TestFixture::with_policy(PALLET_TOWN_STATE, Duration::from_secs(60), Box::new(AsksForStart::default()));
 
-    // Step until the agent has pulled the press — which is the thing under test, and which nothing
-    // in this test ever puts there by hand.
+    // Step until the agent has pulled the press — which is the thing under test, and which
+    // nothing in this test ever puts there by hand.
     let mut collected = false;
     for _ in 0..200 {
         fixture.step();
@@ -904,14 +788,7 @@ fn a_policy_can_ask_for_a_raw_press_and_the_agent_delivers_it() {
                "START should have opened the menu — the agent never presses it by itself");
 }
 
-// ── W9 — the stuck-run watchdog ──────────────────────────────────────────────────────────────────
-
 /// A policy that plays ordinarily and writes down everything the watchdog does to it.
-///
-/// It walks by picking the first action it is offered, which is enough to produce the thing both
-/// tests below are about: an `OverworldMovement` is a stretch of *seconds* in which the agent asks
-/// nothing at all, and to the watchdog that is indistinguishable from a jam. Which one it is, is
-/// entirely a matter of the threshold — and that is the whole design.
 struct WatchdogSpy {
     timeout: Option<Duration>,
     log: std::rc::Rc<std::cell::RefCell<WatchdogLog>>,
@@ -921,7 +798,8 @@ struct WatchdogSpy {
 struct WatchdogLog {
     /// Every `pick_unstick`, as the policy saw it.
     jams: Vec<(String, Duration)>,
-    /// Real decision points — `service_tools`, which the watchdog deliberately does not count as one.
+    /// Real decision points — `service_tools`, which the watchdog deliberately does not count as
+    /// one.
     polls: usize,
     /// Handed to the agent on the tick after the first nudge is asked for.
     nudge: Option<Vec<JoypadButton>>,
@@ -947,8 +825,8 @@ impl crate::pokemon::policy::Policy for WatchdogSpy {
         let mut log = self.log.borrow_mut();
         log.jams.push((jam.agent_state.to_string(), jam.stuck_for));
         // Answers on the third ask rather than the first, because that is the shape of the real
-        // thing: an `LlmPolicy` turn takes seconds of wall clock and is polled on every tick of them.
-        // A watchdog that notified once would leave such a turn with nowhere to be serviced.
+        // thing: an `LlmPolicy` turn takes seconds of wall clock and is polled on every tick of
+        // them.
         if !log.nudged && log.jams.len() >= 3 {
             log.nudged = true;
             log.nudge = Some(vec![JoypadButton::A]);
@@ -976,14 +854,6 @@ impl crate::pokemon::policy::Policy for WatchdogSpy {
     }
 }
 
-/// **W9 / §14** — the watchdog fires when the agent stops asking, says what it was doing, and its
-/// answer reaches the game.
-///
-/// ⚠️ **The jam here is a walk**, and a walk is not a bug. That is deliberate: the only thing the
-/// agent can observe is "nothing has asked me anything for N seconds", and at a one-second threshold
-/// an ordinary walk across Pallet Town qualifies. What separates insurance from a nuisance is
-/// entirely the size of N — `GB_STUCK_TIMEOUT_SECS` defaults to **300 emulated seconds**, and the
-/// test below this one measures how much headroom that really is.
 #[test]
 fn the_watchdog_wakes_a_policy_the_agent_has_stopped_asking() {
     let (policy, log) = WatchdogSpy::new(Some(Duration::from_secs(1)));
@@ -1010,27 +880,22 @@ fn the_watchdog_wakes_a_policy_the_agent_has_stopped_asking() {
     assert!(fired_after.is_some(), "the watchdog never fired");
 
     // It is asked on *every* tick of the jam, not once — which is what gives a turn's tool batch
-    // somewhere to be serviced, and what lets a `wait` count down. One notification would deadlock
-    // an LLM turn that needed a read before it could answer.
+    // somewhere to be serviced, and what lets a `wait` count down.
     assert!(jams.len() > 1, "the watchdog asked once and gave up; a turn needs polling to complete");
 
     // The answer travels the escape hatch: no new agent seam, and `queue_manual_input` resets the
     // state machine to `Idle`, which is itself half of what clears a real jam.
     assert!(fixture.agent.manual_input_pending() > 0, "the nudge never reached the agent");
 
-    // …and the event that says so is a bug report the run cannot lose: the model reads it, the host
-    // publishes it to the UI and the transcript, and `event` prints it to stdout.
+    // …and the event that says so is a bug report the run cannot lose: the model reads it, the
+    // host publishes it to the UI and the transcript, and `event` prints it to stdout.
     let reported = fixture.agent.drain_events().into_iter().any(|event| {
         matches!(event, AgentEvent::WatchdogFired { ref agent_state, .. } if !agent_state.is_empty())
     });
     assert!(reported, "a firing must be reported, not quietly recovered from");
 
-    // Once the press has been delivered the agent is back in charge and asking again, so the clock
-    // is back to zero rather than latched at "stuck forever".
-    // ⚠️ Measured as a *minimum over the window*, not as the value at the end of it. At a
-    // one-second threshold this fixture is stuck again within a couple of tiles of walking, so the
-    // instantaneous reading is usually mid-jam; what is under test is that a real decision point
-    // puts the clock back to zero at all, which the watchdog's own polling must never do.
+    // Once the press has been delivered the agent is back in charge and asking again, so the
+    // clock is back to zero rather than latched at "stuck forever".
     let polls_before = log.borrow().polls;
     let mut lowest = Duration::MAX;
     for _ in 0..200 {
@@ -1045,10 +910,6 @@ fn the_watchdog_wakes_a_policy_the_agent_has_stopped_asking() {
 
 /// The other half, and the one that says the default is not a nuisance: ordinary play never gets
 /// close to the threshold.
-///
-/// The number this prints is the useful part — it is the headroom between the longest stretch the
-/// agent legitimately goes without asking anything and the five emulated minutes at which the
-/// watchdog decides something is wrong.
 #[test]
 fn ordinary_play_stays_far_inside_the_stuck_timeout() {
     let (policy, log) = WatchdogSpy::new(
@@ -1069,11 +930,7 @@ fn ordinary_play_stays_far_inside_the_stuck_timeout() {
              default timeout is too tight or something is genuinely wedged");
 }
 
-// ── W0.5 — the observation facade ────────────────────────────────────────────────────────────────
-
-/// Every view against a known snapshot. These are the shapes the LLM sees, so the assertions are
-/// about the things a wrong one would quietly get away with: a count that disagrees with the list it
-/// counts, an HP over its maximum, a grid whose rows do not match the width it declares.
+/// Every view against a known snapshot.
 #[test]
 fn observation_views_describe_the_snapshot() {
     use crate::pokemon::observe;
@@ -1120,13 +977,13 @@ fn observation_views_describe_the_snapshot() {
     );
     assert_eq!(status.playtime, observe::playtime(&api));
     assert_eq!(status.party.len(), party.len());
-    // The heartbeat's party is what the status panel draws, so every field it draws has to be there
-    // — and `dex` in particular is a *request*: the client turns it into
+    // The heartbeat's party is what the status panel draws, so every field it draws has to be
+    // there — and `dex` in particular is a *request*: the client turns it into
     // `/api/pokemon/{dex}/front.png`, so a zero would be a broken image on the page.
     for (slot, mon) in status.party.iter().zip(party.iter()) {
-        // The two views spell the name differently on purpose: the heartbeat carries what the game
-        // stores (`CHARMANDER`), the LLM's view carries `None` for an un-renamed Pokémon and lets
-        // the species stand in (`Charmander`). Both are right; only the letters differ.
+        // The two views spell the name differently on purpose: the heartbeat carries what the
+        // game stores (`CHARMANDER`), the LLM's view carries `None` for an un-renamed Pokémon and
+        // lets the species stand in (`Charmander`).
         assert!(
             slot.nickname.eq_ignore_ascii_case(&mon.nickname.clone().unwrap_or_else(|| mon.species.clone())),
             "{} vs {:?}/{}", slot.nickname, mon.nickname, mon.species,
@@ -1138,19 +995,11 @@ fn observation_views_describe_the_snapshot() {
     assert!(!status.in_battle, "the Pallet Town snapshot is not in a battle");
     assert!(observe::battle(&state).is_none(), "…so there is no battle to describe");
 
-    // The overworld loads no dialogue font, so there is nothing on screen to decode. Reporting that
-    // as `None` rather than an error is the contract.
+    // The overworld loads no dialogue font, so there is nothing on screen to decode.
     assert_eq!(observe::screen_text(&api), None);
 }
 
 /// What `read_map` says about the map, and the picture that goes with it.
-///
-/// The grid this used to check is gone — the model is sent a rendered map now
-/// ([`crate::llm::map_image`], which holds the render's own tests). What is left here is the JSON
-/// half, and the three ways it goes wrong invisibly: a position that disagrees with the map it is
-/// on, a warp list that reshuffles between two identical reads, and — the reason the grid could be
-/// dropped at all — a `Display` that still has to work, because every dump and probe prints through
-/// it and the renderer falls back to it for a map it cannot draw.
 #[test]
 fn map_view_is_well_formed_stable_and_fully_documented() {
     use crate::pokemon::observe;
@@ -1159,8 +1008,8 @@ fn map_view_is_well_formed_stable_and_fully_documented() {
     let legend: std::collections::HashSet<char> =
         observe::MAP_LEGEND.iter().map(|(c, _)| *c).collect();
 
-    // An outdoor town, a route with grass and ledges, and an indoor map — between them they exercise
-    // most of the tile alphabet.
+    // An outdoor town, a route with grass and ledges, and an indoor map — between them they
+    // exercise most of the tile alphabet.
     for (name, snapshot) in [("Pallet Town", PALLET_TOWN_STATE),
                              ("Route 1", ROUTE1_STATE),
                              ("Red's house", REDS_HOUSE_1F_STATE)] {
@@ -1175,13 +1024,12 @@ fn map_view_is_well_formed_stable_and_fully_documented() {
                     "{name}: warp at {:?} is off a {}x{} map", warp.at, view.width, view.height);
         }
 
-        // `warp_targets` and the action list come off a `HashSet`. Two reads of an unchanged map must
-        // still be equal, or the model sees churn that is not there.
+        // `warp_targets` and the action list come off a `HashSet`.
         assert_eq!(view, observe::map_view(&state), "{name}: two reads of one state disagree");
 
-        // ⚠️ `Display for MetaTileMap` is no longer what the model reads, so nothing else would
-        // notice it rotting — and it is still what the agent log, every probe and the renderer's own
-        // no-metadata fallback print. Its alphabet must stay documented by `MAP_LEGEND`.
+        // `Display for MetaTileMap` is no longer what the model reads, so nothing else would
+        // notice it rotting — and it is still what the agent log, every probe and the renderer's
+        // own no-metadata fallback print.
         let drawn = format!("{}", state.map);
         let grid: Vec<&str> = drawn.trim_end_matches('\n').lines().collect();
         assert_eq!(grid.len(), view.height, "{name}: row count vs declared height");
@@ -1204,10 +1052,8 @@ fn map_view_is_well_formed_stable_and_fully_documented() {
     }
 }
 
-/// The JSON's `people` and the action menu are two views of who can be talked to, and they have to
-/// agree: a person in one and not the other reads as an action the menu forgot. Mt Moon is the map
-/// that found it — Rockets behind walls the player cannot reach from the entrance, and a run that
-/// spent its escape hatch walking at them.
+/// The JSON's `people` and the action menu are two views of who can be talked to, and they have
+/// to agree: a person in one and not the other reads as an action the menu forgot.
 #[test]
 fn map_view_lists_only_the_people_the_menu_offers() {
     use crate::pokemon::observe;
@@ -1232,18 +1078,6 @@ fn map_view_lists_only_the_people_the_menu_offers() {
 }
 
 /// The same property for doors, which had it only for people.
-///
-/// `read_map`'s warp list is the second half of what the deployed run of 2026-09-03 read: it was
-/// fenced into the eastern pocket of Route 4 by the route's one-way ledges, and the JSON listed the
-/// three Mt Moon doors at the far end with nothing to say they could not be opened, exactly as the
-/// picture labelled them. The list is right to carry them — a door out of reach is still where you
-/// come out if you get to it, which is the thing a plan is made of — so it flags rather than
-/// filters, the same call `read_route` makes for a hop it cannot start.
-///
-/// ⚠️ **One direction only, and deliberately.** A warp the menu offers must be flagged reachable,
-/// or the two views contradict each other; the converse is allowed, because `actions()` also drops
-/// a warp entry the cartridge would refuse to open when another door leads to the same place (see
-/// `MetaTileMap::warp_trigger`), and that is a row missing for a reason this flag does not know.
 #[test]
 fn map_view_flags_every_warp_the_menu_cannot_offer() {
     use crate::pokemon::observe;
@@ -1275,11 +1109,6 @@ fn map_view_flags_every_warp_the_menu_cannot_offer() {
 }
 
 /// The badge strip the web UI draws, against a snapshot that has actually earned some.
-///
-/// `observation_views_describe_the_snapshot` checks the shape on a fixture with **no** badges, which
-/// cannot tell a working mapping from one that reports `false` eight times. This one uses the
-/// end-of-game fixture, where the answer is known: index `i` is bit `i` of `wObtainedBadges`, and the
-/// sprite at that index in `/api/badges.png` is the badge the name says it is.
 #[test]
 fn the_badge_strip_reports_which_badges_not_only_how_many() {
     use crate::pokemon::badge::Badge;
@@ -1320,7 +1149,7 @@ fn battle_view_describes_a_live_battle() {
     assert!(battle.player.hp <= battle.player.max_hp);
     assert!(battle.enemy.hp <= battle.enemy.max_hp);
     assert!(battle.player.level > 0 && battle.enemy.level > 0);
-    // The legal actions are the *turn's* battle menu, not this view — see `BattleView`'s ⚠️.
+    // The legal actions are the *turn's* battle menu, not this view — see `BattleView`'s .
     assert!(!crate::pokemon::policy::battle_options(&state).unwrap_or_default().is_empty(),
             "a battle with no legal action would deadlock the agent");
     assert!(!battle.player.moves.is_empty(), "the active Pokémon knows no moves");
@@ -1332,9 +1161,8 @@ fn battle_view_describes_a_live_battle() {
     });
 }
 
-/// The world graph is built as the player walks, so its guarantee is negative: an absent map means
-/// unvisited, never unreachable. `read_route` has to hold that line — and answer the question the
-/// graph dump it replaced only ever supplied the raw material for.
+/// The world graph is built as the player walks, so its guarantee is negative: an absent map
+/// means unvisited, never unreachable.
 #[test]
 fn a_route_is_only_ever_over_ground_already_walked() {
     use crate::pokemon::observe;
@@ -1360,15 +1188,13 @@ fn a_route_is_only_ever_over_ground_already_walked() {
     assert!(route[1..].iter().all(|hop| hop.via.as_deref().is_some_and(|v| v.starts_with("Connection at ("))),
             "every later hop says how, and which tile of the map before it to leave by: {route:?}");
 
-    // ⚠️ The negative guarantee, which is the whole reason this is not a "where is X" tool: an
+    // The negative guarantee, which is the whole reason this is not a "where is X" tool: an
     // unvisited map is `None`, and `None` means "you have not been there", never "it does not
-    // exist". Cinnabar is on the far side of the game from a fixture that has walked to Route 1.
+    // exist".
     assert!(observe::route(fixture.agent.world_graph(), Map::PalletTown, Map::CinnabarIsland).is_none());
 }
 
-/// Under `--features slow-tests` the views serialise. Worth its own test because `cfg_attr` failing to
-/// apply is silent — the code still compiles, it just stops being able to leave the process, and the
-/// first sign would be W5's tool layer not building.
+/// Under `--features slow-tests` the views serialise.
 #[test]
 fn observation_views_serialise_to_json() {
     use crate::pokemon::observe;
@@ -1378,14 +1204,13 @@ fn observation_views_serialise_to_json() {
     let json = serde_json::to_value(observe::map_view(&state)).expect("map view should serialise");
 
     assert_eq!(json["map"], format!("{}", state.map.map));
-    // `Point` is a struct so the coordinates are named rather than a pair a model has to guess at.
+    // `Point` is a struct so the coordinates are named rather than a pair a model has to guess
+    // at.
     assert_eq!(json["position"]["x"], state.map.player_position.x);
     // The terrain is a picture now, so what has to survive serialisation is the half of the map a
     // picture cannot carry: names, and coordinates the model can quote back.
     assert!(json["warps"].is_array(), "warps is an array");
-    // ⚠️ `people`, not `sprites`. "Sprite" is the emulator's word for a moving object on a screen
-    // and the model has no screen; it was jargon in the one block of the request that names who is
-    // standing where.
+    // `people`, not `sprites`.
     assert!(json["people"].is_array(), "people is an array");
     assert!(json.get("sprites").is_none(), "and nothing is called a sprite");
     assert_eq!(json["height"], state.map.height);
@@ -1399,20 +1224,7 @@ fn observation_views_serialise_to_json() {
     }
 }
 
-/// ⚠️ **The generic PC menu is a closed loop under A-only input, and this is the test that says so.**
-///
-/// Walking into the PC in Red's bedroom — eight tiles from a fresh save — used to wedge a run
-/// permanently. `PCMainMenu` (`engine/menus/pc.asm:12`) leaves only on B; A on its resting cursor
-/// enters Bill's PC, whose resting cursor is `WITHDRAW`, which on an empty box prints `NoMonText`
-/// and does `jp BillsPCMenu` — back to the start with the cursor untouched. The agent reads the
-/// whole tree as one long text box (`GameMode::TextBox` comes from `wFontLoaded` alone) and used to
-/// mash A at it for ever.
-///
-/// This is the deployed instance's exact failure, driven from the exact state it ships with
-/// (`START_OF_GAME` is what `gb serve` starts a fresh run from). The two assertions are separate on
-/// purpose: that the PC **opened at all** — without it a regression in `UsePc` would leave this
-/// passing while proving nothing — and that the run then reached somewhere it can only get to by
-/// having left the menu.
+/// The generic PC menu is a closed loop under A-only input, and this is the test that says so.
 #[test]
 fn the_generic_pc_menu_is_backed_out_of_rather_than_mashed() {
     let mut fixture = TestFixture::new(
@@ -1436,20 +1248,9 @@ fn the_generic_pc_menu_is_backed_out_of_rather_than_mashed() {
                "the agent should have logged off and walked downstairs");
 }
 
-// ── The START menu: the row index, and never A-mashing one that was left open ────────────────────
+// ── The START menu: the row index, and never A-mashing one that was left open
+// ────────────────────
 
-/// **The row a cursor index selects on the START menu depends on whether the player has the
-/// Pokédex, and three drivers used to assume it did not.**
-///
-/// `DrawStartMenu` omits the POKéDEX row until `EVENT_GOT_POKEDEX` and `home/start_menu.asm`'s
-/// `.displayMenuItem` compensates with an `inc a`, so the hardcoded `2` that means ITEM after the
-/// Pokédex means the **player-name row** before it — `StartMenu_TrainerInfo`, a closed loop under A.
-/// Oak's Parcel is delivered before the Pokédex, so every run passes through that window; the
-/// deployed run spent 55 minutes in it, in ViridianMart, with the parcel undelivered.
-///
-/// ⚠️ **The index is asserted *and* the game is made to agree.** Asserting `start_menu_row` alone
-/// would only restate the constant; running a real driver through the real menu is what proves the
-/// mapping, and it is the half that fails with `TIME/ 0 16 BADGES` on screen if the `2` comes back.
 #[test]
 fn the_item_row_of_the_start_menu_is_found_without_the_pokedex() {
     use crate::pokemon::agent::{start_menu_row, AgentState, StartMenuRow};
@@ -1466,10 +1267,7 @@ fn the_item_row_of_the_start_menu_is_found_without_the_pokedex() {
                "without the Pokédex, POKéMON is row 0");
 
     // Now make the game agree, by running a driver that navigates START → ITEM in exactly that
-    // window. `TossingItem` is the shortest of the three, and it is in `drives_its_own_menus`, so
-    // nothing else touches the menu while it works. It needs a fixture with something in the bag —
-    // it gives up the moment `bag_item_position` answers `None` — so this half runs from Route 1,
-    // which is also still pre-Pokédex.
+    // window.
     let mut fixture = TestFixture::new(ROUTE1_STATE, Duration::from_secs(60), vec![]);
     for _ in 0..20 { fixture.step(); }
     assert!(!fixture.api().mmu().read_has_pokedex(), "Route 1 has to predate the Pokédex too");
@@ -1481,7 +1279,8 @@ fn the_item_row_of_the_start_menu_is_found_without_the_pokedex() {
     let mut reached_the_bag = false;
     for _ in 0..600 {
         fixture.step();
-        // `DrawTrainerInfo` is the failure mode, and BADGES is the word no other screen here shows.
+        // `DrawTrainerInfo` is the failure mode, and BADGES is the word no other screen here
+        // shows.
         if let Some(text) = fixture.api().on_screen_text(false) {
             assert!(!text.contains("BADGES"),
                     "the driver opened the trainer card instead of the bag: {text:?}");
@@ -1494,17 +1293,7 @@ fn the_item_row_of_the_start_menu_is_found_without_the_pokedex() {
     assert!(reached_the_bag, "the toss driver never reached the bag");
 }
 
-/// **A menu the agent did not open is closed, not confirmed.**
-///
-/// Everything that drives menus on purpose is excluded from `assert_text_box_state`, so a text box
-/// arriving there with a *menu* on screen means something left one behind — a driver abandoned by
-/// `DRIVER_ESCAPE_SILENCE`, or a `press_buttons` batch. The old behaviour was to press A into it,
-/// and the menus that get left behind are closed loops under A.
-///
-/// START is the clearest way to set one up: no `OverworldAction` can express it and the agent
-/// presses it nowhere in the overworld, so the menu on screen afterwards can only have come from the
-/// queue. Before the hand-over rule the agent pressed A here and opened the party screen; now it
-/// presses B and is back in the overworld, without waiting out `TEXT_BOX_ESCAPE_SILENCE`.
+/// A menu the agent did not open is closed, not confirmed.
 #[test]
 fn a_menu_left_open_is_closed_rather_than_confirmed() {
     use gb::joypad::JoypadButton;
@@ -1517,8 +1306,8 @@ fn a_menu_left_open_is_closed_rather_than_confirmed() {
     for _ in 0..MANUAL_INPUT_TICKS_PER_PRESS { fixture.step(); }
     assert_eq!(fixture.api().game_mode(), Some(GameMode::TextBox), "START should have opened the menu");
 
-    // Well inside `TEXT_BOX_ESCAPE_SILENCE` (30 s = 1500 ticks): the hand-over rule acts as soon as
-    // the menu has drawn itself, which is a third of a second.
+    // Well inside `TEXT_BOX_ESCAPE_SILENCE` (30 s = 1500 ticks): the hand-over rule acts as soon
+    // as the menu has drawn itself, which is a third of a second.
     let mut closed = false;
     for _ in 0..400 {
         fixture.step();
@@ -1530,26 +1319,8 @@ fn a_menu_left_open_is_closed_rather_than_confirmed() {
     assert!(closed, "the agent should have left the START menu rather than pressing A into it");
 }
 
-
-/// **A battle turn is put to the policy once, at the main battle menu — not again while the move
-/// list it opened is still on screen.**
-///
-/// ⚠️ **The screen the agent reads lags the game's own tilemap, and the two thirds of it can
-/// disagree.** `AutoBgMapTransfer` (`home/vcopy.asm`) copies `wTileMap` into VRAM one third per
-/// V-blank, so for a frame or two after `MoveSelectionMenu` has drawn the move list — and written
-/// `wTopMenuItemX/Y` = (5, 12) to say so — the bottom third still holds `FIGHT`/`PKMN`/`ITEM`/`RUN`.
-/// `WaitingForMenu`'s text test read that stale third, concluded the main menu was back and handed
-/// the turn to the policy, **abandoning the move chosen one tick earlier**.
-///
-/// It cost a paid LLM turn per battle turn on the deployed run: `choose_battle_action fight:Tackle`,
-/// then 1.1 s later — the `Navigating` and `AwaitingPolicy` delays back to back — a second battle
-/// turn with the move menu open, which the model quite reasonably answered `wait`.
-///
-/// ⚠️ **Two latencies, because it is a race the policy's own speed moves.** An instant policy
-/// answers on the tick it is asked and lands in a different place relative to the transfer than one
-/// that takes a second and a half; the first version of this reproduced at one and not the other.
-/// ⚠️ **And the enemy's HP is half the test**: counting polls alone passes if the agent stops
-/// fighting altogether, so what is asserted is one poll *per landed move*.
+/// A battle turn is put to the policy once, at the main battle menu — not again while the move
+/// list it opened is still on screen.
 #[test]
 fn a_battle_turn_is_decided_once_rather_than_twice() {
     use crate::pokemon::battle::BattleAction;
@@ -1567,9 +1338,7 @@ fn a_battle_turn_is_decided_once_rather_than_twice() {
         menu: String,
     }
 
-    /// Always the first move, with an LLM's latency bolted on. `service_tools` runs on the same tick
-    /// immediately before `pick_battle_action` (see `PokemonAgent::poll_policy`), which is the only
-    /// way to read the screen from a policy.
+    /// Always the first move, with an LLM's latency bolted on.
     struct Probe { latency: u32, remaining: Option<u32>, log: Arc<Mutex<Log>> }
 
     impl Policy for Probe {
@@ -1603,7 +1372,6 @@ fn a_battle_turn_is_decided_once_rather_than_twice() {
         }
     }
 
-    // 20 ms a tick: an instant answer and a second and a half, which is what the deployed run took.
     for latency in [1u32, 75] {
         let log = Arc::new(Mutex::new(Log::default()));
         let policy = Probe { latency, remaining: None, log: Arc::clone(&log) };
@@ -1614,7 +1382,8 @@ fn a_battle_turn_is_decided_once_rather_than_twice() {
         while fixture.total_cycles < fixture.max_cycles {
             ticks += 1;
             fixture.step();
-            // The fixture opens mid-battle; stop once it is over rather than wandering the overworld.
+            // The fixture opens mid-battle; stop once it is over rather than wandering the
+            // overworld.
             if ticks > 50 && fixture.try_game_state().map_or(true, |s| s.battle.is_none()) {
                 break;
             }
@@ -1641,23 +1410,7 @@ fn a_battle_turn_is_decided_once_rather_than_twice() {
     }
 }
 
-/// **A Cut nobody can use never reaches the party menu.**
-///
-/// `CuttingTree` opens the START menu and mashes A until the overworld comes back, and without the
-/// Cascade Badge pokered answers `.newBadgeRequired` with `jp .loop` — the same menu, cursor
-/// untouched — so the overworld never comes back and the whole attempt is sixty seconds ended by
-/// `DRIVER_ESCAPE_SILENCE`. The deployed run of 2026-08-25 walked into it eleven times on one tree in
-/// Route 2 and filed two issue reports saying the game was broken.
-///
-/// Two gates keep a *policy* from asking (`MetaTileMap::can_cut` withholds the action,
-/// `tools::hm_available` refuses the tool call) and this is the third, in the agent, where every
-/// request passes through whatever asked for it — so the policy here asks for the thing neither of
-/// the others would let through.
-///
-/// ⚠️ **The assertion is that decisions keep coming, not that the state was skipped.** A guard that
-/// dropped to `Idle` and left the agent with nothing to do would satisfy "never entered `CuttingTree`"
-/// perfectly well and still be a wedged run — which is exactly what the sixty-second escape it
-/// replaces looks like.
+/// A Cut nobody can use never reaches the party menu.
 #[test]
 fn a_cut_with_no_cut_never_opens_the_party_menu() {
     /// Answers every field-move poll with `CutTree`, which is what the deployed model did.
@@ -1701,28 +1454,6 @@ fn a_cut_with_no_cut_never_opens_the_party_menu() {
             "the agent went {worst_silence:?} without asking anything — a guard that wedges is not a fix");
 }
 
-/// ⚠️ **A text box the game follows with a script used to be read and then thrown away, and that is
-/// every blocker in the game.**
-///
-/// The reader's buffer was emitted in exactly one place — `assert_text_box_state`'s "the box closed"
-/// arm, which fires on the `TextBox → anything else` edge *while the agent is still*
-/// `ReadingTextBox`. But `assert_script_state` runs before it in `update` and swaps the state out
-/// for `RunningScript`, so a box followed by a script never reached that arm: the words went on the
-/// floor and the model was told only that its walk had stopped.
-///
-/// Pokémon Red blocks the player by printing a message and then calling
-/// `StartSimulatingJoypadStates` to shove them back a tile — `Route22GateGuardText`,
-/// `ViridianCityCheckGymOpenScript`, the Viridian old man — so the one class of text box that most
-/// needs to reach the model was precisely the class that never did. Measured on the deployed run of
-/// 2026-08-26: a landed conversation was followed by a `TextBox` event 31 times out of 38, an
-/// aborted walk **2 times out of 28**, and both of those two were long story scripts rather than a
-/// blocker. The run walked into this gate, was told "✗ gave up on the warp to Route23 at (4, 2)"
-/// with nothing after it, talked to the guard **five times** trying to find out why, got nothing
-/// back each time, and filed a `report_issue`.
-///
-/// ⚠️ **What is asserted is that the words arrive, not that an event fires.** An empty `TextBox` is
-/// dropped by `PokemonAgent::event` (a box is detected before its characters are drawn), so a test
-/// that only counted events would pass on the stream of empty ones this bug already produced.
 #[test]
 fn a_guard_who_turns_you_back_is_quoted_rather_than_swallowed() {
     let mut fixture = TestFixture::new(
@@ -1746,8 +1477,8 @@ fn a_guard_who_turns_you_back_is_quoted_rather_than_swallowed() {
         if aborted && !heard.is_empty() { break; }
     }
 
-    // The precondition: without the abort this proves nothing, because the guard would simply have
-    // been walked past.
+    // The precondition: without the abort this proves nothing, because the guard would simply
+    // have been walked past.
     assert!(aborted, "the walk to Route 23 should have been stopped by the guard; heard {heard:?}");
     assert!(
         heard.iter().any(|line| line.contains("BOULDERBADGE")),
@@ -1756,11 +1487,6 @@ fn a_guard_who_turns_you_back_is_quoted_rather_than_swallowed() {
 }
 
 /// The same fixture, from the other side: the model asking the guard directly.
-///
-/// ⚠️ **Talking to him is an `OverworldInteractionCompleted`, and that event carries no words.** It
-/// says "✓ talked to Guard" and nothing else, so the quote has to arrive as its own `TextBox` — the
-/// deployed run spent five consecutive turns on exactly this, each one summarised as wanting "his
-/// exact message", and heard nothing every time.
 #[test]
 fn talking_to_that_guard_reports_what_he_said() {
     let mut fixture = TestFixture::new(
@@ -1790,27 +1516,6 @@ fn talking_to_that_guard_reports_what_he_said() {
     );
 }
 
-/// **The deployed run of 2026-08-27** — teaching Cut to a Pokémon that cannot learn it.
-///
-/// `post-ss-anne.bin` carries HM01 in the bag, a Venusaur in slot 0 and the Route-1 **Pidgey** in
-/// slot 1, and Pidgey is not in HM01's learnset. The cartridge answers a teach it will not allow
-/// with `MonCannotLearnMachineMoveText` and `jr .chooseMon` (`engine/items/item_effects.asm`) —
-/// straight back to the party menu with the cursor exactly where it was, which is the same
-/// closed-loop-under-A shape as the PC menus and the spent move. `TeachingMove` navigated back to
-/// the target slot, pressed A, and was refused again: **179 s of game time with no decision point**,
-/// ended not by anything noticing but by `DRIVER_ESCAPE_SILENCE` a minute in, after which the policy
-/// asked for the identical teach and it all began again.
-///
-/// ⚠️ **The policy is deliberately not a `DeterministicPolicy` here.** That one now skips an
-/// impossible teach before the agent ever sees it, which is right for a scripted leg and would make
-/// this test pass without touching the thing it is about. What is under test is the agent's own
-/// refusal — the layer every request goes through whatever asked for it, the same place
-/// `a_cut_with_no_cut_never_opens_the_party_menu` guards.
-///
-/// ⚠️ **And what it asserts is that the *words* arrive**, not merely that the agent escaped. Before
-/// this the model was told "teach:Hm01Cut got no answer from the game for 60s; starting over", which
-/// reads as a malfunction and gives it nothing to do differently — the same mistake "it was
-/// interrupted" made about a guard turning the player back.
 #[test]
 fn teaching_an_hm_to_a_mon_that_cannot_learn_it_does_not_wedge() {
     /// Asks for the same impossible teach on every poll, which is what an unguarded `LlmPolicy`
@@ -1822,10 +1527,7 @@ fn teaching_an_hm_to_a_mon_that_cannot_learn_it_does_not_wedge() {
             -> Option<crate::pokemon::actions::OverworldAction> { None }
         fn pick_battle_action(&mut self, _: &GameState) -> Option<crate::pokemon::battle::BattleAction> { None }
         fn pick_field_move(&mut self, _: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
-            // ⚠️ **Slot 0, because that is the one that *cannot* take it.** The starter is a
-            // Squirtle line and `wartortle.asm` has no CUT; slot 1 is the Oddish the route catches to
-            // carry it, which would simply learn the move and prove nothing. This test aimed at slot 1
-            // for as long as the starter was the Cut holder.
+            // Slot 0, because that is the one that *cannot* take it.
             Some(crate::pokemon::policy::FieldMove::TeachMove { item: ItemId::Hm01Cut, target_slot: 0 })
         }
     }
@@ -1850,10 +1552,9 @@ fn teaching_an_hm_to_a_mon_that_cannot_learn_it_does_not_wedge() {
 
     println!("[teach] worst silence {worst:?} in {worst_state}, {} reported", heard.len());
 
-    // ⚠️ **Decisions keep coming**, which is the assertion rather than "it never entered
+    // Decisions keep coming, which is the assertion rather than "it never entered
     // `TeachingMove`": a guard that left the agent with nothing at all to do would satisfy the
-    // latter and still be the wedged run it replaces. One minute of game time is well under
-    // `DRIVER_ESCAPE_SILENCE`, so a driver that had entered the menu chain fails here.
+    // latter and still be the wedged run it replaces.
     assert!(
         worst < Duration::from_secs(30),
         "a teach the game will refuse went {worst:?} of game time without reaching a decision \
@@ -1865,26 +1566,6 @@ fn teaching_an_hm_to_a_mon_that_cannot_learn_it_does_not_wedge() {
     assert!(said.contains("slot 1"), "and who in the party can take it instead: {said}");
 }
 
-
-/// **The deployed run of 2026-08-27, later the same day** — the Helix Fossil, on the Mt Moon Rocket.
-///
-/// He says "If you find a fossil, give it to me and scram!", which is flavour rather than a handoff:
-/// nothing in Mt Moon takes a fossil, and `ItemUsePtrTable` sends `HELIX_FOSSIL` to `UnusableItem`,
-/// which is `jp ItemUseNotTime` — "This isn't the time to use that!" and back to the bag list with
-/// the cursor exactly where it was. `UsingFieldItem`'s only completion is "we are in the overworld
-/// again", which that never reaches, so the attempt was **60 s of A-mashing** ended by
-/// `DRIVER_ESCAPE_SILENCE`, reported as "use-item:HelixFossil got no answer from the game for 60s",
-/// which reads as a malfunction. The model read it as one and alternated between talking to him and
-/// re-issuing the identical use, three turns and a minute of wall clock at a time.
-///
-/// This is [`teaching_an_hm_to_a_mon_that_cannot_learn_it_does_not_wedge`]'s test one item along, and
-/// deliberately the same shape: a hand-rolled policy rather than a `DeterministicPolicy` (which only
-/// ever reaches for the Poké Flute and would pass without touching the guard), and the assertion is
-/// that **decisions keep coming** rather than that the driver was skipped.
-///
-/// ⚠️ **The target is a real, reachable person three tiles away.** A target the router cannot serve
-/// would make this pass with the guard removed: `UsingFieldItem` reports "Can't reach the field-item
-/// target" and drops to `Idle` on its own, which is not the wedge under test.
 #[test]
 fn using_an_item_the_game_will_not_use_does_not_wedge() {
     /// Asks for the same impossible use on every poll, which is what an unguarded `LlmPolicy`
@@ -1897,8 +1578,7 @@ fn using_an_item_the_game_will_not_use_does_not_wedge() {
         fn pick_battle_action(&mut self, _: &GameState) -> Option<crate::pokemon::battle::BattleAction> { None }
         fn pick_field_move(&mut self, _: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
             // Sailor 1, at (19, 30) on Vermilion's dock front, three steps from where the fixture
-            // stands. Standing in for the Mt Moon Rocket: an ordinary person, reachable, facing whom
-            // changes nothing about what the bag will do.
+            // stands.
             Some(crate::pokemon::policy::FieldMove::UseFieldItem {
                 item: ItemId::HelixFossil,
                 target: gb::geometry::Point8 { x: 19, y: 30 },
@@ -1942,20 +1622,8 @@ fn using_an_item_the_game_will_not_use_does_not_wedge() {
     assert!(said.contains("carry"), "and say the item is carried rather than used: {said}");
 }
 
-/// The other half of the same wedge: an item the ROM table says *is* usable, refused by **where the
-/// player is standing**.
-///
-/// `ItemUsePtrTable` sends `ESCAPE_ROPE` to `ItemUseEscapeRope`, which is a real effect, so
-/// `item_use::field_use_refusal` lets it through and should. But the routine checks the map's
-/// tileset against `EscapeRopeTilesets` (FOREST, CEMETERY, CAVERN, FACILITY, INTERIOR) and answers
-/// anywhere else with `jp ItemUseNotTime` — the same "This isn't the time to use that!" and the same
-/// bag list with the cursor untouched. Vermilion City is OVERWORLD, so this is that case.
-///
-/// ⚠️ **No table can predict this one**, which is why the driver reads the screen as well:
-/// `BattleState` has had that net since `soak` found the identical loop inside a fight, and it is
-/// the same sentence off the same `ItemUseNotTime`. Without it the cost is the full
-/// `DRIVER_ESCAPE_SILENCE` minute reported as "got no answer from the game", which is what the
-/// deployed run filed a bug about.
+/// The other half of the same wedge: an item the ROM table says *is* usable, refused by where the
+/// player is standing.
 #[test]
 fn an_item_the_map_refuses_backs_out_rather_than_mashing_for_a_minute() {
     struct AlwaysRopes;
@@ -2009,30 +1677,17 @@ fn an_item_the_map_refuses_backs_out_rather_than_mashing_for_a_minute() {
     );
 }
 
-/// ⚠️ **A pickup that the game refuses looks exactly like one that worked.** Both are the same three
-/// events — walk up, text box, back to the overworld — and the run is told `✓ talked to Charmander
-/// Poke Ball` either way. The deployed run of 2026-08-27 spent turns 7 to 24 pressing A on the
-/// starter balls before Oak had offered them, read "Those are POKé BALLs. They contain POKéMON!"
-/// six times, and filed a `report_issue` saying its party and bag were both empty.
-///
-/// The evidence is that the sprite is **still in the map**: a real pickup `HideObject`s it. Both
-/// halves are asserted here, because a check that always fired would pass the first one alone —
-/// and the second is the one that would break every item in the game.
+/// A pickup that the game refuses looks exactly like one that worked.
 #[test]
 fn a_pickup_the_game_refuses_says_the_item_is_still_there() {
-    // ⚠️ **Charmander's ball, not Bulbasaur's.** The rival takes the starter that beats yours, so a
-    // fixture where the player took Squirtle is one where Bulbasaur has gone and *Charmander* is the
-    // ball left on the floor. Oak's last one keeps its row for the rest of the game and answers
-    // every A with "That's PROF.OAK's last POKéMON!", which is the refusal this is about.
+    // Charmander's ball, not Bulbasaur's.
     let mut fixture = TestFixture::new(
         include_bytes!("../data/oaks-lab-just-got-squirtle.bin"),
         Duration::from_secs(120),
         vec![PolicyStep::Interact(MapSprite::OAKSLAB_CHARMANDER_POKE_BALL)],
     );
 
-    // ⚠️ **Not `step_until_exhausted`.** `Interact` pops when the item reaches the bag, and the
-    // whole point of this fixture is that it never does — the queue would sit at 1/1 until the
-    // cycle budget ran out and the test would fail as a timeout rather than as an assertion.
+    // Not `step_until_exhausted`.
     let mut events = Vec::new();
     for _ in 0..3000 {
         fixture.step();
@@ -2050,9 +1705,7 @@ fn a_pickup_the_game_refuses_says_the_item_is_still_there() {
         )),
         "the ball is still on the floor and nothing said so:\n{said}",
     );
-    // ⚠️ **Read out of the rendered line, not the source.** The whitespace in a Rust string
-    // continuation is a trap this repo has been caught by before: a literal written across two
-    // lines without a trailing backslash carries every space of the indent into the prose a model reads.
+    // Read out of the rendered line, not the source.
     let line = events
         .iter()
         .find(|e| matches!(e, AgentEvent::OverworldPickupFailed { .. }))
@@ -2066,8 +1719,7 @@ fn a_pickup_the_game_refuses_says_the_item_is_still_there() {
     );
 }
 
-/// The other half: a pickup that **works** must say nothing at all. Without this the check above
-/// passes by firing on everything, which would put a false failure under every item in the game.
+/// The other half: a pickup that works must say nothing at all.
 #[test]
 fn a_pickup_that_works_reports_no_failure() {
     let mut fixture = TestFixture::new(
@@ -2097,28 +1749,16 @@ fn a_pickup_that_works_reports_no_failure() {
     );
 }
 
-/// ⚠️ **The deployed run of 2026-09-01 was told a pickup it had just completed had failed.** The
-/// transcript is unambiguous: `📖 AI found MOON STONE!`, then 200 ms later — exactly
-/// `PICKUP_SETTLE_TICKS` — `✗ nothing was picked up: the Moon Stone is still lying there.` The
-/// model believed the second one over the first for one turn. `a_pickup_that_works_reports_no_failure`
-/// covers the same shape in Viridian Forest and passes, so whatever this is, it is not every pickup.
 #[test]
 fn the_mt_moon_moon_stone_is_not_reported_as_still_lying_there() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/mt-moon.bin"),
         Duration::from_secs(600),
-        // ⚠️ **Re-issued rather than issued once.** `Interact` pops the moment it issues the walk,
-        // and this walk crosses the whole of Mt Moon: the first attempt is aborted by the Super
-        // Nerd's script and the next few by wild encounters, exactly as the deployed run's was
-        // (it asked three times). One entry would leave the run standing where it was stopped.
+        // Re-issued rather than issued once.
         vec![PolicyStep::Interact(MapSprite::MTMOON1F_MOON_STONE); 30],
     );
 
-    // ⚠️ **Not `step_until_exhausted`, and not for the reason the refusal test says.** `Interact`
-    // pops the instant it *issues* the walk, and this one is 98 steps across Mt Moon through wild
-    // encounters — so the queue is empty a tick in and the run would stop before the ball is
-    // reached. Step until the cartridge says it happened, then long enough for
-    // `PICKUP_SETTLE_TICKS` to come round several times over.
+    // Not `step_until_exhausted`, and not for the reason the refusal test says.
     let mut events = Vec::new();
     let mut settle = 0;
     for _ in 0..200_000 {
@@ -2143,11 +1783,6 @@ fn the_mt_moon_moon_stone_is_not_reported_as_still_lying_there() {
 
 /// A policy that fights with a nominated move slot each turn, recording what it asked for so the
 /// caller can line every request up against what the cartridge actually did.
-///
-/// ⚠️ **It alternates rather than repeating, and that is the whole reproduction.** The deployed
-/// mismatch only ever happened on slot 0 — 7 turns out of 184, every one of them `Scratch` asked
-/// for and `GROWL` executed — and a policy that asks for the same slot every turn leaves the cursor
-/// already sitting on it, which is the one case that cannot go wrong.
 use crate::pokemon::battle::BattleAction;
 
 struct AlternatingMoves {
@@ -2176,7 +1811,6 @@ impl crate::pokemon::policy::Policy for AlternatingMoves {
         new_move: crate::pokemon::move_name::PokemonMoveName,
     ) -> Option<Option<usize>> {
         self.forget_calls.borrow_mut().push(new_move);
-        // Slot 1, which is the answer the deployed run gave three times over.
         Some(Some(1))
     }
 
@@ -2202,14 +1836,8 @@ impl crate::pokemon::policy::Policy for AlternatingMoves {
     }
 }
 
-/// ⚠️ **The agent confirmed whatever the cursor was sitting on, and for the move list nothing ever
-/// closed that.** `BattleState`'s own doc says it of the bag — "pressed A on whatever the cursor
-/// happened to be sitting on" — which is why `UsingItem` exists; the move list has the same hole.
-///
-/// The deployed run of 2026-09-01: **177 battle turns where the published intent matched what the
-/// cartridge did, and 7 where it did not — every one of them `Scratch` asked for, `GROWL`
-/// executed.** Slot 0 and no other, which is the signature of a cursor believed to be on the first
-/// row while it was really on the second.
+/// The agent confirmed whatever the cursor was sitting on, and for the move list nothing ever
+/// closed that.
 #[test]
 fn the_move_the_agent_confirms_is_the_move_the_policy_asked_for() {
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -2231,11 +1859,6 @@ fn the_move_the_agent_confirms_is_the_move_the_policy_asked_for() {
     }
 
     // Pair each published intent with the sentence the cartridge printed next.
-    //
-    // ⚠️ **Keyed on the actor's name, not on the first " used " in the box.** A battle line carries
-    // both sides — "Enemy METAPOD used HARDEN! Pidgey used GUST!" — so a parser that takes the first
-    // one reports every turn the enemy moved first as a mismatch. That mis-pairing is the difference
-    // between 32 of 83 and the real figure.
     let mut intent: Option<(String, String)> = None;
     let mut matched = 0usize;
     let mut mismatched: Vec<(String, String)> = Vec::new();
@@ -2249,8 +1872,8 @@ fn the_move_the_agent_confirms_is_the_move_the_policy_asked_for() {
                 let Some(rest) = message.split(&format!("{actor} used ")).nth(1) else { continue };
                 let Some(actual) = rest.split('!').next() else { continue };
                 let normalise = |s: &str| s.to_lowercase().replace(['-', ' '], "");
-                // Struggle is the cartridge overriding the choice because nothing has PP left, which
-                // is the game working rather than the cursor being wrong.
+                // Struggle is the cartridge overriding the choice because nothing has PP left,
+                // which is the game working rather than the cursor being wrong.
                 if normalise(actual) != "struggle" {
                     match normalise(actual) == normalise(&wanted) {
                         true => matched += 1,
@@ -2265,11 +1888,7 @@ fn the_move_the_agent_confirms_is_the_move_the_policy_asked_for() {
     }
 
     eprintln!("sampled {matched} matched, {} mismatched", mismatched.len());
-    // ⚠️ **The ceiling is the harness, not the agent.** `AlternatingMoves` walks to a `Grass` action
-    // and stands there; once the player is on it there is no such action left to choose, so the run
-    // stops finding encounters after a dozen or so battles however long the budget is. Ten turns is
-    // enough to catch the bug — it was 5 in 81 before the fix, and every one of them slot 0 — and
-    // pretending to a bigger sample by raising the budget would be a lie the numbers do not support.
+    // The ceiling is the harness, not the agent.
     assert!(matched >= 10, "only {matched} battle turns were sampled, which proves nothing");
     assert!(
         mismatched.is_empty(),
@@ -2308,21 +1927,13 @@ impl crate::pokemon::policy::Policy for CountingForget {
     fn current_step_is_long_running(&self) -> bool { self.inner.current_step_is_long_running() }
 }
 
-/// ⚠️ **A menu is one question, and the forget menu was asking it once per tick.**
-///
-/// `drive_forget_menu` presses one button per tick — walk the cursor to the slot, then confirm — and
-/// re-polled the policy before each. For a scripted policy that is free; for `LlmPolicy` every poll
-/// with nothing pending starts a **whole turn**. The deployed run of 2026-09-01 was asked the same
-/// Growl-for-Rage question as turns **232, 233 and 234**, answered `slot 1` all three times, and
-/// paid a full prefill of a ~30 k-token history for each.
-///
-/// The count is what is asserted rather than the answer: the agent already navigated correctly, so
-/// nothing about the *game* was wrong, and a test on the outcome would have passed throughout.
+/// A menu is one question, and the forget menu was asking it once per tick.
 #[test]
 fn the_forget_menu_asks_the_policy_once_rather_than_once_a_tick() {
     let calls = std::rc::Rc::new(std::cell::RefCell::new(0usize));
-    // TM34 is in this fixture's bag and the Wartortle already knows four moves, so the teach opens
-    // the forget menu on the spot — no grinding for a level-up, and the same menu either way.
+    // TM34 is in this fixture's bag and the Wartortle already knows four moves, so the teach
+    // opens the forget menu on the spot — no grinding for a level-up, and the same menu either
+    // way.
     let policy = CountingForget {
         inner: crate::pokemon::policy::DeterministicPolicy::new(42, vec![PolicyStep::TeachMove {
             item: ItemId::Tm34Bide,
@@ -2336,10 +1947,7 @@ fn the_forget_menu_asks_the_policy_once_rather_than_once_a_tick() {
         Box::new(policy),
     );
 
-    // ⚠️ **Counted off the screen, not off a text box.** A level-up learn says "is trying to
-    // learn"; the bag teach this drives says only "Which move should be forgotten?", which is
-    // printed with `done` and never arrives as its own box. `is_forget_move_prompt` is the same
-    // test the agent itself uses, so the two cannot disagree about when the menu is up.
+    // Counted off the screen, not off a text box.
     let mut learns = 0usize;
     let mut showing = false;
     for _ in 0..12_000 {
@@ -2364,19 +1972,7 @@ fn the_forget_menu_asks_the_policy_once_rather_than_once_a_tick() {
     );
 }
 
-/// ⚠️ **Whoever owns a menu has to own it from the moment it opens, and the mart did not.**
-///
-/// `assert_pokemart_state` entered a `PokemartShopping` state only when the policy *answered* what
-/// to buy. Every scripted policy answers on its first poll — the trait default is `Some(None)` — so
-/// this looked correct for the whole life of the driver. `LlmPolicy` answers `None` for as long as
-/// the model is thinking, and `drives_its_own_menus` keys on the **state**, so in that window the
-/// generic text reader owned the shop and did what it does to every text box: pressed A. BUY, the
-/// first item in the stock list, quantity 1, confirm, YES, and round again.
-///
-/// This is the ¥137 face of it, which is what the deployed run of 2026-08-27 was doing when it was
-/// reported as a stuck menu: too poor to afford a ¥200 Poké Ball, so the loop shows only as the
-/// game repeating "You don't have enough money." — 5 times in 30 s here, ~16 per visit deployed.
-/// The test below is the same bug with money in the wallet, and is the one that shows what it costs.
+/// Whoever owns a menu has to own it from the moment it opens, and the mart did not.
 #[test]
 fn a_shop_left_waiting_on_the_policy_is_not_mashed_through() {
     let (money, refusals, before, after) = shop_with_a_policy_that_never_answers(137);
@@ -2386,15 +1982,7 @@ fn a_shop_left_waiting_on_the_policy_is_not_mashed_through() {
     assert_eq!(after, before, "on a bag nothing was added to");
 }
 
-/// The half that says what the loop above is worth. ⚠️ **The poor case cannot see this and an
-/// earlier draft of it could see nothing at all**: a run that cannot afford the first row of the
-/// stock list never completes a purchase however hard the reader mashes, so the wallet is flat
-/// either way and only the refusal *count* separates the two. This one asserts the wallet, which is
-/// what the loop is actually costing a run that has money in it.
-///
-/// Before the fix, seeded with ¥1200 against ¥200 Poké Balls, the same run ended
-/// `money now 0, bag [(TownMap, 1), (Potion, 1), (PokeBall, 6)]` — the whole wallet, six balls, and
-/// no decision behind any of them.
+/// The half that says what the loop above is worth.
 #[test]
 fn a_shop_is_not_raided_while_the_policy_is_still_thinking() {
     let (money, _refusals, before, after) = shop_with_a_policy_that_never_answers(1200);
@@ -2403,14 +1991,9 @@ fn a_shop_is_not_raided_while_the_policy_is_still_thinking() {
     assert_eq!(after, before, "and the first row of the stock list is not bought by default");
 }
 
-/// Walk to the Viridian Mart counter with `money` in the wallet under a policy that opens the shop
-/// and then never says what to buy, and report what the wallet and the bag look like afterwards.
-///
-/// ⚠️ **The mart answer never comes, rather than merely coming late.** A latency long enough to
-/// outlast the run is the obvious way to write this and makes the test a race against its own
-/// budget — the first draft used `SlowPolicy` at 200 ticks against a 30 s run and measured the
-/// *legitimate* purchase landing at tick 560. Withholding one answer for ever is the property
-/// actually under test: while nobody has decided, nothing is bought.
+/// Walk to the Viridian Mart counter with `money` in the wallet under a policy that opens the
+/// shop and then never says what to buy, and report what the wallet and the bag look like
+/// afterwards.
 fn shop_with_a_policy_that_never_answers(money: u32) -> (u32, usize, Vec<(ItemId, u8)>, Vec<(ItemId, u8)>) {
     use crate::pokemon::map_metadata::MapMetadataCache;
     use gb::game_boy::GameBoy;
@@ -2443,7 +2026,7 @@ fn shop_with_a_policy_that_never_answers(money: u32) -> (u32, usize, Vec<(ItemId
     gb.load_state(include_bytes!("../data/viridian-city-pokemart-shopping.bin")).expect("fixture loads");
     let mut cache = MapMetadataCache::default();
     PokemonApi::with_cache(&mut gb, &mut cache).debug_set_money(money);
-    // ⚠️ The fixture already carries a Town Map and a Potion, so "nothing was bought" is the bag
+    // The fixture already carries a Town Map and a Potion, so "nothing was bought" is the bag
     // being *unchanged* rather than the bag being empty.
     let before: Vec<(ItemId, u8)> = PokemonApi::with_cache(&mut gb, &mut cache)
         .game_state().expect("readable").bag.iter().map(|i| (i.id, i.quantity)).collect();
@@ -2454,15 +2037,11 @@ fn shop_with_a_policy_that_never_answers(money: u32) -> (u32, usize, Vec<(ItemId
     }];
     let mut agent = PokemonAgent::new(Box::new(StillThinking(DeterministicPolicy::new(1, steps))));
 
-    // ⚠️ Inside `DRIVER_ESCAPE_SILENCE` (60 s), which is the net under a driver that stops making
-    // progress. Past it the agent is entitled to abandon the shop, and this is about the window
-    // before that, not about the net.
+    // Inside `DRIVER_ESCAPE_SILENCE` (60 s), which is the net under a driver that stops making
+    // progress.
     let budget = MachineCycles::from_duration(Duration::from_secs(30));
     let mut emulated = MachineCycles::ZERO;
-    // ⚠️ **Counted off the screen on a rising edge, not out of `AgentEvent::TextBox`.** The box
-    // never closes on a run this short, so nothing is ever emitted and a test that counted events
-    // would report zero refusals on the very run that produced sixteen. The latch is what makes it
-    // a count of *refusals* rather than of ticks one refusal happened to be legible for.
+    // Counted off the screen on a rising edge, not out of `AgentEvent::TextBox`.
     let mut refusals = 0usize;
     let mut refusing = false;
     while emulated < budget {
@@ -2485,33 +2064,8 @@ fn shop_with_a_policy_that_never_answers(money: u32) -> (u32, usize, Vec<(ItemId
     (state.money, refusals, before, after)
 }
 
-/// **A black-out ends the battle a second or two before it moves the player, and the agent must not
-/// ask the model what to do in the gap.**
-///
-/// The battle engine returns the moment the party is down, so `wIsInBattle` leaves its wild/trainer
-/// value, `assert_battle_state` correctly says the battle is over and the agent drops to `Idle` —
-/// while `HandleBlackOut` is still fading the screen, halving the money, healing the party and
-/// warping the player to the Pokémon Centre they last accepted a heal at. `AwaitingOverworldAction`
-/// then counted down its ordinary second and asked, describing a world that had already gone.
-///
-/// The deployed run of 2026-09-02 is the measurement. Turn 57 was put to the model as
-/// `ViridianForest at (26, 19)`, a party at `0/25` and `0/21` HP, ¥1960, a live `### Battle` block
-/// naming the Weedle that had just won, and the nine Viridian Forest actions. It read the blackout
-/// out of the text and answered well — take the south gate out of the forest — and the id was
-/// rejected on arrival ("`ViridianForest:17,47:Warp` is an id for `ViridianForest` and you are in
-/// `ViridianCity`"), because ids are minted for the map you are standing on. **31 of the previous
-/// run's 38 blackouts spent a whole request that way**, and the Cerulean Gym stretch is a loop of
-/// them.
-///
-/// ⚠️ **Two independent halves, so both are asserted.** [`crate::pokemon::battle::LOST_BATTLE`] is
-/// why the overworld turn carried a battle at all — `$ff` is the *loss* sentinel and
-/// `read_battle_state` was reading it as a battle in progress — and
-/// [`crate::pokemon::agent::blackout_in_flight`] is why it carried the wrong map. Fixing only the
-/// first leaves the model routing from a forest it is not in.
-///
-/// ⚠️ **The assertion is on the *first* overworld decision after the loss, not on where the run ends
-/// up.** The second decision was always right: the agent re-polls, and by then the warp has landed.
-/// A test that waited for the player to reach the Centre passes on the bug.
+/// A black-out ends the battle a second or two before it moves the player, and the agent must not
+/// ask the model what to do in the gap.
 #[test]
 fn a_blackout_is_not_a_decision_point_until_the_warp_has_landed() {
     use crate::pokemon::actions::OverworldAction;
@@ -2520,8 +2074,6 @@ fn a_blackout_is_not_a_decision_point_until_the_warp_has_landed() {
     use crate::pokemon::world_graph::WorldGraph;
     use std::sync::{Arc, Mutex};
 
-    /// Every overworld decision the policy was offered: the map it was told it was on, whether it
-    /// was handed a battle, and the party's total HP.
     #[derive(Default)]
     struct Log {
         overworld: Vec<(Map, bool, u16)>,
@@ -2530,8 +2082,8 @@ fn a_blackout_is_not_a_decision_point_until_the_warp_has_landed() {
         battles_fought: usize,
     }
 
-    /// Fights with whatever it has and never walks anywhere, so the only overworld decisions in the
-    /// log are the ones the agent volunteered.
+    /// Fights with whatever it has and never walks anywhere, so the only overworld decisions in
+    /// the log are the ones the agent volunteered.
     struct Probe { log: Arc<Mutex<Log>> }
 
     impl Policy for Probe {
@@ -2559,8 +2111,7 @@ fn a_blackout_is_not_a_decision_point_until_the_warp_has_landed() {
     // with the Centre's town instead, which is the whole point.
     let battlefield = fixture.game_state().map.map;
 
-    // Let the battle get going, then take the party out from under it. See `debug_faint_party` for
-    // why losing on purpose cannot be arranged with button input.
+    // Let the battle get going, then take the party out from under it.
     for _ in 0..60 { fixture.step(); }
     fixture.api().debug_faint_party();
 
@@ -2572,15 +2123,13 @@ fn a_blackout_is_not_a_decision_point_until_the_warp_has_landed() {
                 if crate::llm::battle_report::is_blackout(message) { blacked_out = true; }
             }
         }
-        // Two overworld decisions past the loss is enough: the first is the one that used to be
-        // wrong and the second is the one that always worked.
         if blacked_out && log.lock().expect("the log is never poisoned").overworld.len() >= 2 {
             break;
         }
     }
 
     let log = log.lock().expect("the log is never poisoned");
-    // ⚠️ The preconditions, or this proves nothing: a run that never fought and never lost has no
+    // The preconditions, or this proves nothing: a run that never fought and never lost has no
     // gap to ask in, and would pass on the broken build.
     assert!(log.battles_fought > 0, "the probe never reached a battle decision, so nothing was lost");
     assert!(blacked_out, "the party was knocked out but the cartridge never said the player blacked out");
@@ -2601,36 +2150,12 @@ fn a_blackout_is_not_a_decision_point_until_the_warp_has_landed() {
             log.overworld);
 }
 
-/// **The agent's tick is 20 ms of *game* time, not one turn of whatever loop is driving it.**
-///
-/// `host.rs` and `sdl/render.rs` both pace themselves on wall clock: they work out how far behind
-/// the clock they are, run the emulator that far, and then tick the agent. Until 2026-09-03 they
-/// ticked it *once* for the lot, and [`PokemonAgent::update`] coalesces rather than catching up — so
-/// the agent's real decision rate was the driver's loop rate. A checkpoint write, a descheduled
-/// thread or a busy node lowered it silently, up to `host::MAX_CATCHUP` (250 ms), against a game
-/// still running at full speed.
-///
-/// What it costs is corners. A held direction keeps walking — pokered starts another step whenever
-/// the pad is still down at the end of one — so the agent has one step (267 ms) to notice it has
-/// arrived and press the other way. Miss it and the player overshoots, the route recomputes from a
-/// tile one further on, and the walk oscillates about the turn until `MAX_MOVEMENT_SILENCE` gives
-/// up 60 seconds later.
-///
-/// Route 12's west corridor is where the deployed run found it. Row 63 is one tile high between two
-/// walls, and the north-south road crosses it at x=11, so the walk must stop dead on (11, 63) and
-/// turn west. At a 250 ms tick the player instead paced (11, 62) ↔ (11, 64) for ever; the run
-/// abandoned three walks at 60 s each and filed an issue saying Route 11 was unreachable.
-///
-/// ⚠️ **No test could see it, and that is the more useful half of this one.** Every test in this
-/// module drives [`TestFixture::step`], which is `gb.run(AGENT_RESOLUTION)` and one `agent.update`
-/// in lockstep — the one cadence at which the defect does not exist. `soak` hunts jams for hours
-/// through the same harness and would never have found this in any number of them. So this test
-/// drives [`TestFixture::step_coarse`] instead, at the worst tick the host permits itself.
+/// The agent's tick is 20 ms of *game* time, not one turn of whatever loop is driving it.
 #[test]
 fn a_corner_is_turned_at_a_coarse_host_tick() {
     // 250 ms is `host::MAX_CATCHUP`: the most emulated time one host iteration will ever hand the
-    // agent, and therefore the coarsest tick a deployment can reach. 60 ms is an ordinarily bad one
-    // — it overshoots this corner once and recovers, which is the shape that shows up in a
+    // agent, and therefore the coarsest tick a deployment can reach. 60 ms is an ordinarily bad
+    // one — it overshoots this corner once and recovers, which is the shape that shows up in a
     // transcript as a walk that took twice as long as it should have.
     for tick_ms in [20u64, 60, 250] {
         let mut fixture = TestFixture::new(
@@ -2640,9 +2165,8 @@ fn a_corner_is_turned_at_a_coarse_host_tick() {
         );
         let tick = MachineCycles::from_duration(Duration::from_millis(tick_ms));
         let mut arrived = false;
-        // The budget is the fixture's own (120 s of game time); the walk is thirteen tiles and takes
-        // about four. A run that oscillates instead burns the lot and this loop ends on the assert
-        // inside `step_coarse`.
+        // The budget is the fixture's own (120 s of game time); the walk is thirteen tiles and
+        // takes about four.
         while !arrived {
             fixture.step_coarse(tick);
             arrived = fixture.game_state().map.map == Map::Route11;
@@ -2651,25 +2175,8 @@ fn a_corner_is_turned_at_a_coarse_host_tick() {
     }
 }
 
-
-/// ⭐ **A walk that has already arrived must not be reported as a routing failure**, and for one
-/// tick per northward or westward map connection the agent was told it had.
-///
-/// Crossing a connection north leaves `wYCoord` at **255** — the ROM's own −1 — while `wCurMap` is
-/// still the old map, until `CheckMapConnections` runs on the following frame.
-/// `MetaTileMap::new`'s bounds clamp, which exists to keep `meta_tiles` indexing in range and has
-/// to stay, turns that −1 into `(255 + north_extra).min(height - 1)`: a perfectly plausible square
-/// at the **opposite** edge of the map. From the wrong end of Route 2 the BFS reaches nothing, so
-/// `connection_action` answered `None` and the walk was abandoned with `NoRoute`.
-///
-/// C3's frontier walk caught it three times in one run, and the shape is the tell: every target was
-/// on row 0 and every reported position on the last row (`Route2:8,0` "standing at (8, 73)",
-/// `Route2:9,0` at (9, 73), `ViridianCity:19,0` at (19, 37)). The save state taken at the abort
-/// showed `wCurMap=Route2, raw=(8, 255)` and the very next tick `wCurMap=PewterCity, raw=(18, 35)`.
-///
-/// ⚠️ **A southward or eastward crossing must stay `settled`**, and that is the half a naive
-/// "coordinate looks odd" check would break: there the coordinate goes one row *past* the map, which
-/// lands on the connection strip and is a real, reachable tile the agent routes to by design.
+/// A walk that has already arrived must not be reported as a routing failure, and for one tick
+/// per northward or westward map connection the agent was told it had.
 #[test]
 fn a_coordinate_that_underflows_a_map_edge_is_not_a_position() {
     use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
@@ -2712,14 +2219,13 @@ fn a_coordinate_that_underflows_a_map_edge_is_not_a_position() {
     assert!(inside.position_settled, "an ordinary square in the middle of the map");
     assert_eq!(inside.player_position.y, 10 + dimensions.north_extra as u8);
 
-    // ⚠️ One row *past* the bottom is the southern connection strip, which is a real tile: the agent
+    // One row *past* the bottom is the southern connection strip, which is a real tile: the agent
     // walks onto it on purpose on the way to Route 1, and calling it unsettled would break every
     // southward crossing in the game.
     let leaving_south = at(dimensions.meta_height as u8);
     assert!(leaving_south.position_settled, "the southern strip is a square, not a transient");
 
-    // …and 255 is not a square at all. It is −1 with the map still reading as the old one, and the
-    // clamp's answer is the *far* edge: the whole height of the map away from where the player is.
+    // …and 255 is not a square at all.
     let leaving_north = at(255);
     assert!(!leaving_north.position_settled, "wYCoord == 255 is a transition, not a position");
     assert_eq!(
@@ -2730,25 +2236,8 @@ fn a_coordinate_that_underflows_a_map_edge_is_not_a_position() {
     );
 }
 
-/// ⭐ **The other half of `position_settled`: a map-load earlier, and 26 agent ticks long on an
-/// ordinary warp.**
-///
-/// `WarpFound2` writes the destination into `wCurMap` and only then loads the map, so until
-/// `LoadMapHeader` runs, the coordinates, the sprite slots and the map's own dimensions all still
-/// belong to the map being left — and unlike the 255 above, a stale coordinate from a *small* map is
-/// an ordinary-looking square well inside a big one. Nothing about it looks wrong.
-///
-/// The coverage walk of 2026-09-09 paid the Safari Zone's fee and was auto-walked through the gate.
-/// For 94 agent ticks `wCurMap` read `SafariZoneCenter` while `wCurMapWidth`/`wCurMapHeight` still
-/// read the gate's 4x3 and the coordinate still read the gate's `(4, 0)` — which in the Centre is the
-/// wall along the top, on the far side of a pond. It was offered three rows over there, chose one,
-/// arrived at `(15, 25)` where it had never been offered, and failed on "there is no route to
-/// Nugget".
-///
-/// ⚠️ **Surf being refused is not the bug and must not be read as one.** `can_surf` is false on
-/// every Safari Zone map (`PokemonApi::observe_state`, and it is the cartridge's own rule), so the
-/// pond is a wall and the far side is genuinely another region. The bug is being asked to route
-/// from a square the player is not standing on.
+/// The other half of `position_settled`: a map-load earlier, and 26 agent ticks long on an
+/// ordinary warp.
 #[test]
 fn a_map_the_cartridge_has_not_finished_loading_offers_no_rows() {
     use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
@@ -2782,14 +2271,13 @@ fn a_map_the_cartridge_has_not_finished_loading_offers_no_rows() {
     assert!(in_flight.actions().is_empty(), "a route has to start somewhere real: {:?}", ids(&in_flight));
 
     // The same square with the check told the map is loaded, which is what the walk was offered
-    // before there was a check. The west shore of the pond is a region the entrance cannot reach,
-    // and here it is a row.
+    // before there was a check.
     let fiction = at(4, 0, true);
     assert!(ids(&fiction).iter().any(|id| id == "SafariZoneCenter:0,10:Warp"),
         "the fiction this test exists to describe: {:?}", ids(&fiction));
 
-    // Where the player actually was one map-load later, offered the same menu the walk then failed
-    // against. Same map, same pond, and the west shore is not on it.
+    // Where the player actually was one map-load later, offered the same menu the walk then
+    // failed against.
     let landed = at(15, 25, true);
     assert!(landed.position_settled);
     assert!(!ids(&landed).iter().any(|id| id == "SafariZoneCenter:0,10:Warp"),
@@ -2798,8 +2286,8 @@ fn a_map_the_cartridge_has_not_finished_loading_offers_no_rows() {
         "and it can reach the east one: {:?}", ids(&landed));
 }
 
-/// The ten bytes `LoadMapHeader` copies are the test, and they discriminate: on a settled save the
-/// header in WRAM is `wCurMap`'s and no other map's.
+/// The ten bytes `LoadMapHeader` copies are the test, and they discriminate: on a settled save
+/// the header in WRAM is `wCurMap`'s and no other map's.
 #[test]
 fn the_header_in_wram_says_which_map_has_actually_been_loaded() {
     use crate::pokemon::map_metadata::map_header_is_loaded;
@@ -2821,10 +2309,7 @@ fn the_header_in_wram_says_which_map_has_actually_been_loaded() {
     }
     drop(api);
 
-    // ⚠️ **And the field that had to come out of the comparison.** Viridian Mart's script repoints
-    // `wCurMapTextPtr` at a list of its own and leaves it there, so a save taken inside the shop has
-    // a header that differs from the ROM's in exactly those two bytes while being entirely loaded.
-    // Comparing all ten withheld the clerk for the rest of the visit; see [`MAP_HEADER_TEXT_PTR`].
+    // And the field that had to come out of the comparison.
     let mut shopping = TestFixture::new(
         include_bytes!("../data/viridian-city-pokemart-shopping.bin"),
         Duration::from_secs(10),
@@ -2836,24 +2321,8 @@ fn the_header_in_wram_says_which_map_has_actually_been_loaded() {
         "a shop whose script has moved its own text pointer is still a loaded map");
 }
 
-
-/// ⭐ **Every driver built on `TestFixture` plays at the fastest settings the cartridge has**, and
-/// this is the proof rather than the claim. `LlmRun` — the god run and C3's frontier walk both —
-/// goes through `TestFixture::with_policy`, which writes
-/// [`FAST_FIXTURE_OPTIONS`](crate::pokemon::postgame::debug::FAST_FIXTURE_OPTIONS) on the way in and
-/// re-writes it on every tick, because the cartridge restores its own `wOptions` from SRAM across a
-/// save/reload.
-///
-/// The three bits, and all three matter to what a run costs:
-///
-/// - **text speed FAST**, so a conversation is not paid for a character at a time;
-/// - **battle animations OFF** — every battle in the suite otherwise pays for the attack animations,
-///   and nothing in the agent watches them;
-/// - **battle style SET**, which is what stops the game asking "will you switch?" every time an
-///   opponent faints.
-///
-/// ⚠️ **A test asserted this before it existed**: `fixture.rs` cited a `probe_fixture_options` as the
-/// proof and there was no such test, so the guarantee was a comment.
+/// Every driver built on `TestFixture` plays at the fastest settings the cartridge has, and this
+/// is the proof rather than the claim.
 #[test]
 fn every_fixture_plays_at_the_fastest_game_options() {
     use crate::pokemon::options::{BattleStyle, GameOptionsReader, TextSpeed};
@@ -2884,24 +2353,10 @@ fn every_fixture_plays_at_the_fastest_game_options() {
     assert_eq!(live, FAST_FIXTURE_OPTIONS, "a tick puts the fast options back");
 }
 
-
-
-
-/// ⭐ **Every committed fixture's sprite table is complete**, which is the assertion
-/// [`map_sprites_are_loaded`](crate::pokemon::map_metadata::map_sprites_are_loaded) makes on every
-/// tick of every run: `wNumSprites` against the number of slots the cartridge has actually filled.
-///
-/// The check exists because an intra-map teleport reloads the map without changing `wCurMap`, so
-/// `map_header_is_loaded` cannot see it — but `.loadSpriteData` writes `wNumSprites` first, zeroes
-/// all fifteen slots, and then fills them, and the coverage walk of 2026-09-09 minted a Saffron Gym
-/// menu off five of nine.
-///
-/// ⚠️ **It is the slots that are counted, not what `read_sprites` returns**, and the first attempt
-/// counted the latter. That reader stops at [`Map::sprites`], the *named* object list, which is
-/// shorter than the cartridge's for several maps — Cinnabar Island loads nine objects and names two
-/// — so the beach came out permanently "mid-load", `position_settled` went false, and `actions()`
-/// answered with nothing at all. This walks the whole fixture directory rather than a list, so a
-/// map added to the chain is covered without anyone remembering to add it here.
+/// Every committed fixture's sprite table is complete, which is the assertion
+/// [`map_sprites_are_loaded`](crate::pokemon::map_metadata::map_sprites_are_loaded) makes on
+/// every tick of every run: `wNumSprites` against the number of slots the cartridge has actually
+/// filled.
 #[test]
 fn every_committed_fixture_has_a_complete_sprite_table() {
     use crate::pokemon::map_metadata::map_sprites_are_loaded;
@@ -2929,31 +2384,8 @@ fn every_committed_fixture_has_a_complete_sprite_table() {
     println!("{checked} fixtures, every sprite table complete");
 }
 
-/// ⭐ **A warp on the water is not taken the way a warp on land is, and the cartridge is explicit
-/// about it.** `home/overworld.asm`'s `.noDirectionChange` tests `wWalkBikeSurfState` for `$02`
-/// before it looks at anything else: on foot, walking into the wall in front while standing on a
-/// warp entry runs `ExtraWarpCheck` and then `CheckWarpsCollision`, and the warp fires; surfing,
-/// the branch goes to `CollisionCheckOnWater` and `jp c, OverworldLoop`, and `CheckWarpsCollision`
-/// is never reached. The only door left is `CheckWarpsNoCollision`, which runs on a completed step.
-///
-/// ⭐ **The two staircases out of Seafoam B4F are a warp the cartridge arms and then cancels, and
-/// no tile says so.** `SeafoamIslandsB4FDefaultScript` checks
-/// `EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE` and `EVENT_SEAFOAM3_BOULDER2_DOWN_HOLE`, and while either is
-/// unset it simulates a step north off (20, 17)/(21, 17) and clears `BIT_FORCED_WARP` — so the
-/// entry is an ordinary step-on warp that never fires.
-///
-/// The coverage walks of 2026-09-09 and 2026-09-10 spent 60 s of game time on each of those two
-/// squares, twice a sweep, and scored `DidNotArrive` while standing on them. That is not an agent
-/// fault: it is the rule the cut trees and the boulder pushes are already withheld under, one
-/// script deeper. This pins **both halves** — that the flags are where the arithmetic in
-/// `map_warp_gate_specs` says they are, read off two committed fixtures the scripted route
-/// produced, and that the row goes away when they are clear and comes back when they are set.
-///
-/// ⚠️ **`post-articuno.bin` is the negative rather than the positive.** The Articuno leg pushes
-/// B3F's boulders, which is SEAFOAM**4**, and then leaves the islands by Escape Rope precisely
-/// because SEAFOAM3 is what would have reopened the east staircases and it never sets it
-/// (`policy.rs`'s Articuno leg carries the whole argument). So a save that has *beaten* Seafoam
-/// still has these two warps shut, which is the case the walk keeps meeting.
+/// A warp on the water is not taken the way a warp on land is, and the cartridge is explicit
+/// about it.
 #[test]
 fn a_seafoam_staircase_the_script_cancels_is_not_a_row() {
     use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection,
@@ -2972,9 +2404,7 @@ fn a_seafoam_staircase_the_script_cancels_is_not_a_row() {
         include_bytes!("../data/post-articuno.bin"), Duration::from_secs(10), vec![]);
     let base = pokered_symbols::wEventFlags.address;
 
-    // ⚠️ **The arithmetic is the risky half and this is what checks it.** An off-by-one byte would
-    // read some other pair of events, and the gate would then open or shut for reasons nothing in
-    // this file could explain. The Articuno leg's own two boulders are the positive control.
+    // The arithmetic is the risky half and this is what checks it.
     let flags = |f: &TestFixture, off: u16| f.gb.core().mmu().read(base + off);
     assert_eq!(flags(&fixture, SEAFOAM4.0) & SEAFOAM4.1, SEAFOAM4.1,
         "post-articuno pushed B3F's two boulders down their holes, so SEAFOAM4 must be set — if it \
@@ -3021,13 +2451,6 @@ fn a_seafoam_staircase_the_script_cancels_is_not_a_row() {
     }
 }
 
-/// The coverage walk of 2026-09-09 found both of them. `SeafoamIslandsB3F:21,17:Warp` and
-/// `SeafoamIslandsB4F:21,17:Warp` are water at the bottom edge of a current channel, and the walk
-/// sat on each holding Down for 60 s of game time before giving up "without getting there" while
-/// standing exactly there. Measured on the dropped state: 120 ticks of Down move nothing; Up and
-/// then Down warps. The `20,17` entry beside each of them passed every sweep, because the walk
-/// happened to arrive from above and the arrival fired it — which is the same fact from the other
-/// side.
 #[test]
 fn a_warp_reached_by_surfing_is_entered_rather_than_leant_on() {
     use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
@@ -3078,9 +2501,6 @@ fn a_warp_reached_by_surfing_is_entered_rather_than_leant_on() {
         assert_eq!(route(&afloat), vec![JoypadButton::Up, JoypadButton::Down],
             "{id}: off the way it came and back the way `IsPlayerFacingEdgeOfMap` wants");
 
-        // ⚠️ And the same square on foot is still one held button — this must not become the
-        // answer everywhere, because the step-off dance on a *land* warp is the 60 s shuffle a
-        // deployed run did at the Route 8 gate. Nothing but the surfing flag differs here.
         assert_eq!(route(&build(false)), vec![JoypadButton::Down],
             "{id}: on foot the collision path fires it and no step is needed");
     }
@@ -3094,8 +2514,6 @@ fn an_impossible_warp_is_one_the_cartridge_really_will_not_open() {
     use std::sync::Arc;
     use strum::IntoEnumIterator;
 
-    // Three gate entries whose sibling is the way in (Route 8's east gate is W5's own case), and one
-    // that pokered's source labels `; inaccessible` in the warp table itself.
     const KNOWN: &[(Map, u8, u8, &str)] = &[
         (Map::Route7, 19, 9, "Route 7's gate: raw $23, and (19, 10) beside it is the door"),
         (Map::Route8, 2, 9, "Route 8's west gate: raw $39, sibling at (2, 10)"),
@@ -3138,20 +2556,6 @@ fn an_impossible_warp_is_one_the_cartridge_really_will_not_open() {
             .collect::<String>());
 }
 
-/// **A doormat somebody is standing on is not a row, and the map used to say it was.**
-///
-/// A mart's exit is two tiles wide and the shoppers wander over both of them. `meta_tiles` used to
-/// keep the `Warp` visible *underneath* a sprite, so an occupied doormat read as open floor: the BFS
-/// routed straight through the person, `actions()` minted the row, and the walk held Down against a
-/// Cooltrainer for the whole 60 s of `MAX_MOVEMENT_SILENCE` before reporting `DidNotArrive` from the
-/// square right beside it. The sweep of 2026-09-10 scored `CeruleanMart:3,7:Warp` a defect in
-/// **three regions at once** and then walked out through `4,7` on the next turn without trouble.
-///
-/// The state below is the one the `celadon` walk dropped at that moment: the player at (3, 6) and
-/// the Cooltrainer Male standing on (3, 7). Two assertions, because the fix has two halves and only
-/// the pair is the behaviour — the occupied tile is **not** offered, and the other half of the same
-/// doormat still is, so being blocked costs a different row rather than the room.
-// Default tier: the state is standing on the answer and the walk out is a couple of seconds.
 #[test]
 fn a_door_with_somebody_standing_in_it_is_not_a_row_until_they_move() {
     use gb::geometry::Point8;
@@ -3178,19 +2582,7 @@ fn a_door_with_somebody_standing_in_it_is_not_a_row_until_they_move() {
     println!("left through ({}, {})", end.map.player_position.x, end.map.player_position.y);
 }
 
-/// **A pacing pair is chosen once and the map moves under it.**
-///
-/// A `Grass` row ends by pacing between two squares, because the ROM rolls for an encounter on the
-/// tile being stepped *onto*. The pair comes out of `adjacent_grass` at the moment the walk arrives
-/// and is then held for the whole pace — so a Youngster who steps onto one half of it leaves the
-/// agent bumping into a person, and bumping is not a step: the counter never advances, the ROM never
-/// rolls, and 60 ticks later the row was aborted as `Unknown`, which the oracle scores a defect. It
-/// is the one `Route11:13,6:Grass` has been reported under intermittently since 2026-09-09, and the
-/// `ssanne` walk of 2026-09-10 is the run that finally dropped a state for it.
-///
-/// Re-picking is what the fix does, and it is free: `adjacent_grass` skips a square somebody is
-/// standing on all by itself, because a person is a `MetaTile::Sprite` and not `Grass`.
-// Default tier: `PACING_BUDGET_TICKS` bounds it and an encounter arrives long before that.
+/// A pacing pair is chosen once and the map moves under it.
 #[test]
 fn a_pacing_pair_somebody_steps_onto_is_re_picked_rather_than_bumped_into() {
     use gb::geometry::Point8;
@@ -3208,11 +2600,7 @@ fn a_pacing_pair_somebody_steps_onto_is_re_picked_rather_than_bumped_into() {
     assert_eq!(start.map.tile_at(BLOCKED), MetaTile::Sprite("Youngster 1"),
         "the state has to be dropped with somebody on the square the pace walks into");
 
-    // ⚠️ **The pair is installed rather than asked for, and it has to be.** `adjacent_grass` skips a
-    // square somebody is standing on, so starting a *fresh* pace on this state simply picks the
-    // other neighbour and proves nothing — the defect is a pair chosen while (14, 5) was empty and
-    // held after the Youngster stepped onto it, which is the order the coverage walk met and the
-    // only order that reaches the bug.
+    // The pair is installed rather than asked for, and it has to be.
     fixture.agent.set_state(AgentState::PacingForEncounters {
         destination: MetaTile::Grass,
         map: Map::Route11,
@@ -3224,10 +2612,7 @@ fn a_pacing_pair_somebody_steps_onto_is_re_picked_rather_than_bumped_into() {
     });
 
     // What the defect looked like: `Unknown` after `STALL_TICKS` of bumping, from the square it
-    // started on. What it should look like is the row keeping its promise — and the promise of a
-    // `Grass` row is an encounter, not a particular pair of squares, so the pace succeeding here is
-    // a wild Pokémon rather than a step. It comes on the first move onto (14, 7), which is why the
-    // player is still on (14, 6) when it does.
+    // started on.
     let mut stalled = false;
     let mut paced = false;
     for _ in 0..9000 {
@@ -3249,21 +2634,6 @@ fn a_pacing_pair_somebody_steps_onto_is_re_picked_rather_than_bumped_into() {
     assert!(paced, "the pace neither moved nor turned anything up");
 }
 
-/// **A land bridge and a water seam to the same neighbour are two crossings, and only one of them
-/// used to be a row.**
-///
-/// `actions()` emitted the *nearest* crossing per adjacent map, land or water, so wherever both
-/// exist the bridge always wins and the seam is unaskable. Route 24 → Cerulean is the case that
-/// matters: the footbridge is two steps from where the river seam starts, and the seam is the only
-/// way into the half of Cerulean that holds Cerulean Cave — the Fly landing, the gym and the marts
-/// are all east of a lake and a solid wall at x=8, the cave door is west of it, and no land route
-/// joins them. `CeruleanCave1F`, `2F` and `B1F` were `unreached` on every sweep this repo has taken,
-/// and the ROM cross-check named the cause every time: `CeruleanCity (5, 12) → CeruleanCave1F: on
-/// the grid, no sibling, and never a row`.
-///
-/// ⚠️ **Both halves are asserted.** Without Surf the water edge is scenery rather than a way out —
-/// the row would be a walk to the shore and a bump into the sea, which is the rule the cut trees and
-/// the fishing rows keep — so it appears only when the party can mount.
 #[test]
 fn a_water_crossing_is_a_row_of_its_own_beside_the_bridge_to_the_same_map() {
     use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
@@ -3308,27 +2678,6 @@ fn a_water_crossing_is_a_row_of_its_own_beside_the_bridge_to_the_same_map() {
          {surfing:?}");
 }
 
-/// **The four duplicate map headers no warp in the game targets** —
-/// `docs/coverage-plan.md` step 1.2.
-///
-/// ⚠️ **Every map count that plan has ever printed was four too pessimistic**, because
-/// `unreached_report` set aside the 22 `UnusedMap*` and the two link-cable rooms and not these. They
-/// are real map numbers with real dimensions — `Map::iter()` yields them and nothing marks them as
-/// different — and no walk can ever enter one, so a sweep that reached absolutely everything would
-/// still have looked like 216 of 220.
-///
-/// This is what keeps [`coverage::UNREACHABLE_DUPLICATES`] honest against the ROM rather than
-/// against a `grep`: **nothing anywhere warps to any of the four**, and every *other* interior is
-/// warped to by something. A duplicate that stops being one upstream, or a new one that starts,
-/// fails here rather than quietly moving the denominator.
-///
-/// ⚠️ **Warps only, and interiors only.** An outdoor map is entered by a *connection*, so a
-/// warp scan has nothing to say about one; all four of these are interiors, which have no
-/// connections at all.
-///
-/// ⚠️ **Three of the four have no header symbol for the reader to reach** (`map.rs` answers `None`),
-/// so they never appear in the second half's scan — which is why the first half tests them by name.
-/// That is a second, independent way of saying the same thing about the same four maps.
 #[test]
 fn a_duplicate_map_is_not_a_coverage_gap() {
     use crate::pokemon::map_metadata::MapMetadataReader;
@@ -3356,8 +2705,7 @@ fn a_duplicate_map_is_not_a_coverage_gap() {
             "{map:?} is warped to after all, so it is not an unreachable duplicate");
     }
 
-    // And nothing else that the reader can see is orphaned. `UnusedMap*` have no header, the two
-    // link-cable rooms are their own bucket, and an outdoor map is entered by a connection.
+    // And nothing else that the reader can see is orphaned.
     let orphans: Vec<Map> = readable.into_iter()
         .filter(|map| !targeted.contains(map))
         .filter(|map| !format!("{map:?}").starts_with("UnusedMap"))

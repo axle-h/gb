@@ -1,45 +1,5 @@
-//! The conversation on disk: what a restarted process resumes on, and what a compaction destroyed.
-//!
-//! Two files in the run directory, two audiences, and the split is the whole design:
-//!
-//! | file | written | read by | job |
-//! |---|---|---|---|
-//! | [`files::HISTORY`] | rewritten whole, once a turn | the *next* process | the live history |
-//! | [`files::CONVERSATION`] | appended, once a turn | people, `jq`, the archive | every message ever |
-//!
-//! Before this existed the history was a private `Vec<Message>` that never touched disk, so a
-//! rollout, an OOM or a node loss left the game, the plan and the transcript intact and the model's
-//! actual memory empty; and a compaction ([`compaction::apply_summary`]) rebuilt the history as
-//! `[system, summary, tail]` with no copy of the middle anywhere. `transcript.jsonl` is not that
-//! copy and cannot be made into one: it holds `UiEvent`s, carries no rendered situation, plan
-//! message or summary, and truncates every tool result at `MAX_TOOL_RESULT`.
-//!
-//! ⚠️ **One append-only file replayed on load was the other design, and it is worse.** Rebuilding
-//! the live history from the log means writing a reducer for `pop`, [`compaction::evict_images`]'
-//! in-place rewrite, `apply_summary`'s rebuild and `trim_history`'s `drain`, and keeping it
-//! bit-exact with `compaction.rs` for ever. A divergence corrupts a resumed history *silently* and
-//! the symptom is a 400 on every request for the rest of the run. It also reads the whole file at
-//! every start, which is the unbounded read that OOM-killed the deployed pod before
-//! [`crate::run::transcript::read_since`] learned to work from the tail. Two files instead: the
-//! restore path is one `serde_json::from_slice`, and the log is never load-bearing.
-//!
-//! ⚠️ **Both copies are image-evicted, and that is not only about size.** A `read_map` picture is
-//! hundreds of kilobytes of base64, but the reason it *must* not round-trip is
-//! [`ImageUrl::tokens`](crate::llm::protocol::ImageUrl): it is `#[serde(skip)]` with a default of
-//! `IMAGE_TOKENS` (85), while a real map costs 765 to 3825. A restored picture would therefore be
-//! priced at a twentieth of its weight, [`Accounting::occupancy`](crate::llm::accounting::Accounting::occupancy) would read a full context as
-//! nearly empty, and compaction would never fire again. With no image parts stored there is nothing
-//! to mis-default. The eviction goes through [`compaction::evict_images`] rather than being
-//! open-coded, because compaction's own `is_evicted_image` sniffs the [`compaction::EVICTED`] wording
-//! and only one place may own it. Same call, same argument, as `incident::recent_turns`.
-//!
-//! ⚠️ **The run directory is captured here, and re-read per write by `transcript.rs` — the
-//! inversion is deliberate.** The transcript thread re-reads because it is driven by an unrelated
-//! event stream and would never otherwise learn that `POST /api/new-run` swapped the directory
-//! underneath it. The worker *does* learn, through the `Restart` cell at the top of
-//! `Worker::run_one`. So here re-reading would be the bug: a turn already in flight when a new run
-//! starts belongs to the **old** game, and filing its conversation in the new run's directory would
-//! leave the new run resuming into a conversation about a game that no longer exists.
+//! The conversation on disk: what a restarted process resumes on, and what a compaction
+//! destroyed.
 
 use std::io::Write;
 use std::ops::{Deref, DerefMut};
@@ -50,20 +10,21 @@ use crate::llm::prompt;
 use crate::llm::protocol::{Message, Role};
 use crate::run::files;
 
-/// The envelope's version. Bumped when the *meaning* of a field changes; a mismatch is a fresh
-/// conversation rather than a migration, because the cost of getting a resumed history subtly wrong
-/// is far higher than the cost of one run starting its conversation over.
+/// The envelope's version.
 const VERSION: u32 = 1;
 
-/// What [`History::open`] recovered besides the messages. `None` on a conversation that started here.
+/// What [`History::open`] recovered besides the messages. `None` on a conversation that started
+/// here.
 #[derive(Debug, Clone)]
 pub struct Restored {
-    /// How many messages came back, not counting the system prompt or the note appended after them.
+    /// How many messages came back, not counting the system prompt or the note appended after
+    /// them.
     pub messages: usize,
     /// The turn the last process was on when it wrote this. Carried only so the save taken at
     /// construction does not report the run as being back at turn 0.
     pub turn: u64,
-    /// The endpoint-versus-us token ratio the last process had measured. See [`Accounting::resumed`](crate::llm::accounting::Accounting::resumed).
+    /// The endpoint-versus-us token ratio the last process had measured. See
+    /// [`Accounting::resumed`](crate::llm::accounting::Accounting::resumed).
     pub calibration: f64,
     /// How many overworld turns had passed since the plan was last repositioned.
     pub turns_since_plan: u32,
@@ -72,8 +33,8 @@ pub struct Restored {
     pub system_prompt_changed: bool,
 }
 
-/// What one compaction did: the marker line, and the `Compacted` event, are both built from this so
-/// the file and the page cannot disagree about it.
+/// What one compaction did: the marker line, and the `Compacted` event, are both built from this
+/// so the file and the page cannot disagree about it.
 #[derive(Debug, Clone)]
 pub struct CompactionNote {
     pub before: u64,
@@ -86,31 +47,18 @@ pub struct CompactionNote {
 }
 
 /// The live conversation, and the two files behind it.
-///
-/// ⚠️ **Deliberately not [`Clone`].** The one site that wants the messages is the `ChatRequest`,
-/// which takes them by value; a `Clone` impl would make `self.history.clone()` there compile into a
-/// second `History` — carrying a duplicate of the run directory's write path — rather than the
-/// `Vec<Message>` the caller meant. `to_vec()` through the `Deref` says which one it wants.
 #[derive(Debug)]
 pub struct History {
-    /// `None` in tests and under `--policy random`: a history with nowhere to live still works, it
-    /// just forgets everything, which is what every process did before this module existed.
+    /// `None` in tests and under `--policy random`: a history with nowhere to live still works,
+    /// it just forgets everything, which is what every process did before this module existed.
     dir: Option<PathBuf>,
     messages: Vec<Message>,
     /// How much of `messages` is already in the log.
-    ///
-    /// ⚠️ **An index into a vector that compaction rewrites**, so every path that shortens
-    /// `messages` has to put this back — which is what [`Self::note_compaction`] is for. It is only
-    /// ever sound because the log is flushed *before* `compact_if_needed` runs, so everything a
-    /// compaction removes has already been written down.
     logged: usize,
     restored: Option<Restored>,
 }
 
 /// The on-disk envelope.
-///
-/// No `deny_unknown_fields` and `#[serde(default)]` throughout, so a field added by a later build is
-/// readable by an older one and vice versa — the same forgiving shape as `RunMeta`.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Saved {
     version: u32,
@@ -127,24 +75,9 @@ struct Saved {
     #[serde(default)]
     turns_since_plan: u32,
     /// The system prompt this conversation was last being held under.
-    ///
-    /// ⚠️ **Stored to be *compared*, never to be restored**, and the two are a hair apart. Index 0
-    /// is always re-minted from [`prompt::system_message`] — that is the whole reason it is not in
-    /// `messages` below — so putting this back into the history would undo it and pin a deployment's
-    /// edit to whatever the last process happened to be running.
-    /// `the_stored_system_prompt_is_compared_and_never_restored` is the guard.
-    ///
-    /// The full text rather than a hash, for two reasons: an exact comparison means "changed in any
-    /// way" means exactly that, and `DefaultHasher` is explicitly not stable across Rust releases,
-    /// so a toolchain bump would report a change that never happened. It is ~10 KB against a file
-    /// already bounded by the context window.
     #[serde(default)]
     system_prompt: String,
-    /// ⚠️ **Messages `1..n`: index 0 is deliberately absent.** The system prompt is a compile-time
-    /// constant, so storing it would pin a deployment's edit to whatever the last process happened
-    /// to be running — the one message a rollout most needs to change is the one a naive round trip
-    /// would freeze. It is re-minted by [`prompt::system_message`] on the way back in. Storing it
-    /// would also open the door to a history holding two `Role::System` messages.
+    /// Messages `1..n`: index 0 is deliberately absent.
     #[serde(default)]
     messages: Vec<Message>,
 }
@@ -154,10 +87,6 @@ fn one() -> f64 {
 }
 
 /// Which of the three constructors is running, since they share [`History::start`].
-///
-/// ⚠️ **Only [`Start::Open`] may read the directory back.** The other two are the call sites where
-/// reading is the bug: `Fresh` would hand a new run the dead game's memory, and `Cleared` would put
-/// back the very conversation the operator asked to be rid of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Start {
     Open,
@@ -167,35 +96,17 @@ enum Start {
 
 impl History {
     /// Open the conversation in a run directory, restoring it when there is one to restore.
-    ///
-    /// Never fails. An unreadable, truncated or version-skewed file is a fresh conversation with a
-    /// line on stderr, exactly as `TodoList::open` treats a broken `todo.json`: losing the
-    /// conversation is bad, and refusing to play because of it is worse.
     pub fn open(run_dir: Option<&Path>) -> Self {
         Self::start(run_dir, Start::Open)
     }
 
     /// The conversation for a run that is *starting*, which is never the one on disk.
-    ///
-    /// ⚠️ **This clears and must never reload.** It is what `Worker::apply_restart` calls when
-    /// `POST /api/new-run` swaps the game out, and a reload there would hand the new run the dead
-    /// game's memory. Today `RunDir::open`'s fresh path always mints an empty directory, so the two
-    /// would behave the same by luck; this is the constructor that makes it true by construction.
-    /// It writes its empty state out immediately, so there is no window in which a `history.json`
-    /// in a run directory describes some other run.
     pub fn fresh(run_dir: Option<&Path>) -> Self {
         Self::start(run_dir, Start::Fresh)
     }
 
-    /// **`POST /api/clear`** — the conversation for a run that is *carrying on*, played by a model
+    /// `POST /api/clear` — the conversation for a run that is *carrying on*, played by a model
     /// that has just been made to forget it.
-    ///
-    /// [`Self::fresh`] with two differences, and both are because the game is still there. The log
-    /// gets a `cleared` line, so reading `conversation.jsonl` back shows where the memory was cut
-    /// rather than a conversation that inexplicably starts over halfway down. And the history ends
-    /// on a note saying so, for the reason [`prompt::RESUMED_NOTE`] exists: a model whose first turn
-    /// shows a party of five and eight hours on the clock, with nothing above it, is a model about
-    /// to decide something is badly wrong.
     pub fn cleared(run_dir: Option<&Path>) -> Self {
         Self::start(run_dir, Start::Cleared)
     }
@@ -214,22 +125,14 @@ impl History {
             restored: None,
         };
         history.write_header();
-        // ⚠️ **The system prompt is logged here, explicitly, and every process logs its own.** The
-        // watermark cannot do it: on a restore the messages behind it were written by the *previous*
-        // process, and index 0 was not. Doing it per process is what makes each process's stretch of
-        // the log self-describing, and it is what makes a changed prompt visible in the record
-        // rather than only in a warning that scrolls away.
+        // The system prompt is logged here, explicitly, and every process logs its own.
         history.log_message(0, &prompt::system_message());
 
         if let Some((saved, messages)) = restored {
             let count = messages.len();
             history.messages.extend(messages);
-            // Everything restored is already in the log this process is about to append to — it was
-            // written there by the process that produced it.
             history.logged = history.messages.len();
-            // ⚠️ **An empty stored prompt is "not recorded", not "changed".** The field is
-            // `#[serde(default)]` so that a file written before it existed reads rather than being
-            // thrown away, and reporting those as a change would be a warning about nothing.
+            // An empty stored prompt is "not recorded", not "changed".
             let changed = !saved.system_prompt.is_empty() && saved.system_prompt != prompt::SYSTEM_PROMPT;
             if changed {
                 eprintln!(
@@ -252,11 +155,7 @@ impl History {
                 turns_since_plan: saved.turns_since_plan,
                 system_prompt_changed: changed,
             });
-            // ⚠️ **Appended after the watermark, so it is logged like anything else.** The note is
-            // a real message the model reads and it belongs in the record of what the model was
-            // sent. It also has to sit at the tail rather than anywhere earlier: it is written
-            // fresh by every process, and a message that changes near the front of the history
-            // would throw away the cached prefill of everything after it.
+            // Appended after the watermark, so it is logged like anything else.
             history.messages.push(Message::user(prompt::RESUMED_NOTE));
         }
 
@@ -265,26 +164,20 @@ impl History {
                 "kind": "cleared",
                 "at": crate::published::now_ms(),
             }));
-            // Appended after the watermark for the reason the resume note is: it is a real message
-            // the model reads, and it belongs in the record of what the model was sent.
+            // Appended after the watermark for the reason the resume note is: it is a real
+            // message the model reads, and it belongs in the record of what the model was sent.
             history.messages.push(Message::user(prompt::CLEARED_NOTE));
         }
 
-        // Puts the resume note in the log now rather than at the end of the first turn, so a process
-        // that dies before finishing one still leaves a complete record of what it sent.
+        // Puts the resume note in the log now rather than at the end of the first turn, so a
+        // process that dies before finishing one still leaves a complete record of what it sent.
         history.flush_log(0);
         history.save();
         history
     }
 
     /// Shorten the conversation back to `len` messages, for a turn that produced no completion at
-    /// all — see [`crate::llm::worker::Worker::roll_back_failed_turn`].
-    ///
-    /// ⚠️ **The one shortening that is not a compaction, and the only one that is safe without a
-    /// [`Self::note_compaction`].** Everything above `len` was appended by the turn that is being
-    /// abandoned, so by construction none of it has reached the log: the flush happens at the end of
-    /// a turn and this happens in the middle of one. The `min` below is therefore expected to be a
-    /// no-op and is here so that a future caller cannot make it one that matters silently.
+    /// all — see `crate::llm::worker::Worker::roll_back_failed_turn`.
     pub fn rollback_to(&mut self, len: usize) {
         self.messages.truncate(len);
         self.logged = self.logged.min(self.messages.len());
@@ -296,27 +189,12 @@ impl History {
     }
 
     /// Write the turn down: append whatever is new to the log, then rewrite the live file.
-    ///
-    /// ⚠️ **Called between `decide` returning and the outcome being sent, never at the end of the
-    /// turn.** The moment the worker sends its `TurnOutcome` the emulator thread may act on it, and
-    /// if that action wins the game then `hall_of_fame::archive` copies the run directory — so
-    /// anything written after the send races the archive and usually loses. Publishing the
-    /// `Decision`, and `compact_if_needed` with its whole summarising completion, are both after it.
-    /// Checkpointing first makes durability precede visibility and closes the race by construction.
-    /// It is the same argument that made the archiver *follow* the transcript rather than copy it.
     pub fn checkpoint(&mut self, turn: u64, calibration: f64, turns_since_plan: u32) {
         self.flush_log(turn);
         self.save_with(turn, calibration, turns_since_plan);
     }
 
     /// Record what a compaction did, and put the log's watermark back.
-    ///
-    /// ⚠️ **The watermark reset is the whole reason this is a method rather than a log line.**
-    /// `logged` indexes `messages`, and a compaction is the one thing that makes the vector shorter.
-    /// It is safe because [`Self::checkpoint`] has already flushed everything the compaction is
-    /// about to remove: `evict_images` rewrites in place (and the log holds the evicted text, which
-    /// is what the live history will hold afterwards too), while `apply_summary` and `trim_history`
-    /// only ever drop messages that are already written down.
     pub fn note_compaction(&mut self, turn: u64, note: &CompactionNote) {
         self.append_line(&serde_json::json!({
             "kind": "compaction",
@@ -350,11 +228,9 @@ impl History {
     }
 
     fn flush_log(&mut self, turn: u64) {
-        // ⚠️ `DerefMut` hands the worker the vector itself, and one path in `decide` shortens it —
+        // `DerefMut` hands the worker the vector itself, and one path in `decide` shortens it —
         // `Worker::roll_back_failed_turn`, which puts a turn that produced no completion back the
-        // way it found the conversation. A watermark past the end would panic the slice below, so it
-        // is clamped rather than trusted — and asserted in debug, since a *silent* clamp would hide
-        // a rollback that dropped a message the log never received.
+        // way it found the conversation.
         debug_assert!(self.logged <= self.messages.len(), "the log watermark ran past the history");
         self.logged = self.logged.min(self.messages.len());
         let mut fresh = self.messages[self.logged..].to_vec();
@@ -375,12 +251,6 @@ impl History {
     }
 
     /// The save taken at construction, before any turn has run.
-    ///
-    /// ⚠️ **It writes the *restored* figures back, not defaults.** `save_with(0, 1.0, 0)` looks
-    /// harmless here because the first turn's checkpoint overwrites it a few seconds later, but a
-    /// process that dies before finishing a turn would then have walked the calibration back to 1.0
-    /// — and a run that keeps restarting under a crash loop would lose it for good, which is the
-    /// silent half of a context that stops compacting.
     fn save(&mut self) {
         let (turn, calibration, turns_since_plan) = match &self.restored {
             Some(restored) => (restored.turn, restored.calibration, restored.turns_since_plan),
@@ -395,8 +265,7 @@ impl History {
         compaction::evict_images(&mut messages, 0);
         let saved = Saved {
             version: VERSION,
-            // ⚠️ **The prompt in force *now*, not the one that was restored.** This is what makes
-            // the warning fire once per change rather than once per restart after one.
+            // The prompt in force *now*, not the one that was restored.
             system_prompt: prompt::SYSTEM_PROMPT.to_string(),
             run_id: crate::run::directory_name(&dir),
             model: std::env::var("GB_MODEL").unwrap_or_default(),
@@ -426,9 +295,6 @@ impl History {
 }
 
 /// Append one line, rotating first if the file has grown past the transcript's own limit.
-///
-/// The log is flushed per line for the reason the transcript is: `hall_of_fame::archive` reads it
-/// from another thread while this one is still writing, and it reads whole lines.
 fn append(path: &Path, line: &str) -> Result<(), String> {
     if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) >= crate::run::transcript::MAX_BYTES {
         crate::run::transcript::rotate(path)?;
@@ -465,27 +331,20 @@ fn read_saved(dir: &Path) -> Option<(Saved, Vec<Message>)> {
 }
 
 /// Everything that has to be true of a history before it is put back in front of an endpoint.
-///
-/// Three passes, each guarding a different way a stored conversation can be rejected for the rest of
-/// the run rather than for one request.
 fn sanitise(messages: Vec<Message>) -> Vec<Message> {
-    // A stored system message would end up second, behind the one `open` prepends. Nothing we write
-    // produces one; a hand-edited or older file might.
+    // A stored system message would end up second, behind the one `open` prepends.
     let mut messages: Vec<Message> = messages.into_iter().skip_while(|m| m.role == Role::System).collect();
 
-    // ⚠️ The `serde` route into a `Message` walks straight past `Message::assistant`, which is where
-    // `history_safe` lives. See its doc comment: one stored call whose `arguments` are not a JSON
-    // object 400s *every* request from then on, because it is re-sent with the whole history.
+    // The `serde` route into a `Message` walks straight past `Message::assistant`, which is where
+    // `history_safe` lives.
     for message in &mut messages {
         if !message.tool_calls.is_empty() {
             message.tool_calls = crate::llm::protocol::history_safe(std::mem::take(&mut message.tool_calls));
         }
     }
 
-    // ⚠️ A history whose last assistant message asks for tools nobody answered is rejected outright
-    // by a strict endpoint. Our own writer cannot produce one — every checkpoint is taken with the
-    // turn's messages complete — so this is guarding the file rather than the code, and it is worth
-    // its twenty lines because the failure is permanent rather than transient.
+    // A history whose last assistant message asks for tools nobody answered is rejected outright
+    // by a strict endpoint.
     let mut end = messages.len();
     for (index, message) in messages.iter().enumerate() {
         if message.tool_calls.is_empty() {
@@ -512,11 +371,6 @@ fn sanitise(messages: Vec<Message>) -> Vec<Message> {
     messages
 }
 
-/// The worker holds a `History` where it used to hold a `Vec<Message>`, and reads it as one.
-///
-/// Sound *here* specifically because persistence is checkpoint-based rather than write-through:
-/// nothing has to intercept a mutation, only observe the vector once a turn. A write-through design
-/// could not expose `DerefMut` at all.
 impl Deref for History {
     type Target = Vec<Message>;
 
@@ -558,7 +412,7 @@ mod tests {
         text.lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str(l).expect("json")).collect()
     }
 
-    /// Half (A). A conversation written by one process is what the next one opens on.
+    /// Half (A).
     #[test]
     fn a_conversation_reopened_from_disk_starts_where_it_left_off() {
         let scratch = Scratch::new("history-roundtrip");
@@ -569,8 +423,8 @@ mod tests {
         let before = first.len();
         drop(first);
 
-        // The precondition: the file holds everything *except* the system prompt, or the assertion
-        // below would pass on a file that stored index 0 as well.
+        // The precondition: the file holds everything *except* the system prompt, or the
+        // assertion below would pass on a file that stored index 0 as well.
         let saved: Saved =
             serde_json::from_slice(&std::fs::read(scratch.0.join(files::HISTORY)).expect("a file")).expect("json");
         assert_eq!(saved.messages.len(), before - 1, "the system prompt is not on disk");
@@ -583,8 +437,7 @@ mod tests {
         assert_eq!(second[3].tool_call_id.as_deref(), Some("c1"), "the tool result came back with its call");
     }
 
-    /// ⚠️ The deployment case. Message 0 is re-minted rather than restored, so an edit to the system
-    /// prompt reaches a run that is resumed across it instead of being pinned by the old file.
+    /// The deployment case.
     #[test]
     fn the_system_prompt_is_rebuilt_rather_than_restored_so_an_edit_reaches_the_model() {
         let scratch = Scratch::new("history-prompt");
@@ -609,9 +462,7 @@ mod tests {
         assert_eq!(history.iter().filter(|m| m.role == Role::System).count(), 1);
     }
 
-    /// ⚠️ The `ImageUrl::tokens` trap. `tokens` is `#[serde(skip)]` and defaults to 85, so a picture
-    /// that round-tripped would be priced at a twentieth of its weight and a full context would read
-    /// as nearly empty for the rest of the run. Nothing is stored, so nothing can be mis-defaulted.
+    /// The `ImageUrl::tokens` trap.
     #[test]
     fn a_restored_history_carries_no_pictures_and_no_mispriced_image_tokens() {
         let scratch = Scratch::new("history-images");
@@ -623,7 +474,8 @@ mod tests {
             ImageDetail::High,
             3825,
         ));
-        // The precondition: this really is an expensive picture before it goes anywhere near disk.
+        // The precondition: this really is an expensive picture before it goes anywhere near
+        // disk.
         assert!(history.last().unwrap().has_image());
         assert!(history.last().unwrap().approximate_tokens() >= 3825, "a map is not an 85-token thumbnail");
         history.checkpoint(1, 1.0, 0);
@@ -634,15 +486,13 @@ mod tests {
 
         let restored = History::open(Some(&scratch.0));
         assert!(!restored.iter().any(Message::has_image), "nothing comes back as an image");
-        // ⚠️ Not `last()`: a restored conversation ends in `RESUMED_NOTE`. The picture is the
-        // message before it.
+        // Not `last()`: a restored conversation ends in `RESUMED_NOTE`.
         let caption = restored[restored.len() - 2].text().expect("text");
         assert!(caption.starts_with("the map of Route 2"), "the caption survives: {caption}");
         assert!(caption.ends_with(compaction::EVICTED), "and says the picture went: {caption}");
     }
 
-    /// ⚠️ `serde` walks straight past `Message::assistant`, where `history_safe` lives. One stored
-    /// call whose arguments are not a JSON object 400s *every* request for the rest of the run.
+    /// `serde` walks straight past `Message::assistant`, where `history_safe` lives.
     #[test]
     fn a_tool_call_the_model_wrote_badly_is_still_repaired_when_it_comes_back_off_disk() {
         let scratch = Scratch::new("history-badcall");
@@ -658,20 +508,20 @@ mod tests {
             ],
         });
         std::fs::write(scratch.0.join(files::HISTORY), saved.to_string()).expect("write");
-        // The precondition: the fragment really is on disk, so the repair below is doing something.
+        // The precondition: the fragment really is on disk, so the repair below is doing
+        // something.
         assert!(std::fs::read_to_string(scratch.0.join(files::HISTORY)).unwrap().contains(r#"{\"broken\": "#));
 
         let history = History::open(Some(&scratch.0));
         let assistant = history.iter().find(|m| !m.tool_calls.is_empty()).expect("the call survives");
         assert_eq!(assistant.tool_calls.len(), 1, "repaired in place, never dropped");
         assert_eq!(assistant.tool_calls[0].function.arguments, "{}");
-        // ⚠️ Dropping the call instead would orphan this result, which is the *other* way to 400.
+        // Dropping the call instead would orphan this result, which is the *other* way to 400.
         assert_eq!(assistant.tool_calls[0].id, "c1");
         assert!(history.iter().any(|m| m.tool_call_id.as_deref() == Some("c1")), "its answer is still paired");
     }
 
-    /// A history ending in tool calls nobody answered is rejected outright by a strict endpoint. Our
-    /// own writer cannot produce one, so this guards the *file* rather than the code.
+    /// A history ending in tool calls nobody answered is rejected outright by a strict endpoint.
     #[test]
     fn a_history_whose_last_assistant_was_never_answered_is_rolled_back_on_open() {
         let scratch = Scratch::new("history-unpaired");
@@ -740,8 +590,7 @@ mod tests {
         });
         history.checkpoint(8, 1.0, 0);
 
-        // ⚠️ **The precondition is the whole test.** Without it this passes on a compaction that
-        // never dropped anything, which is exactly the shape that proves nothing.
+        // The precondition is the whole test.
         assert!(
             !history.iter().any(|m| m.text().is_some_and(|t| t.contains(doomed))),
             "the live history really has lost it"
@@ -755,8 +604,9 @@ mod tests {
         assert!(logged.contains(doomed), "but the log still has it");
     }
 
-    /// The marker line says a compaction happened, and the summary that replaced the middle goes in
-    /// as an ordinary message so a reader filtering on `kind == "message"` still sees everything.
+    /// The marker line says a compaction happened, and the summary that replaced the middle goes
+    /// in as an ordinary message so a reader filtering on `kind == "message"` still sees
+    /// everything.
     #[test]
     fn the_log_records_a_compaction_and_the_summary_it_kept() {
         let scratch = Scratch::new("history-marker");
@@ -788,7 +638,7 @@ mod tests {
         assert_eq!(summary["turn"], 2);
     }
 
-    /// ⚠️ `fresh` clears and `open` restores, and `apply_restart` must call the first one: a new run
+    /// `fresh` clears and `open` restores, and `apply_restart` must call the first one: a new run
     /// reading the conversation back would inherit the dead game's memory.
     #[test]
     fn a_new_run_clears_the_conversation_instead_of_reloading_it() {
@@ -811,8 +661,6 @@ mod tests {
 
     /// The same for `POST /api/clear`, where the trap is sharper: a clear's directory is the one
     /// that has been playing all along, so `open` would put the whole conversation straight back.
-    /// The note at the tail is the other half — it is what stops a model waking up eight hours into
-    /// a run with no memory of it and concluding the game is broken.
     #[test]
     fn a_cleared_conversation_is_replaced_and_says_so_in_the_history_and_the_log() {
         let scratch = Scratch::new("history-cleared");
@@ -831,8 +679,8 @@ mod tests {
             "and the file a restart would resume on was replaced too",
         );
 
-        // ⚠️ The append-only log keeps what the live history dropped — the whole reason there are two
-        // files — and says where the cut was, or it reads as a conversation that inexplicably
+        // The append-only log keeps what the live history dropped — the whole reason there are
+        // two files — and says where the cut was, or it reads as a conversation that inexplicably
         // starts over halfway down.
         let logged = std::fs::read_to_string(scratch.0.join(files::CONVERSATION)).expect("a log");
         assert!(logged.contains("rather forget"), "the log lost what the clear took out of the history");
@@ -843,9 +691,8 @@ mod tests {
         );
     }
 
-    /// ⚠️ The skew half (A) creates: `state.gbst` is the last checkpoint and `history.json` is the
-    /// last turn, so a restored conversation can be ahead of the game. Saying so once is what stops
-    /// the model concluding the game is broken.
+    /// The skew half (A) creates: `state.gbst` is the last checkpoint and `history.json` is the
+    /// last turn, so a restored conversation can be ahead of the game.
     #[test]
     fn a_resumed_run_tells_the_model_the_game_may_be_behind_the_conversation() {
         let scratch = Scratch::new("history-note");
@@ -861,7 +708,8 @@ mod tests {
         assert!(compaction::is_turn_start(second.last().unwrap()), "a legal cut point, so it can be compacted away");
     }
 
-    /// The calibration is the one number that has to survive, and it comes back with the messages.
+    /// The calibration is the one number that has to survive, and it comes back with the
+    /// messages.
     #[test]
     fn the_endpoints_measure_of_the_context_survives_the_restart_with_it() {
         let scratch = Scratch::new("history-calibration");
@@ -875,11 +723,7 @@ mod tests {
         assert_eq!(restored.turns_since_plan, 4);
     }
 
-    /// ⚠️ **A restore that never reaches a turn must not walk the calibration back to 1.0.** The
-    /// save taken at construction is the one nobody thinks about, because the first turn's
-    /// checkpoint overwrites it seconds later — but a process that dies before finishing a turn
-    /// leaves it as the file, and a run restarting under a crash loop would lose the endpoint's
-    /// measure of its own context for good.
+    /// A restore that never reaches a turn must not walk the calibration back to 1.0.
     #[test]
     fn a_restart_that_finishes_no_turn_still_leaves_the_calibration_where_it_found_it() {
         let scratch = Scratch::new("history-crashloop");
@@ -900,10 +744,8 @@ mod tests {
         assert_eq!(History::open(Some(&scratch.0)).restored().expect("restored").calibration, 2.75);
     }
 
-    /// ⚠️ **A deployment that edits the system prompt must have the edit take effect on the next
-    /// restart, out loud.** The conversation is kept and index 0 is replaced, which is the whole
-    /// point: a run that is resumed for a week would otherwise be held under the prompt it started
-    /// with for ever.
+    /// A deployment that edits the system prompt must have the edit take effect on the next
+    /// restart, out loud.
     #[test]
     fn a_system_prompt_that_changed_under_a_restart_is_replaced_and_said_out_loud() {
         let scratch = Scratch::new("history-promptchange");
@@ -926,8 +768,7 @@ mod tests {
         let lines = log_lines(&scratch.0);
         assert!(lines.iter().any(|l| l["kind"] == "system_prompt_changed"), "{lines:#?}");
 
-        // ⚠️ **And it fires once per change, not once per restart after one.** The save taken at
-        // construction records the prompt now in force, so the next process finds them equal.
+        // And it fires once per change, not once per restart after one.
         drop(history);
         assert!(
             !History::open(Some(&scratch.0)).restored().expect("restored").system_prompt_changed,
@@ -935,8 +776,8 @@ mod tests {
         );
     }
 
-    /// The other half, and the one that would make the warning useless: an unchanged prompt must not
-    /// report a change, or every restart cries wolf.
+    /// The other half, and the one that would make the warning useless: an unchanged prompt must
+    /// not report a change, or every restart cries wolf.
     #[test]
     fn an_unchanged_system_prompt_is_not_reported_as_a_change() {
         let scratch = Scratch::new("history-promptsame");
@@ -948,9 +789,9 @@ mod tests {
         let restored = History::open(Some(&scratch.0)).restored().expect("restored").clone();
         assert!(!restored.system_prompt_changed);
 
-        // ⚠️ A file predating the field reads as "not recorded" rather than "changed": the field is
-        // `#[serde(default)]` so an older file is still readable, and warning about one would be a
-        // warning about nothing.
+        // A file predating the field reads as "not recorded" rather than "changed": the field is
+        // `#[serde(default)]` so an older file is still readable, and warning about one would be
+        // a warning about nothing.
         let text = std::fs::read_to_string(scratch.0.join(files::HISTORY)).unwrap();
         let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
         value.as_object_mut().unwrap().remove("system_prompt");
@@ -961,8 +802,8 @@ mod tests {
         );
     }
 
-    /// ⚠️ **Stored to be compared, never to be restored**, and the distance between the two is one
-    /// line of code. Restoring it would undo the re-minting that makes a deployment's edit land.
+    /// Stored to be compared, never to be restored, and the distance between the two is one line
+    /// of code.
     #[test]
     fn the_stored_system_prompt_is_compared_and_never_restored() {
         let scratch = Scratch::new("history-promptonce");
@@ -985,9 +826,7 @@ mod tests {
     }
 
     /// The log is a record of what the model was *sent*, so it carries the system prompt — and a
-    /// process that changed it logs the new one under its own header. ⚠️ Reading the file back as
-    /// one conversation therefore shows the prompt changing partway through, which is the honest
-    /// picture rather than a glitch.
+    /// process that changed it logs the new one under its own header.
     #[test]
     fn the_log_carries_the_system_prompt_each_process_actually_used() {
         let scratch = Scratch::new("history-logprompt");
@@ -1006,7 +845,7 @@ mod tests {
         for logged in prompts {
             assert_eq!(logged["message"]["content"], prompt::SYSTEM_PROMPT);
         }
-        // ⚠️ And the conversation itself is not re-logged on the restart, or a run restarted nightly
+        // And the conversation itself is not re-logged on the restart, or a run restarted nightly
         // would multiply its own log.
         assert_eq!(
             lines

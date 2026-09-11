@@ -1,10 +1,4 @@
 //! Command-line parsing — hand-rolled over `std::env::args`, no `clap`.
-//!
-//! The surface is three commands' worth of flags and is not expected to grow much; a dependency
-//! that pulls in a derive macro and a builder API to parse `--port 8080` would cost more than it
-//! saves. What it does buy, being a module rather than a few lines in `main`, is [`parse`] being
-//! testable without spawning a process.
-//!
 //! ```text
 //! poke-agent-web                       web UI + LlmPolicy, resuming the newest run if there is one
 //! poke-agent-web --policy random       web UI, RandomPolicy — no API key, the video-pipeline harness
@@ -13,13 +7,6 @@
 //! ```
 
 /// The crate version, from `Cargo.toml`.
-///
-/// `CARGO_PKG_VERSION` is set by cargo for every crate it compiles, so this needs nothing from
-/// `build.rs` — which is worth saying out loud, because `build.rs` is where every *other* generated
-/// constant in this crate comes from and the obvious guess is that this one does too.
-///
-/// It is bumped **by hand**: a version here is a claim about the run recorded under it
-/// (`run::hall_of_fame`), not a build number, so it should move when someone decides it has.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub const USAGE: &str = "\
@@ -80,43 +67,29 @@ pub enum Command {
     Serve {
         port: u16,
         policy: ServePolicy,
-        /// **W7** — ignore any resumable run under `GB_RUN_DIR` and start the game from the
-        /// beginning in a directory of its own. The old run is left exactly as it was.
+        /// Ignore any resumable run under `GB_RUN_DIR` and start the game from the beginning in a
+        /// directory of its own.
         new_run: bool,
     },
-    /// `--help`. Separate from a parse error because it exits zero and prints to stdout.
+    /// `--help`.
     Help,
 }
 
 /// Who makes the decisions under `gb serve`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServePolicy {
-    /// An LLM over an OpenAI-compatible API. Needs an API key in the environment.
+    /// An LLM over an OpenAI-compatible API.
     Llm,
-    /// Random legal choices. Needs nothing, which is what makes it the harness for exercising the
-    /// video pipeline and the web UI without spending tokens.
+    /// Random legal choices.
     Random,
-    /// `DeterministicPolicy` on `PolicyStep::complete_game_steps` — the same queue `full_playthrough`
-    /// runs, on the same fresh save, played out on the page instead of in a test harness. Needs no
-    /// API key and spends nothing.
-    ///
-    /// ⚠️ **It ends on Victory Road 2F, not in the Hall of Fame**, because that step list does: the
-    /// VR2F/VR3F puzzle and the Elite Four are deliberately left out of it as PP-marginal for the
-    /// team this route arrives with, and are proved separately from their own fixtures
-    /// (`endgame::can_solve_victory_road_2f_3f`, `endgame::can_beat_elite_four`). When the queue
-    /// empties the policy simply stops answering and the run parks where it stands.
-    ///
-    /// ⚠️ **It expects a game at the beginning.** The queue starts in Red's bedroom and every step
-    /// is relative to that, so pointing it at a *resumed* mid-game save replays a route the world has
-    /// already moved past. Pair it with `--new-run`, or `POST /api/new-run` once the process is up.
+    /// `DeterministicPolicy` on `PolicyStep::complete_game_steps` — the same queue
+    /// `full_playthrough` runs, on the same fresh save, played out on the page instead of in a
+    /// test harness.
     Deterministic,
 }
 
 impl ServePolicy {
     /// The spellings `--policy` and `GB_POLICY` share.
-    ///
-    /// One parser for both on purpose: the whole point of the variable is that a Deployment sets the
-    /// same thing an operator would type, and two lists of names is two lists to fall out of step.
     fn parse(value: &str) -> Option<Self> {
         match value {
             "llm" => Some(Self::Llm),
@@ -132,10 +105,7 @@ impl ServePolicy {
 
 pub const DEFAULT_PORT: u16 = 8080;
 
-/// Parse already-split arguments, **excluding** the program name.
-///
-/// `Err` carries a complete message ready to print — the specific complaint followed by [`USAGE`] —
-/// so callers never have to compose one.
+/// Parse already-split arguments, excluding the program name.
 pub fn parse<I, S>(args: I) -> Result<Command, String>
 where
     I: IntoIterator<Item = S>,
@@ -145,10 +115,6 @@ where
 }
 
 /// [`parse`] against an explicit environment.
-///
-/// The environment is process-global, which would make every test here order-dependent against
-/// whatever `GB_PORT` the shell happened to export — so the tests pass their own, and `parse`
-/// supplies the real one.
 pub fn parse_with_env<I, S>(args: I, env: &dyn Fn(&str) -> Option<String>) -> Result<Command, String>
 where
     I: IntoIterator<Item = S>,
@@ -162,7 +128,6 @@ where
     }
     let mut rest = args.iter().map(String::as_str);
 
-    // `GB_PORT` is the container's way of setting this (§7.1); `--port` is the operator's, and wins.
     let mut port = match env("GB_PORT").map(|value| value.trim().to_string()).filter(|v| !v.is_empty()) {
         Some(value) => match value.parse::<u16>() {
             Ok(0) | Err(_) => return fail(format!("`GB_PORT={value}` is not a port number")),
@@ -170,24 +135,22 @@ where
         },
         None => DEFAULT_PORT,
     };
-    // `GB_POLICY` is the container's way of setting this and `--policy` is the operator's, exactly as
-    // above — so the ConfigMap can move a deployment between the model, the random harness and the
-    // scripted playthrough with a `kubectl rollout restart` rather than an edited command line.
+    // `GB_POLICY` is the container's way of setting this and `--policy` is the operator's,
+    // exactly as above — so the ConfigMap can move a deployment between the model, the random
+    // harness and the scripted playthrough with a `kubectl rollout restart` rather than an edited
+    // command line.
     let mut policy = match env("GB_POLICY").map(|value| value.trim().to_string()).filter(|v| !v.is_empty()) {
         Some(value) => match ServePolicy::parse(&value) {
             Some(parsed) => parsed,
-            // Refused rather than defaulted, for `GB_PORT`'s reason: a container quietly playing at
-            // random when it was told `llm` is diagnosed by *watching* it, which is the slowest
-            // route to a typo there is.
             None => return fail(format!("`GB_POLICY={value}` is not {}", ServePolicy::EXPECTED)),
         },
         None => ServePolicy::Llm,
     };
     let mut new_run = false;
     while let Some(flag) = rest.next() {
-        // `--new-run` is the only flag that is a switch rather than a setting, so it is taken before
-        // a value is demanded — every other missing value is the same mistake and reports the same
-        // way rather than silently defaulting.
+        // `--new-run` is the only flag that is a switch rather than a setting, so it is taken
+        // before a value is demanded — every other missing value is the same mistake and reports
+        // the same way rather than silently defaulting.
         if flag == "--new-run" {
             new_run = true;
             continue;
@@ -238,8 +201,6 @@ mod tests {
         assert_eq!(parse(["--policy", "random", "--port", "9000"]), Ok(expected));
     }
 
-    /// **W7.** A switch among settings: it must not swallow the flag after it, and it must be
-    /// accepted anywhere in the line.
     #[test]
     fn new_run_is_a_switch_and_not_a_setting() {
         let expected = Command::Serve { port: 9000, policy: ServePolicy::Random, new_run: true };
@@ -255,10 +216,6 @@ mod tests {
         }
     }
 
-    /// ⚠️ **The usage text is hand-maintained beside a hand-rolled parser, and it fell behind
-    /// silently once already** — `--new-run` shipped and `--help` never mentioned it, which for a
-    /// tool whose only discovery mechanism is `--help` means the flag may as well not exist. Every
-    /// flag the parser accepts and every variable the server reads has to appear in it.
     #[test]
     fn the_usage_names_every_flag_and_variable() {
         for name in [
@@ -275,7 +232,7 @@ mod tests {
         }
     }
 
-    /// ⚠️ The flag and the variable are one parser, and this is what says so: a name accepted by one
+    /// The flag and the variable are one parser, and this is what says so: a name accepted by one
     /// and not the other is the trap the shared [`ServePolicy::parse`] exists to close.
     #[test]
     fn every_policy_is_spelled_the_same_on_the_command_line_and_in_the_environment() {
@@ -298,9 +255,7 @@ mod tests {
         }
     }
 
-    /// **The ConfigMap sets it; the operator overrides it.** The same contract `GB_PORT` has, and
-    /// for the same reason — the deployment's command line should not have to be edited to move the
-    /// run between the model and a policy that spends nothing.
+    /// The ConfigMap sets it; the operator overrides it.
     #[test]
     fn gb_policy_is_the_default_and_the_flag_overrides_it() {
         let env = |name: &str| (name == "GB_POLICY").then(|| "random".to_string());
@@ -313,7 +268,8 @@ mod tests {
             Ok(Command::Serve { port: DEFAULT_PORT, policy: ServePolicy::Llm, new_run: false }),
         );
 
-        // Blank and whitespace are what a placeholder looks like in a Deployment, and mean "unset".
+        // Blank and whitespace are what a placeholder looks like in a Deployment, and mean
+        // "unset".
         for blank in ["", "   "] {
             let env = |name: &str| (name == "GB_POLICY").then(|| blank.to_string());
             assert_eq!(
@@ -349,8 +305,6 @@ mod tests {
         }
     }
 
-    /// **W4 / §7.1.** The container sets the port through the environment; a person debugging sets it
-    /// on the command line, and theirs wins.
     #[test]
     fn gb_port_is_the_default_and_the_flag_overrides_it() {
         let env = |name: &str| (name == "GB_PORT").then(|| "9999".to_string());
@@ -363,8 +317,6 @@ mod tests {
             Ok(Command::Serve { port: 7000, policy: ServePolicy::Llm, new_run: false }),
         );
 
-        // A nonsense `GB_PORT` is reported rather than silently ignored: a container that quietly
-        // binds 8080 when it was told 80 is a much longer afternoon than one that will not start.
         for bad in ["0", "port80", "70000"] {
             let env = |name: &str| (name == "GB_PORT").then(|| bad.to_string());
             let error = parse_with_env(Vec::<String>::new(), &env).expect_err("{bad} is not a port");

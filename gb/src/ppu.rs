@@ -14,10 +14,9 @@ use image::{ImageBuffer, RgbImage};
 
 #[derive(Debug, Clone)]
 pub struct PPU {
-    /// Two 8 KB banks. A DMG only ever uses bank 0, and both [`PPU::vram`] and the CPU-facing
-    /// accessors keep that indistinguishable from the old single-bank array.
+    /// Two 8 KB banks.
     vram: [u8; VRAM_BANK_SIZE * VRAM_BANKS],
-    /// `VBK` (`FF4F`), 0 or 1. Always 0 on DMG and in CGB compatibility mode.
+    /// `VBK` (`FF4F`), 0 or 1.
     vram_bank: usize,
     oam: [u8; 0xA0], // 160 bytes OAM (Object Attribute Memory)
     lcd_control: LcdControl,
@@ -26,41 +25,32 @@ pub struct PPU {
     scroll: Point8,
     window_position: Point8,
     palette: LcdPalette,
-    /// CGB background palette RAM (`BCPS`/`BCPD`). Unused on DMG; in compatibility mode it is
-    /// pre-loaded by the boot ROM and read-only to the cartridge.
+    /// CGB background palette RAM (`BCPS`/`BCPD`).
     cgb_background: PaletteBank,
     /// CGB object palette RAM (`OCPS`/`OCPD`).
     cgb_object: PaletteBank,
     /// `OPRI` (`FF6C`): bit 0 set selects DMG sprite priority (lowest X wins) instead of CGB's
-    /// (lowest OAM index wins). The boot ROM sets it in compatibility mode (`EmulateDMG`).
+    /// (lowest OAM index wins).
     object_priority: u8,
     dma: LcdDma,
     lcd: [LcdColor; LCD_WIDTH * LCD_HEIGHT],
     current_ticks: usize, // Current machine cycles
     /// Set on each mode 3 -> mode 0 transition and consumed by the MMU in the same `update` call,
-    /// which is what paces HDMA. Never observable at rest, so it is neither serialised nor part
-    /// of equality.
+    /// which is what paces HDMA.
     hblank_started: bool,
-    /// Which palette hardware drives the screen. A construction-time property, not guest state.
+    /// Which palette hardware drives the screen.
     color_mode: ColorMode,
 
     // TODO move all these into a separate struct for the current frame state
     current_x: usize,
     window_state: WindowRenderState,
-    /// The (at most ten) sprites the OAM scan selected for the current scanline, **in OAM order**
-    /// — which is the CGB priority order. A fixed array rather than a `Vec`: the limit is a hard
-    /// ten, and the allocation was ~8640 of them a second (C5).
+    /// The (at most ten) sprites the OAM scan selected for the current scanline, in OAM order —
+    /// which is the CGB priority order.
     scanline_sprites: [Sprite; MAX_SPRITES_PER_SCANLINE],
     scanline_sprite_count: usize,
-    /// The same sprites indexed in **DMG priority order**: by X, ties by OAM index. Computed once
-    /// per scanline, because deriving it per pixel is what `sorted_by_key` used to do — inside the
-    /// innermost pixel loop, allocating a `Vec` each time (C5).
+    /// The same sprites indexed in DMG priority order: by X, ties by OAM index.
     scanline_sprite_order: [u8; MAX_SPRITES_PER_SCANLINE],
     /// One bit per screen column: is any selected sprite over it at all?
-    ///
-    /// `top_sprite` is a scan, and without this it runs for every pixel of every scanline — including
-    /// the great majority that no sprite is anywhere near. Ten sprites can cover at most 80 of the
-    /// 160 columns, so this skips the scan outright more often than not.
     scanline_sprite_columns: [u64; LCD_WIDTH.div_ceil(64)],
 }
 
@@ -94,11 +84,7 @@ impl WindowRenderState {
     }
 }
 
-/// `lcd` is derived output and `scanline_sprites` is rebuilt from OAM on every scanline. Neither
-/// is machine state, so neither is serialised — which means neither may take part in equality
-/// either, or the save/load round-trip assertion in `game_boy::tests::save_and_load_state` would
-/// compare a restored frame buffer against one that was never saved. `Audio` excludes its
-/// resampler output for exactly the same reason.
+/// `lcd` is derived output and `scanline_sprites` is rebuilt from OAM on every scanline.
 impl PartialEq for PPU {
     fn eq(&self, other: &Self) -> bool {
         self.vram == other.vram
@@ -145,11 +131,10 @@ pub struct PpuSection {
 pub const PPU_SECTION_VERSION: u16 = 2;
 /// Bumped to 2 by A7: incremental transfer, source page instead of address, `FF46` read-back.
 pub const DMA_SECTION_VERSION: u16 = 2;
-/// Phase B's own section: everything that only exists on a Game Boy Color.
 pub const CGB_SECTION_VERSION: u16 = 1;
 
 /// Contents of the PPU's half of the `cgb` save-state section. The MMU appends its own fields
-/// after these — see [`crate::mmu::MMU::write_sections`].
+/// after these — see `crate::mmu::MMU::write_sections`.
 #[derive(Debug, Clone, Decode, Encode)]
 pub struct CgbVideoSection {
     pub vram_bank: usize,
@@ -206,8 +191,7 @@ impl PPU {
     }
 
     /// The `dma` section's shape changed in version 2 (A7: incremental transfer, page instead of
-    /// address, `FF46` read-back). Version 1 payloads are converted rather than regenerated —
-    /// this is the escape hatch documented in `src/savestate/mod.rs` for a shape change.
+    /// address, `FF46` read-back).
     fn read_dma_section(&mut self, reader: &SectionReader) -> Result<(), String> {
         let Some(mut fields) = reader.section(labels::DMA)? else {
             return Ok(());
@@ -300,14 +284,13 @@ impl PPU {
         if self.lcd_status.mode().vram_accessible() {
             self.vram[self.vram_offset(address)]
         } else {
-            // garbage data https://gbdev.io/pandocs/Rendering.html
+            // Garbage data https://gbdev.io/pandocs/Rendering.html
             0xff
         }
     }
 
-    /// **VRAM bank 0.** The Pokémon layer reads tile data through this and a DMG has no other
-    /// bank, so it deliberately does not follow `VBK`. Use [`PPU::vram_banked`] for the bank the
-    /// CPU currently sees.
+    /// VRAM bank 0. The Pokémon layer reads tile data through this and a DMG has no other bank,
+    /// so it deliberately does not follow `VBK`.
     pub fn vram(&self) -> &[u8] {
         &self.vram[..VRAM_BANK_SIZE]
     }
@@ -342,7 +325,7 @@ impl PPU {
         &mut self.cgb_object
     }
 
-    /// True once per scanline, on entering HBlank. See [`PPU::hblank_started`].
+    /// True once per scanline, on entering HBlank. See `PPU::hblank_started`.
     pub fn consume_hblank_started(&mut self) -> bool {
         std::mem::take(&mut self.hblank_started)
     }
@@ -369,10 +352,6 @@ impl PPU {
     }
 
     /// Where a `0x8000`-relative address lands in the two-bank array, following `VBK`.
-    ///
-    /// Masked so the index is provably in range: `vram_bank` is a plain `usize`, and without the
-    /// mask every VRAM access — the hottest read in the machine — carries a bounds check. Same
-    /// reasoning as [`crate::mmu::MMU::work_ram_offset`].
     #[inline]
     fn vram_offset(&self, address: u16) -> usize {
         (self.vram_bank * VRAM_BANK_SIZE + address as usize) & (VRAM_BANK_SIZE * VRAM_BANKS - 1)
@@ -386,14 +365,12 @@ impl PPU {
         self.vram[offset] = value;
     }
 
-    /// CPU-facing OAM read. Blocked by the PPU mode, **and** while an OAM DMA holds the bus — the
-    /// old code had `|| dma.is_active()`, which made OAM *more* accessible during a transfer,
-    /// the opposite of hardware.
+    /// CPU-facing OAM read.
     pub fn read_oam(&self, address: u16) -> u8 {
         if self.lcd_status.mode().oam_accessible() && !self.dma.is_active() {
             self.oam[address as usize]
         } else {
-            // garbage data https://gbdev.io/pandocs/Rendering.html
+            // Garbage data https://gbdev.io/pandocs/Rendering.html
             0xff
         }
     }
@@ -461,9 +438,6 @@ impl PPU {
     }
 
     /// Generate a screenshot of the current PPU state as an in-memory RGB image.
-    ///
-    /// Still an `RgbImage` after B4 widened the frame buffer, so every screenshot test is
-    /// unaffected; on DMG the bytes are identical to what they always were.
     pub fn screenshot(&self) -> RgbImage {
         let mut img = ImageBuffer::new(LCD_WIDTH as u32, LCD_HEIGHT as u32);
         for y in 0..LCD_HEIGHT {
@@ -487,17 +461,8 @@ impl PPU {
         img
     }
 
-    /// How many **video** M-cycles until the PPU's next mode transition, or `None` while the LCD
-    /// is off.
-    ///
-    /// This is the bound C2's HALT skip is allowed to jump to. Everything the PPU can do that the
-    /// rest of the machine notices — the VBlank and STAT interrupts, `LY`, the HBlank edge that
-    /// paces HDMA, the OAM scan — happens *at* a transition, so a halted CPU can sleep right up to
-    /// one and observe nothing.
-    ///
-    /// Never zero: `update` services one transition per call, so a large window can leave
-    /// `current_ticks` already past the *next* mode's threshold. Returning 0 there would stall the
-    /// run loop; returning 1 lets the PPU walk out over the following steps.
+    /// How many video M-cycles until the PPU's next mode transition, or `None` while the LCD is
+    /// off.
     pub fn next_event(&self) -> Option<u64> {
         if !self.lcd_control.is_enabled() {
             return None;
@@ -533,21 +498,12 @@ impl PPU {
                 let drawing_ticks = INITIAL_FIFO_LOAD_TICKS + LCD_WIDTH;
 
                 if self.current_ticks >= drawing_ticks {
-                    // Flush whatever is still outstanding before leaving mode 3. Previously this
-                    // branch drew nothing at all — masked only by the x-advance bug below, which
-                    // had already emitted every pixel far too early.
+                    // Flush whatever is still outstanding before leaving mode 3.
                     self.draw_pixels_to(LCD_WIDTH);
                     self.lcd_status.set_mode(LcdMode::HBlank); // drawing done
                     self.hblank_started = true; // paces HDMA — see MMU::update
                     self.current_ticks -= drawing_ticks;
                 } else {
-                    // `current_ticks` is an *absolute* offset into mode 3 and is not reset within
-                    // it, so the old `start_x + current_ticks - INITIAL_FIFO_LOAD_TICKS + 1` added
-                    // the offset afresh every call and advanced x quadratically: 1, 6, 15, 28, 45,
-                    // ... all 160 pixels were emitted ~36 T into mode 3 instead of over 160 T.
-                    // Nothing looked broken because an `x < LCD_WIDTH` guard swallowed the
-                    // overshoot — but every register write landing more than ~36 cycles into
-                    // mode 3 was a no-op for that scanline.
                     let target_x = self.current_ticks
                         .saturating_sub(INITIAL_FIFO_LOAD_TICKS)
                         .min(LCD_WIDTH);
@@ -555,10 +511,11 @@ impl PPU {
                 }
             }
             LcdMode::HBlank => {
-                // TODO vary the length of the HBlank period based on the length of the Drawing phase
+                // TODO vary the length of the HBlank period based on the length of the Drawing
+                // phase
                 let hblank_ticks = SCANLINE_TICKS - OAM_TICKS - INITIAL_FIFO_LOAD_TICKS - LCD_WIDTH;
                 if self.current_ticks >= hblank_ticks {
-                    // hblank finished, go to next scanline
+                    // Hblank finished, go to next scanline
                     self.current_ticks -= hblank_ticks;
                     self.current_x = 0; // reset X for the next scanline
                     let next_ly = self.lcd_status.increment_ly();
@@ -600,8 +557,7 @@ impl PPU {
         TileMap(&self.vram[address..address + TILE_MAP_BYTES])
     }
 
-    /// LCDC's window-enable bit — which is a *different* bit on CGB. Split out of [`PPU::in_window`]
-    /// so the pixel loop can settle it once instead of once per pixel.
+    /// LCDC's window-enable bit — which is a *different* bit on CGB.
     fn window_enabled(&self) -> bool {
         if self.color_mode.cgb_features() {
             self.lcd_control.window_display_enabled()
@@ -610,10 +566,8 @@ impl PPU {
         }
     }
 
-    /// Fetch the two bitplane bytes of the tile row covering map-space row `map_y`, for the tile at
-    /// tile-map index `entry` — the per-*tile* half of what [`PPU::map_pixel`] does per pixel.
-    ///
-    /// Same reads, same order, same masking as `map_pixel`; only the granularity differs.
+    /// Fetch the two bitplane bytes of the tile row covering map-space row `map_y`, for the tile
+    /// at tile-map index `entry` — the per-*tile* half of what [`PPU::map_pixel`] does per pixel.
     #[inline]
     fn fetch_tile_row(&self, data_mode: TileDataMode, entry: usize, map_y: usize) -> TileRow {
         let index = self.vram[entry];
@@ -643,12 +597,6 @@ impl PPU {
     }
 
     /// One pixel of a background or window tile map, in 256x256 map space.
-    ///
-    /// On CGB the tile map at `0x9800`/`0x9C00` is shadowed at the same offset in **VRAM bank 1**
-    /// by a byte of per-tile attributes (gambatte `video/ppu.cpp:617`): palette, tile bank, X and
-    /// Y flip, and BG-over-OBJ priority. On DMG, and in CGB compatibility mode, no such byte
-    /// exists and the attributes are all-zero — which happens to be exactly "palette 0, bank 0,
-    /// no flips, no priority", so the two paths converge without a branch per pixel.
     fn map_pixel(&self, map: TileMapMode, data_mode: TileDataMode, x: usize, y: usize) -> (u8, TileAttributes) {
         let entry = map.base_address() as usize - VRAM_BASE_ADDRESS
             + (y / TILE_PIXELS % TILE_MAP_SIZE) * TILE_MAP_SIZE
@@ -687,40 +635,17 @@ impl PPU {
         indexes
     }
 
-    /// Where each of `tile_indexes` appears **on the 20x18 screen**, in screen tile coordinates.
-    ///
-    /// Used by the Pokémon layer to read the game's own text out of the tile map — see
-    /// `poke-agent`'s `PokemonApiTrait::on_screen_text`.
-    ///
-    /// ⚠️ **Only what is actually displayed, and this used to scan all 32x32 of both maps at raw
-    /// map coordinates.** A tile map is 256x256 pixels and the screen shows 160x144 of it, so most
-    /// of both maps is off-screen at any moment — and Pokémon Red leaves things there. During a
-    /// battle a stale copy of the enemy's HUD sits below the visible rows of the window map, so
-    /// every read of the message box came back as
-    /// `"GEODUDE BRN Ember 23 22/ 63 Enemy GEODUDE's hurt by the burn! GEODUDE 10"`: the message,
-    /// with an invisible `GEODUDE 10` welded onto the end of it. Sorted by position that lands
-    /// *after* the message, so every frame of a page ended with the same nine characters, no frame
-    /// was a prefix of the next, and `poke-agent`'s `PokemonTextReader` broke the page up
-    /// into one fragment per frame — 1456 bytes of `GEODUDE 10 Ene GEODUDE 10 Enem …` in a single
-    /// text box, on the deployed run of 2026-08-27.
-    ///
-    /// ⚠️ **The window is asked about per screen tile, not once for the frame.** The old version
-    /// took "the window is enabled" to mean "the window is everything", so anything in the window
-    /// map won over the background wherever it was. WX and WY decide that, and Pokémon Red parks
-    /// the window at WY=144 — entirely off-screen — for the whole of the overworld while its map
-    /// still holds the last screen drawn through it.
+    /// Where each of `tile_indexes` appears on the 20x18 screen, in screen tile coordinates.
     pub fn tile_coordinates(&self, tile_indexes: &[u8]) -> Vec<(usize, Point8)> {
         let bg_tile_map = self.tile_map(self.lcd_control.background_tile_map());
         let window_tile_map = self.tile_map(self.lcd_control.window_tile_map());
 
-        // map of tile indexes to their position in the tile_indexes array
+        // Map of tile indexes to their position in the tile_indexes array
         let tile_lookups: HashMap<u8, usize> = tile_indexes.iter().enumerate()
             .map(|(i, &index)| (index, i))
             .collect();
 
-        // ⚠️ **[`Self::window_enabled`], not `LcdControl`'s.** The window-enable bit is gated by
-        // LCDC bit 0 on DMG and means something else entirely on CGB, and this has to agree with
-        // the pixel loop about which surface is on screen.
+        // [`Self::window_enabled`], not `LcdControl`'s.
         let window_enabled = self.window_enabled();
         let (wx, wy) = (self.window_position.x as usize, self.window_position.y as usize);
 
@@ -728,10 +653,7 @@ impl PPU {
         for y in 0..LCD_HEIGHT / TILE_PIXELS {
             for x in 0..LCD_WIDTH / TILE_PIXELS {
                 let (px, py) = (x * TILE_PIXELS, y * TILE_PIXELS);
-                // The same test the pixel loop makes — see [`Self::in_window`]. `window_state` is
-                // per-scanline and only meaningful mid-frame, so the static half of it is used
-                // here: the window covers this tile if it starts at or above this row and at or
-                // left of this column.
+                // The same test the pixel loop makes — see [`Self::in_window`].
                 let index = match window_enabled && py >= wy && px + 7 >= wx {
                     true => {
                         let (wtx, wty) = ((px + 7 - wx) / TILE_PIXELS, (py - wy) / TILE_PIXELS);
@@ -754,13 +676,8 @@ impl PPU {
         coordinates
     }
 
-
     /// Emit pixels for the current scanline up to (but excluding) `target_x`, then leave
-    /// `current_x` there. A no-op if the pixel clock has not moved.
-    ///
-    /// **Deliberately not inlined.** `PPU::update` is inlined into `MMU::update`, which the CPU
-    /// calls once per instruction; letting the whole pixel path in there grew that function by
-    /// 60% and cost several percent of core throughput to instruction-cache pressure alone.
+    /// `current_x` there.
     #[inline(never)]
     fn draw_pixels_to(&mut self, target_x: usize) {
         let y = self.lcd_status.ly() as usize;
@@ -778,15 +695,7 @@ impl PPU {
         let bg_drawn = cgb || self.lcd_control.background_enabled();
         let bg_has_priority = self.lcd_control.background_enabled();
 
-        // ⭐ **Everything from here to the loop is hoisted out of it, and that is the whole point.**
-        // Measured by `perf`, this loop was 36% of the emulator, and its cost was a chain of
-        // dependent loads *per pixel*: tile-map entry → tile row → palette → colour. Eight
-        // consecutive pixels share all of it.
-        //
-        // Nothing here can change while the loop runs: the CPU is between memory accesses for the
-        // whole of one `draw_pixels_to`, so VRAM, LCDC, SCX/SCY and WX are fixed. The cached fetch
-        // is therefore **exactly** what refetching would have produced — which is why dmg-acid2 and
-        // cgb-acid2 still match their reference images byte for byte.
+        // Everything from here to the loop is hoisted out of it, and that is the whole point.
         let bg_map = self.lcd_control.background_tile_map();
         let window_map = self.lcd_control.window_tile_map();
         let data_mode = self.lcd_control.tile_data_mode();
@@ -798,7 +707,7 @@ impl PPU {
             usize::MAX
         };
 
-        // What a background-disabled pixel resolves to. Also a loop constant.
+        // What a background-disabled pixel resolves to.
         let blank_color = self.background_color(0, TileAttributes::NONE);
         let mut bg_row = TileRow::EMPTY;
         let mut window_row = TileRow::EMPTY;
@@ -808,8 +717,6 @@ impl PPU {
             if pixel_in_window && !row_in_window {
                 row_in_window = true;
                 self.window_state.update_if_active(y);
-                // ⚠️ That call can move `window_y`, so anything fetched against the old one is
-                // stale. It happens at most once per call, on the first window pixel.
                 window_row = TileRow::EMPTY;
             }
 
@@ -818,7 +725,7 @@ impl PPU {
                 (0, TileAttributes::NONE)
             } else {
                 let (map, map_x, map_y, cached) = if pixel_in_window {
-                    // x+7 because the window starts at WX-7.
+                    // X+7 because the window starts at WX-7.
                     (window_map, x + 7 - self.window_position.x as usize,
                      self.window_state.window_y, &mut window_row)
                 } else {
@@ -837,7 +744,7 @@ impl PPU {
             let color = self.top_sprite(x, y)
                 .map_or(bg_color, |(sprite, sprite_color)| {
                     // The background wins when it is opaque *and* either the sprite yields to it
-                    // or (CGB only) the tile claims priority. LCDC bit 0 overrides both on CGB.
+                    // or (CGB only) the tile claims priority.
                     let bg_wins = bg_color_index != 0
                         && (sprite.bg_priority || bg_attributes.priority())
                         && (!cgb || bg_has_priority);
@@ -855,18 +762,14 @@ impl PPU {
     }
 
     /// The highest-priority non-transparent sprite covering `x`, if any.
-    ///
-    /// DMG breaks ties by X coordinate, then by OAM index. CGB uses OAM index alone — the order
-    /// `scanline_sprites` is already in — unless `OPRI` bit 0 asks for the DMG rule, which is
-    /// what the boot ROM does in compatibility mode (gambatte `video/ppu.cpp:853-884`).
     fn top_sprite(&self, x: usize, y: usize) -> Option<(&Sprite, u8)> {
-        // No sprite is over this column: the overwhelmingly common case on most scanlines, and the
-        // scan below would have to walk every selected sprite to discover it.
+        // No sprite is over this column: the overwhelmingly common case on most scanlines, and
+        // the scan below would have to walk every selected sprite to discover it.
         if self.scanline_sprite_columns[x / 64] & (1 << (x % 64)) == 0 {
             return None;
         }
         // Whichever order applies, the winner is the *first* candidate in it — so this is a scan
-        // that stops early, not a sort. C5: it used to build and sort a `Vec` per pixel.
+        // that stops early, not a sort.
         let oam_order = self.color_mode.cgb_features() && self.object_priority & 0x01 == 0;
         for i in 0..self.scanline_sprite_count {
             let index = if oam_order { i } else { self.scanline_sprite_order[i] as usize };
@@ -926,15 +829,6 @@ impl PPU {
     }
 
     /// The mode 2 → mode 3 OAM scan: pick the sprites covering this scanline.
-    ///
-    /// ⚠️ **The semantics here are already correct and easy to break** — see
-    /// `docs/compatibility/03-ppu.md`, "Sprites — what is already correct". The ten-per-line limit
-    /// is taken **in OAM order after a Y-only filter** (an eleventh sprite is dropped even if it
-    /// would have won on X), and DMG's X tie-break must be **stable**, so equal X keeps OAM order.
-    ///
-    /// C5 rewrote it to fill fixed arrays instead of collecting two `Vec`s per scanline — one of
-    /// 40 sprites and one of up to 10 — and to derive the X order once here rather than
-    /// re-deriving it for every one of the 160 pixels.
     fn scan_oam(&mut self) {
         self.scanline_sprite_count = 0;
         self.scanline_sprite_columns = [0; LCD_WIDTH.div_ceil(64)];
@@ -966,8 +860,8 @@ impl PPU {
             }
         }
 
-        // Insertion sort — stable, and the right choice at n <= 10 (gambatte's `sprite_mapper.cpp`
-        // uses one too). Only the *indices* move, so `scanline_sprites` keeps OAM order for CGB.
+        // Insertion sort — stable, and the right choice at n <= 10 (gambatte's
+        // `sprite_mapper.cpp` uses one too).
         for i in 0..self.scanline_sprite_count {
             let mut j = i;
             let x = self.scanline_sprites[i].x;
@@ -979,7 +873,6 @@ impl PPU {
         }
     }
 }
-
 
 const VRAM_BASE_ADDRESS: usize = 0x8000;
 pub const VRAM_BANK_SIZE: usize = 0x2000;
@@ -1052,10 +945,6 @@ impl<'a> Tile<'a> {
 }
 
 /// Where a tile-map lookup lands in VRAM, for map-space pixel `(x, y)`.
-///
-/// Split out of [`PPU::map_pixel`] so the pixel loop can ask "same tile as last pixel?" without
-/// touching memory — the comparison is pure arithmetic, and it is what turns a per-pixel fetch
-/// into a per-tile one.
 #[inline]
 fn tile_map_entry(map: TileMapMode, x: usize, y: usize) -> usize {
     map.base_address() as usize - VRAM_BASE_ADDRESS
@@ -1065,23 +954,14 @@ fn tile_map_entry(map: TileMapMode, x: usize, y: usize) -> usize {
 
 /// One background or window tile row, fetched once and shifted out over the (up to eight) pixels
 /// that share it.
-///
-/// This is the shape gambatte's PPU has always had — fetch a row, shift it out — and the reason
-/// its renderer is so much cheaper than a per-pixel `map_pixel`.
 #[derive(Debug, Clone, Copy)]
 struct TileRow {
-    /// The tile-map index this was fetched from; the cache key. [`usize::MAX`] means empty, which
-    /// no real entry can be.
+    /// The tile-map index this was fetched from; the cache key.
     entry: usize,
     lo: u8,
     hi: u8,
     attributes: TileAttributes,
-    /// The four colours this tile's two-bit indices resolve to, resolved **once per tile**.
-    ///
-    /// ⭐ `perf` put **33% of the whole pixel loop** in the dependent chain this replaces: a byte
-    /// load from the `BGP` mapping followed by the shade→RGB multiply, per pixel, for a value with
-    /// four possible answers. On DMG and in compatibility mode it does not even depend on the tile;
-    /// on CGB it depends only on the tile's palette bits, which arrive with the fetch.
+    /// The four colours this tile's two-bit indices resolve to, resolved once per tile.
     colors: [LcdColor; 4],
 }
 
@@ -1094,8 +974,8 @@ impl TileRow {
         colors: [LcdColor::WHITE; 4],
     };
 
-    /// The 2-bit colour index at `pixel_x` (0..8) across the row, honouring the CGB X flip — which
-    /// is a choice of bit, exactly as flipping the coordinate before indexing was.
+    /// The 2-bit colour index at `pixel_x` (0..8) across the row, honouring the CGB X flip —
+    /// which is a choice of bit, exactly as flipping the coordinate before indexing was.
     #[inline]
     fn pixel(&self, pixel_x: usize) -> u8 {
         let bit = if self.attributes.flip_x() { pixel_x } else { TILE_PIXELS - 1 - pixel_x };
@@ -1104,9 +984,6 @@ impl TileRow {
 }
 
 /// A background or window tile's CGB attribute byte, from VRAM bank 1.
-///
-/// [`TileAttributes::NONE`] is what DMG and CGB compatibility mode use — no attribute byte exists
-/// there, and all-zero is the right answer for every field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct TileAttributes(u8);
 
@@ -1134,18 +1011,14 @@ impl TileAttributes {
 struct Sprite {
     y: isize,
     x: isize,
-    /// Height in pixels, **captured during the OAM scan that selected this sprite**. LCDC bit 2
-    /// is re-readable by the guest mid-scanline, so re-deriving the height at draw time can
-    /// disagree with the height the sprite was selected under — an 8x16 sprite selected on rows
-    /// 8..15 and then drawn as 8x8 indexes past its 16-byte tile. See A6.
+    /// Height in pixels, captured during the OAM scan that selected this sprite.
     height: usize,
     tile_index: u8,
     bg_priority: bool, // bit 7 - 0 = No, 1 = BG and Window color indices 1–3 are drawn over this OBJ
     flip_y: bool, // bit 6 - 0 = Normal, 1 = Entire OBJ is vertically mirrored
     flip_x: bool, // bit 5 - 0 = Normal, 1 = Entire OBJ is horizontally mirrored
     alt_palette: bool, // bit 4 (DMG only) - 0 = Use OBJ palette 0, 1 = Use OBJ palette 1
-    /// Bit 3 (CGB only): which VRAM bank holds the sprite's tile. A `u8` rather than a `usize`
-    /// because `scanline_sprites` is walked once per pixel — the record's size is hot.
+    /// Bit 3 (CGB only): which VRAM bank holds the sprite's tile.
     vram_bank: u8,
     /// Bits 0-2 (CGB only): which of the eight CGB object palettes.
     cgb_palette: u8,
@@ -1177,18 +1050,12 @@ impl Sprite {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use DMGColor::*;
     use super::*;
     use crate::lcd_control::ObjectSizeMode;
 
-    /// A11: `current_ticks` is an absolute offset into mode 3, but the old x-advance re-added it
-    /// on every call, so `current_x` went 1, 6, 15, 28, 45, 66, 91, 120, 153, 190 — every pixel
-    /// emitted ~36 T in, instead of spread across 160. The frame looked fine (an `x < LCD_WIDTH`
-    /// guard swallowed the overshoot) but any register write past ~36 T into mode 3 was ignored
-    /// for that scanline.
     #[test]
     fn pixel_clock_advances_linearly_through_mode_3() {
         let mut ppu = PPU::default();
@@ -1208,8 +1075,7 @@ mod tests {
         assert_eq!(observed, expected);
     }
 
-    /// Leaving mode 3 must flush the rest of the scanline. That branch used to draw nothing at
-    /// all — harmless only because the quadratic advance had already over-drawn everything.
+    /// Leaving mode 3 must flush the rest of the scanline.
     #[test]
     fn leaving_mode_3_flushes_the_rest_of_the_scanline() {
         let mut ppu = PPU::default();
@@ -1220,16 +1086,11 @@ mod tests {
             ppu.update(MachineCycles::ONE);
         }
         assert_eq!(ppu.lcd_status.mode(), LcdMode::HBlank);
-        // current_x is reset at the end of HBlank, not on leaving mode 3, so the whole scanline
+        // Current_x is reset at the end of HBlank, not on leaving mode 3, so the whole scanline
         // must have been emitted by the time the mode changed.
         assert_eq!(ppu.current_x, LCD_WIDTH);
     }
 
-    /// A6: `scanline_sprites` is filtered at OAM-scan time using the *then* object size, but
-    /// `sprite_pixel` used to re-read LCDC at draw time. A guest write between the two flips
-    /// 8x16 -> 8x8, so `sprite_y` reaches 8..15 against a 16-byte tile: index up to 31 on a
-    /// 16-element slice, which is an out-of-bounds panic in release (the only guard was a
-    /// `debug_assert!`). Flipped sprites underflowed `8 - 1 - 15` on a `usize` instead.
     #[test]
     fn lcdc_flip_mid_scanline_does_not_read_past_a_sprite_tile() {
         for flip_y in [false, true] {
@@ -1264,10 +1125,6 @@ mod tests {
         }
     }
 
-    /// Phase B's pixel path, at the level `cgb-acid2` cannot reach: that ROM only ever uses an
-    /// identity `BGP`, so it says nothing about whether compatibility mode really indirects
-    /// through the DMG palette registers. (Verified by mutation: dropping that indirection left
-    /// every other Phase B test green.)
     mod cgb {
         use super::*;
         use crate::lcd_palette::LcdColor;
@@ -1311,9 +1168,8 @@ mod tests {
             (0..8).map(|x| LcdColor::from_rgb555(colors[order[x % 4]])).collect()
         }
 
-        /// ⭐ In compatibility mode the colour index goes through `BGP` **first**, and the shade
-        /// that comes out is what indexes CGB palette 0. Skip that step and a game that inverts
-        /// `BGP` — which Pokémon Red does, on every screen fade — renders inside out.
+        /// In compatibility mode the colour index goes through `BGP` first, and the shade that
+        /// comes out is what indexes CGB palette 0.
         #[test]
         fn compatibility_mode_indirects_the_background_through_bgp() {
             let mut ppu = ppu_with_tile(ColorMode::CgbCompat);
@@ -1349,7 +1205,7 @@ mod tests {
         }
 
         /// A real CGB game does not go through `BGP` at all: the colour index addresses palette
-        /// RAM directly. Setting `BGP` to something perverse must change nothing.
+        /// RAM directly.
         #[test]
         fn cgb_mode_ignores_the_dmg_palette_registers() {
             let mut ppu = ppu_with_tile(ColorMode::Cgb);
@@ -1359,7 +1215,7 @@ mod tests {
             assert_eq!(scanline(&mut ppu), expected(PALETTE, [0, 1, 2, 3]));
         }
 
-        /// B6. The attribute byte in VRAM bank 1 picks the palette, and X-flips the tile.
+        /// B6.
         #[test]
         fn bg_attributes_select_the_palette_and_flip_the_tile() {
             let mut ppu = ppu_with_tile(ColorMode::Cgb);

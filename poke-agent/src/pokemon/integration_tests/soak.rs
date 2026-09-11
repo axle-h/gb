@@ -1,120 +1,21 @@
 //! The stall hunt: random play from two dozen points in the game, watching for the agent to stop
 //! asking the policy anything.
-//!
-//! Behind the `soak-tests` feature, and **gated as a module rather than with `#[ignore]`** — the
-//! ignored list is a backlog of *blocked* tests (see `CLAUDE.md`), and this is neither blocked nor a
-//! backlog item. Without the feature it does not exist.
-//!
-//! # What it is for
-//!
-//! `RandomPolicy` is not how the game gets played; it is how the *agent* gets tested. A random
-//! decider walks into map corners, menus and states a scripted policy never visits, which makes it a
-//! far better explorer of the agent's state machine than `full_playthrough` — which walks one
-//! carefully chosen route and proves that route still works.
-//!
-//! What it watches is [`PokemonAgent::since_last_policy_poll`], the **same** measure W9's watchdog
-//! reads. That is deliberate: this test fails exactly when a deployed `LlmPolicy` would have its
-//! watchdog fire. So a pass means "nothing here would have woken the model", and a failure is a real
-//! bug report rather than a threshold argument.
-//!
-//! ⚠️ **`RandomPolicy` deliberately has no watchdog of its own** (`stuck_timeout()` is `None`). That
-//! is what makes it a detector: a policy that nudged itself out of a jam would hide the jam, which is
-//! the one thing this test exists to see.
-//!
-//! # ⚠️ Breadth beats depth, and that is a measurement rather than a preference
-//!
-//! The first version of this was **one** test: five hours of game time from a fresh save. Watching
-//! the deployed `--policy random` run is what killed that shape — a random walker does not explore,
-//! it *diffuses*. It picks uniformly from the tiles the current map offers, so it spends its time
-//! re-crossing the handful of maps around wherever it started, and the second hour visits almost
-//! exactly what the first one did. Five hours from Pallet Town is five hours of Pallet Town, Route 1,
-//! Viridian and the bedroom it started in; it never sees a bicycle, a Safari step counter, a boulder,
-//! a PC with anything in it, or a full bag.
-//!
-//! So the budget is spent the other way round: **[`SOAK_GAME_TIME`] of game time each, from every
-//! entry in [`STATES`]**. Same fuzzer, same detector, one test per starting point, and libtest runs
-//! them in parallel — the tier costs about the same wall clock as the single five-hour test did
-//! while covering two dozen regions of the game instead of one.
-//!
-//! # Where the starting points come from
-//!
-//! Two places, and the split is a budget rather than a taxonomy. A dozen of them are **hand-cut**:
-//! saves the leg chain already commits, plus one lifted off a deployed pod, kept because a fuzzer
-//! cannot reach what they hold inside forty minutes — a bicycle, a full PC box, every field move
-//! learnt. The other dozen are **checkpoints**, cut off the mainline by
-//! [`playthrough::regen_soak_checkpoints`](super::playthrough::regen_soak_checkpoints): the route
-//! already walks through Mt Moon, an unlit Rock Tunnel, Silph Co, the Safari Zone, the Mansion
-//! switches and the Cinnabar quiz, so a copy taken on the way past costs one run of a test that has
-//! to be run anyway and no fixture-cutting at all. They carry an `expect_map` and the regeneration
-//! fails on a map the route no longer crosses, so neither half can rot quietly.
-//!
-//! # ⚠️ The walker is biased away from what it has just done
-//!
-//! Breadth over depth is also applied *within* a soak, because the diffusion above is not only a
-//! property of long runs: a uniform walker's distance from where it started grows as the square root
-//! of its steps, so the last ten minutes of a forty-minute soak were largely re-crossing the first
-//! ten. [`RandomPolicy::exploring`] keeps the ids of the last two dozen overworld actions it chose
-//! and weights the draw down for each repeat, which is enough to stop the two-action ping-pong the
-//! diffusion is mostly made of (through the door, back through the door) without forbidding
-//! anything — Red has floors whose only exit is the one just used. The battle draw is untouched;
-//! the argument for that is on `exploring` too.
-//!
-//! # ⚠️ The options are forced to the *cartridge's* defaults, not the harness's
-//!
-//! Unlike [`TestFixture`], which applies `FAST_FIXTURE_OPTIONS`, this writes what `InitOptions`
-//! writes: medium text, battle animations **on**, battle style SHIFT. `gb serve` runs on those, and
-//! the soak exists to reproduce the deployment rather than to be cheap — the no-PP jam was a race
-//! with the character-by-character text renderer, and fast text may well not reproduce it.
-//!
-//! It has to be *written*, not merely left alone: every fixture past `start-of-game-state.bin` was
-//! captured mid-leg by `TestFixture`, so its `wOptions` carries fast text and animations off. A soak
-//! seeded from one and left alone would silently fuzz the harness's settings instead of the
-//! deployment's.
-//!
-//! # Two real bugs it would have caught
-//!
-//! Both found by hand, in production, on the deployed instance — which is the argument for the test:
-//!
-//! - **The PC menus** (`PokemonApiTrait::in_pc_menu`). Every Gen 1 PC menu is a closed loop under
-//!   A-only input, and the agent A-mashed one for fifteen minutes eight tiles from a fresh save.
-//! - **Grass with nothing in it** (`MetaTileMap::has_grass_encounters`). Every town and city draws
-//!   real tall grass over `wGrassRate == 0`, so pacing there waits for an encounter that cannot
-//!   happen. It paced Pallet Town for eleven minutes.
-//!
-//! Both are reachable within minutes of a fresh save under random play, and neither was reachable by
-//! any scripted test — the scripted policy never chooses to walk into them.
 
 use super::*;
 use crate::pokemon::options::{BattleStyle, GameOptions, TextSpeed};
 use crate::pokemon::policy::RandomPolicy;
 use super::playthrough::SOAK_CHECKPOINTS;
 
-/// How much **game time** one soak covers, per starting state.
-///
-/// Random play measures at ~62× realtime, so this is about 39 s of wall clock each (2026-09-02,
-/// 16 threads); libtest runs them together and the tier as a whole lands at about 5.5 min, which is
-/// memory bandwidth rather than cores — 26 emulators and 26 world graphs do not fit in a cache
-/// between them. Sized by what a random walker actually adds per minute rather than by what the
-/// machine can afford: the deployed run makes it plain that the *n*th minute from one starting point
-/// is worth far less than the first minute from a new one, so the budget buys starting points.
-///
-/// Override with `GB_SOAK_MINUTES` to go deeper from a state that looks interesting.
+/// How much game time one soak covers, per starting state.
 const SOAK_GAME_TIME: Duration = Duration::from_secs(40 * 60);
 
-/// How often to print, in game time. libtest shows nothing until a test finishes, so a multi-minute
-/// run that says nothing is indistinguishable from a hung one.
+/// How often to print, in game time.
 const PROGRESS_EVERY: Duration = Duration::from_secs(10 * 60);
 
 /// Events kept for the failure report — enough to see what the agent was doing on the way in.
 const EVENT_TAIL: usize = 12;
 
 /// The seed the fuzzer plays by default.
-///
-/// ⚠️ **Fixed, not drawn.** A soak that reseeds itself every run is a lottery: a failure vanishes the
-/// moment you go back to look at it, a "pass" proves only that *this* draw was clean, and CI flakes.
-/// Pinning it makes a green run mean "this sequence is still clean" — which is what a regression test
-/// has to mean. To hunt for *new* jams, vary it:
-///
 /// ```shell
 /// for seed in $(seq 1 20); do
 ///   GB_SOAK_SEED=$seed cargo test --release --features slow-tests --lib -- soak --nocapture
@@ -122,8 +23,8 @@ const EVENT_TAIL: usize = 12;
 /// ```
 const DEFAULT_SEED: u64 = 1;
 
-/// The options `gb serve` plays on: pokered's own `InitOptions` byte, `TEXT_DELAY_MEDIUM` — which is
-/// battle animations **on** and battle style SHIFT, neither of which any other tier ever sees.
+/// The options `gb serve` plays on: pokered's own `InitOptions` byte, `TEXT_DELAY_MEDIUM` — which
+/// is battle animations on and battle style SHIFT, neither of which any other tier ever sees.
 const DEPLOYMENT_OPTIONS: GameOptions = GameOptions {
     battle_animations_on: true,
     battle_style: BattleStyle::Shift,
@@ -136,25 +37,12 @@ struct SoakState {
     name: &'static str,
     state: &'static [u8],
     /// What this state puts within reach that the others do not — the reason it is in the list.
-    /// Printed on every run, so the log says what was actually covered.
     covers: &'static str,
     /// Where the capture is supposed to have been taken, asserted on the way in.
-    ///
-    /// ⚠️ **Only the checkpoints carry one, and that is what makes them safe to regenerate.** A
-    /// hand-cut fixture is where somebody put it; a checkpoint is wherever the route happened to be
-    /// when [`regen_soak_checkpoints`](super::playthrough::regen_soak_checkpoints) last ran, and a
-    /// route that stops crossing that map would otherwise leave a stale `.bin` fuzzing somewhere
-    /// nobody chose. The regen fails on a checkpoint it could not reach; this fails on one whose
-    /// bytes were never replaced.
     expect_map: Option<Map>,
 }
 
-/// Where the fuzzer starts, chosen for **what is reachable from each**, not for progression.
-///
-/// The rule for adding one: it must put a *mechanism* within a random walker's reach that nothing
-/// else here does — a bicycle, a step-limited zone, a boulder, a PC with something in it. A state
-/// that merely has more badges than its neighbour buys nothing, because the fuzzer does not care
-/// about badges; it cares about which screens it can end up in front of.
+/// Where the fuzzer starts, chosen for what is reachable from each, not for progression.
 const STATES: &[SoakState] = &[
     SoakState {
         name: "start-of-game",
@@ -242,15 +130,8 @@ const STATES: &[SoakState] = &[
         expect_map: None,
     },
 
-    // ── Checkpoints cut off the mainline by `playthrough::regen_soak_checkpoints` ────────────────
-    //
-    // ⚠️ **Everything above is hand-cut and everything below is not, and the difference is which
-    // half of the map each half buys.** The states above exist because a fuzzer cannot get to them
-    // on its own inside forty minutes — a bicycle, a full PC box, a ledge pocket a deployed run
-    // really got stuck in — and each one cost somebody a fixture. The states below are the route
-    // itself: `full_playthrough` already walks past every one of them, so taking a copy on the way
-    // through costs one run of a test that has to be run anyway and no hand-cutting at all. See
-    // `SOAK_CHECKPOINTS`, which is where the list of them lives and what regenerates them.
+    // ── Checkpoints cut off the mainline by `playthrough::regen_soak_checkpoints`
+    // ────────────────
     SoakState {
         name: "soak-mt-moon",
         state: include_bytes!("../data/soak-mt-moon.bin"),
@@ -335,26 +216,16 @@ fn state(name: &str) -> &'static SoakState {
     STATES.iter().find(|s| s.name == name).expect("every soak test names a state in STATES")
 }
 
-/// Read a `u64` out of the environment, falling back to `default` when it is unset or unparseable.
+/// Read a `u64` out of the environment, falling back to `default` when it is unset or
+/// unparseable.
 fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
 }
 
-/// Turn `state` loose under `RandomPolicy` and fail if the agent ever goes quiet for longer than the
-/// deployed watchdog would allow.
+/// Turn `state` loose under `RandomPolicy` and fail if the agent ever goes quiet for longer than
+/// the deployed watchdog would allow.
 fn soak(state: &SoakState) {
-    // `GB_SOAK_LIMIT_SECS` tightens the net below the watchdog's 300 s. The default is the watchdog,
-    // because that is the number that actually matters in production — but a *near* miss is a jam in
-    // embryo, and the only way to get one to drop its artifact is to lower the bar until it trips.
-    // `GB_SOAK_LIMIT_SECS=150` trips on anything twice as quiet as ordinary play and is the useful
-    // setting for hunting; it found the pacing budget that way (182 s of silence in Viridian Forest
-    // that turned out to be `PACING_BUDGET_TICKS` running to the end, not a jam at all).
-    //
-    // ⚠️ **Do not go below about 150.** A sweep at 100 kept flagging one shape that turned out to be
-    // the game playing properly: a **paralysed Pokémon caught in a wrap chain** gets no menu for
-    // several turns (Gen 1 skips your input while WRAP/BIND is running), and on Route 15's line of
-    // trainers that is measured at **124 s** of legitimate silence. Seed 1's 62 s is the *quiet* end
-    // of the distribution, not the top of it.
+    // `GB_SOAK_LIMIT_SECS` tightens the net below the watchdog's 300 s.
     let limit = Duration::from_secs(env_u64("GB_SOAK_LIMIT_SECS",
                                             crate::llm::config::DEFAULT_STUCK_TIMEOUT_SECS));
     let seed = env_u64("GB_SOAK_SEED", DEFAULT_SEED);
@@ -366,20 +237,12 @@ fn soak(state: &SoakState) {
 
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
     gb.load_state(state.state).expect("a committed soak fixture loads");
-    // Nobody listens to a jam hunt, so the APU does not mix or resample: ~10% off a tier that runs
-    // for as long as you leave it. Bit-identical either way — see `TestFixture::with_policy`, which
-    // does the same for every other tier, and the test named there.
+    // Nobody listens to a jam hunt, so the APU does not mix or resample: ~10% off a tier that
+    // runs for as long as you leave it.
     gb.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
     let mut cache = MapMetadataCache::default();
-    // ⚠️ The *deployment's* options, not `FAST_FIXTURE_OPTIONS` — see the module docs. Written once:
-    // nothing a random walker can do reloads them short of a soft reset, and a soak that re-applied
-    // them every tick would be papering over exactly the kind of state change it exists to notice.
+    // The *deployment's* options, not `FAST_FIXTURE_OPTIONS` — see the module docs.
     PokemonApi::with_cache(&mut gb, &mut cache).debug_set_options(&DEPLOYMENT_OPTIONS);
-    // ⚠️ **A checkpoint says where it was cut, and it is checked here rather than at the capture.**
-    // The capture cannot be wrong about the map — it is what selects the moment — but the *file* can
-    // be: a route that stops crossing PokemonTower5F leaves last year's bytes on disk, and a soak
-    // that then fuzzes somewhere nobody chose still passes and still says it covered the tower. This
-    // is the seam where the two halves have to agree, so it is where the disagreement is reported.
     if let Some(want) = state.expect_map {
         let on = PokemonApi::with_cache(&mut gb, &mut cache).game_state().map(|s| s.map.map);
         assert_eq!(on.ok(), Some(want),
@@ -388,13 +251,8 @@ fn soak(state: &SoakState) {
                     pokemon::integration_tests::playthrough::regen_soak_checkpoints --exact`",
                    state.name);
     }
-    // ⚠️ **`exploring`, not `seeded`** — the recency-weighted draw, whose argument is on
-    // `RandomPolicy::exploring`. The short version is that this tier's own module docs record five
-    // hours from Pallet Town spent almost entirely in Pallet Town: a uniform walker's distance from
-    // where it started grows as the square root of its steps, so the second half of every soak was
-    // re-crossing the first half. Weighting the draw away from the last two dozen actions taken
-    // costs nothing, forbids nothing, stays exactly as seeded, and spends the same forty minutes
-    // further out.
+    // `exploring`, not `seeded` — the recency-weighted draw, whose argument is on
+    // `RandomPolicy::exploring`.
     let mut agent = PokemonAgent::new(Box::new(RandomPolicy::exploring(seed)));
 
     let target = MachineCycles::from_duration(game_time);
@@ -409,13 +267,11 @@ fn soak(state: &SoakState) {
         emulated += ran;
 
         let mut api = PokemonApi::with_cache(&mut gb, &mut cache);
-        // A failure here is not what is being tested — `update` reports transient read errors during
-        // map transitions — but a wedged agent shows up as silence either way.
+        // A failure here is not what is being tested — `update` reports transient read errors
+        // during map transitions — but a wedged agent shows up as silence either way.
         agent.update(&mut api, ran).ok();
 
-        // ⚠️ Drained every tick, not left to accumulate. Nothing here reads them for their own sake;
-        // the buffer is unbounded and a long run would otherwise grow one event per decision for the
-        // whole test.
+        // Drained every tick, not left to accumulate.
         for event in agent.drain_events() {
             tail.push_back(format!("{event:?}"));
             if tail.len() > EVENT_TAIL { tail.pop_front(); }
@@ -427,21 +283,14 @@ fn soak(state: &SoakState) {
             worst_state = agent.state_debug();
         }
         if gap >= limit {
-            // ⚠️ **The screen is half the bug report.** Most of what `soak` finds is a menu or a
-            // message the agent cannot leave, and the state name alone ("battle:wait") says which
-            // driver was waiting but not what it was waiting *on*, which is the question every case
-            // starts with. ⚠️ The artifact cannot always answer it either: a jam that lives in the
-            // agent's own state does not reproduce from the save file, and then these lines are the
-            // only evidence there is.
+            // The screen is half the bug report.
             let (screen, menu, buttons) = {
                 let api = PokemonApi::with_cache(&mut gb, &mut cache);
                 (api.on_screen_text(false).map(|t| t.replace('\n', " ")), api.menu_state(),
                  format!("{:?}", api.read_joypad_state()))
             };
             let where_it_is = PokemonApi::with_cache(&mut gb, &mut cache).game_state().ok();
-            // ⚠️ Named per state *and* per seed. The artifact is the whole value of a failure — it is
-            // what gets promoted into `stalls` — and a hunt that runs every state under every seed
-            // would otherwise have each failure overwrite the last one it found.
+            // Named per state *and* per seed.
             let dir = std::path::Path::new("target/test-artifacts");
             std::fs::create_dir_all(dir).ok();
             let stem = dir.join(format!("soak-{}-seed{seed}", state.name));
@@ -487,8 +336,6 @@ fn soak(state: &SoakState) {
         }
     }
 
-    // The *emulated* total, not the constant it was asked for: a summary that prints its own target
-    // back cannot tell you the loop exited early, which is exactly the failure it should surface.
     let ended = PokemonApi::with_cache(&mut gb, &mut cache).game_state().ok().map_or_else(
         || "unreadable".to_string(),
         |s| format!("{} at {}", s.map.map, s.map.player_position));
@@ -505,28 +352,13 @@ fn random_play_from_a_fresh_save_never_goes_quiet() {
     soak(state("start-of-game"));
 }
 
-/// Viridian Forest: trainers, and the 8/256 grass that showed the pacing budget was three times too
-/// generous.
+/// Viridian Forest: trainers, and the 8/256 grass that showed the pacing budget was three times
+/// too generous.
 #[test]
 fn random_play_in_viridian_forest_never_goes_quiet() {
     soak(state("viridian-forest"));
 }
 
-/// Route 3's north-east pocket — **the deployed run's own save**, lifted off the pod, and the only
-/// fixture here that did not come out of the leg chain.
-///
-/// The player is stood where a one-way ledge dropped them out of Route 4, against a map border whose
-/// strip was misread twice over: the row came from the middle of Route 4, and cells were called
-/// walkable if *any* of their four sub-tiles was. The crossing directly overhead was a ledge, it was
-/// also the nearest one, and `actions()` only ever offers the nearest per map — so the only way into
-/// Route 4 on the menu was one that could never be walked. The run picked it for a day.
-///
-/// ⚠️ **This is coverage, not the regression test.** A jam that aborts is not silence: the phantom
-/// cost 60 s of `MAX_MOVEMENT_SILENCE` and then handed control back, which never approaches the
-/// watchdog this tier watches, so a soak here would have passed throughout. What pins the bug is
-/// `map_metadata`'s `test_a_ledge_across_a_border_is_not_a_connection` and its two neighbours. What
-/// this buys is the region — connection strips, one-way ledges and a pocket that has to be routed
-/// out of westwards — under a fuzzer, from a save that a real run really reached.
 #[test]
 fn random_play_in_route_3s_ledge_pocket_never_goes_quiet() {
     soak(state("route3-ledge-pocket"));
@@ -581,8 +413,8 @@ fn random_play_in_victory_road_never_goes_quiet() {
     soak(state("vr1f-strength"));
 }
 
-/// A PC with mons in the box — withdraw, deposit and release, none of which any other state here can
-/// reach.
+/// A PC with mons in the box — withdraw, deposit and release, none of which any other state here
+/// can reach.
 #[test]
 fn random_play_with_a_full_pc_box_never_goes_quiet() {
     soak(state("postgame-pc-box"));
@@ -594,8 +426,8 @@ fn random_play_with_a_bike_and_fly_never_goes_quiet() {
     soak(state("postgame-fly-bike"));
 }
 
-/// The postgame chain head: a full bag, a full party, every field move, and the largest action space
-/// in the suite.
+/// The postgame chain head: a full bag, a full party, every field move, and the largest action
+/// space in the suite.
 #[test]
 fn random_play_in_the_postgame_never_goes_quiet() {
     soak(state("postgame-aides"));
@@ -607,7 +439,7 @@ fn random_play_in_mt_moon_never_goes_quiet() {
     soak(state("soak-mt-moon"));
 }
 
-/// The S.S. Anne: two dozen identical cabin doors, and a ship that sails once the route is done with it.
+/// The S.S.
 #[test]
 fn random_play_on_the_ss_anne_never_goes_quiet() {
     soak(state("soak-ss-anne"));
@@ -619,7 +451,8 @@ fn random_play_in_rock_tunnel_never_goes_quiet() {
     soak(state("soak-rock-tunnel"));
 }
 
-/// Pokémon Tower *with* the Silph Scope, which is the other half of `at-lavender`: the ghosts fight back.
+/// Pokémon Tower *with* the Silph Scope, which is the other half of `at-lavender`: the ghosts
+/// fight back.
 #[test]
 fn random_play_in_pokemon_tower_never_goes_quiet() {
     soak(state("soak-pokemon-tower"));
@@ -631,7 +464,8 @@ fn random_play_at_the_snorlax_never_goes_quiet() {
     soak(state("soak-route12-snorlax"));
 }
 
-/// Inside the Safari Zone with the step counter running, rather than `post-safari`'s view from afterwards.
+/// Inside the Safari Zone with the step counter running, rather than `post-safari`'s view from
+/// afterwards.
 #[test]
 fn random_play_inside_the_safari_zone_never_goes_quiet() {
     soak(state("soak-safari-zone"));
@@ -674,12 +508,6 @@ fn random_play_at_the_victory_road_gates_never_goes_quiet() {
 }
 
 /// Every entry in [`SOAK_CHECKPOINTS`] is a soak state, cut on the map that list names.
-///
-/// The two lists cannot be one: the capture side needs `(name, Map)` in a module that is compiled
-/// whatever features are on, and this side needs an `include_bytes!` per entry, which no const can
-/// generate. So they are joined here instead — adding a checkpoint and forgetting to turn it loose
-/// leaves a `.bin` in the repository that nothing reads, which is exactly the kind of thing that is
-/// only ever noticed a year later.
 #[test]
 fn every_checkpoint_is_a_soak_state() {
     for (name, map) in SOAK_CHECKPOINTS {
@@ -693,10 +521,6 @@ fn every_checkpoint_is_a_soak_state() {
 }
 
 /// Every state in [`STATES`] is named by exactly one test, and every name resolves.
-///
-/// The list and the tests are separate on purpose — a test per state is what makes libtest run them
-/// in parallel and report them individually — so this is the seam where an added state can be
-/// forgotten. It costs nothing and it fails the moment the two drift apart.
 #[test]
 fn every_soak_state_is_named_by_a_test() {
     let source = include_str!("soak.rs");

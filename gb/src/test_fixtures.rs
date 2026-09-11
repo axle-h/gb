@@ -1,7 +1,7 @@
 //! The Pokémon Red cartridge and a couple of its save states, for the emulator tests that need a
-//! real commercial game rather than a test ROM. They live in `poke-agent`, which is the crate that
-//! builds the cartridge; this module is `#[cfg(test)]`, so a published `gb` reaches outside its own
-//! directory for nothing.
+//! real commercial game rather than a test ROM. They live in `poke-agent`, which is the crate
+//! that builds the cartridge; this module is `#[cfg(test)]`, so a published `gb` reaches outside
+//! its own directory for nothing.
 
 pub const POKERED: &[u8] = include_bytes!("../../poke-agent/pokered/pokered.gbc");
 

@@ -38,14 +38,8 @@ impl TileSetId {
     const GYM_CUT_TREE: u8 = 0x50;
     const OVERWORLD_CUT_TREE: u8 = 0x3d;
     
-    /// Raw tile IDs in this tileset that warp the player the moment they **step onto** them —
+    /// Raw tile IDs in this tileset that warp the player the moment they step onto them —
     /// `pokered/data/tilesets/warp_tile_ids.asm`, read by `CheckWarpsNoCollision`.
-    ///
-    /// The distinction matters to anything driving a player who is *already standing* on a warp tile.
-    /// A tile in this list re-fires if you step off and back on; a warp tile that is **not** in it (the
-    /// map-edge kind) only fires when you press the outward direction. Guessing from geometry gets
-    /// Victory Road 3F's (2,0) ladder wrong — it sits on the map border and is a step-on tile, so the
-    /// outward press does nothing at all and the agent pushes into the wall for ever.
     pub fn warp_tile_ids(&self) -> &'static [u8] {
         match self {
             Self::Overworld => &[0x1B, 0x58],
@@ -72,21 +66,9 @@ impl TileSetId {
         }
     }
 
-    /// Tiles that warp the player the moment they **step onto** them by a second mechanism
-    /// entirely — `data/tilesets/warp_pad_hole_tile_ids.asm`, read by
-    /// `IsPlayerStandingOnWarpPadOrHole` (`engine/overworld/player_animations.asm`).
-    ///
-    /// ⚠️ **A hole is not in [`Self::warp_tile_ids`] and the game does not care.** That table is
-    /// `IsPlayerStandingOnDoorTileOrWarpTile`'s; this one is a different four-row table with its own
-    /// reader, and between them they are every way the cartridge opens a warp on the step onto it.
-    /// The overlap is almost total — FACILITY `$20`, CAVERN `$22` and INTERIOR `$55` are in both —
-    /// which is exactly why the one entry that is *not* went unnoticed: **FACILITY `$11`, the floor
-    /// holes on Pokémon Mansion 3F.** Those three are the only way onto 1F's right side and thus to
-    /// the Secret Key, and `MetaTileMap::warp_trigger` called all three `Impossible`.
-    ///
-    /// Nothing was broken by that, because `actions()` used to keep an `Impossible` warp whenever no
-    /// sibling on the map opened onto the same place — and it was those three holes that the guard
-    /// was really protecting. Naming the mechanism is what let the guard go; see `actions()`.
+    /// Tiles that warp the player the moment they step onto them by a second mechanism entirely —
+    /// `data/tilesets/warp_pad_hole_tile_ids.asm`, read by `IsPlayerStandingOnWarpPadOrHole`
+    /// (`engine/overworld/player_animations.asm`).
     pub fn warp_pad_and_hole_tile_ids(&self) -> &'static [u8] {
         match self {
             Self::Facility => &[0x20, 0x11],
@@ -97,21 +79,6 @@ impl TileSetId {
     }
 
     /// The tiles that make `ExtraWarpCheck`'s "function 2" pass, per direction faced.
-    ///
-    /// ⚠️ **Not the same table as [`Self::warp_tile_ids`], and the difference is the whole of W5.**
-    /// That one answers "does standing here warp me" (`IsPlayerStandingOnDoorTileOrWarpTile`,
-    /// `data/tilesets/warp_tile_ids.asm`) and is keyed on the tileset. This one is
-    /// `data/tilesets/warp_carpet_tile_ids.asm`, is keyed on the direction the player faces rather
-    /// than on the tileset at all, and answers the *other* question `home/overworld.asm` asks: when
-    /// standing on a warp entry whose own tile is not a door, the cartridge warps only if the tile
-    /// **in front** is one of these and a direction is being held.
-    ///
-    /// Route 8's east gate doorstep is why this is transcribed. Its two warp entries are raw tiles
-    /// $2C at (9, 9) and $39 at (9, 10); neither is in the overworld's `[$1B, $58]`, so both need
-    /// this check. From (9, 10) the tile west is $4B, which is in the facing-left list, so holding
-    /// Left goes in. From (9, 9) the tile west is $17 and no other direction matches either, so that
-    /// entry cannot be triggered from Route 8 at all, by any approach. A deployed run spent 60 s of
-    /// game time a tile away from a gate it could see, shuffling left and right.
     pub fn warp_carpet_tile_ids(facing: crate::pokemon::map_metadata::PlayerFacingDirection) -> &'static [u8] {
         use crate::pokemon::map_metadata::PlayerFacingDirection as Facing;
         match facing {
@@ -122,12 +89,8 @@ impl TileSetId {
         }
     }
 
-    /// Whether `ExtraWarpCheck` dispatches to `IsWarpTileInFrontOfPlayer` ("function 2") rather than
-    /// `IsPlayerFacingEdgeOfMap` ("function 1") on this tileset.
-    ///
-    /// ⚠️ **Four maps override the tileset and are checked first**, so this is not the whole
-    /// dispatch: see `MetaTileMap::warp_trigger`, which carries them. Transcribed from
-    /// `ExtraWarpCheck` in `home/overworld.asm`.
+    /// Whether `ExtraWarpCheck` dispatches to `IsWarpTileInFrontOfPlayer` ("function 2") rather
+    /// than `IsPlayerFacingEdgeOfMap` ("function 1") on this tileset.
     pub fn warp_check_reads_the_tile_in_front(&self) -> bool {
         matches!(self, Self::Overworld | Self::Ship | Self::ShipPort | Self::Plateau)
     }
@@ -231,47 +194,38 @@ pub struct MapConnection {
     /// The ID of the adjacent map.
     pub map: Map,
 
-    /// Pointer into the **connected map's block data** indicating which row/column of blocks
-    /// forms the shared border (the 3-block-deep strip that is pre-loaded for seamless scrolling).
+    /// Pointer into the connected map's block data indicating which row/column of blocks forms
+    /// the shared border (the 3-block-deep strip that is pre-loaded for seamless scrolling).
     pub strip_src: u16,
 
-    /// Pointer into the **overworld map buffer** (`wOverworldMap`) where the strip will be placed
-    /// so the game can render it when the player approaches the edge.
+    /// Pointer into the overworld map buffer (`wOverworldMap`) where the strip will be placed so
+    /// the game can render it when the player approaches the edge.
     pub strip_dest: u16,
 
     /// Number of blocks in the connection strip:
-    /// - **North / South** connections: strip width (columns of blocks).
-    /// - **East / West** connections: strip height (rows of blocks).
     pub strip_length: u8,
 
-    /// Width of the connected map in blocks.
-    /// Needed to stride through its block data correctly.
+    /// Width of the connected map in blocks. Needed to stride through its block data correctly.
     pub connected_map_width: u8,
 
-    /// Y tile-offset of the connected map relative to the current map.
-    /// Units are tiles (2 tiles = 1 block). Negative means the connected map starts above/further up.
-    /// - North: `connected_height * 2 - 1`
-    /// - South: `0`
-    /// - East / West: `-alignment_offset * 2`
+    /// Y tile-offset of the connected map relative to the current map. Units are tiles (2 tiles =
+    /// 1 block).
     pub y_alignment: i8,
 
-    /// X tile-offset of the connected map relative to the current map.
-    /// Units are tiles (2 tiles = 1 block). Negative means the connected map starts to the left.
-    /// - North / South: `-alignment_offset * 2`
-    /// - East: `0`
-    /// - West: `connected_width * 2 - 1`
+    /// X tile-offset of the connected map relative to the current map. Units are tiles (2 tiles =
+    /// 1 block).
     pub x_alignment: i8,
 
-    /// Pointer into the overworld buffer representing where the game's camera window
-    /// into the connected map begins (used by the renderer when near the border).
+    /// Pointer into the overworld buffer representing where the game's camera window into the
+    /// connected map begins (used by the renderer when near the border).
     pub view_pointer: u16,
 }
 
 /// How far a map's tile-map coordinates sit from its raw warp-table ones: one column if the map
-/// has a western connection strip, one row if it has a northern one (`MapDimensions::{west,north}_extra`).
-/// Read straight out of the ROM, so it can be asked about a map the player is *not* on — which is
-/// what a menu row needs to say where a warp comes out in the coordinates the picture of that map
-/// uses. Caves and buildings have no strips and answer `(0, 0)`.
+/// has a western connection strip, one row if it has a northern one
+/// (`MapDimensions::{west,north}_extra`). Read straight out of the ROM, so it can be asked about
+/// a map the player is *not* on — which is what a menu row needs to say where a warp comes out in
+/// the coordinates the picture of that map uses.
 pub fn strip_offset(map: Map) -> (u8, u8) {
     let Some(pointer) = map.header_pointer() else { return (0, 0) };
     // Byte 9 of the header is the connection flags; see `MACRO map_header`.
@@ -286,7 +240,7 @@ pub trait MapHeaderReader {
 
 impl MapHeaderReader for MMU {
     fn read_map_header(&self, map: Map) -> Result<MapHeader, String> {
-        // see `MACRO map_header`
+        // See `MACRO map_header`
         let pointer = map.header_pointer()
             .ok_or("Map header pointer was null".to_string())?;
 
@@ -465,7 +419,8 @@ mod tests {
         assert_eq!(celadon_city.connections().len(), 4);
         assert_eq!(celadon_city.north_connection.unwrap().direction, MapConnectionDirection::North);
         assert_eq!(celadon_city.north_connection.unwrap().map, Map::Route24);
-        // Route 24 is 10 wide × 18 tall; full-width strip, x-offset -10 (connected map shifted left)
+        // Route 24 is 10 wide × 18 tall; full-width strip, x-offset -10 (connected map shifted
+        // left)
         assert_eq!(celadon_city.north_connection.unwrap().strip_src,          0x477d);
         assert_eq!(celadon_city.north_connection.unwrap().strip_dest,         0xc6f0);
         assert_eq!(celadon_city.north_connection.unwrap().strip_length,       10);

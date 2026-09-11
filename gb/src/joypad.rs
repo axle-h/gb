@@ -1,6 +1,6 @@
 use bincode::{Decode, Encode};
 use crate::activation::Activation;
-/// https://gbdev.io/pandocs/Joypad_Input.html#ff00--p1joyp-joypad
+/// Https://gbdev.io/pandocs/Joypad_Input.html#ff00--p1joyp-joypad
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Decode, Encode, Default)]
 pub struct JoypadRegister {
     state: JoypadButtonState,
@@ -19,18 +19,13 @@ impl JoypadRegister {
         self.raise_on_falling_edge(before);
     }
 
-    /// The four button lines as the guest reads them: **`1` is released**, and a line only goes
-    /// low when its group is selected.
+    /// The four button lines as the guest reads them: `1` is released, and a line only goes low
+    /// when its group is selected.
     fn low_nibble(&self) -> u8 {
         self.get() & 0x0F
     }
 
-    /// **D9.** Hardware raises the joypad interrupt on a **high-to-low edge of a register line**,
-    /// not on a button press.
-    ///
-    /// ⚠️ The difference is real: `gb` used to fire on any press, including one in a group the
-    /// guest has not selected — where the lines do not move at all — and to *miss* the edge
-    /// produced by selecting a group that already has a button held down.
+    /// D9.
     fn raise_on_falling_edge(&mut self, before: u8) {
         let after = self.low_nibble();
         if before & !after != 0 {
@@ -146,7 +141,6 @@ mod tests {
     #[test]
     fn to_byte() {
         let mut joypad = JoypadRegister::default();
-        // A13: bits 6-7 are unused and read as 1 on hardware; the MMU ORs in 0xC0.
         assert_eq!(joypad.get(), 0x3F); // All buttons released (before the 0xC0 mask)
         joypad.set(0x10); // Select buttons
         assert_eq!(joypad.get(), 0x1F); // none pressed
@@ -178,8 +172,7 @@ mod tests {
         assert!(joypad.is_activation_pending()); // still interrupt required until read
     }
 
-    /// **D9.** The interrupt follows the *register lines*, not the buttons. A press in a group the
-    /// guest has not selected moves no line, so it raises nothing.
+    /// D9.
     #[test]
     fn a_press_in_an_unselected_group_raises_nothing() {
         let mut joypad = JoypadRegister::default();
@@ -190,8 +183,6 @@ mod tests {
         assert!(joypad.is_activation_pending(), "...but buttons are");
     }
 
-    /// ...and the converse, which the old press-triggered code could not produce at all:
-    /// selecting a group that already has a button held pulls a line low, and that is an edge.
     #[test]
     fn selecting_a_group_with_a_button_held_raises_the_interrupt() {
         let mut joypad = JoypadRegister::default();

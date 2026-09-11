@@ -9,24 +9,12 @@ pub struct Timer {
     mode: TimerMode,
     value: u8,
     modulo: u8,
-    /// When TIMA next increments. **While the timer runs this is an absolute m-cycle stamp on
-    /// [`crate::mmu::MMU::now`]; while it is stopped it is the cycles the interrupted period still
-    /// owes** — the same quantity measured from a standstill rather than from the clock.
-    /// [`Timer::set_control`] rebases between the two, which is what stops a disabled timer from
-    /// banking the cycles it slept through. (Hardware ties TIMA's phase to DIV and would not
-    /// freeze it at all; freezing is what `gb` has always done, and C1 is a refactor.)
-    ///
-    /// **Signed**, because a TAC write that shortens the period can leave the deadline in the
-    /// past: pre-C1 that showed up as a remainder larger than the new period, and it has to keep
-    /// producing the same burst of catch-up ticks.
+    /// When TIMA next increments.
     next_tick: i64,
     interrupt_pending: bool,
 }
 
-/// The serialised shape of a [`Timer`]. Field-for-field what the `timer` save-state section has
-/// always held — including `cycles`, the *elapsed* part of the current period, which C1 replaced
-/// internally with the deadline it implies. Keeping the old shape is why the absolute clock landed
-/// without regenerating any of the 91 committed fixtures.
+/// The serialised shape of a [`Timer`].
 #[derive(Debug, Clone, Decode, Encode)]
 pub struct TimerSnapshot {
     enabled: bool,
@@ -37,9 +25,6 @@ pub struct TimerSnapshot {
     interrupt_pending: bool,
 }
 
-/// A whole period still owed, measured from a standstill — the deadline form of the `cycles: 0`
-/// this used to derive from `#[derive(Default)]`. Zero would mean the *opposite*: a period that
-/// has fully elapsed.
 impl Default for Timer {
     fn default() -> Self {
         let mode = TimerMode::default();
@@ -98,16 +83,14 @@ impl Timer {
         self.mode as u8 | if self.enabled { 0b0100 } else { 0 }
     }
 
-    /// ⚠️ **Catch the timer up to `now` first.** The deadline is rebased against the state as of
-    /// `now`, so a stale one would be carried into the new period.
+    /// Catch the timer up to `now` first. The deadline is rebased against the state as of `now`,
+    /// so a stale one would be carried into the new period.
     pub fn set_control(&mut self, value: u8, now: u64) {
         let enabled = value & 0b0100 != 0;
         let mode = TimerMode::from_repr(value & 0b11).unwrap_or_default();
 
         // Preserve how far into the period TIMA has already got, then re-express what is left
-        // against the new period and the new origin. Pre-C1 this fell out of keeping the `cycles`
-        // accumulator across the write, including the case where the new period is *shorter* than
-        // what has already elapsed and the next catch-up owes several ticks at once.
+        // against the new period and the new origin.
         let elapsed = self.period() - (self.next_tick - Self::origin(self.enabled, now));
         self.enabled = enabled;
         self.mode = mode;
@@ -203,8 +186,6 @@ mod tests {
         timer
     }
 
-    /// C1: `next_event` has to name the exact cycle the counter moves, or the HALT fast-path C2
-    /// builds on it would skip straight past a TIMA increment.
     #[test]
     fn next_event_names_the_cycle_tima_increments() {
         let mut timer = enabled_timer();
@@ -225,8 +206,6 @@ mod tests {
         assert_eq!(timer.next_event(), DISABLED);
     }
 
-    /// A stopped timer must not bank the cycles it slept through — pre-C1 the `cycles` accumulator
-    /// simply froze, and the deadline's two origins reproduce that.
     #[test]
     fn a_disabled_timer_does_not_bank_the_cycles_it_slept_through() {
         let mut timer = Timer::default(); // disabled
@@ -246,8 +225,7 @@ mod tests {
     }
 
     /// Shortening the period mid-run leaves the deadline behind `now`, and the next catch-up owes
-    /// several ticks at once. Pre-C1 this was a remainder larger than the new period; it is the
-    /// reason the deadline is signed.
+    /// several ticks at once.
     #[test]
     fn shortening_the_period_pays_out_the_ticks_it_skipped() {
         let mut timer = Timer::default();
@@ -261,8 +239,6 @@ mod tests {
         assert_eq!(timer.value(), 50);
     }
 
-    /// A snapshot is the pre-C1 field list exactly, and the deadline comes back from the restored
-    /// clock — this is what lets 91 committed fixtures survive C1 untouched.
     #[test]
     fn a_snapshot_round_trips_against_a_restored_clock() {
         let mut timer = enabled_timer();

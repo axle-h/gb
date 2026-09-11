@@ -1,22 +1,4 @@
-//! **W3** — the SPA, served two ways.
-//!
-//! In a release build `web/dist` is baked into the binary by `rust-embed`, so the container is one
-//! file with no asset directory to mount or get out of step. With `GB_WEB_DEV=1` the same paths are
-//! read from disk instead, which is what makes `pnpm run build && cargo run` a loop rather than a
-//! rebuild — the other dev loop, `pnpm run dev` on :5173 proxying `/api` to :8080, does not come
-//! through here at all.
-//!
-//! ⚠️ **`web/dist` must exist when the crate is compiled**, or the `rust-embed` derive fails. A
-//! `.gitkeep` is committed for that, and a checkout that has never run `pnpm run build` compiles and
-//! serves [`NOT_BUILT`] instead of a 404 that looks like a routing bug.
-//!
-//! The whole module is read-only and always was: it answers GETs from a fixed directory and holds
-//! nothing.
-//!
-//! One thing to know about `rust-embed`: in a **debug** build it reads from disk regardless of
-//! `GB_WEB_DEV`, and only a release build embeds. Everything here is run with `--release`, so that
-//! difference does not normally show — but a `cargo run` without it is reading `web/dist`, not the
-//! copy that was baked in.
+//! The SPA, served two ways.
 
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
@@ -28,8 +10,8 @@ use axum::response::{IntoResponse, Response};
 /// Where the SPA is read from under `GB_WEB_DEV=1`, relative to the process's working directory.
 const DEV_ROOT: &str = "web/dist";
 
-/// Vite emits content-hashed filenames under `assets/`, so those may be cached forever; `index.html`
-/// is the mutable pointer to them and must not be.
+/// Vite emits content-hashed filenames under `assets/`, so those may be cached forever;
+/// `index.html` is the mutable pointer to them and must not be.
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 const REVALIDATE: &str = "no-cache";
 
@@ -37,8 +19,7 @@ const REVALIDATE: &str = "no-cache";
 #[folder = "web/dist"]
 struct Dist;
 
-/// `GET /` — always `index.html`. There is no client-side router (§6), so every other path is either
-/// a real asset or a genuine 404.
+/// `GET /` — always `index.html`.
 pub async fn index() -> Response {
     serve("index.html")
 }
@@ -53,7 +34,8 @@ fn serve(path: &str) -> Response {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
     let Some(body) = read(&path) else {
-        // The one case worth explaining rather than 404ing: the binary was built before the SPA was.
+        // The one case worth explaining rather than 404ing: the binary was built before the SPA
+        // was.
         if path == "index.html" {
             return (
                 StatusCode::OK,
@@ -70,9 +52,6 @@ fn serve(path: &str) -> Response {
 }
 
 /// Read one asset, from the binary or — under `GB_WEB_DEV` — from disk.
-///
-/// `path` must already have come through [`sanitise`]; the disk read then cannot escape [`DEV_ROOT`]
-/// because there is no `..` and no root left in it to escape with.
 fn read(path: &str) -> Option<Cow<'static, [u8]>> {
     if dev_mode() {
         return std::fs::read(Path::new(DEV_ROOT).join(path)).ok().map(Cow::Owned);
@@ -84,13 +63,6 @@ fn dev_mode() -> bool {
     std::env::var_os("GB_WEB_DEV").is_some_and(|value| value != "0" && value != "")
 }
 
-/// A URL path reduced to a relative, `..`-free path, or `None` if it was never going to name an
-/// asset.
-///
-/// This is the whole of the traversal defence, and it is deliberately a whitelist of shapes rather
-/// than a blacklist of tricks: a path is kept only if every component is an ordinary name. Percent
-/// escapes are already decoded by the extractor, so `%2e%2e%2f` arrives here as `../` and is
-/// rejected like any other.
 fn sanitise(path: &str) -> Option<String> {
     let trimmed = path.trim_start_matches('/');
     if trimmed.is_empty() {
@@ -100,8 +72,6 @@ fn sanitise(path: &str) -> Option<String> {
     for component in Path::new(trimmed).components() {
         match component {
             Component::Normal(part) => clean.push(part),
-            // `.` is harmless but only ever arrives from something generating paths oddly; `..`,
-            // a root or a Windows prefix are the ones that matter.
             _ => return None,
         }
     }
@@ -109,8 +79,7 @@ fn sanitise(path: &str) -> Option<String> {
     Some(clean.components().filter_map(|c| c.as_os_str().to_str()).collect::<Vec<_>>().join("/"))
 }
 
-/// Only what Vite actually emits, plus the handful a favicon or a font would need. An unknown
-/// extension is served as bytes rather than guessed at.
+/// Only what Vite actually emits, plus the handful a favicon or a font would need.
 fn content_type(path: &str) -> &'static str {
     match path.rsplit_once('.').map(|(_, extension)| extension) {
         Some("html") => "text/html; charset=utf-8",
@@ -126,8 +95,7 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
-/// Served at `/` when `web/dist` held no `index.html` at compile time. It is a build-order mistake,
-/// not a bug, and saying so beats a blank page.
+/// Served at `/` when `web/dist` held no `index.html` at compile time.
 const NOT_BUILT: &str = r#"<!doctype html>
 <meta charset="utf-8">
 <title>gb · the UI is not built</title>
@@ -188,9 +156,8 @@ mod tests {
         assert_eq!(content_type("LICENSE"), "application/octet-stream");
     }
 
-    /// `/` answers with a page in both worlds — the built SPA, or the message explaining that it is
-    /// not built. Which one depends on whether `pnpm run build` ran before `cargo build`, so the test
-    /// asserts what is true either way and then checks the *right* branch was taken.
+    /// `/` answers with a page in both worlds — the built SPA, or the message explaining that it
+    /// is not built.
     #[test]
     fn index_is_always_a_page() {
         let response = serve("index.html");
@@ -219,8 +186,8 @@ mod tests {
         assert_eq!(serve("../Cargo.toml").status(), StatusCode::NOT_FOUND);
     }
 
-    /// Reading a body is the only async part of any of this, and it is not worth a `macros` feature
-    /// on `tokio` to say so.
+    /// Reading a body is the only async part of any of this, and it is not worth a `macros`
+    /// feature on `tokio` to say so.
     fn body_of(response: Response) -> String {
         let runtime = tokio::runtime::Builder::new_current_thread().build().expect("a bare runtime");
         let bytes = runtime

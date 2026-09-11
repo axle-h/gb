@@ -1,16 +1,4 @@
-//! **W7 / §11** — `transcript.jsonl`: every `UiEvent` worth keeping, one JSON object per line.
-//!
-//! Written by a thread of its own, subscribed to the same broadcast the browser reads. Neither the
-//! emulator nor the LLM worker ever touches the file: a `publish_event` call is a channel send and
-//! must stay one, because the emulator thread makes them at 10 Hz between instructions and the
-//! worker makes one per streamed token.
-//!
-//! ⚠️ **The status heartbeat is deliberately excluded.** §11 says "one JSON object per `UiEvent`",
-//! which taken literally is ten a second of a message whose entire purpose is to be current — 36 000
-//! lines and ~14 MB an hour, drowning the conversation it is supposed to preserve and making
-//! `/api/history` a replay of yesterday's clock. A viewer gets a fresh heartbeat within 100 ms of
-//! connecting, so nothing is lost by leaving them out and a great deal is gained: what remains is
-//! the run's *story* — what the agent did, what the model said, what it decided.
+//! `transcript.jsonl`: every `UiEvent` worth keeping, one JSON object per line.
 
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -19,20 +7,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::published::{Published, UiEvent, UiEventBody};
 
-/// §11's rotation point. Reached only by a run that has been going for weeks: with heartbeats
-/// excluded a busy hour is a few hundred kilobytes.
 pub(crate) const MAX_BYTES: u64 = 256 * 1024 * 1024;
 
-/// The most events `/api/history` will return, however far back `since` reaches. The SPA keeps 500
-/// entries, so this is already more than it can show; the cap exists so a month-old run cannot make
-/// a page load allocate a hundred megabytes.
+/// The most events `/api/history` will return, however far back `since` reaches. The SPA keeps
+/// 500 entries, so this is already more than it can show; the cap exists so a month-old run
+/// cannot make a page load allocate a hundred megabytes.
 pub const MAX_BACKLOG: usize = 2_000;
 
 /// Write every event to `path` until `stop` is set or the process ends.
-///
-/// Returns immediately; the work is on its own thread. Failure to *open* the file is reported to the
-/// caller, and failure to write is reported once and then the thread stops — a run whose disk has
-/// filled should not also spend the rest of its life printing about it.
 pub fn spawn(
     current: Arc<crate::run::CurrentRun>,
     published: Arc<Published>,
@@ -54,12 +36,7 @@ pub fn spawn(
                 if !keep(&event) {
                     continue;
                 }
-                // ⚠️ **Follow the run, do not capture it.** `POST /api/new-run` swaps the current run
-                // directory under a live process, and this thread is the only writer of the file it
-                // swaps away from — a captured `PathBuf` would keep appending the new run's events to
-                // the old run's transcript, which is invisible until someone reads either file. The
-                // check is a `PathBuf` join and a compare per *kept* event (heartbeats are filtered
-                // out above), so it costs nothing on the path that matters.
+                // Follow the run, do not capture it.
                 let live = current.get().transcript_path();
                 if live != path {
                     let _ = writer.flush();
@@ -69,7 +46,6 @@ pub fn spawn(
                             writer = BufWriter::new(file);
                             path = live;
                         }
-                        // Keep writing to the old file rather than losing the run's events outright.
                         Err(failure) => eprintln!("transcript: {failure} — still writing to {}",
                                                   path.display()),
                     }
@@ -98,7 +74,7 @@ pub fn spawn(
         .map_err(|e| format!("could not start the transcript thread: {e}"))
 }
 
-/// Whether an event belongs in the file. See the module's ⚠️.
+/// Whether an event belongs in the file.
 fn keep(event: &UiEvent) -> bool {
     !matches!(event.body, UiEventBody::Status(_))
 }
@@ -122,21 +98,8 @@ pub(crate) fn rotate(path: &Path) -> Result<std::fs::File, String> {
         .map_err(|e| format!("could not reopen {} after rotating it: {e}", path.display()))
 }
 
-/// The backlog `/api/history?since=` serves: every event with `seq >= since`, oldest first, capped
-/// at the most recent [`MAX_BACKLOG`].
-///
-/// Parsed back to `serde_json::Value` rather than re-serialised from a typed struct, because the file
-/// is the wire format already — round-tripping it through `UiEventBody` would mean the transcript
-/// could only ever hold events *this* build knows the shape of.
-///
-/// ⚠️ **Read from the end, and never the whole file.** The first version was `read_to_string` and a
-/// parse of every line with the cap applied last — fine at the "couple of megabytes" it was written
-/// for, and what OOM-killed the deployed pod at its 2 GiB limit once a reasoning model publishing
-/// one event per streamed token had grown a four-day run's transcript to 254 MB and 2.9 million
-/// lines. A page load is `/api/history`, so the run died *on connect*, eight times. This walks
-/// backwards in [`CHUNK`]-sized reads and stops at the cap or at the first event below `since`
-/// (sequence numbers are monotonic within a file; that is what [`last_seq`] is for), so the
-/// allocation is bounded by what is returned rather than by the age of the run.
+/// The backlog `/api/history?since=` serves: every event with `seq >= since`, oldest first,
+/// capped at the most recent [`MAX_BACKLOG`].
 pub fn read_since(path: &Path, since: u64) -> Vec<serde_json::Value> {
     let Ok(file) = std::fs::File::open(path) else { return Vec::new() };
     let mut events = Vec::new();
@@ -159,15 +122,6 @@ pub fn read_since(path: &Path, since: u64) -> Vec<serde_json::Value> {
 }
 
 /// The last sequence number in the file, if there is one.
-///
-/// ⚠️ **A resumed run must not restart its sequence numbers**, and this is what stops it. The
-/// counter lives in `Published`, which is built fresh every process — so a second process would
-/// otherwise write `seq: 0` again, ten thousand lines into a transcript that already has one. Two
-/// things break at once: `?since=` selects across both ranges, and the browser, which keys entries
-/// by sequence number, gets duplicates. Found by reading the file after a restart.
-///
-/// Reads from the end for the same reason as [`read_since`]: this runs at every start, and a
-/// `read_to_string` here was a quarter of a gigabyte of baseline on the deployed run.
 pub fn last_seq(path: &Path) -> Option<u64> {
     let file = std::fs::File::open(path).ok()?;
     RevLines::new(file)
@@ -175,20 +129,17 @@ pub fn last_seq(path: &Path) -> Option<u64> {
         .find_map(|event| event["seq"].as_u64())
 }
 
-/// How much of the file a backwards read pulls in at a time. A transcript line is a few hundred
-/// bytes, a `plan` a few kilobytes, so a chunk holds many of them and a line straddling two is the
-/// rare case rather than the rule.
+/// How much of the file a backwards read pulls in at a time.
 const CHUNK: u64 = 64 * 1024;
 
 /// The lines of a file, last first, read in [`CHUNK`]s from the end so that a file of any size
-/// costs only what is consumed. Invalid UTF-8 is replaced rather than failing the whole read, since
-/// one torn line must not hide the rest of the file.
+/// costs only what is consumed.
 struct RevLines {
     file: std::fs::File,
     /// Everything below this offset is still unread.
     pos: u64,
-    /// Bytes read but not yet yielded: the (possibly partial) first line of the chunks seen so far,
-    /// without its newline, which completes once the chunk before it arrives.
+    /// Bytes read but not yet yielded: the (possibly partial) first line of the chunks seen so
+    /// far, without its newline, which completes once the chunk before it arrives.
     pending: Vec<u8>,
     /// Whole lines ready to yield, in file order, so `pop` is the next line backwards.
     ready: Vec<String>,
@@ -200,8 +151,7 @@ impl RevLines {
         Self { file, pos, pending: Vec::new(), ready: Vec::new() }
     }
 
-    /// Pull the next chunk off the end and split it into lines. Returns `false` at the start of
-    /// the file, once whatever was pending has been flushed as the first line.
+    /// Pull the next chunk off the end and split it into lines.
     fn fill(&mut self) -> bool {
         use std::io::{Read, Seek, SeekFrom};
         if self.pos == 0 {
@@ -260,8 +210,7 @@ mod tests {
     use crate::published::{RunStatus, StatusSnapshot};
     use std::time::{Duration, Instant};
 
-    /// A `CurrentRun` over a fresh run directory under `root`. The transcript now lives *inside* a
-    /// run directory rather than wherever the caller says, because that is what the writer follows.
+    /// A `CurrentRun` over a fresh run directory under `root`.
     fn current_run(root: &Path) -> Arc<crate::run::CurrentRun> {
         let (run, _, _) = crate::run::RunDir::open(root, true, "test", &|_| false).expect("a fresh run");
         Arc::new(crate::run::CurrentRun::new(root.to_path_buf(), "test".to_string(), run))
@@ -283,8 +232,6 @@ mod tests {
         }))
     }
 
-    /// The whole path: published on one thread, on disk from another, and read back in order — with
-    /// the heartbeats left out, which is the thing §11 did not say.
     #[test]
     fn the_story_is_written_and_the_heartbeats_are_not() {
         let scratch = Scratch::new("transcript");
@@ -319,7 +266,7 @@ mod tests {
         assert_eq!(read_since(&path, 99).len(), 0);
         assert_eq!(read_since(&scratch.0.join("nothing-here.jsonl"), 0).len(), 0);
 
-        // ⚠️ …and where a second process must pick the numbering up from.
+        // …and where a second process must pick the numbering up from.
         assert_eq!(last_seq(&path), Some(3));
         assert_eq!(last_seq(&scratch.0.join("nothing-here.jsonl")), None);
 
@@ -328,8 +275,8 @@ mod tests {
         let _ = writer.join();
     }
 
-    /// A restarted process appends to the file it left rather than truncating it — the transcript is
-    /// the one thing in the run directory that is not a snapshot.
+    /// A restarted process appends to the file it left rather than truncating it — the transcript
+    /// is the one thing in the run directory that is not a snapshot.
     #[test]
     fn a_second_process_appends_rather_than_starting_again() {
         let scratch = Scratch::new("transcript-append");
@@ -401,9 +348,7 @@ mod tests {
     }
 
     /// The deployed failure: a transcript far larger than anything the backlog returns is served
-    /// without being read whole. The file is ~40 MB; the read is bounded by the cap, so it finishes
-    /// in a small fraction of what parsing every line would take, and `since` near the end reads
-    /// almost nothing at all.
+    /// without being read whole.
     #[test]
     fn a_huge_transcript_is_not_read_whole() {
         let scratch = Scratch::new("transcript-huge");
@@ -417,9 +362,10 @@ mod tests {
                     .unwrap();
             }
         }
-        // The cap is honoured, and the values prove the loop *stopped* rather than read on and threw
-        // the rest away: `read_since` pushes every line it parses and has no discard path, so a
-        // result holding exactly the last `MAX_BACKLOG` seqs is a result that broke at the cap.
+        // The cap is honoured, and the values prove the loop *stopped* rather than read on and
+        // threw the rest away: `read_since` pushes every line it parses and has no discard path,
+        // so a result holding exactly the last `MAX_BACKLOG` seqs is a result that broke at the
+        // cap.
         let events = read_since(&path, 0);
         assert_eq!(events.len(), MAX_BACKLOG);
         assert_eq!(events[0]["seq"], total - MAX_BACKLOG as u64);
@@ -431,12 +377,8 @@ mod tests {
         assert_eq!(tail[0]["seq"], total - 10);
         assert_eq!(last_seq(&path), Some(total - 1));
 
-        // ⚠️ **The other half of the name — *not read whole* — is about the reader underneath, and
-        // it is measured rather than timed.** This asserted "the capped read took under two seconds"
-        // and "a read near the end is faster than one across the cap"; both are races against
-        // whatever else the machine is doing, and the pair went red once under a loaded full-suite
-        // run while passing alone every time. `RevLines::pos` is the offset below which nothing has
-        // been read, so laziness is a number the test can simply look at.
+        // The other half of the name — *not read whole* — is about the reader underneath, and it
+        // is measured rather than timed.
         let length = std::fs::metadata(&path).unwrap().len();
         let mut lines = RevLines::new(std::fs::File::open(&path).unwrap());
         for _ in 0..MAX_BACKLOG {

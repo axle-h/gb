@@ -1,35 +1,16 @@
-//! Tests for workstream `items` — see `docs/postgame-coverage-plan.md` §8-I and
-//! [`crate::pokemon::postgame::items`].
-//!
-//! Rooted on **H's output**, the chain head, for the reason §8-I gives: `postgame-aides.bin` arrives
-//! with the Itemfinder, a PC full of medicine — and, less obviously, a **fainted Venusaur** and an
-//! Articuno at 64/259, which is the only fixture in the repo that gives a Revive and a Potion a legal
-//! target without arranging one first.
-//!
-//! Nothing here is debug-seeded. Every item is either in the PC already, on a shelf
-//! (`data/items/marts.asm`), or lying on the floor as a hidden item — which turned out to be the
-//! cheapest source of all, and the one that makes I7 provable.
 
 use super::super::*;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::postgame::items;
 
-/// H's output and the chain head (§9): Route 15, dex 52, bag 20/20, **Venusaur fainted**,
-/// Articuno 64/259, ¥5,894.
 const AIDES: &[u8] = include_bytes!("../../data/postgame-aides.bin");
 
-/// The three bag rows I1 spends: two TMs nothing in this repo teaches, and a Full Heal for a party
-/// that has no status to cure.
+/// The three bag rows I1 spends: two TMs nothing in this repo teaches, and a Full Heal for a
+/// party that has no status to cure.
 const JUNK: &[ItemId] = &[ItemId::Tm29Psychic, ItemId::Tm31Mimic, ItemId::FullHeal];
 
-/// **Task I1** — `ItemUseMedicine` out of battle: a **Revive** on a fainted mon and a **Potion** on a
-/// hurt one, then a Potion on a healthy one that must be *refused*. Emulates ≤60 min (≈2 min wall).
-///
-/// Three assertions and the third is the point. §8-I1 warns that at full HP the ROM prints *"It won't
-/// have any effect"* — a text box that reads exactly like success — and keeps the item, so a driver
-/// waiting for the item to be consumed waits for ever. The guard is
-/// [`crate::pokemon::postgame::items::blocked`], and the way to prove a guard is to hand it the case
-/// it guards against and watch the queue drain anyway.
+/// Task I1 — `ItemUseMedicine` out of battle: a Revive on a fainted mon and a Potion on a hurt
+/// one, then a Potion on a healthy one that must be *refused*.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_revive_and_heal_a_party_member() {
@@ -49,9 +30,8 @@ fn can_revive_and_heal_a_party_member() {
     steps.extend([
         PolicyStep::withdraw_item(ItemId::Revive, 1, Map::FuchsiaPokecenter),
         PolicyStep::withdraw_item(ItemId::Potion, 1, Map::FuchsiaPokecenter),
-        // ⚠️ The PC holds exactly **one** Potion, which the heal below spends — so the declined use
-        // needs a *different* item or it pops on "not in the bag" and proves nothing. Six Full
-        // Restores are banked; one comes out to be refused.
+        // The PC holds exactly one Potion, which the heal below spends — so the declined use
+        // needs a *different* item or it pops on "not in the bag" and proves nothing.
         PolicyStep::withdraw_item(ItemId::FullRestore, 1, Map::FuchsiaPokecenter),
         PolicyStep::use_medicine(ItemId::Revive, FAINTED),
         PolicyStep::use_medicine(ItemId::Potion, HURT),
@@ -91,20 +71,7 @@ fn can_revive_and_heal_a_party_member() {
 /// I1's output: Fuchsia City, Venusaur revived, Articuno topped up, two bag rows spare.
 const MEDICINE: &[u8] = include_bytes!("../../data/postgame-medicine.bin");
 
-/// **Task I7** — press the **Itemfinder**, both ways. Emulates ≤90 min (≈3 min wall).
-///
-/// The Itemfinder is the one item in the table with **no RAM observable whatsoever**: it plays four
-/// sound effects and prints one of two texts. So the test reads the screen, and it reads it in both
-/// places — a run that only ever saw "found nothing" would pass an assertion that merely says
-/// *something* was printed, and would be indistinguishable from a driver that opened the bag and
-/// pressed A on the wrong row.
-///
-/// See [`PolicyStep::press_the_itemfinder_steps`] for why the positive answer needs a specific door:
-/// `HiddenItemNear`'s window is small, the Fly stop is outside it, and the item it points at happens
-/// to be one no one can ever pick up — which is what makes this stable rather than single-use.
-///
-/// It also buys the **Repel** the next leg spends, because it is standing in the only mart that
-/// stocks one (`data/items/marts.asm:17`).
+/// Task I7 — press the Itemfinder, both ways.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_press_the_itemfinder_both_ways() {
@@ -145,35 +112,14 @@ const FINDER: &[u8] = include_bytes!("../../data/postgame-finder.bin");
 const SOLARBEAM_SLOT: u8 = 0;
 const RAZOR_LEAF_SLOT: u8 = 1;
 
-/// **Task I2** — `ItemUsePPRestore` and `ItemUsePPUp`. Emulates ≤120 min (≈5 min wall).
-///
-/// The plan calls this the highest-value item in the workstream and the archive says why: a 0-PP
-/// battle deadlock is what once made grinding look impossible, and the only cure today is a walk to a
-/// Pokémon Center.
-///
-/// Two items, one ROM routine (`ItemUsePPUp` falls through into `ItemUsePPRestore`), two different
-/// observables — and the second is only visible because of a wrinkle worth knowing:
-///
-/// ⚠️ **`PokemonMove::pp` is the raw PP byte.** `encoding.rs` reads it unmasked and the ROM packs the
-/// **PP Up count into bits 6–7**. So an Ether shows up in bits 0–5 and a PP Up shows up as the whole
-/// byte jumping by 64 — and any comparison of "PP" that forgets the mask is wrong the moment a single
-/// PP Up has ever been spent.
-///
-/// ⚠️ And the **move menu is 1-indexed** (`MoveSelectionMenu`'s relearn layout). The other three move
-/// slots are asserted unchanged, because an off-by-one here restores the wrong move in silence.
+/// Task I2 — `ItemUsePPRestore` and `ItemUsePPUp`.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_restore_pp_and_raise_it() {
     let mut fixture = TestFixture::new(FINDER, Duration::from_mins(120),
         PolicyStep::pp_restore_steps(ItemId::Ether, 0, SOLARBEAM_SLOT, RAZOR_LEAF_SLOT));
-    // ⚠️ Debug tier, deliberately — see `PolicyStep::pp_restore_steps`: nothing in Kanto sells an
+    // Debug tier, deliberately — see `PolicyStep::pp_restore_steps`: nothing in Kanto sells an
     // Ether and every one on the floor is behind a trek this leg is not about.
-    //
-    // ⚠️ **The PP Up is seeded too, since 2026-09-03.** It used to be dug out of Celadon, and every
-    // PP Up in the game is a hidden item — hidden-item collection is gone from the crate, so there
-    // is nowhere left to get one. What this leg tests is unchanged: `ItemUsePPUp` falls through into
-    // `ItemUsePPRestore`, so one ROM routine produces two different observables, and neither of them
-    // cares where the item came from.
     fixture.api().debug_give_item(ItemId::Ether, 1).expect("bag should have a free row for the Ether");
 
     let before = fixture.game_state();
@@ -183,7 +129,8 @@ fn can_restore_pp_and_raise_it() {
         "I2 needs a move that is missing PP; {:?} is at {}", solarbeam.name, items::move_pp(&solarbeam));
     assert_eq!(items::pp_ups(&razor_leaf), 0, "the PP Up target should have none spent on it yet");
 
-    // ── the Ether ────────────────────────────────────────────────────────────────────────────────
+    // ── the Ether
+    // ────────────────────────────────────────────────────────────────────────────────
     let restored = fixture.run_until(|s| s.pokemon[0].moves[SOLARBEAM_SLOT as usize].as_ref()
         .is_some_and(|m| items::move_pp(m) > items::move_pp(&solarbeam)));
     let now = restored.pokemon[0].moves[SOLARBEAM_SLOT as usize].as_ref().unwrap();
@@ -191,22 +138,16 @@ fn can_restore_pp_and_raise_it() {
         items::max_pp(now));
     assert!(items::move_pp(now) > items::move_pp(&solarbeam), "the Ether should have restored PP");
 
-    // ── the PP Up ────────────────────────────────────────────────────────────────────────────────
-    // ⚠️ **Seeded here rather than up with the Ether, because the bag is at its 20-slot cap**, and
-    // waited for rather than assumed. H3's output leaves exactly one free row; the Ether takes it
-    // and only gives it back when the *item* is consumed, which is a few ticks after the PP moves —
-    // so seeding on the PP assertion above still finds a full bag. This is the order the leg ran in
-    // when the PP Up was dug out of Celadon, which is why the cap never showed up before.
+    // ── the PP Up
+    // ──────────────────────────────────────────────────────────────────────────────── Seeded
+    // here rather than up with the Ether, because the bag is at its 20-slot cap, and waited for
+    // rather than assumed.
     fixture.run_until(|s| items::bag_quantity(s, ItemId::Ether) == 0);
     fixture.api().debug_give_item(ItemId::PpUp, 1).expect("the spent Ether should have freed a row");
     let state = fixture.run_leg(|s| s.pokemon[0].moves[RAZOR_LEAF_SLOT as usize].as_ref()
         .is_some_and(|m| items::pp_ups(m) > 0));
     let leaf = state.pokemon[0].moves[RAZOR_LEAF_SLOT as usize].as_ref().unwrap();
     assert_eq!(items::pp_ups(leaf), 1, "one PP Up should have been applied to {:?}", leaf.name);
-    // ⚠️ A PP Up raises the **current** PP as well as the maximum — `.PPNotMaxedOut` calls
-    // `RestoreBonusPP` right after bumping the count (`item_effects.asm:2008-2010`), and the bonus is
-    // `base / 5`. The first draft of this assertion said "the maximum, not the current PP" and was
-    // simply wrong; Razor Leaf went 25 → 30 on both.
     let bonus = razor_leaf.name.metadata().pp / 5;
     assert_eq!(items::max_pp(leaf), razor_leaf.name.metadata().pp + bonus,
         "one PP Up should raise the maximum by base/5");
@@ -229,12 +170,7 @@ fn can_restore_pp_and_raise_it() {
 /// I2's output: Celadon City, Solarbeam topped up, one PP Up on Razor Leaf, a Repel in the bag.
 const ETHER: &[u8] = include_bytes!("../../data/postgame-ether.bin");
 
-/// **Task I5** — the Repel family. Emulates ≤30 min (≈1½ min wall).
-///
-/// `ItemUseRepelCommon` writes `wRepelRemainingSteps` and nothing else, so the observable is exactly
-/// that byte: 0 → **100** for a Repel (200 for a Super Repel, 250 for a Max Repel), then one less per
-/// overworld step. Both halves are asserted — a counter that is set but never decremented would mean
-/// the agent was not actually walking, which is the failure mode §10 warns about for every wander.
+/// Task I5 — the Repel family.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_set_a_repel_running() {
@@ -252,17 +188,7 @@ fn can_set_a_repel_running() {
     println!("after walking to {}: {} steps left", walked.map.map, walked.repel_steps);
 }
 
-/// **Task I6** — ride the Bicycle. Emulates ≤30 min (≈1½ min wall).
-///
-/// `ItemUseBicycle` toggles `wWalkBikeSurfState` between 0 and 1, and 1 is what doubles overworld
-/// speed. Two things this pins that §8-I6 only asserts:
-///
-/// 1. It is a **toggle**, so getting off is the same item again — which is why
-///    [`crate::pokemon::postgame::items::Effect::TogglesBicycle`] completes on "the mount state
-///    changed" rather than "we are on the bike". With the latter the dismount step would be
-///    satisfied before it started and pop without pressing anything.
-/// 2. It really is faster. The same walk is timed on foot and on the bike, in emulated cycles, and
-///    §8-I6's "this one may pay for itself in emulated minutes" is either true or it is not.
+/// Task I6 — ride the Bicycle.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_ride_the_bicycle() {
@@ -299,33 +225,12 @@ fn can_ride_the_bicycle() {
     println!("dismounted at {} @ {}", state.map.map, state.map.player_position);
 }
 
-/// **Tasks I3 + I4** — the seven in-battle stat items and the **Poké Doll**, in one wild battle.
-/// Emulates ≤150 min (≈6½ min wall).
-///
-/// Everything is bought (`data/items/marts.asm`): Celadon Mart 5F's first clerk sells all seven stat
-/// items, 4F sells the doll. The battle is a level-3 Route 1 wild against a level-71 lead, so it
-/// lasts exactly as long as the shopping list.
-///
-/// The observables are the two the plan asks for and no animation is watched:
-///
-/// * `wPlayerMonAttackMod` and friends — **7 is neutral**, so each `ItemUseXStat` shows up as an 8.
-/// * `wPlayerBattleStatus2` — X Accuracy, Guard Spec. and Dire Hit are *not* `XStat` entries at all;
-///   they set `USING_X_ACCURACY`, `PROTECTED_BY_MIST` and `GETTING_PUMPED` instead.
-///
-/// Both are battle-scoped and reset when it ends, so they are sampled every tick while it runs
-/// rather than asserted afterwards. The Poké Doll's observable is the battle ending on the spot.
+/// Tasks I3 + I4 — the seven in-battle stat items and the Poké Doll, in one wild battle.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_use_the_stat_items_and_a_poke_doll_in_battle() {
     use crate::pokemon::postgame::items::{battle_status2, StatMods, STAT_ITEMS};
 
-    /// Nine rows have to be free before the first purchase, or the clerk says "you can't carry any
-    /// more items" and `BuyFromMart` gives up quietly (§10). None of these is needed again: the HMs,
-    /// the Bicycle and the Itemfinder all stay.
-    /// ⚠️ **Eight, not seven.** Seven is the arithmetic (19 held − 7 shed + 8 bought = 20, exactly
-    /// full) and exactly-full is how the first run failed: the eighth purchase, Dire Hit, was refused
-    /// four times and the step gave up — the §10 trap, from the one direction that still bites when
-    /// you have counted. One spare row costs nothing and removes the whole class.
     const SHED: &[ItemId] = &[ItemId::GreatBall, ItemId::EscapeRope, ItemId::ExpAll,
                               ItemId::PokeFlute, ItemId::TownMap, ItemId::FullRestore,
                               ItemId::Repel, ItemId::SecretKey];
@@ -341,9 +246,7 @@ fn can_use_the_stat_items_and_a_poke_doll_in_battle() {
     let bag_before = fixture.api().mmu().read_pointer(&pokered_symbols::wNumBagItems);
     println!("shopping with ¥{} and {bag_before}/20 bag rows", before.money);
 
-    // The shedding, asserted on its own. Every purchase below needs a row, and a mart sale into a
-    // full bag is refused with one text box and no error — so if this is where it goes wrong, it
-    // should say so here rather than as a mystery three purchases later.
+    // The shedding, asserted on its own.
     let shed = fixture.run_until(|s| SHED.iter().all(|&i| items::bag_quantity(s, i) == 0));
     let bag_after = fixture.api().mmu().read_pointer(&pokered_symbols::wNumBagItems);
     println!("shed {} items: bag {bag_before} → {bag_after}", SHED.len());

@@ -1,5 +1,4 @@
 
-
 pub mod blargg_cpu {
     pub const ROM: &[u8] = include_bytes!("cpu_instrs/cpu_instrs.gb");
     pub const SPECIAL_01: &[u8] = include_bytes!("cpu_instrs/01-special.gb");
@@ -20,8 +19,7 @@ pub mod blargg_cpu {
 pub mod blargg_dmg_sound {
     pub const ROM: &[u8] = include_bytes!("dmg_sound/dmg_sound.gb");
     /// The combined suite's own screen: `01:ok` through `12:ok`, then `Passed`. All twelve
-    /// sub-tests in one assertion. Captured from gambatte (see `10-implementation-plan.md` §2.5);
-    /// gb reproduces it pixel for pixel.
+    /// sub-tests in one assertion.
     pub const EXPECTED_ALL: &[u8] = include_bytes!("dmg_sound/dmg_sound.png");
 
     pub const REGISTERS: &[u8] = include_bytes!("dmg_sound/01-registers.gb");
@@ -41,18 +39,12 @@ pub mod blargg_dmg_sound {
     pub const LENGTH_COUNTER_DURING_POWER: &[u8] = include_bytes!("dmg_sound/08-len ctr during power.gb");
     pub const EXPECTED_LENGTH_COUNTER_DURING_POWER: &[u8] = include_bytes!("dmg_sound/08-len ctr during power.png");
     pub const WAVE_READ_WHILE_ON: &[u8] = include_bytes!("dmg_sound/09-wave read while on.gb");
-    /// Promoted by A16 once the wave channel was fixed, and only after checking the frame
-    /// against gambatte's — the two are byte-identical.
     pub const EXPECTED_WAVE_READ_WHILE_ON: &[u8] = include_bytes!("dmg_sound/09-wave read while on.png");
     pub const WAVE_TRIGGER_WHILE_ON: &[u8] = include_bytes!("dmg_sound/10-wave trigger while on.gb");
-    /// Promoted by A16 once the wave channel was fixed, and only after checking the frame
-    /// against gambatte's — the two are byte-identical.
     pub const EXPECTED_WAVE_TRIGGER_WHILE_ON: &[u8] = include_bytes!("dmg_sound/10-wave trigger while on.png");
     pub const REGISTERS_AFTER_POWER: &[u8] = include_bytes!("dmg_sound/11-regs after power.gb");
     pub const EXPECTED_REGISTERS_AFTER_POWER: &[u8] = include_bytes!("dmg_sound/11-regs after power.png");
     pub const WAVE_WRITE_WHILE_ON: &[u8] = include_bytes!("dmg_sound/12-wave write while on.gb");
-    /// Promoted by A16 once the wave channel was fixed, and only after checking the frame
-    /// against gambatte's — the two are byte-identical.
     pub const EXPECTED_WAVE_WRITE_WHILE_ON: &[u8] = include_bytes!("dmg_sound/12-wave write while on.png");
 }
 
@@ -61,17 +53,6 @@ pub mod acid {
     pub const EXPECTED_DMG: &[u8] = include_bytes!("dmg-acid2/reference-dmg.png");
 }
 
-/// `cgb-acid2` v1.1 — the CGB counterpart of `dmg-acid2`, and Phase B's acceptance test. It
-/// covers BG map attributes, the eight-palette BG and OBJ banks, sprite priority by OAM index,
-/// LCDC bit 0 as a master priority override, and 8x16 sprites out of VRAM bank 1.
-///
-/// Unlike the audio suites this one ships its own reference image, so nothing had to be promoted
-/// from `gb`'s own output. The upstream README specifies the 5-bit to 8-bit expansion as
-/// `(c << 3) | (c >> 2)`, which is what [`crate::lcd_palette::LcdColor::from_rgb555`] does, so the
-/// PNG compares byte for byte with no colour-correction curve in the way.
-///
-/// Source: <https://github.com/mattcurrie/cgb-acid2> (ROM from the v1.1 release,
-/// `img/reference.png` from `master`, both fetched 2026-08-05).
 pub mod cgb_acid {
     pub const ROM: &[u8] = include_bytes!("cgb-acid2/cgb-acid2.gbc");
     pub const EXPECTED: &[u8] = include_bytes!("cgb-acid2/reference.png");
@@ -106,18 +87,6 @@ pub mod blargg_timing {
     pub const EXPECTED_INTERRUPT_TIME: &[u8] = include_bytes!("interrupt_time.png");
 }
 
-/// **D10.** The mooneye MBC test ROMs, from `c-sp/game-boy-test-roms` v7.0 (MIT).
-///
-/// ⚠️ **These are stored lz4-compressed and must be decompressed before use** — see
-/// [`mooneye::rom`]. Raw they are 22 MB, which is 15x the rest of this repository's committed
-/// binary data put together, and almost all of it is padding: `mbc5/rom_64Mb.gb` alone is 8 MB of
-/// mostly-nothing testing that bank 511 is addressable. Compressed the whole set is ~90 KB.
-///
-/// Regenerate with [`mooneye::tests::compress_mooneye_roms`] if the upstream set ever changes.
-///
-/// ⚠️ **`cfg(test)`, not a feature.** The suite is three tests and 0.7 s, so it belongs in the
-/// default tier — and gating on `test` rather than on a feature means the shipped binary carries
-/// none of these bytes either way, which is what the `hwtests` feature was really buying.
 #[cfg(test)]
 pub mod mooneye {
     /// Decompress one of the ROMs below into a real cartridge image.
@@ -168,15 +137,10 @@ pub mod mooneye {
     #[cfg(test)]
     mod tests {
         /// Rebuild `src/roms/mooneye/*.lz4` from an extracted `game-boy-test-roms` release.
-        ///
         /// ```text
         /// MOONEYE_SRC=/path/to/mooneye-test-suite/emulator-only \
         ///   cargo test --release --features slow-tests --lib -- compress_mooneye_roms --ignored --nocapture
         /// ```
-        ///
-        /// Same shape as the blip golden-vector regeneration: a tool, not an assertion, so it sits
-        /// behind `diagnostics` and is `#[ignore]`d on top of that — the ignored list is a backlog of
-        /// *blocked* tests, and a tool in it reads as one.
         #[test]
         #[cfg(feature = "slow-tests")]
         #[ignore = "tool: rebuilds the committed mooneye ROMs from an extracted release"]

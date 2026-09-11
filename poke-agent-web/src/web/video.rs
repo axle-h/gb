@@ -1,10 +1,4 @@
-//! **W2** — the video wire format: an 8×8 block diff with a persistent palette.
-//!
-//! There is no image codec here and no dependency on one. The Game Boy's LCD is 160×144 with a
-//! handful of colours on screen and most of it unchanged from one frame to the next, so a
-//! hand-rolled palette block diff beats anything general-purpose at a fraction of the complexity: a
-//! static screen costs *nothing*.
-//!
+//! The video wire format: an 8×8 block diff with a persistent palette.
 //! ```text
 //! u8   version (=2)
 //! u8   flags            bit0 = keyframe, bit1 = the block list is a bitmap
@@ -18,56 +12,6 @@
 //! payloads              one per listed block, in ascending block order, each 64 × bits_per_pixel
 //!                       bits packed low-bits-first
 //! ```
-//!
-//! ## Why it looks like this
-//!
-//! **v1 had three per-block modes (RLE, raw, a 4-colour sub-palette) and picked the smallest.**
-//! `src/web/video/bench.rs` measured them against four minutes of real play and the answer was that
-//! the cleverness was costing bytes rather than saving them. Two facts did it in:
-//!
-//! - **`gb serve` runs `GameBoy::dmg` by default, so the screen is four shades** — the bench asserts
-//!   it. (`GB_HARDWARE=cgb` makes it six, and the format carries that by widening `bits_per_pixel`
-//!   to 4 rather than by changing: measured at 1.63× the bytes on real footage, against the 2× it
-//!   costs before deflate.) v1's packed mode therefore spent 4 of its 23 bytes naming a per-block sub-palette
-//!   that was always a permutation of `0,1,2,3`, and another 3 on a block index and a mode tag. The
-//!   payload underneath was 16 bytes. **A third of the stream was describing the encoding rather
-//!   than the picture.**
-//! - **Anything downstream compresses far better than a per-block size contest does.** Variable-size
-//!   blocks with embedded tags are close to the worst input you can hand an LZ77 window; a fixed
-//!   16-byte payload at a fixed offset is close to the best. Measured end to end, dropping all three
-//!   modes for one flat width made the *uncompressed* stream 21% smaller and the *compressed* stream
-//!   **2.6×** smaller.
-//!
-//! So: one width for the whole message, wide enough for the palette (2 bits in practice, 8 in the
-//! worst case, which is still v1's raw mode). No modes, no tags, and the block list is hoisted out
-//! of the payloads so like sits with like — which is again for the compressor's benefit.
-//!
-//! **The palette is stream state, not message state.** A delta *appends* its `new_palette` entries
-//! to whatever the decoder already has; a **keyframe replaces the palette outright** with the entries
-//! it carries, which are the encoder's entire palette at that moment. That second rule is what makes
-//! the late-joiner handshake work: a keyframe encoded from the current frame leaves the decoder's
-//! palette *identical* to the encoder's, so every subsequent delta lines up. An earlier design had a
-//! keyframe carry only the colours it needed, which quietly desynchronised every late joiner the
-//! first time a delta referenced an index the keyframe had not listed.
-//!
-//! ⚠️ **`bits_per_pixel` is a property of the message, not of the stream.** It is whatever the
-//! palette needs *after* this message's new entries are folded in, so a frame that introduces a
-//! fifth colour widens from 2 bits to 4 for that message alone. Blocks already on screen are not
-//! resent, and do not need to be: the decoder holds pixels, not packed bytes.
-//!
-//! **RGB888, not RGB565.** DMG's greys are `FF/AA/55/00` and `0xAA` does not survive a round trip
-//! through 5 bits (see [`LcdColor`]). The palette is at most 255 entries, so the third byte is free.
-//!
-//! The encoder tracks what the *decoder* will hold, not what the frame contained — [`VideoEncoder`]
-//! writes palette-resolved indices into `last_sent`. It matters only on the lossy path (a frame with
-//! more than 255 distinct colours, which Pokémon Red never produces), but without it a block that
-//! was approximated once would read as unchanged forever after.
-//!
-//! ## What goes on the wire
-//!
-//! Nothing here base64s anything. `src/web/mod.rs` streams these messages as binary, length-prefixed
-//! and deflated per connection — see that module for why, and for the measurement that base64 costs
-//! **twice** as much after compression as the 33% it costs before.
 
 use std::collections::{HashMap, HashSet};
 
@@ -87,20 +31,13 @@ pub const VERSION: u8 = 2;
 const FLAG_KEYFRAME: u8 = 0x01;
 const FLAG_BITMAP: u8 = 0x02;
 /// One bit per block, so a message that touches most of the screen names them all in 45 bytes
-/// instead of 720. The alternative — a `u16` each — wins below 22 blocks, and the encoder picks.
+/// instead of 720.
 const BITMAP_BYTES: usize = BLOCK_COUNT.div_ceil(8);
 const BITMAP_WORTH_IT: usize = (BITMAP_BYTES - 2) / 2 + 1;
-/// ⚠️ **255, not 256, and the `u8` index is not the reason.** `new_palette_len` is a `u8`, and a
-/// keyframe has to carry the *whole* palette in one message — so a 256th entry would encode its
-/// length as `0` and the decoder would silently read the block list as palette bytes. Losing one
-/// index out of 256 costs nothing on a path Pokémon Red never reaches; a length field that wraps to
-/// zero costs the stream.
+/// 255, not 256, and the `u8` index is not the reason.
 const MAX_PALETTE: usize = 255;
 
-
-/// How wide an index into a palette of `entries` has to be. Rounded up to a power of two so a
-/// payload is a whole number of pixels per byte, which is what keeps packing and unpacking a shift
-/// rather than a division.
+/// How wide an index into a palette of `entries` has to be.
 fn bits_per_pixel(entries: usize) -> u8 {
     match entries {
         0..=2 => 1,
@@ -130,19 +67,19 @@ fn pack(indices: &[u8; BLOCK_PIXELS], bits: u8, out: &mut Vec<u8>) {
     }
 }
 
-// ── Encoder ──────────────────────────────────────────────────────────────────────────────────────
+// ── Encoder
+// ──────────────────────────────────────────────────────────────────────────────────────
 
 pub struct VideoEncoder {
     palette: Vec<LcdColor>,
     index: HashMap<LcdColor, u8>,
-    /// What the decoder holds after everything emitted so far, **as palette indices** — see the
-    /// module docs. Indices rather than colours so [`VideoEncoder::keyframe`] is a straight pack:
-    /// holding colours meant one hash lookup per pixel, 23040 of them, every published frame.
+    /// What the decoder holds after everything emitted so far, as palette indices — see the
+    /// module docs.
     last_sent: Box<[u8; PIXELS]>,
     sent_anything: bool,
     seq: u64,
     /// Scratch for one message's block payloads, kept across calls so a 30 fps stream allocates
-    /// nothing per frame. `(block index, indices)`.
+    /// nothing per frame.
     staged: Vec<(u16, [u8; BLOCK_PIXELS])>,
 }
 
@@ -167,16 +104,6 @@ impl VideoEncoder {
 
     /// Forget everything the decoder is believed to hold, so the next [`Self::encode`] is a full
     /// keyframe with a fresh palette.
-    ///
-    /// For `POST /api/new-run`, which replaces the emulator's state outright. Deltas are encoded
-    /// against `last_sent`, so without this the first frame of the new game would be diffed against
-    /// the last frame of the old one and every block that happened to match would simply not be
-    /// sent — leaving fragments of the abandoned run on screen with nothing to repair them.
-    ///
-    /// ⚠️ **`seq` is deliberately kept.** It is not part of what the decoder holds, it is the
-    /// ordering every connected client filters on (`/api/video` drops anything at or below the seq
-    /// it opened with), so restarting the count at zero would make a live viewer discard the whole
-    /// new run. `VideoEncoder::default()` is therefore *not* a substitute for this.
     pub fn restart(&mut self) {
         self.palette.clear();
         self.index.clear();
@@ -185,15 +112,6 @@ impl VideoEncoder {
     }
 
     /// Encode `frame` against everything sent so far.
-    ///
-    /// `None` when nothing the decoder can see changed — the common case for an idle screen and the
-    /// reason a standing-still emulator costs no bandwidth at all. Roughly half of all published
-    /// frames come back `None` in ordinary play. The sequence number only advances when a message is
-    /// actually produced, so a stored keyframe stays valid across idle ticks.
-    ///
-    /// "Nothing the decoder can see" rather than "nothing changed" is the precise rule, and on the
-    /// lossy path they differ: a block whose true colours moved but whose *approximation* did not
-    /// carries no information, and emitting it would mean re-sending an unchanged screen forever.
     pub fn encode(&mut self, frame: &Frame) -> Option<Encoded> {
         let mut keyframe = !self.sent_anything;
         let mut blocks: Vec<u16> = if keyframe {
@@ -216,9 +134,9 @@ impl VideoEncoder {
             self.index.clear();
         }
 
-        // Two passes, and the split is forced: `bits_per_pixel` covers the palette *including* the
-        // entries these blocks are about to introduce, so nothing can be written until they have all
-        // been interned.
+        // Two passes, and the split is forced: `bits_per_pixel` covers the palette *including*
+        // the entries these blocks are about to introduce, so nothing can be written until they
+        // have all been interned.
         let palette_base = self.palette.len();
         self.staged.clear();
         for &block in &blocks {
@@ -226,10 +144,7 @@ impl VideoEncoder {
             self.stage_block(frame, block, keyframe);
         }
         if self.staged.is_empty() {
-            // Every candidate resolved to what the decoder already holds. Only reachable on the lossy
-            // path, and only reachable at all *because* the candidates were chosen by comparing the
-            // source against the approximation. Roll the palette back: an entry that was interned but
-            // never sent would be referenced by a later message the decoder cannot resolve.
+            // Every candidate resolved to what the decoder already holds.
             self.index.retain(|_, index| (*index as usize) < palette_base);
             self.palette.truncate(palette_base);
             return None;
@@ -276,12 +191,8 @@ impl VideoEncoder {
         Some(Encoded { seq: self.seq, keyframe, bytes })
     }
 
-    /// A standalone keyframe for the state the encoder is currently in, carrying the **whole**
+    /// A standalone keyframe for the state the encoder is currently in, carrying the whole
     /// palette so a decoder starting from nothing lands exactly where the encoder is.
-    ///
-    /// Pure: it neither advances the sequence number nor touches the palette, so the emulator thread
-    /// can hand one to a joiner without racing the encoder. Returns `None` before anything has been
-    /// encoded, when there is no state to describe.
     pub fn keyframe(&self) -> Option<Encoded> {
         if !self.sent_anything {
             return None;
@@ -313,14 +224,7 @@ impl VideoEncoder {
         block_pixels(block).any(|p| self.palette[self.last_sent[p] as usize] != frame[p])
     }
 
-    /// Should this frame be spent on a fresh palette? Decided before anything is written, so the
-    /// answer is taken once rather than discovered mid-frame.
-    ///
-    /// Two conditions, and the second is easy to forget: the changed blocks must need more palette
-    /// than is left, **and** a fresh palette must actually be able to hold the whole frame. Without
-    /// the second, a frame carrying more than [`MAX_PALETTE`] distinct colours resets, approximates,
-    /// reads as changed again on the next tick because the approximation is not the source, and
-    /// resets again — a full keyframe every tick, forever, for a screen nobody is touching.
+    /// Should this frame be spent on a fresh palette?
     fn should_reset_palette(&self, frame: &Frame, blocks: &[u16]) -> bool {
         let mut fresh: HashSet<LcdColor> = HashSet::new();
         let overflows = blocks.iter().flat_map(|&b| block_pixels(b as usize)).any(|p| {
@@ -343,17 +247,14 @@ impl VideoEncoder {
     }
 
     /// Resolve one block to palette indices and queue it, if it says anything new.
-    ///
-    /// A block is queued when its palette-resolved form differs from what the decoder holds — not
-    /// when the *source* differs, which is a weaker thing that is only equivalent off the lossy
-    /// path. `force` is how a keyframe gets all 360 blocks regardless.
     fn stage_block(&mut self, frame: &Frame, block: u16, force: bool) {
         let mut indices = [0u8; BLOCK_PIXELS];
         let mut changed = false;
         for (slot, p) in block_pixels(block as usize).enumerate() {
             let index = self.intern(frame[p]);
             indices[slot] = index;
-            // Record what the decoder will hold, which is the frame itself except on the lossy path.
+            // Record what the decoder will hold, which is the frame itself except on the lossy
+            // path.
             changed |= self.last_sent[p] != index;
             self.last_sent[p] = index;
         }
@@ -373,8 +274,7 @@ impl VideoEncoder {
             return index;
         }
         // Unreachable for Pokémon Red — a full frame never carries 256 distinct colours, and
-        // `should_reset_palette` spends a keyframe before it gets close. Approximating beats
-        // failing: a slightly wrong pixel is a better outcome for a livestream than a dropped stream.
+        // `should_reset_palette` spends a keyframe before it gets close.
         nearest(&self.palette, colour)
     }
 }
@@ -395,7 +295,8 @@ fn nearest(palette: &[LcdColor], colour: LcdColor) -> u8 {
     palette.iter().enumerate().min_by_key(|(_, c)| distance(c)).map(|(i, _)| i as u8).unwrap_or(0)
 }
 
-// ── Decoder ──────────────────────────────────────────────────────────────────────────────────────
+// ── Decoder
+// ──────────────────────────────────────────────────────────────────────────────────────
 
 /// The reference decoder: the regression net for the wire format, and the thing the TypeScript
 /// decoder in the SPA is a direct port of. Every rule in the module docs is enforced here, so a
@@ -446,8 +347,7 @@ impl VideoDecoder {
             ));
         }
 
-        // A keyframe's block list is implicit: every block, in order. That is what makes it
-        // standalone, and it is also 45 bytes and a validation case that cannot go wrong.
+        // A keyframe's block list is implicit: every block, in order.
         let blocks: Vec<usize> = if keyframe {
             (0..BLOCK_COUNT).collect()
         } else if flags & FLAG_BITMAP != 0 {
@@ -512,7 +412,8 @@ impl Reader<'_> {
         Ok(u16::from_le_bytes([self.u8()?, self.u8()?]))
     }
 
-    /// Read without advancing — the packed payload is addressed by pixel, not consumed byte by byte.
+    /// Read without advancing — the packed payload is addressed by pixel, not consumed byte by
+    /// byte.
     fn peek(&self, offset: usize) -> Result<u8, String> {
         self.bytes.get(self.at + offset).copied().ok_or_else(|| "video message ended early".into())
     }

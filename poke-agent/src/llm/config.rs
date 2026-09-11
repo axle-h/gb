@@ -1,38 +1,4 @@
-//! **W4 / §7.1** — the configuration block, entirely from the environment.
-//!
-//! Environment rather than flags, and never exposed to the browser: the API key is the reason, and
-//! once the key has to be an environment variable it is simpler for everything beside it to be one
-//! too than to have two mechanisms. `--port` is the exception, because it is the one setting an
-//! operator changes while debugging, and it overrides `GB_PORT`.
-//!
-//! | Var | Default | Meaning |
-//! |---|---|---|
-//! | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Any compatible endpoint |
-//! | `OPENAI_API_KEY` | — | Required for `--policy llm` |
-//! | `GB_MODEL` | — | Required |
-//! | `GB_CONTEXT_LIMIT` | `128000` | The window W6's compaction triggers a fraction of |
-//! | `GB_COMPACT_ABOVE` | `0.85` | That fraction. `0.2`–`0.95`; see [`LlmConfig::compact_above`] |
-//! | `GB_TEMPERATURE` | `1.0` | |
-//! | `GB_MAX_TOOL_STEPS` | `12` | Non-terminal calls per turn before a decision is forced |
-//! | `GB_REQUEST_TIMEOUT_SECS` | `180` | How long an endpoint may take to answer; see [`LlmConfig::request_timeout`] |
-//! | `GB_MAX_TOKENS` | `8192` | Ceiling on one completion; `0` removes it |
-//! | `GB_REASONING_EFFORT` | — | Passed through as `reasoning_effort` when set (`none`/`low`/…) |
-//! | `GB_STUCK_TIMEOUT_SECS` | `300` | **W9** — emulated seconds with the agent asking nothing before the watchdog does; `0` is off |
-//! | `GB_PORT` | `8080` | Read in `cli.rs`, since it applies to `--policy random` too |
-//! | `GB_RUN_DIR` | `runs` | Read in `web/mod.rs`, for the same reason (**W7**) |
-//! | `GB_RESTORE_HISTORY` | `1` | Resume the conversation as well as the save; `0` starts it over. See [`restore_history`] |
-//!
-//! `GB_RUN_DIR` is **W7's and is read in `src/web/mod.rs`**, not here: it applies to
-//! `--policy random` too, and the run directory is resolved before this block is — a missing API key
-//! should be an error before a directory exists for a run that cannot start.
-//!
-//! `GB_PAUSE_WHILE_THINKING` (§2.1) was built in W4 and removed the same day. Freezing the emulator
-//! while the model thinks is never what this thing is for — the live picture is the product, and a
-//! frozen one is a worse watch than a slightly stale one under every circumstance we could name. It
-//! was also the only setting that could deadlock a run: a tool batch is answered at the policy poll,
-//! and the policy is only polled when `gb.run` advances the agent, so any pause that spanned a tool
-//! round trip hung the run on the first `read_map`. Keeping a knob whose *on* position is a footgun,
-//! for a behaviour nobody wants, is worse than not having it.
+//! The configuration block, entirely from the environment.
 
 /// Everything the worker and the client need, resolved once at startup.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,107 +6,55 @@ pub struct LlmConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
-    /// The context window in tokens. W4 only reports against it; W6 compacts on it.
+    /// The context window in tokens.
     pub context_limit: u64,
-    /// **W6 / §9** — the occupancy at which the history is compacted, as a fraction of
-    /// [`Self::context_limit`]. Both stages trigger here: eviction first, and summarisation only if
-    /// eviction left it still over.
-    ///
-    /// Measured on the calibrated scale — see [`crate::llm::accounting`], whose whole reason for
-    /// existing is that "85% full" has to mean the same thing before and after a message is removed.
-    ///
-    /// ⚠️ **What the remaining fraction has to pay for is not one message — it is a whole turn and a
-    /// summary.** Compaction runs *between* turns, so once a turn has started the history grows
-    /// unchecked until it ends: up to `GB_MAX_TOOL_STEPS` completions, their tool results and two
-    /// screenshots. And stage 2's request carries the entire history *plus* room for the summary the
-    /// model writes back, which on a reasoning model is the summary plus everything it thought on the
-    /// way to it. Both of those are absolute token counts, so the headroom that matters is
-    /// `(1 - compact_above) × context_limit` rather than the percentage: 15% of 128 k is 19 k and
-    /// comfortable, 15% of 60 k is 9 k and merely adequate, 5% of 60 k is 3 k and will not fit a
-    /// summary.
-    ///
-    /// Going over is not fatal — a failed summary falls back to [`trim_history`] and a failed turn
-    /// resolves to a wait — but each one costs the run either its memory or a turn.
-    ///
-    /// [`trim_history`]: crate::llm::worker
+    /// The occupancy at which the history is compacted, as a fraction of [`Self::context_limit`].
+    /// Both stages trigger here: eviction first, and summarisation only if eviction left it still
+    /// over.
     pub compact_above: f64,
     pub temperature: f32,
-    /// Non-terminal tool calls a single turn may make before the worker forces `wait` (§7.3).
     pub max_tool_steps: usize,
-    /// How long the endpoint may take to start answering, and to keep answering, before the request
-    /// is abandoned as an [`LlmError::Timeout`](crate::llm::LlmError::Timeout).
-    ///
-    /// ⚠️ **Abandoning is not free, so this wants to be generous rather than tight.** A hosted API
-    /// answers in milliseconds and a dead one never answers at all, which is the case the default was
-    /// sized for. A local server is neither: it accepts the request, works on it, and keeps working
-    /// after we hang up — llama.cpp prints "Stopping generation… (If the model is busy processing the
-    /// prompt, it will finish first.)" — so every expiry here leaves a piece of work running that
-    /// nobody will ever read, on a machine that may serve only one request at a time. Waiting longer
-    /// costs a stalled turn; giving up early costs the same stalled turn *and* the endpoint's next
-    /// few minutes.
+    /// How long the endpoint may take to start answering, and to keep answering, before the
+    /// request is abandoned as an [`LlmError::Timeout`](crate::llm::LlmError::Timeout).
     pub request_timeout: std::time::Duration,
     /// A ceiling on one completion, or `None` for whatever the endpoint does by default.
-    ///
-    /// ⚠️ **The context window is not a usable ceiling.** An uncapped reasoning model that falls into
-    /// a repetition loop generates until the window is full — measured at ~26 000 tokens against
-    /// turns that normally cost 24–2 000 — and on a single-slot local endpoint nothing else can be
-    /// decided for as long as that takes. The default is deliberately far above any observed
-    /// legitimate turn (a compaction summary, the longest thing the loop asks for, runs to a couple
-    /// of thousand) so that hitting it means something has gone wrong rather than that the number is
-    /// too small.
     pub max_tokens: Option<u32>,
-    /// `reasoning_effort`, passed straight through when set. See [`ChatRequest::reasoning_effort`]
-    /// for what the values actually do — it is the endpoint's vocabulary, not ours.
-    ///
-    /// [`ChatRequest::reasoning_effort`]: crate::llm::protocol::ChatRequest::reasoning_effort
+    /// `reasoning_effort`, passed straight through when set. See
+    /// `ChatRequest::reasoning_effort` for what the values actually do — it is the endpoint's
+    /// vocabulary, not ours.
     pub reasoning_effort: Option<String>,
-    /// **W9 / §14** — how much *emulated* time the agent may go without reaching a decision point of
-    /// any kind before the watchdog asks for a nudge on its behalf. `None` when
-    /// `GB_STUCK_TIMEOUT_SECS=0`, which turns it off.
-    ///
-    /// Deliberately generous: normal play never approaches five minutes of game time without asking
-    /// something, and this is insurance against an agent bug rather than a mechanism the design
-    /// leans on. Every firing is a bug report.
+    /// How much *emulated* time the agent may go without reaching a decision point of any kind
+    /// before the watchdog asks for a nudge on its behalf. `None` when `GB_STUCK_TIMEOUT_SECS=0`,
+    /// which turns it off.
     pub stuck_timeout: Option<std::time::Duration>,
 }
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_CONTEXT_LIMIT: u64 = 128_000;
-/// **W6 / §9.** 0.70 originally, which was never measured against anything — it was headroom chosen
-/// on the assumption of a large window, where 30% is tens of thousands of tokens. What the headroom
-/// actually has to cover is bounded and small (see [`LlmConfig::compact_above`]), so the cost of
-/// 0.70 was real and paid every turn: a fifth of a paid-for window held empty, and a summarising
-/// completion — the most expensive thing the loop does — bought sooner and more often than needed.
 pub const DEFAULT_COMPACT_ABOVE: f64 = 0.85;
-/// The range [`DEFAULT_COMPACT_ABOVE`] may be moved through. The ceiling is not superstition: above
-/// it, the remaining window cannot hold the summary that compaction exists to produce, so the run
-/// silently degrades to the last-resort trim. The floor keeps a typo like `0.05` from summarising
-/// on every single turn.
+/// The range [`DEFAULT_COMPACT_ABOVE`] may be moved through. The ceiling is not superstition:
+/// above it, the remaining window cannot hold the summary that compaction exists to produce, so
+/// the run silently degrades to the last-resort trim.
 pub const COMPACT_ABOVE_RANGE: std::ops::RangeInclusive<f64> = 0.2..=0.95;
 pub const DEFAULT_TEMPERATURE: f32 = 1.0;
 pub const DEFAULT_MAX_TOOL_STEPS: usize = 12;
 /// Three minutes. Enough for any hosted endpoint and for a local one that is merely slow; see
 /// [`LlmConfig::request_timeout`] for why the number wants to grow rather than shrink.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 180;
-/// Generous by design — see [`LlmConfig::max_tokens`]. `GB_MAX_TOKENS=0` removes the cap entirely,
-/// which is the pre-2026-08-12 behaviour and a footgun on any endpoint that serves one request at a
-/// time.
+/// Generous by design — see [`LlmConfig::max_tokens`].
 pub const DEFAULT_MAX_TOKENS: u32 = 8192;
-/// Five minutes of *emulated* time. **W9 / §14.**
+/// Five minutes of *emulated* time.
 pub const DEFAULT_STUCK_TIMEOUT_SECS: u64 = 300;
 
 impl LlmConfig {
     /// Read the block from the process environment.
-    ///
-    /// `Err` is a complete sentence naming the variable, because the overwhelmingly common failure is
-    /// starting the container without one of the two required ones.
     pub fn from_env() -> Result<Self, String> {
         Self::from_lookup(&|name| std::env::var(name).ok())
     }
 
-    /// [`Self::from_env`] against an arbitrary lookup, so the parsing and the defaults are testable
-    /// without touching the real environment — which is process-global and would make the tests
-    /// order-dependent.
+    /// [`Self::from_env`] against an arbitrary lookup, so the parsing and the defaults are
+    /// testable without touching the real environment — which is process-global and would make
+    /// the tests order-dependent.
     pub fn from_lookup(env: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
         let required = |name: &str| -> Result<String, String> {
             match env(name).map(|value| value.trim().to_string()) {
@@ -150,8 +64,7 @@ impl LlmConfig {
         };
 
         Ok(Self {
-            // A trailing slash here and the request path would double it. Endpoints vary on whether
-            // they forgive that; none of them mind it being absent.
+            // A trailing slash here and the request path would double it.
             base_url: env("OPENAI_BASE_URL")
                 .map(|url| url.trim().trim_end_matches('/').to_string())
                 .filter(|url| !url.is_empty())
@@ -178,9 +91,9 @@ impl LlmConfig {
                 0 => None,
                 cap => Some(cap),
             },
-            // Not validated against a list: the accepted values belong to the endpoint, and refusing
-            // one it would have taken is worse than passing through one it rejects — which it says
-            // so, in a 400 whose body we keep.
+            // Not validated against a list: the accepted values belong to the endpoint, and
+            // refusing one it would have taken is worse than passing through one it rejects —
+            // which it says so, in a 400 whose body we keep.
             reasoning_effort: env("GB_REASONING_EFFORT")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
@@ -189,8 +102,8 @@ impl LlmConfig {
                 "GB_REQUEST_TIMEOUT_SECS",
                 DEFAULT_REQUEST_TIMEOUT_SECS,
             )?),
-            // Zero is "off" rather than "fire on every tick", which is the only reading that makes
-            // the variable a way to turn the watchdog off.
+            // Zero is "off" rather than "fire on every tick", which is the only reading that
+            // makes the variable a way to turn the watchdog off.
             stuck_timeout: match number(env, "GB_STUCK_TIMEOUT_SECS", DEFAULT_STUCK_TIMEOUT_SECS)? {
                 0 => None,
                 seconds => Some(std::time::Duration::from_secs(seconds)),
@@ -199,8 +112,8 @@ impl LlmConfig {
     }
 
     /// Where the completions live. Split out because it is the one string most likely to be wrong
-    /// against a non-OpenAI endpoint, and an error saying which URL was tried is worth a great deal
-    /// more than one that does not.
+    /// against a non-OpenAI endpoint, and an error saying which URL was tried is worth a great
+    /// deal more than one that does not.
     pub fn completions_url(&self) -> String {
         format!("{}/chat/completions", self.base_url)
     }
@@ -216,20 +129,8 @@ where
     }
 }
 
-/// Whether a resumed run picks its conversation back up — `GB_RESTORE_HISTORY`, on unless it is set
-/// to `0`, `false`, `no` or `off`.
-///
-/// ⚠️ **Read here rather than parsed into [`LlmConfig`], for `GB_RUN_DIR`'s reason**: the history is
-/// opened in `web/mod.rs` beside the `TodoList`, before the config block is validated, and it is a
-/// property of the run directory rather than of the endpoint.
-///
-/// What switching it off buys is the one thing a restart used to give for free. A model reads its
-/// own last turns back on every request, so a run that has talked itself into a loop — the 91
-/// consecutive `press_buttons` on Route 3, the eleven cuts at the same tree — reinforces it, and
-/// before this module the loop died with the process. Now it does not. `GB_RESTORE_HISTORY=0` is
-/// therefore an escape hatch rather than a tuning knob: it starts the conversation over while
-/// keeping the game, the plan and the run directory, which is the one combination
-/// `POST /api/new-run` cannot offer because that resets the cartridge too.
+/// Whether a resumed run picks its conversation back up — `GB_RESTORE_HISTORY`, on unless it is
+/// set to `0`, `false`, `no` or `off`.
 pub fn restore_history() -> bool {
     restores_history(std::env::var("GB_RESTORE_HISTORY").ok())
 }
@@ -238,9 +139,9 @@ pub fn restore_history() -> bool {
 /// reason [`LlmConfig::from_lookup`] exists.
 fn restores_history(value: Option<String>) -> bool {
     match value {
-        // ⚠️ **Blank counts as unset**, which is the shape a placeholder Secret takes — the same
-        // reading `GB_ADMIN_TOKEN` already has, and the opposite of treating an empty string as
-        // "off" and silently dropping every resumed conversation on the deployment.
+        // Blank counts as unset, which is the shape a placeholder Secret takes — the same reading
+        // `GB_ADMIN_TOKEN` already has, and the opposite of treating an empty string as "off" and
+        // silently dropping every resumed conversation on the deployment.
         Some(value) => !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
         None => true,
     }
@@ -258,10 +159,8 @@ mod tests {
 
     const MINIMAL: &[(&str, &str)] = &[("OPENAI_API_KEY", "sk-test"), ("GB_MODEL", "gpt-test")];
 
-    /// **Seven characters is the game's limit and a model id is nothing like seven characters**, so
-    /// the whole question is what to throw away. Whole segments from the front, because the family
-    /// and its version are what a viewer recognises — and because truncating the joined string
-    /// instead invents version numbers (`gemma-3-12b` → `GEMMA31`).
+    /// Seven characters is the game's limit and a model id is nothing like seven characters, so
+    /// the whole question is what to throw away.
     #[test]
     fn the_two_required_variables_are_the_only_two_required() {
         let config = LlmConfig::from_lookup(&lookup(MINIMAL)).expect("the defaults cover the rest");
@@ -276,8 +175,6 @@ mod tests {
         assert_eq!(config.stuck_timeout, Some(std::time::Duration::from_secs(DEFAULT_STUCK_TIMEOUT_SECS)));
     }
 
-    /// **W9.** Zero is the off switch, and it has to be *off* rather than "a timeout of zero", which
-    /// would fire the watchdog on every tick of every run — a turn per 20 ms, and a bill to match.
     #[test]
     fn a_zero_stuck_timeout_turns_the_watchdog_off() {
         let mut pairs = MINIMAL.to_vec();
@@ -295,7 +192,8 @@ mod tests {
         assert!(failure.contains("GB_STUCK_TIMEOUT_SECS"), "{failure}");
     }
 
-    /// The failure an operator actually hits, and it must name the variable rather than say "config".
+    /// The failure an operator actually hits, and it must name the variable rather than say
+    /// "config".
     #[test]
     fn a_missing_or_blank_requirement_names_itself() {
         for (missing, present) in [("OPENAI_API_KEY", "GB_MODEL"), ("GB_MODEL", "OPENAI_API_KEY")] {
@@ -308,9 +206,6 @@ mod tests {
         }
     }
 
-    /// **W6 / §9.** The threshold moves, and an unusable one is refused rather than clamped: the
-    /// window it is a fraction of can be as small as a local model's 60 k, where the last few percent
-    /// are the only room the summarising completion has to be written in.
     #[test]
     fn the_compaction_threshold_can_be_moved_but_not_off_the_end() {
         let mut pairs = MINIMAL.to_vec();
@@ -318,7 +213,7 @@ mod tests {
         assert_eq!(LlmConfig::from_lookup(&lookup(&pairs)).expect("valid").compact_above, 0.9);
 
         // The two shapes of typo that matter: a percentage written as one, and a fraction written
-        // upside down. Both would otherwise be a run that compacts every turn or never at all.
+        // upside down.
         for bad in ["90", "0.05", "1.0", "-0.5"] {
             let mut pairs = MINIMAL.to_vec();
             pairs.push(("GB_COMPACT_ABOVE", bad));
@@ -333,8 +228,7 @@ mod tests {
         );
     }
 
-    /// The patience knob. Its whole purpose is to be raised for a local endpoint, so the test that
-    /// matters is that a big number survives the parse rather than that the default is 180.
+    /// The patience knob.
     #[test]
     fn the_request_timeout_can_be_lengthened_for_a_slow_endpoint() {
         let mut pairs = MINIMAL.to_vec();
@@ -343,8 +237,9 @@ mod tests {
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(900));
     }
 
-    /// ⚠️ Zero is "no ceiling", not "a ceiling of zero" — the same reading as `GB_STUCK_TIMEOUT_SECS`,
-    /// and the only one that makes the variable a way to restore the endpoint's own default.
+    /// Zero is "no ceiling", not "a ceiling of zero" — the same reading as
+    /// `GB_STUCK_TIMEOUT_SECS`, and the only one that makes the variable a way to restore the
+    /// endpoint's own default.
     #[test]
     fn a_zero_token_cap_removes_the_ceiling_rather_than_setting_it_to_nothing() {
         let mut pairs = MINIMAL.to_vec();
@@ -356,8 +251,7 @@ mod tests {
         assert_eq!(LlmConfig::from_lookup(&lookup(&pairs)).expect("valid").max_tokens, Some(2048));
     }
 
-    /// Passed through verbatim and *not* validated: the vocabulary is the endpoint's. On LM Studio
-    /// with gemma-4, `none` is the only value that measurably does anything.
+    /// Passed through verbatim and *not* validated: the vocabulary is the endpoint's.
     #[test]
     fn the_reasoning_effort_is_whatever_the_endpoint_calls_it() {
         let mut pairs = MINIMAL.to_vec();
@@ -365,8 +259,9 @@ mod tests {
         let config = LlmConfig::from_lookup(&lookup(&pairs)).expect("valid");
         assert_eq!(config.reasoning_effort.as_deref(), Some("none"));
 
-        // Blank is not a value: it is the variable being present in a template and never filled in,
-        // which must read the same as unset or the endpoint gets an empty string it will reject.
+        // Blank is not a value: it is the variable being present in a template and never filled
+        // in, which must read the same as unset or the endpoint gets an empty string it will
+        // reject.
         let mut pairs = MINIMAL.to_vec();
         pairs.push(("GB_REASONING_EFFORT", "   "));
         assert_eq!(LlmConfig::from_lookup(&lookup(&pairs)).expect("valid").reasoning_effort, None);
@@ -404,9 +299,7 @@ mod tests {
         }
     }
 
-    /// ⚠️ **The default has to be *on*, and blank has to read as unset.** This decides whether a
-    /// resumed run keeps the conversation it was having, so a placeholder Secret rendering as an
-    /// empty string must not quietly turn the feature off across a whole deployment.
+    /// The default has to be *on*, and blank has to read as unset.
     #[test]
     fn a_conversation_is_restored_unless_something_actually_says_not_to() {
         assert!(restores_history(None), "unset resumes the conversation");

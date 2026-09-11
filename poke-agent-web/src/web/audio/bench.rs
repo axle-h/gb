@@ -1,18 +1,3 @@
-//! What the audio stream costs, and everything it was chosen over. **Measured, not claimed** — this
-//! file is why `/api/audio` looks the way it does and is the thing to re-run before changing the
-//! codec, the bitrate or the framing.
-//!
-//! Behind the `bench` feature:
-//! `cargo test --release --features slow-tests --lib -- audio::bench --nocapture`
-//!
-//! It reads real audio out of the emulator actually playing, from the same four fixtures
-//! `video/bench.rs` uses and under the same seeded `RandomPolicy`, so the two streams' numbers can
-//! be read against each other — which is the comparison that matters, since a viewer with sound on
-//! pays for both.
-//!
-//! ⚠️ **It needs its own capture.** The video one collects LCD frames and never touches the APU;
-//! this one has to tune the resampler and drain it per step, which is thirty lines rather than a
-//! shared abstraction that would serve neither well.
 
 use std::sync::OnceLock;
 
@@ -25,7 +10,8 @@ use poke_agent::pokemon::policy::RandomPolicy;
 use poke_agent::pokemon::{PokemonApi, roms};
 
 const SECONDS: u32 = 60;
-/// The emulator is stepped at the host's own cadence so the APU is drained the way `tick` drains it.
+/// The emulator is stepped at the host's own cadence so the APU is drained the way `tick` drains
+/// it.
 const STEP_MS: u64 = 20;
 
 struct Capture {
@@ -47,7 +33,8 @@ impl Capture {
 fn capture(name: &'static str, state: &[u8], seed: u64) -> Capture {
     let mut gb = GameBoy::dmg(roms::POKERED);
     gb.load_state(state).expect("fixture should load");
-    // Exactly what `EmulatorHost::tune_audio` does, and for the same reason: a state carries neither.
+    // Exactly what `EmulatorHost::tune_audio` does, and for the same reason: a state carries
+    // neither.
     gb.core_mut().mmu_mut().audio_mut().set_output_sample_rate(SAMPLE_RATE);
     gb.core_mut().mmu_mut().audio_mut().set_emulation_speed(1.0);
 
@@ -73,7 +60,7 @@ fn capture(name: &'static str, state: &[u8], seed: u64) -> Capture {
     Capture { name, pcm }
 }
 
-/// Built **once per process** and shared, so every test below measures the same audio.
+/// Built once per process and shared, so every test below measures the same audio.
 fn captures() -> &'static [Capture] {
     static CAPTURES: OnceLock<Vec<Capture>> = OnceLock::new();
     CAPTURES.get_or_init(|| {
@@ -94,17 +81,14 @@ fn kbits(bytes: usize, seconds: f64) -> f64 {
 fn encode(capture: &Capture, bitrate: i32) -> (usize, usize) {
     let mut encoder = AudioEncoder::new(bitrate);
     let mut out = Vec::new();
-    // Pushed in host-sized bites rather than one slab, so the accumulator is exercised the way the
-    // run exercises it.
+    // Pushed in host-sized bites rather than one slab, so the accumulator is exercised the way
+    // the run exercises it.
     for chunk in capture.pcm.chunks(SAMPLE_RATE as usize / 50 * 2) {
         encoder.push(chunk, &mut out);
     }
     (encoder.bytes() as usize, out.len())
 }
 
-/// IMA ADPCM, 4 bits a sample — the "no dependency at all" answer, and the one §12 offered as the
-/// fallback if raw PCM proved too fat. Here so the codec is compared against something rather than
-/// against nothing.
 fn ima_adpcm(mono: &[f32]) -> usize {
     const STEPS: [i32; 89] = [
         7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66,
@@ -144,9 +128,9 @@ fn to_mono(pcm: &[f32]) -> Vec<f32> {
     pcm.chunks_exact(2).map(|lr| ((lr[0] + lr[1]) * 0.5).clamp(-1.0, 1.0)).collect()
 }
 
-// ── The headline ─────────────────────────────────────────────────────────────────────────────────
+// ── The headline
+// ─────────────────────────────────────────────────────────────────────────────────
 
-/// **The number the README quotes**, and the four alternatives it was chosen over.
 #[test]
 #[ignore = "benchmark: what the Opus stream costs, and what it beat"]
 fn bench_audio_the_shipped_stack_and_what_it_beat() {
@@ -160,14 +144,14 @@ fn bench_audio_the_shipped_stack_and_what_it_beat() {
         seconds += span;
 
         // Every row is what the *wire* carries: the payload plus our 4-byte length prefix per
-        // message, which for Opus is 50 messages a second and for the raw rows is one per host tick.
+        // message, which for Opus is 50 messages a second and for the raw rows is one per host
+        // tick.
         let messages_per_second = 1000.0 / STEP_MS as f64;
         let framing = |per_second: f64| (4.0 * per_second * span) as usize;
 
         let row = [
             capture.pcm.len() * 4 + framing(messages_per_second),        // f32 stereo, as the APU makes it
             capture.pcm.len() * 2 + framing(messages_per_second),        // i16 stereo
-            // i16 mono at 48 kHz is the same 768 kbit/s §12's 24 kHz *stereo* plan came to.
             mono.len() * 2 + framing(messages_per_second),
             ima_adpcm(&mono) + framing(messages_per_second),             // IMA ADPCM mono
             encode(capture, 16_000).0 + framing(50.0),

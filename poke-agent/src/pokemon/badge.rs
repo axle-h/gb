@@ -18,8 +18,8 @@ bitflags! {
 }
 
 impl Badge {
-    /// The badges in bit order, which is the order the game awards them, the order they are laid out
-    /// on the trainer card, and the order their graphics appear in the ROM
+    /// The badges in bit order, which is the order the game awards them, the order they are laid
+    /// out on the trainer card, and the order their graphics appear in the ROM
     /// ([`crate::pokemon::badge_gfx`]). Index `i` is bit `i` — `badges_are_declared_in_bit_order`
     /// pins that, because a UI that lights badge 3 for bit 4 would look entirely plausible.
     pub const ORDER: [Badge; 8] = [
@@ -50,8 +50,8 @@ mod tests {
         }
     }
 
-    /// The name the UI labels a badge with is the flag's own name, so it is worth one assertion that
-    /// `Display` gives a single flag its bare name rather than a set-shaped rendering.
+    /// The name the UI labels a badge with is the flag's own name, so it is worth one assertion
+    /// that `Display` gives a single flag its bare name rather than a set-shaped rendering.
     #[test]
     fn a_single_flag_displays_as_its_name() {
         assert_eq!(format!("{}", Badge::BoulderBadge), "BoulderBadge");
