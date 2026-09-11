@@ -9,6 +9,7 @@ use crate::pokemon::policy::{DeterministicPolicy, PolicyStep};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::tile::MetaTile;
+use crate::pokemon::tile_map::MetaTileMap;
 use crate::pokemon::world_graph::WorldGraph;
 use crate::pokemon::GameState;
 use gb::ram::ROM;
@@ -219,7 +220,7 @@ pub fn pick(
 
     if state.map.map != map {
         // Walk (back) in.
-        return match step_toward(world_graph, actions, state.map.map, map) {
+        return match step_toward(world_graph, &state.map, actions, map) {
             Some(action) => { progress.route_stuck = 0; Hunt::Walk(action) }
             // Not a failure yet.
             None if progress.route_stuck < ROUTE_PATIENCE => {
@@ -284,7 +285,7 @@ const LAND_CHAIN: [Map; 5] = [
 const WEST_LANDING: Point8 = Point8 { x: 26, y: 0 };
 
 /// One hop toward `map` from wherever the player is standing.
-fn step_toward(world_graph: &WorldGraph, actions: &[OverworldAction], from: Map, to: Map)
+fn step_toward(world_graph: &WorldGraph, map: &MetaTileMap, actions: &[OverworldAction], to: Map)
     -> Option<OverworldAction>
 {
     let crossing_to = |target: Map, landing: Option<Point8>| {
@@ -302,14 +303,14 @@ fn step_toward(world_graph: &WorldGraph, actions: &[OverworldAction], from: Map,
         })).cloned()
     };
     // The next map along the chain, which for an adjacent target is the target itself.
-    let next = match (LAND_CHAIN.iter().position(|&m| m == from), LAND_CHAIN.iter().position(|&m| m == to)) {
+    let next = match (LAND_CHAIN.iter().position(|&m| m == map.map), LAND_CHAIN.iter().position(|&m| m == to)) {
         (Some(i), Some(j)) if i < j => LAND_CHAIN[i + 1],
         (Some(i), Some(j)) if i > j => LAND_CHAIN[i - 1],
         _ => to,
     };
     let landing = (next == Map::SafariZoneWest).then_some(WEST_LANDING);
     crossing_to(next, landing)
-        .or_else(|| DeterministicPolicy::route_toward(world_graph, actions, to))
+        .or_else(|| DeterministicPolicy::route_toward(world_graph, map, actions, to))
 }
 
 /// The overworld half of [`PolicyStep::SafariExit`] — walk out of the zone from wherever a hunt
@@ -320,7 +321,7 @@ pub fn exit(progress: &mut HuntProgress, state: &GameState, world_graph: &WorldG
     if !LAND_CHAIN.contains(&state.map.map) || state.map.map == Map::SafariZoneGate {
         return Hunt::Done; // on the mat, or already outside — either way the zone is behind us
     }
-    match step_toward(world_graph, actions, state.map.map, Map::SafariZoneGate) {
+    match step_toward(world_graph, &state.map, actions, Map::SafariZoneGate) {
         Some(action) => { progress.route_stuck = 0; Hunt::Walk(action) }
         None if progress.route_stuck < ROUTE_PATIENCE => { progress.route_stuck += 1; Hunt::Wait }
         None => {

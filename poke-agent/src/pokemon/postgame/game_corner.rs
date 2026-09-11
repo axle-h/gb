@@ -95,7 +95,7 @@ pub fn buy_coins_action(
     }
 
     if state.map.map != Map::GameCorner {
-        let action = DeterministicPolicy::route_toward(world_graph, actions, Map::GameCorner);
+        let action = DeterministicPolicy::route_toward(world_graph, &state.map, actions, Map::GameCorner);
         if action.is_none() {
             println!("[policy] want to buy coins, but no path to the Game Corner!");
             return None;
