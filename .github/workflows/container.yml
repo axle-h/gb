@@ -119,7 +119,7 @@ jobs:
       # with no `ENTRYPOINT`, so overriding it replaces the lot.
       - name: Start the container
         run: |
-          docker run -d --name gb-ci -p 8080:8080 gb:ci gb serve --policy random --new-run
+          docker run -d --name gb-ci -p 8080:8080 gb:ci poke-agent-web --policy random --new-run
 
       - name: It serves, it embedded the SPA, and it is emulating
         run: |

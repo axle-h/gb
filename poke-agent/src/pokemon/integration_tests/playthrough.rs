@@ -24,6 +24,7 @@ use super::*;
 /// curated states already cover. This list and the hand-cut states are two halves of one budget:
 /// these buy the ground the route crosses for nothing, and the curated ones buy the ground it never
 /// does (a bicycle, a full PC box, a ledge pocket a real run got stuck in).
+#[cfg(feature = "slow-tests")]
 pub(super) const SOAK_CHECKPOINTS: &[(&str, Map)] = &[
     ("soak-mt-moon", Map::MtMoonB2F),
     ("soak-ss-anne", Map::SSAnne1F),
@@ -47,6 +48,7 @@ pub(super) const SOAK_CHECKPOINTS: &[(&str, Map)] = &[
 /// over the following frames, and a state cut in that window loads into an agent that reads a map
 /// half of which is the previous one. A second is far longer than that takes and far shorter than
 /// the run spends anywhere it is worth starting a fuzzer from.
+#[cfg(feature = "slow-tests")]
 const CHECKPOINT_SETTLE_TICKS: u32 = 50;
 
 /// Re-cut every [`SOAK_CHECKPOINTS`] state by playing the eight-badge route once.
@@ -59,7 +61,7 @@ const CHECKPOINT_SETTLE_TICKS: u32 = 50;
 /// here would be paid by the seven-minute gate rather than by the regeneration nobody runs weekly.
 ///
 /// ```text
-/// cargo test --release --features full-playthrough,regen-fixtures --bin gb -- \
+/// cargo test --release --features slow-tests --lib -- \
 ///   regen_soak_checkpoints --exact --nocapture
 /// ```
 ///
@@ -67,7 +69,8 @@ const CHECKPOINT_SETTLE_TICKS: u32 = 50;
 /// checkpoint from — and it **fails** naming any declared checkpoint the run never stood on, so a
 /// map that drops off the route cannot leave a stale `.bin` behind pretending to still be on it.
 #[test]
-#[cfg(all(feature = "full-playthrough", feature = "regen-fixtures"))]
+#[cfg(feature = "slow-tests")]
+#[ignore = "tool: recuts every soak checkpoint; needs GB_REGEN_FIXTURES=1"]
 fn regen_soak_checkpoints() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/start-of-game-state.bin"),
@@ -127,11 +130,11 @@ fn regen_soak_checkpoints() {
 ///
 /// `RESUME_QUEUE_LEN` is the `queue_len=` from the last `[policy]` line of the stalled run.
 /// ```text
-/// RESUME_QUEUE_LEN=233 cargo test --release --features full-playthrough --bin gb -- \
+/// RESUME_QUEUE_LEN=233 cargo test --release --features slow-tests --lib -- \
 ///   probe_resume_playthrough --exact --ignored --nocapture
 /// ```
 #[test]
-#[cfg(feature = "diagnostics")]
+#[cfg(feature = "slow-tests")]
 #[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
 fn probe_resume_playthrough() {
     let Ok(bytes) = std::fs::read("target/test-artifacts/test_stall_state.bin") else {
@@ -183,7 +186,7 @@ fn probe_resume_playthrough() {
 ///
 /// It emulates every frame, so even in `--release` it takes ~7 min of wall clock — hence its own
 /// feature gate, separate from the leg chain:
-/// `cargo test --release --features full-playthrough full_playthrough`. The per-leg tests (each seeded
+/// `cargo test --release --features slow-tests full_playthrough`. The per-leg tests (each seeded
 /// from a saved fixture) cover the same ground quickly and in parallel.
 ///
 /// ⚠️ **Run this after every major work item and always before pushing** (see CLAUDE.md). It is the
@@ -203,7 +206,7 @@ fn probe_resume_playthrough() {
 /// while this very paragraph claimed it reached the Hall of Fame. It does not, on purpose, and the
 /// assertion at the bottom is what says where it does stop — not this.
 #[test]
-#[cfg_attr(not(feature = "full-playthrough"), ignore = "full playthrough; run with --features full-playthrough")]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "full playthrough; run with --features slow-tests")]
 fn full_playthrough() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/start-of-game-state.bin"),
@@ -313,7 +316,7 @@ fn full_playthrough() {
 /// same mechanism the paragraph above describes for the last step, one step earlier. Out of 516 the
 /// guard is unchanged in what it is for.
 #[test]
-#[cfg_attr(not(feature = "hall-of-fame"), ignore = "~26 min — run with --features hall-of-fame")]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "~26 min — run with --features slow-tests")]
 fn hall_of_fame_playthrough() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/start-of-game-state.bin"),

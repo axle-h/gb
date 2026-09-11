@@ -9,12 +9,12 @@
 //! |---|---|---|
 //! | default | `cargo test --release` | [`mechanics`] + the two navigation smoke tests in [`early_game`] |
 //! | leg chain | `cargo test --release --features slow-tests` | one test per `PolicyStep::*_steps()` leg, each seeded from a committed snapshot |
-//! | full game | `cargo test --release --features full-playthrough` | [`playthrough`] — a fresh save played to all 8 badges + Victory Road 2F. **Run it before pushing** |
+//! | full game | `cargo test --release --features slow-tests` | [`playthrough`] — a fresh save played to all 8 badges + Victory Road 2F. **Run it before pushing** |
 //!
 //! The leg tests form a linear pipeline: each consumes the snapshot the previous one produces, and
 //! together they cover the same ground as [`playthrough`] but in parallel and from disk. Those
 //! snapshots live in `src/pokemon/data/*.bin` and are **committed inputs** — a test only rewrites one
-//! when `--features regen-fixtures` is on (see [`fixture::TestFixture::save_state_named`]), so an
+//! when `--features slow-tests` is on (see [`fixture::TestFixture::save_state_named`]), so an
 //! ordinary run leaves the working tree clean.
 //!
 //! ⚠️ **Keep the chain's order matching `complete_game_steps`' `extend` order.** When they disagree,
@@ -67,7 +67,7 @@ pub(crate) mod cheats;
 pub(crate) mod coverage;
 
 /// **C2** — a run through `LlmPolicy` that cannot lose, and what one of its turns costs. The
-/// machinery is default-tier; the measured run is behind `--features godmode`. See
+/// machinery is default-tier; the measured run is behind `--features slow-tests`. See
 /// `docs/coverage-plan.md` §4.
 pub(crate) mod godmode;
 
@@ -101,7 +101,7 @@ mod playthrough;
 // Cheap, because each starts inside the jam instead of wandering into one. See the module docs.
 mod stalls;
 // Gated as a module: without the feature the test does not exist, so it never shows up as ignored.
-#[cfg(feature = "soak-tests")]
+#[cfg(feature = "slow-tests")]
 mod soak;
 mod postgame;
 

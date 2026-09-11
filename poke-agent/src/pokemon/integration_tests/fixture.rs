@@ -45,6 +45,12 @@ pub struct TestFixture {
     pub coverage: Option<super::coverage::CoverageLog>,
 }
 
+/// Whether this run may overwrite the fixtures it snapshots. Off by default: a test run must leave
+/// the working tree clean, or every run silently changes the next run's inputs.
+pub fn regenerating_fixtures() -> bool {
+    std::env::var_os("GB_REGEN_FIXTURES").is_some_and(|v| v != "0" && v != "")
+}
+
 impl TestFixture {
     pub fn new(save_state: &[u8], max_game_time: Duration, policy_steps: Vec<PolicyStep>) -> Self {
         Self::with_policy(save_state, max_game_time, Box::new(DeterministicPolicy::new(42, policy_steps)))
@@ -408,18 +414,18 @@ impl TestFixture {
         self.api().game_state()
     }
 
-    /// Rewrite a committed fixture — **only** with `--features regen-fixtures`.
+    /// Rewrite a committed fixture — **only** under `GB_REGEN_FIXTURES=1`.
     ///
     /// Every leg test snapshots its end state for the next leg to start from, which is how the chain
     /// is maintained. Doing that on an ordinary run means each run silently changes the next run's
     /// inputs, so a leg can "fail" purely because an earlier one re-saved its fixture slightly
     /// differently. Off by default; the call sites stay as documentation of the chain.
     pub fn save_state_named(&mut self, path: &str) -> Result<(), String> {
-        if cfg!(feature = "regen-fixtures") {
+        if regenerating_fixtures() {
             println!("regenerating fixture {path}");
             self.gb.save_state_to_file(path)
         } else {
-            println!("skipping fixture write to {path} (enable --features regen-fixtures)");
+            println!("skipping fixture write to {path} (set GB_REGEN_FIXTURES=1)");
             Ok(())
         }
     }
@@ -429,9 +435,9 @@ impl TestFixture {
 /// bag. When a leg test fails, this is the first thing to look at, because the usual cause is that its
 /// input snapshot no longer matches what the leg's `PolicyStep`s assume (a party member in a different
 /// slot, a missing HM, an empty wallet). Run with
-/// `cargo test --release --bin gb -- dump_fixture_states --exact --ignored --nocapture`.
+/// `cargo test --release -- dump_fixture_states --exact --ignored --nocapture`.
 #[test]
-#[cfg(feature = "diagnostics")]
+#[cfg(feature = "slow-tests")]
 #[ignore = "diagnostic, not a test; run with --ignored --nocapture"]
 fn dump_fixture_states() {
     // Every fixture some leg reads, in chain order.
@@ -490,11 +496,11 @@ fn dump_fixture_states() {
 /// `game_boy::tests::bench_core_throughput`.
 ///
 /// ```text
-/// cargo test --release --features bench --bin gb -- \
+/// cargo test --release --features slow-tests --lib -- \
 ///   pokemon::integration_tests::fixture::bench_emulation_throughput --exact --ignored --nocapture
 /// ```
 #[test]
-#[cfg(feature = "bench")]
+#[cfg(feature = "slow-tests")]
 #[ignore = "benchmark, not a test; run with --ignored --nocapture"]
 fn bench_emulation_throughput() {
     let mut fixture = TestFixture::new(

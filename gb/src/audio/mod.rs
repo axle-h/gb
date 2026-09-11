@@ -86,7 +86,7 @@ pub struct Audio {
     /// be reporting a machine 2.5% slower than the one that ships. The cost is to the two tests
     /// that need a control machine, which do not exist under `bench`; they are in the default
     /// tier, which is what gates everything.
-    #[cfg(all(test, not(feature = "bench")))]
+    #[cfg(all(test, not(feature = "slow-tests")))]
     batching: bool,
 }
 
@@ -111,7 +111,7 @@ impl Default for Audio {
             pending: 0,
             // Nothing has been measured yet, so the first update must flush rather than batch.
             channel_deadline: 0,
-            #[cfg(all(test, not(feature = "bench")))]
+            #[cfg(all(test, not(feature = "slow-tests")))]
             batching: true,
         }
     }
@@ -209,7 +209,7 @@ impl Audio {
     /// Turn the batch off, so a test has a per-instruction machine to compare a batching one
     /// against. **The only callers are tests**, and the field it sets does not exist in a release
     /// build or under `bench`; see [`Audio::deadline_after_flush`].
-    #[cfg(all(test, not(feature = "bench")))]
+    #[cfg(all(test, not(feature = "slow-tests")))]
     pub fn set_channel_batching(&mut self, batching: bool) {
         self.sync();
         self.batching = batching;
@@ -493,7 +493,7 @@ impl Audio {
     /// real thing that provides one. See `Audio::set_channel_batching`.
     #[inline]
     fn deadline_after_flush(&self) -> u64 {
-        #[cfg(all(test, not(feature = "bench")))]
+        #[cfg(all(test, not(feature = "slow-tests")))]
         {
             if !self.batching {
                 return 0;

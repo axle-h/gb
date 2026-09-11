@@ -1025,7 +1025,7 @@ mod tests {
     /// Writes the renders out as real PNGs so a human can look at them, and prints what each one
     /// would cost the model. ⚠️ Prints a report rather than asserting, so it stays `#[ignore]`d on
     /// top of its feature gate, as `CLAUDE.md`'s table requires of every `probe_`.
-    #[cfg(feature = "diagnostics")]
+    #[cfg(feature = "slow-tests")]
     #[test]
     #[ignore = "probe: prints what a map picture costs the model"]
     fn probe_map_images() {

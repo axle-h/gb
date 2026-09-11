@@ -2,7 +2,7 @@
 //! the transport look the way they do, and it is the thing to re-run before changing either.
 //!
 //! Behind the `bench` feature:
-//! `cargo test --release --features bench --bin gb -- video::bench --nocapture`
+//! `cargo test --release --features slow-tests --lib -- video::bench --nocapture`
 //!
 //! Everything here reads real frames out of the emulator actually playing, from four fixtures
 //! chosen for different screen behaviour: a bedroom (a room to walk around), a route (the whole
@@ -99,6 +99,7 @@ fn kbits(bytes: usize, frames: usize) -> f64 {
 /// The headline number, and the four alternatives it was chosen over. **Re-run this before changing
 /// the codec or the transport.**
 #[test]
+#[ignore = "benchmark: what the video stream costs, and what it beat"]
 fn bench_video_the_shipped_stack_and_what_it_beat() {
     println!("\n=== {SECONDS}s per capture at {FPS} fps, kbit/s ===");
     let (mut totals, mut all_frames) = ([0usize; 5], 0usize);

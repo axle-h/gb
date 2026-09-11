@@ -426,6 +426,7 @@ impl CoverageLog {
         self.entries.values().filter(|entry| entry.verdict == Verdict::Silent).count()
     }
 
+    #[cfg(feature = "slow-tests")]
     /// The kinds of action that went silent, and how many of each — which is what names the gap.
     pub fn silent_kinds(&self) -> BTreeMap<String, usize> {
         let mut out = BTreeMap::new();
@@ -436,6 +437,7 @@ impl CoverageLog {
         out
     }
 
+    #[cfg(feature = "slow-tests")]
     /// ⭐ **Every id the menu offered and the walk never chose, by kind** —
     /// `docs/coverage-plan.md` step 1.6, and the number the plan's own goal sentence turns on.
     ///
@@ -475,6 +477,7 @@ impl CoverageLog {
         )
     }
 
+    #[cfg(feature = "slow-tests")]
     /// Drop the table under `target/test-artifacts/coverage/`, where the rest of the suite puts its
     /// failure artifacts. Returns the path, or the reason it could not be written — which is never
     /// worth failing a test over.
@@ -730,6 +733,7 @@ mod tests {
 
 // ── C3 §5.1: the frontier ────────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "slow-tests")]
 /// A brain that takes every row it is offered, once, and then goes looking for more.
 ///
 /// `docs/coverage-plan.md` §5.1:
@@ -846,6 +850,7 @@ pub struct ExploringBrain {
     pub boxed_in_at: Vec<String>,
 }
 
+#[cfg(feature = "slow-tests")]
 /// The PC operations the walk exercises, in the order it tries them, as
 /// (`move`, `op`, extra arguments).
 ///
@@ -860,22 +865,26 @@ const PC_OPS: [(&str, &str, &str); 4] = [
     ("pc_pokemon", "change_box", r#""box":2"#),
 ];
 
+#[cfg(feature = "slow-tests")]
 /// Consecutive rowless turns before the walk gives up on where it is standing and flies out.
 /// Generous: a map change settles over a few turns and a menu is briefly empty while it does.
 const BOXED_IN_PATIENCE: usize = 20;
 
+#[cfg(feature = "slow-tests")]
 /// A row that leaves the map. Matched on the id's kind, which is the one part of a row that is a key
 /// rather than prose.
 fn is_a_way_out(id: &str) -> bool {
     matches!(id.rsplit(':').next(), Some("Warp" | "Connection" | "ConnectionWater"))
 }
 
+#[cfg(feature = "slow-tests")]
 impl Default for ExploringBrain {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "slow-tests")]
 impl ExploringBrain {
     pub fn new() -> Self {
         Self {
@@ -1015,6 +1024,7 @@ impl ExploringBrain {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
     fn respond(
         &mut self,
@@ -1467,7 +1477,7 @@ pub const COVERAGE_STARTS: &[Start] = &[
 /// ⚠️ **`maps` and `ids` are sets rather than counts, because the union is the whole point.** Eight
 /// walks that each reach 30 maps have reached somewhere between 30 and 240 of them, and only the
 /// sets say which.
-#[cfg(feature = "coverage-tests")]
+#[cfg(feature = "slow-tests")]
 struct WalkOutcome {
     name: &'static str,
     ids: std::collections::BTreeSet<String>,
@@ -1511,7 +1521,7 @@ struct WalkOutcome {
 /// one walk per region and the union of what they reached. See [`Start`] for why one walk is not
 /// enough. The default is `phase0`, which is the sweep every number in the plan was taken from.
 #[test]
-#[cfg(feature = "coverage-tests")]
+#[cfg(feature = "slow-tests")]
 fn coverage_walk_of_the_finished_game() {
     // How much game time **each** walk may spend, in game-minutes, from `GB_COVERAGE_MINUTES`.
     //
@@ -1672,6 +1682,7 @@ fn coverage_walk_of_the_finished_game() {
     assert!(discovered > 10, "only {discovered} ids were ever offered; the walk did not happen");
 }
 
+#[cfg(feature = "slow-tests")]
 /// ⭐ **The maps no walk entered, which is the other half of the union and the input to
 /// `docs/coverage-plan.md`'s step 1.4.**
 ///
@@ -1723,6 +1734,7 @@ fn unreached_report(entered: &std::collections::BTreeSet<&String>) -> String {
     lines.join("\n")
 }
 
+#[cfg(feature = "slow-tests")]
 /// **Headers the ROM carries that no warp in any map targets**, so nothing can walk into one.
 ///
 /// ⚠️ **Checked against `pokered/data/maps/objects/` rather than assumed**: `grep -rl warp_event.*
@@ -1737,10 +1749,12 @@ const UNREACHABLE_DUPLICATES: [crate::pokemon::map::Map; 4] = [
     crate::pokemon::map::Map::UndergroundPathRoute7Copy,
 ];
 
+#[cfg(feature = "slow-tests")]
 /// Why a map number is or is not something a walk could have entered. See [`unreached_report`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MapBucket { Padding, LinkCable, Duplicate, Reachable }
 
+#[cfg(feature = "slow-tests")]
 fn classify(map: crate::pokemon::map::Map, name: &str) -> MapBucket {
     use crate::pokemon::map::Map;
     match map {
@@ -1751,6 +1765,7 @@ fn classify(map: crate::pokemon::map::Map, name: &str) -> MapBucket {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 /// Game-minutes per walk below which a sweep is a smoke run rather than a measurement, and the
 /// union-wide checks are printed rather than asserted.
 ///
@@ -1759,6 +1774,7 @@ fn classify(map: crate::pokemon::map::Map, name: &str) -> MapBucket {
 /// — and the report says which side of it a run was on.
 const COVERAGE_BUDGET_MINUTES: u64 = 180;
 
+#[cfg(feature = "slow-tests")]
 /// **What an id ends in**, which is [`MetaTile::id_kind`] and therefore the one name a family of
 /// rows shares.
 ///
@@ -1773,6 +1789,7 @@ pub fn kind_of(id: &str) -> String {
     }
 }
 
+#[cfg(feature = "slow-tests")]
 /// ⭐ **Every kind of row the game can offer, against the kinds the sweep was actually offered** —
 /// `docs/coverage-plan.md` step 1.5.
 ///
@@ -1895,7 +1912,7 @@ fn kind_cross_check(offered: &std::collections::BTreeSet<&String>, pc_ops: usize
 
 /// One walk, from one [`Start`]. Everything above it is knobs and arithmetic; this is the walk that
 /// every number in `docs/coverage-plan.md` §2 came out of.
-#[cfg(feature = "coverage-tests")]
+#[cfg(feature = "slow-tests")]
 fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> WalkOutcome {
     use crate::pokemon::integration_tests::cheats::Cheats;
     use crate::pokemon::integration_tests::llm_harness::LlmRun;

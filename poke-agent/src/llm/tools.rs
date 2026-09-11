@@ -45,6 +45,7 @@ use crate::pokemon::bag::BagItem;
 use crate::pokemon::battle::BattleAction;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::Map;
+#[cfg(test)]
 use crate::pokemon::map_metadata::PlayerFacingDirection;
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::observe;
@@ -2112,6 +2113,7 @@ fn button_arguments(arguments: &Value) -> Result<Vec<JoypadButton>, String> {
 
 /// Compare two names the way a model spells them against the way the code spells them: `"HM01 Cut"`,
 /// `"hm01_cut"` and `"Hm01Cut"` are all the same item, and none of the three is worth a rejection.
+#[cfg(test)]
 fn facing_by_name(name: &str) -> Option<PlayerFacingDirection> {
     [
         PlayerFacingDirection::Up,

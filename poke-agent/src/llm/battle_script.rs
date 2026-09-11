@@ -1270,7 +1270,7 @@ fn indented(lines: &[String]) -> String {
 /// One of [`SCENARIOS`]' states, for the tests in [`crate::llm::battle_report`] and for
 /// `prompt::probe_turn_requests` — a healthy lead in a wild battle. Here rather than duplicated
 /// there, so the modules that describe a battle cannot drift about what one looks like.
-#[cfg(any(test, feature = "diagnostics"))]
+#[cfg(any(test))]
 pub fn test_scenario() -> GameState {
     scenarios::healthy_wild()
 }

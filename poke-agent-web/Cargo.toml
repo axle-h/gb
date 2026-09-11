@@ -7,7 +7,6 @@ description = "Serves a poke-agent run: the game, the streams and the web UI."
 [features]
 # The host's one long test and the two stream benches.
 slow-tests = []
-bench = []
 
 [dependencies]
 gb = { path = "../gb" }

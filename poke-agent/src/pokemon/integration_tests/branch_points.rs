@@ -654,7 +654,8 @@ fn a_trade_with_nothing_to_give_backs_out_and_says_so() {
 
 /// Cut Oak's lab one A press before the starter branch.
 #[test]
-#[cfg(feature = "regen-fixtures")]
+#[cfg(feature = "slow-tests")]
+#[ignore = "tool: recuts the Oak's Lab fixture; needs GB_REGEN_FIXTURES=1"]
 fn regen_oaks_lab_fixture() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/start-of-game-state.bin"),
@@ -690,7 +691,8 @@ fn regen_oaks_lab_fixture() {
 /// reachable only by walking at the fossils — which is the branch action itself. He is left where he
 /// is, and each arm pays for him: see [`fossil_arm`] for what that costs the intent list.
 #[test]
-#[cfg(feature = "regen-fixtures")]
+#[cfg(feature = "slow-tests")]
+#[ignore = "tool: recuts the Mt Moon fossils fixture; needs GB_REGEN_FIXTURES=1"]
 fn regen_mt_moon_fossils_fixture() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/mt-moon.bin"),
@@ -743,7 +745,8 @@ fn regen_mt_moon_fossils_fixture() {
 /// is there: with six members the gift takes `SendNewMonToBox` and the arms stop being about the
 /// choice.
 #[test]
-#[cfg(feature = "regen-fixtures")]
+#[cfg(feature = "slow-tests")]
+#[ignore = "tool: recuts the dojo-prize fixture; needs GB_REGEN_FIXTURES=1"]
 fn regen_dojo_prize_fixture() {
     /// Omanyte, which `postgame-lapras.bin` carries in slot 4 — dex-registered, so banking it is free.
     const BANK_SLOT: u8 = 4;
@@ -775,7 +778,8 @@ fn regen_dojo_prize_fixture() {
 /// hold it and `IsItemInBag` hands the Bicycle over as a gift, and the same clerk without it opens a
 /// BICYCLE/CANCEL mart menu at ¥1,000,000 instead.
 #[test]
-#[cfg(feature = "regen-fixtures")]
+#[cfg(feature = "slow-tests")]
+#[ignore = "tool: recuts the bike-shop fixture; needs GB_REGEN_FIXTURES=1"]
 fn regen_bike_shop_fixture() {
     let mut steps = PolicyStep::bicycle_steps();
     steps.retain(|step| !matches!(step, PolicyStep::Interact(_)));

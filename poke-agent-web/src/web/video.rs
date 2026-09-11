@@ -521,5 +521,5 @@ impl Reader<'_> {
 #[cfg(test)]
 mod tests;
 
-#[cfg(all(test, feature = "bench"))]
+#[cfg(all(test, feature = "slow-tests"))]
 mod bench;

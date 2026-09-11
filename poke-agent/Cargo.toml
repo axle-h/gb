@@ -7,15 +7,6 @@ description = "Plays Pokémon Red on a gb emulator, through the game's own memor
 [features]
 # The per-badge legs, the playthroughs, the soak, the coverage walk and the probes.
 slow-tests = []
-bench = []
-coverage-tests = []
-diagnostics = []
-full-playthrough = []
-godmode = []
-hall-of-fame = []
-regen-fixtures = []
-soak-tests = []
-very-slow-tests = []
 
 [dependencies]
 gb = { path = "../gb" }

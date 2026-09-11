@@ -171,14 +171,14 @@ pub mod mooneye {
         ///
         /// ```text
         /// MOONEYE_SRC=/path/to/mooneye-test-suite/emulator-only \
-        ///   cargo test --release --features diagnostics --bin gb -- compress_mooneye_roms --ignored --nocapture
+        ///   cargo test --release --features slow-tests --lib -- compress_mooneye_roms --ignored --nocapture
         /// ```
         ///
         /// Same shape as the blip golden-vector regeneration: a tool, not an assertion, so it sits
         /// behind `diagnostics` and is `#[ignore]`d on top of that — the ignored list is a backlog of
         /// *blocked* tests, and a tool in it reads as one.
         #[test]
-        #[cfg(feature = "diagnostics")]
+        #[cfg(feature = "slow-tests")]
         #[ignore = "tool: rebuilds the committed mooneye ROMs from an extracted release"]
         fn compress_mooneye_roms() {
             let src = std::env::var("MOONEYE_SRC").expect("set MOONEYE_SRC to .../emulator-only");

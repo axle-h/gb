@@ -1031,7 +1031,8 @@ impl<'a> Tile<'a> {
         Self(data)
     }
 
-    /// One row of the tile, as DMG shades. Only the tilemap dump and its test read a whole row.
+    /// One row of the tile, as DMG shades. Only the tilemap test reads a whole row.
+    #[cfg(test)]
     pub fn line(&self, y: usize) -> [DMGColor; TILE_PIXELS] {
         debug_assert!(y < TILE_PIXELS, "Line index out of bounds for tile");
         let mut line = [DMGColor::White; TILE_PIXELS];

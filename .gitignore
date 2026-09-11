@@ -1,15 +1,17 @@
 /target
+# A test writes its artifacts relative to its own crate root, not the workspace root.
+**/target/
 .idea/
 # Claude Code's own per-project state is local.
 .claude/
-# Compiled golden-vector generator (tools/blip-golden/build.sh builds into target/)
-/tools/blip-golden/gen_golden
+# Compiled golden-vector generator (gb/tools/blip-golden/build.sh builds into target/)
+/gb/tools/blip-golden/gen_golden
 
-# The SPA: `pnpm run build` in `web/` produces `web/dist`. The directory must exist for the crate to
-# compile, which is what the committed `web/dist/.gitkeep` is for.
-/web/node_modules/
-/web/dist/*
-!/web/dist/.gitkeep
+# The SPA: `pnpm run build` in `poke-agent-web/web/` produces `web/dist`. The directory must exist
+# for the crate to compile, which is what the committed `.gitkeep` is for.
+/poke-agent-web/web/node_modules/
+/poke-agent-web/web/dist/*
+!/poke-agent-web/web/dist/.gitkeep
 
 # Run directories, `$GB_RUN_DIR` (default `./runs`).
 /runs

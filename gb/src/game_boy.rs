@@ -161,13 +161,13 @@ mod tests {
     /// ablation ceilings taken with it, and the ranked list of what to do about them.
     ///
     /// ```text
-    /// cargo test --release --features bench --bin gb -- \
+    /// cargo test --release --features slow-tests --lib -- \
     ///   game_boy::tests::bench_core_throughput --exact --nocapture
     /// ```
     ///
     /// Behind a feature rather than `#[ignore]`d, so a benchmark never shows up in the ignored
     /// count next to tests that are actually blocked.
-    #[cfg(feature = "bench")]
+    #[cfg(feature = "slow-tests")]
     #[test]
     fn bench_core_throughput() {
         use std::time::Instant;
@@ -191,6 +191,7 @@ mod tests {
         let audio_output = std::env::var("BENCH_AUDIO").unwrap_or_default() != "off";
 
         fn pokemon_in_game() -> GameBoy {
+            use crate::ram::ROM;
             use crate::test_fixtures::symbols;
             let mut gb = GameBoy::dmg(crate::test_fixtures::POKERED);
             gb.load_state(crate::test_fixtures::AT_CELADON).expect("load fixture");
@@ -322,7 +323,7 @@ mod tests {
     /// screen would ever have shown.
     // Needs a control machine that never batches, which the `bench` build does not have —
     // see `Audio::batching`. Runs in the default tier, which is where it matters.
-    #[cfg(not(feature = "bench"))]
+    #[cfg(not(feature = "slow-tests"))]
     #[test]
     fn deadline_driving_the_channels_is_invisible_to_the_game() {
         let expected = parse_png(crate::roms::blargg_dmg_sound::EXPECTED_ALL);
@@ -385,7 +386,7 @@ mod tests {
     /// trailing silence is shorter. Everything before it is complete and must match exactly.
     // Needs a control machine that never batches, which the `bench` build does not have —
     // see `Audio::batching`. Runs in the default tier, which is where it matters.
-    #[cfg(not(feature = "bench"))]
+    #[cfg(not(feature = "slow-tests"))]
     #[test]
     fn batching_the_channels_under_a_listener_is_inaudible() {
         /// One frame: 154 scanlines x 456 T-cycles.

@@ -87,7 +87,8 @@ fn can_navigate_mt_moon() {
 /// nothing the default tier's `can_navigate_to_pewter_city` and `can_navigate_mt_moon` do not.
 /// Regenerate the chain in order from here — see the `test-suite` skill.
 #[test]
-#[cfg(feature = "regen-fixtures")]
+#[cfg(feature = "slow-tests")]
+#[ignore = "tool: recuts at-cerulean.bin; needs GB_REGEN_FIXTURES=1"]
 fn regen_at_cerulean_fixture() {
     let mut steps = PolicyStep::pallet_to_cerulean_steps();
     steps.extend(PolicyStep::mt_moon_traversal());

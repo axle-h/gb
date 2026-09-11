@@ -14,7 +14,7 @@ data:
   #
   # ⚠️ **This used to be `--policy` on the container's `args`, and it is here now so that switching
   # the run is an edit to a ConfigMap rather than to a Deployment's command line.** The container's
-  # `args` are `["gb", "serve"]` and name no policy at all; `--policy` still exists and still wins,
+  # `args` are `["poke-agent-web"]` and name no policy at all; `--policy` still exists and still wins,
   # which makes it the override for a one-off `kubectl -n gb set args`, not the normal way in.
   #
   # ⚠️ **Editing this restarts nothing on its own.** `envFrom` is read once at process start and the
