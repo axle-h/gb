@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::fmt::Display;
 use std::time::Duration;
 use gb::cycles::MachineCycles;
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::battle::BattleAction;

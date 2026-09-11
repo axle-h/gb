@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
 use crate::llm::prompt::ApiSnapshot;
 use crate::llm::battle_script::MAX_SOURCE as MAX_BATTLE_SCRIPT;
@@ -2328,7 +2328,7 @@ mod tests {
     fn the_warp_the_player_came_in_by_says_so() {
         use crate::pokemon::world_graph::Arrival;
         let state = fixture_state();
-        let door = gb::geometry::Point8 { x: 5, y: 11 };
+        let door = poke_core::geometry::Point8 { x: 5, y: 11 };
         let marked = overworld_menu(&state, Some(Arrival { map: state.map.map, at: door, from: Some(Map::PalletTown) }));
         let row = |menu: &[MenuItem], id: &str| menu.iter().find(|m| m.id == id).expect(id).description.clone();
         assert_eq!(row(&marked, "OaksLab:5,11:Warp"), "take the warp to PalletTown, arriving at (12, 12); the way you came in");

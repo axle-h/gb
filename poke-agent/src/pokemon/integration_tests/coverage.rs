@@ -15,7 +15,7 @@ pub enum Verdict {
     /// The game stopped the player to say something, and here is what it said.
     Blocked { times: usize, message: Option<String> },
     /// The menu offered a row the agent could not then execute.
-    Defect { reason: String, at: Option<gb::geometry::Point8> },
+    Defect { reason: String, at: Option<poke_core::geometry::Point8> },
     /// The action was taken and the agent never said what became of it.
     Silent,
 }
@@ -1182,7 +1182,7 @@ fn kind_cross_check(offered: &std::collections::BTreeSet<&String>, pc_ops: usize
     use crate::pokemon::tile::{HiddenObject, JumpDirection, MetaTile};
     use crate::pokemon::postgame::fishing::Rod;
     use crate::pokemon::map::Map;
-    use gb::geometry::Point8;
+    use poke_core::geometry::Point8;
 
     /// Whether `MetaTileMap::actions` can put a `MetaTile` on the menu, and if not, why.
     enum Expect {

@@ -1,6 +1,6 @@
 # Graphics out of the cartridge, and the map picture
 
-Read before touching `poke-agent/src/pokemon/{rom_gfx,badge_gfx,mon_gfx,map_gfx,font}.rs`,
+Read before touching `poke-core/src/{rom_gfx,badge_gfx,mon_gfx,map_gfx,font}.rs`,
 `poke-agent-web/src/web/sprites.rs` or `poke-agent/src/llm/map_image.rs`. Every rule here is also a
 comment where it applies.
 

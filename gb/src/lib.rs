@@ -19,7 +19,6 @@ pub mod mbc;
 pub mod mmu;
 pub mod model;
 pub mod opcode;
-pub mod pointer;
 pub mod ppu;
 pub mod ram;
 pub mod registers;

@@ -1,7 +1,7 @@
 //! The legendaries: Zapdos, Moltres, Mewtwo. A ball fails whenever `Rand1` less the status bonus
 //! exceeds the catch rate, whatever the HP, so against catch rate 3 a status is the only lever.
 
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use crate::pokemon::bag::BagItem;
 use crate::pokemon::battle::{BattleAction, BattleType};
 use crate::pokemon::item::ItemId;

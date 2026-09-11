@@ -1,0 +1,73 @@
+//! The eight gym badges, decoded from the cartridge. Each gym is eight tiles, a 2×2 face then its
+//! 2×2 badge.
+
+use crate::rom_gfx::{TILE_BYTES, tile_grid_shades};
+use crate::symbols::pokered_symbols::GymLeaderFaceAndBadgeTileGraphics;
+
+pub const BADGE_PX: usize = 16;
+pub const BADGE_COUNT: usize = 8;
+
+const TILES_PER_GYM: usize = 8;
+
+/// One badge as shade indices, row-major, `0` (lightest) to `3` (darkest), not colours.
+pub fn badge_shades(index: usize) -> [u8; BADGE_PX * BADGE_PX] {
+    assert!(index < BADGE_COUNT, "there are only {BADGE_COUNT} badges");
+    let first_tile = index * TILES_PER_GYM + 4; // past the gym leader's face
+    let shades = tile_grid_shades(GymLeaderFaceAndBadgeTileGraphics + (first_tile * TILE_BYTES) as u16, 2, 2);
+    shades.try_into().expect("2×2 tiles is 16×16 pixels")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rom_gfx::rom_slice;
+
+    fn tile_bytes(tile: usize) -> &'static [u8] {
+        let at = tile * TILE_BYTES;
+        &rom_slice(GymLeaderFaceAndBadgeTileGraphics)[at..at + TILE_BYTES]
+    }
+
+    /// Eight distinct badge shapes decode, where one tile out would give half a face.
+    #[test]
+    fn eight_distinct_badges_come_out_of_the_rom() {
+        let badges: Vec<_> = (0..BADGE_COUNT).map(badge_shades).collect();
+
+        for (index, shades) in badges.iter().enumerate() {
+            let mut used = shades.to_vec();
+            used.sort_unstable();
+            used.dedup();
+            assert!(used.len() >= 3, "badge {index} uses only {} shades — {used:?}", used.len());
+
+            let dark = shades.iter().filter(|&&s| s >= 2).count();
+            assert!(
+                (BADGE_PX * 2..BADGE_PX * BADGE_PX * 3 / 4).contains(&dark),
+                "badge {index} has {dark} dark pixels of {}",
+                BADGE_PX * BADGE_PX,
+            );
+        }
+
+        for (a, first) in badges.iter().enumerate() {
+            for (b, second) in badges.iter().enumerate().skip(a + 1) {
+                assert_ne!(first, second, "badges {a} and {b} decoded identically");
+            }
+        }
+    }
+
+    /// A badge's four quadrants are four consecutive tiles, decoded here by hand.
+    #[test]
+    fn the_quadrants_are_four_consecutive_tiles() {
+        let shades = badge_shades(0);
+        for tile in 0..4 {
+            let bytes = tile_bytes(4 + tile);
+            let (left, top) = ((tile % 2) * 8, (tile / 2) * 8);
+            for y in 0..8 {
+                let (low, high) = (bytes[y * 2], bytes[y * 2 + 1]);
+                for x in 0..8 {
+                    let expected = ((high >> (7 - x)) & 1) << 1 | ((low >> (7 - x)) & 1);
+                    assert_eq!(shades[(top + y) * BADGE_PX + left + x], expected, "({x}, {y}) of tile {tile}");
+                }
+            }
+        }
+    }
+
+}

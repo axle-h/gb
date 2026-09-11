@@ -92,7 +92,7 @@ pub enum JoypadButton {
     Start,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Decode, Encode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Decode, Encode, serde::Serialize, serde::Deserialize)]
 pub struct JoypadButtonState {
     pub up: bool,
     pub down: bool,
@@ -129,6 +129,38 @@ impl JoypadButtonState {
             JoypadButton::Select => self.select = pressed,
             JoypadButton::Start => self.start = pressed,
         }
+    }
+}
+
+/// What a player held, frame by frame: the buttons from each change onward, released before the
+/// first. Frames count from wherever the tape is started; see [`crate::game_boy::GameBoy::play_tape`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Decode, Encode, serde::Serialize, serde::Deserialize)]
+pub struct JoypadTape {
+    changes: Vec<(u64, JoypadButtonState)>,
+}
+
+impl JoypadTape {
+    /// Hold `buttons` from `frame` on. Changes are appended in frame order; a second change on
+    /// the same frame replaces the first.
+    pub fn hold(&mut self, frame: u64, buttons: JoypadButtonState) {
+        match self.changes.last_mut() {
+            Some((last, held)) if *last == frame => *held = buttons,
+            Some((last, _)) => {
+                assert!(*last < frame, "a tape is recorded in frame order: {frame} after {last}");
+                self.changes.push((frame, buttons));
+            }
+            None => self.changes.push((frame, buttons)),
+        }
+    }
+
+    pub fn buttons_at(&self, frame: u64) -> JoypadButtonState {
+        let after = self.changes.partition_point(|(start, _)| *start <= frame);
+        after.checked_sub(1).map(|i| self.changes[i].1).unwrap_or_default()
+    }
+
+    /// The frame of the last change, after which the tape holds still.
+    pub fn last_change(&self) -> Option<u64> {
+        self.changes.last().map(|(frame, _)| *frame)
     }
 }
 
@@ -201,5 +233,23 @@ mod tests {
             joypad.press_button(button);
         }
         assert!(!joypad.is_activation_pending());
+    }
+
+    #[test]
+    fn a_tape_holds_each_change_until_the_next() {
+        let mut tape = JoypadTape::default();
+        let a = JoypadButtonState { a: true, ..Default::default() };
+        let up = JoypadButtonState { up: true, ..Default::default() };
+        tape.hold(3, a);
+        tape.hold(5, up);
+        tape.hold(5, a);
+        assert_eq!(tape.buttons_at(0), JoypadButtonState::default());
+        assert_eq!(tape.buttons_at(3), a);
+        assert_eq!(tape.buttons_at(4), a);
+        assert_eq!(tape.buttons_at(100), a, "the last change on a frame wins");
+        assert_eq!(tape.last_change(), Some(5));
+
+        let json = serde_json::to_string(&tape).unwrap();
+        assert_eq!(serde_json::from_str::<JoypadTape>(&json).unwrap(), tape);
     }
 }

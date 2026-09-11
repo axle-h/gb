@@ -4,6 +4,9 @@ use crate::cycles::MachineCycles;
 use crate::model::Model;
 use crate::savestate::{SectionReader, SectionWriter};
 
+mod harness;
+pub use harness::{Breakpoint, Stop};
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct GameBoy {
     core: Core

@@ -6,7 +6,7 @@ use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use crate::pokemon::{GameState, PokemonApi};
 use crate::pokemon::actions::OverworldAction;
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use crate::pokemon::badge::Badge;
 use crate::pokemon::bag::BagItem;
 use crate::pokemon::battle::{is_ghost_battle, BattleAction, BattleType};
@@ -163,7 +163,7 @@ impl RandomPolicy {
         if !total.is_finite() || total <= 0.0 {
             return actions.into_iter().choose(rng);
         }
-        let mut draw = rand::Rng::random_range(rng, 0.0..total);
+        let mut draw = rand::RngExt::random_range(rng, 0.0..total);
         for (action, weight) in actions.into_iter().zip(weights) {
             draw -= weight;
             if draw <= 0.0 {
@@ -601,9 +601,9 @@ pub enum PolicyStep {
     /// Activate Strength using the party mon `target` names (an HM-slave that knows it).
     UseStrength { target: PartyRef },
     /// Push a boulder onto the Strength switch at `switch`, solving the floor's puzzle.
-    SolveBoulders { switch: gb::geometry::Point8, boulder: Option<gb::geometry::Point8> },
+    SolveBoulders { switch: poke_core::geometry::Point8, boulder: Option<poke_core::geometry::Point8> },
     /// Push a boulder into floor `hole` so it falls to the floor below (Victory Road 3F).
-    DropBoulderInHole { hole: gb::geometry::Point8, boulder: Option<gb::geometry::Point8> },
+    DropBoulderInHole { hole: poke_core::geometry::Point8, boulder: Option<poke_core::geometry::Point8> },
     /// Check the Vermilion Gym's two switch cans in turn, unlocking the door to Lt. Surge.
     SolveTrashCans,
     /// Face the hidden switch at `at` on `map` and press A until a reachable warp to `reveals`
@@ -629,38 +629,38 @@ pub enum FieldMove {
     /// Use the Cut field move on the tree the player is currently facing.
     CutTree,
     /// Walk to the tile at `target` and press A.
-    CheckTrashCan { target: gb::geometry::Point8, facing: Option<crate::pokemon::map_metadata::PlayerFacingDirection> },
+    CheckTrashCan { target: poke_core::geometry::Point8, facing: Option<crate::pokemon::map_metadata::PlayerFacingDirection> },
     /// Drive the elevator menu at `panel` to index `floor`, then ride the redirected warp out.
-    UseElevator { panel: gb::geometry::Point8, floor: u8 },
+    UseElevator { panel: poke_core::geometry::Point8, floor: u8 },
     /// Face the sprite at `target`, then use bag `item` on it (START → ITEM → select → USE).
-    UseFieldItem { item: ItemId, target: gb::geometry::Point8 },
+    UseFieldItem { item: ItemId, target: poke_core::geometry::Point8 },
     /// A party-menu script: walk to `npc`, a (tile, facing) pair from `actions()` because
     /// `route_to_face_dir` cannot reach behind a counter, then pick `slot`.
     UsePartyScript {
         script: crate::pokemon::postgame::gifts::PartyScript,
         slot: u8,
-        npc: (gb::geometry::Point8, crate::pokemon::map_metadata::PlayerFacingDirection),
+        npc: (poke_core::geometry::Point8, crate::pokemon::map_metadata::PlayerFacingDirection),
     },
     /// A field move from the party menu: the mon at `slot`, the entry at `move_index`.
     UseFieldMove { slot: u8, move_index: u8 },
     /// Toss `item` from the bag (START → ITEM → the item → TOSS → quantity → YES) to free a slot.
     TossItem { item: ItemId },
     /// Move `qty` of `item` between the bag and PC item storage at the PC at `pc`.
-    UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp, item: ItemId, qty: u8, pc: gb::geometry::Point8 },
+    UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp, item: ItemId, qty: u8, pc: poke_core::geometry::Point8 },
     /// Walk to the PC at `pc` and drive Bill's PC box menus.
-    UsePcBox { op: crate::pokemon::postgame::pc_box::PcBoxOp, pc: gb::geometry::Point8 },
+    UsePcBox { op: crate::pokemon::postgame::pc_box::PcBoxOp, pc: poke_core::geometry::Point8 },
 
     Fly { to: Map },
     /// Cast `rod` once at the water tile `at`.
-    Fish { rod: crate::pokemon::postgame::fishing::Rod, at: gb::geometry::Point8 },
+    Fish { rod: crate::pokemon::postgame::fishing::Rod, at: poke_core::geometry::Point8 },
     /// Walk to the clerk at `clerk` and sell `item`.
-    SellToMart { item: BagItem, clerk: (gb::geometry::Point8, crate::pokemon::map_metadata::PlayerFacingDirection) },
+    SellToMart { item: BagItem, clerk: (poke_core::geometry::Point8, crate::pokemon::map_metadata::PlayerFacingDirection) },
     /// Walk to the prize vendor and buy `prize` with coins.
     RedeemPrize { prize: crate::pokemon::postgame::game_corner::Prize },
     /// Use bag `item` on `target` from the overworld.
     UseBagItem { item: ItemId, target: crate::pokemon::postgame::items::UseTarget },
     /// Shove the boulder at `boulder` one tile in `dir`; Strength must be armed.
-    PushBoulder { boulder: gb::geometry::Point8, dir: gb::joypad::JoypadButton },
+    PushBoulder { boulder: poke_core::geometry::Point8, dir: gb::joypad::JoypadButton },
 }
 
 /// The Pokémon Mansion floors, whose statue switches trigger only when faced from below.

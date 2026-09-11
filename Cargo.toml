@@ -1,5 +1,5 @@
 [workspace]
-members = ["gb", "poke-agent", "poke-agent-sdl", "poke-agent-web"]
+members = ["gb", "poke-core", "pokered", "pokered-sdl", "poke-agent", "poke-agent-sdl", "poke-agent-web"]
 resolver = "3"
 
 # The integration tests are bound by raw emulation speed; these two make every test faster at once.
@@ -9,6 +9,9 @@ codegen-units = 1
 
 # Tests emulate every frame; unoptimised `poke-agent` frames also overflow the test harness's stack.
 [profile.dev.package.gb]
+opt-level = 3
+
+[profile.dev.package.poke-core]
 opt-level = 3
 
 [profile.dev.package.poke-agent]

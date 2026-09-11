@@ -1,11 +1,11 @@
 use std::cmp::PartialEq;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
 use crate::pokemon::map::Map;
 use crate::pokemon::actions::OverworldAction;
-use crate::pokemon::map_metadata::{CurrentMap, PlayerFacingDirection};
+use crate::pokemon::map_metadata::{facing_button, CurrentMap, PlayerFacingDirection};
 use crate::pokemon::tile::JumpDirection;
 use crate::pokemon::sprite::Sprite;
 use crate::pokemon::tile::{HiddenObject, MetaTile};
@@ -1084,7 +1084,7 @@ impl MetaTileMap {
 
             let (_, came_from) = best_dist_from(&dest).unwrap();
             let mut route = reconstruct(dest, came_from);
-            let face_button: JoypadButton = face_dir.into();
+            let face_button: JoypadButton = facing_button(face_dir);
             if route.is_empty() {
                 if face_dir != self.player_direction { route.push(face_button); }
             } else if route.last() != Some(&face_button) {
@@ -1163,7 +1163,7 @@ impl MetaTileMap {
             {
                 let (_, came_from) = best_dist_from(&dest).unwrap();
                 let mut route = reconstruct(dest, came_from);
-                let face_button: JoypadButton = face_dir.into();
+                let face_button: JoypadButton = facing_button(face_dir);
                 if route.is_empty() {
                     if face_dir != self.player_direction { route.push(face_button); }
                 } else if route.last() != Some(&face_button) {
@@ -1250,7 +1250,7 @@ impl MetaTileMap {
             else { continue };
             let (_, came_from) = best_dist_from(&dest).unwrap();
             let mut route = reconstruct(dest, came_from);
-            let face_button: JoypadButton = face_dir.into();
+            let face_button: JoypadButton = facing_button(face_dir);
             if route.is_empty() {
                 if face_dir != self.player_direction { route.push(face_button); }
             } else if route.last() != Some(&face_button) {
@@ -1285,7 +1285,7 @@ impl MetaTileMap {
                 // The walk is to the plan's first push; the driver re-plans from there.
                 let mut route = reconstruct(stand, &came);
                 if route.is_empty() {
-                    let facing: JoypadButton = self.player_direction.into();
+                    let facing: JoypadButton = facing_button(self.player_direction);
                     if facing != push { route.push(push); }
                 } else if route.last() != Some(&push) {
                     route.push(push);
@@ -1330,7 +1330,7 @@ impl MetaTileMap {
                 else if at.x as usize == self.width.saturating_sub(1) { Some(PlayerFacingDirection::Right) }
                 else { None };
             return match out {
-                Some(facing) => WarpTrigger::HoldDirection(facing.into()),
+                Some(facing) => WarpTrigger::HoldDirection(facing_button(facing)),
                 None => WarpTrigger::Impossible,
             };
         }
@@ -1349,7 +1349,7 @@ impl MetaTileMap {
             }
             let front = self.raw_tile_ids[x as usize + y as usize * self.width];
             if crate::pokemon::map_header::TileSetId::warp_carpet_tile_ids(facing).contains(&front) {
-                return WarpTrigger::HoldDirection(facing.into());
+                return WarpTrigger::HoldDirection(facing_button(facing));
             }
         }
         match looks_off_the_map {
@@ -1506,7 +1506,7 @@ impl MetaTileMap {
         if !reach.contains(&stand) { return None }
         let mut route = self.reconstruct_from(stand, &came);
         if route.is_empty() {
-            let facing: JoypadButton = self.player_direction.into();
+            let facing: JoypadButton = facing_button(self.player_direction);
             if facing != push { route.push(push); }
         } else if route.last() != Some(&push) {
             route.push(push);
@@ -1573,7 +1573,7 @@ impl MetaTileMap {
     pub fn interaction_in_front(&self) -> Option<(Point8, MetaTile)> {
         let (at, tile) = self.tile_in_front()?;
         if tile != MetaTile::Counter { return Some((at, tile)); }
-        let over = step_one(at, self.player_direction.into(), self.width, self.height);
+        let over = step_one(at, facing_button(self.player_direction), self.width, self.height);
         match over.map(|p| (p, self.tile_at(p))) {
             Some((p, sprite @ MetaTile::Sprite(_))) => Some((p, sprite)),
             _ => Some((at, tile)),
@@ -1622,7 +1622,7 @@ impl MetaTileMap {
             cur = *prev;
         }
         route.reverse();
-        let face_button: JoypadButton = face_dir.into();
+        let face_button: JoypadButton = facing_button(face_dir);
         if route.is_empty() {
             if face_dir != self.player_direction { route.push(face_button); }
         } else if route.last() != Some(&face_button) {
