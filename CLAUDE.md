@@ -35,9 +35,9 @@ rule names the comment in the code that carries the argument, so the code stays 
 | [emulator-core](docs/emulator-core.md) | `gb/src/{mmu,mbc,ppu,savestate,schedule,cycles,game_boy}.rs`, adding or reordering a serialised field, adding a file to `poke-agent/src/pokemon/data/` |
 | [emulator-performance](docs/emulator-performance.md) | optimising `gb/src/{ppu,core,opcode,mmu}.rs` or `gb/src/audio/`, or building a rig to measure them |
 | [pokemon-agent](docs/pokemon-agent.md) | `poke-agent/src/pokemon/{agent,policy,text,tile_map,actions}.rs`, `AgentEvent` or any `Display` it goes through, the SPA's `useEventStream.ts` |
-| [llm-turn-loop](docs/llm-turn-loop.md) | anything under `poke-agent/src/llm/`, `pokemon/llm_policy.rs`, any change to what the model is sent |
+| [llm-turn-loop](docs/llm-turn-loop.md) | anything under `poke-agent/src/llm/`, `poke-agent/src/pokemon/llm_policy.rs`, any change to what the model is sent |
 | [web-streams](docs/web-streams.md) | `poke-agent-web/src/web/{video,audio}*`, the SPA's `{stream,video,audio}.ts` |
-| [rom-graphics](docs/rom-graphics.md) | `poke-agent/src/pokemon/{rom_gfx,badge_gfx,mon_gfx,map_gfx,font}.rs`, `web/sprites.rs`, `llm/map_image.rs` |
-| [run-lifecycle](docs/run-lifecycle.md) | `poke-agent/src/run/`, `host.rs`'s new-run and completion seams, the three admin endpoints |
+| [rom-graphics](docs/rom-graphics.md) | `poke-agent/src/pokemon/{rom_gfx,badge_gfx,mon_gfx,map_gfx,font}.rs`, `poke-agent-web/src/web/sprites.rs`, `poke-agent/src/llm/map_image.rs` |
+| [run-lifecycle](docs/run-lifecycle.md) | `poke-agent/src/run/`, `poke-agent-web/src/host.rs`'s new-run and completion seams, the three admin endpoints |
 | [test-suite](docs/test-suite.md) | running anything but the default tier, regenerating a fixture, adding a test |
 | [build-and-ship](docs/build-and-ship.md) | a build that fails before it reaches Rust, the `Dockerfile`, `.dockerignore`, `.github/workflows`, `k8s/` |

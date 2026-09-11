@@ -14,12 +14,12 @@ arguments are in the module docs named below; this is the list of what not to br
 
 - Every mapper resolves its bank register differently. MBC1 remaps a zero selection *then* wraps,
   so a wrap can reach bank 0; MBC3 wraps *then* remaps, so it never can; MBC2, MBC5 and HuC1 just
-  mask. The table is in `mbc.rs`'s module docs, and it is what makes blargg's combined
+  mask. The table is in `gb/src/mbc.rs`'s module docs, and it is what makes blargg's combined
   `dmg_sound.gb` terminate.
 
 ## Save states
 
-- `savestate/mod.rs`'s module docs are authoritative. Adding a section is free. Adding a field
+- `gb/src/savestate/mod.rs`'s module docs are authoritative. Adding a section is free. Adding a field
   means appending it inside its section and bumping that section's version. Never reorder or
   retype a shipped value: bincode is positional. Before writing a legacy struct, check whether the
   boundary can be re-cut instead; that is how CGB support cost zero fixture regeneration.

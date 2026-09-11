@@ -5,7 +5,7 @@ Read before touching `poke-agent/src/pokemon/{rom_gfx,badge_gfx,mon_gfx,map_gfx,
 comment where it applies.
 
 - Bank 0 is a raw file offset; every other bank is a `0x4000` window. `rom_slice` is the one place
-  that knows, bar `font.rs`, which computes its offset in a `const`.
+  that knows, bar `poke-agent/src/pokemon/font.rs`, which computes its offset in a `const`.
 - Tiles are row-major everywhere except a decompressed pic, which is built column-major. The wrong
   order differs on four fifths of the bytes and still looks like a sprite.
 - The differential decode runs along rows and resets per row, the opposite axis to the bitstream.

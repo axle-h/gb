@@ -196,7 +196,7 @@ fact and a scripted battle is otherwise invisible from outside.
 
 **No graphics are committed to this repo.** The badges, the sprites, the favicon and every tile,
 person and letter in the map pictures are read out of the ROM at run time; Gen 1 pics are compressed,
-so `mon_gfx.rs` is a port of pokered's `UncompressSpriteData`, checked byte-for-byte against
+so `poke-agent/src/pokemon/mon_gfx.rs` is a port of pokered's `UncompressSpriteData`, checked byte-for-byte against
 upstream's own build output.
 
 The screen is 8×8 block deltas deflated once across the connection, about 21 kbit/s against the 565
@@ -271,7 +271,7 @@ poke-agent-sdl/   the desktop window
 |---|---|---|
 | Audio resampling | `gb/src/audio/blip/`, no dependency | A port of blargg's Blip_Buffer. Band-limited *step* synthesis rather than sinc resampling: the APU reports amplitude transitions and they go straight into a buffer already at the output rate. 8 output samples of latency, no FFT, no crates |
 | Save state format | labelled sections | `"GBST" \| version \| lz4 { [label][len][payload] }`. Unknown sections are skipped and missing ones are not errors, so adding one is free — CGB support doubled VRAM and quadrupled WRAM at the cost of zero fixture regeneration |
-| Symbol codegen | `build.rs` + `pokered.sym` | Every RAM/ROM symbol becomes a typed pointer constant, so an address that moves upstream is a compile error |
+| Symbol codegen | `poke-agent/build.rs` + `pokered.sym` | Every RAM/ROM symbol becomes a typed pointer constant, so an address that moves upstream is a compile error |
 | Audio transport | raw Opus over chunked binary framing | No container and no muxer: WebCodecs takes bare packets, and an `OpusHead` would put the decoder into Ogg mode. Not deflated either, at +16.6% measured |
 | Video transport | chunked binary + `flate2` | Not a WebSocket: nothing is bidirectional, and a plain response needs no upgrade, no ping/pong and no second reconnection story. The compression is the protocol rather than a `Content-Encoding`, so no proxy can buffer and re-encode it |
 
