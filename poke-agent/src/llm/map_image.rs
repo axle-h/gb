@@ -2,7 +2,7 @@
 
 use image::RgbaImage;
 
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use crate::pokemon::map::Map;
 use crate::pokemon::map_gfx::{self, NpcSprite, SPRITE_PX, TILE_PX};
 use crate::pokemon::map_metadata::{MapMetadata, PlayerFacingDirection};

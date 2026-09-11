@@ -197,7 +197,7 @@ fact and a scripted battle is otherwise invisible from outside.
 
 **No graphics are committed to this repo.** The badges, the sprites, the favicon and every tile,
 person and letter in the map pictures are read out of the ROM at run time; Gen 1 pics are compressed,
-so `poke-agent/src/pokemon/mon_gfx.rs` is a port of pokered's `UncompressSpriteData`, checked byte-for-byte against
+so `poke-core/src/mon_gfx.rs` is a port of pokered's `UncompressSpriteData`, checked byte-for-byte against
 upstream's own build output.
 
 The screen is 8×8 block deltas deflated once across the connection, about 21 kbit/s against the 565
@@ -264,19 +264,22 @@ an `env!()` would put it in the cargo layer's inputs. `k8s/` has manifests for k
 
 ```
 gb/               the emulator, as a library: CPU, PPU, APU, MBCs, save states, the test ROMs
+poke-core/        Pokémon Red as data: species, moves, items, maps, pictures and symbols, from the ROM
+pokered/          Pokémon Red recreated natively, on `poke-core` alone; in progress
 poke-agent/       the Pokémon layer — agent, policies, LLM turn loop, the run directory
 poke-agent-web/   the axum server, the video and audio codecs, and the SPA
 poke-agent-sdl/   the desktop window
 vendor/           pokered, the disassembly, as a submodule; Blip_Buffer's C++, for golden vectors
 ```
 
-`gb` ← `poke-agent` ← the two binaries, and nothing else. Each crate has one feature, `slow-tests`.
+`gb` and `poke-core` ← `poke-agent` ← the two binaries, and `poke-core` ← `pokered`, and nothing
+else: neither `poke-core` nor `pokered` knows about `gb`. Each crate has one feature, `slow-tests`.
 
 | Concern | Choice | Reason |
 |---|---|---|
 | Audio resampling | `gb/src/audio/blip/`, no dependency | A port of blargg's Blip_Buffer. Band-limited *step* synthesis rather than sinc resampling: the APU reports amplitude transitions and they go straight into a buffer already at the output rate. 8 output samples of latency, no FFT, no crates |
 | Save state format | labelled sections | `"GBST" \| version \| lz4 { [label][len][payload] }`. Unknown sections are skipped and missing ones are not errors, so adding one is free — CGB support doubled VRAM and quadrupled WRAM at the cost of zero fixture regeneration |
-| Symbol codegen | `poke-agent/build.rs` + `pokered.sym` | Every RAM/ROM symbol becomes a typed pointer constant, so an address that moves upstream is a compile error |
+| Symbol codegen | `poke-core/build.rs` + `pokered.sym` | Every RAM/ROM symbol becomes a typed pointer constant, so an address that moves upstream is a compile error |
 | Audio transport | raw Opus over chunked binary framing | No container and no muxer: WebCodecs takes bare packets, and an `OpusHead` would put the decoder into Ogg mode. Not deflated either, at +16.6% measured |
 | Video transport | chunked binary + `flate2` | Not a WebSocket: nothing is bidirectional, and a plain response needs no upgrade, no ping/pong and no second reconnection story. The compression is the protocol rather than a `Content-Encoding`, so no proxy can buffer and re-encode it |
 

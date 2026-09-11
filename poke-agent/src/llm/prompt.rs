@@ -499,9 +499,9 @@ pub fn situation(
         use crate::pokemon::learnset::can_learn;
         use crate::pokemon::tile::MetaTile;
         // Where the trees actually are, which the line below either offers or explains.
-        let trees: Vec<gb::geometry::Point8> = state.map.meta_tiles.iter().enumerate()
+        let trees: Vec<poke_core::geometry::Point8> = state.map.meta_tiles.iter().enumerate()
             .filter(|(_, tile)| **tile == MetaTile::CutTree)
-            .map(|(index, _)| gb::geometry::Point8 {
+            .map(|(index, _)| poke_core::geometry::Point8 {
                 x: (index % state.map.width) as u8, y: (index / state.map.width) as u8 })
             .collect();
         if !trees.is_empty() && state.can_use_cut {
@@ -766,7 +766,7 @@ fn named(mon: &crate::pokemon::pokemon::Pokemon) -> String {
 }
 
 /// A list of squares as `(x, y), (x, y)`, bounded.
-fn point_list(points: &[gb::geometry::Point8]) -> String {
+fn point_list(points: &[poke_core::geometry::Point8]) -> String {
     /// Enough for every Strength puzzle in the game and the trees on a route.
     const MAX: usize = 8;
     let shown: Vec<String> = points.iter().take(MAX)
@@ -912,9 +912,9 @@ mod tests {
             AgentEvent::OverworldInteractionCompleted { target: MetaTile::Sprite("Gym Guide") },
             AgentEvent::TextBox { message: "Hey! You look weak! Let me give you some advice!".into() },
             AgentEvent::OverworldActionAborted {
-                destination: MetaTile::Warp { to_map: crate::pokemon::map::Map::CeladonGym, to_position: gb::geometry::Point8 { x: 4, y: 17 } },
+                destination: MetaTile::Warp { to_map: crate::pokemon::map::Map::CeladonGym, to_position: poke_core::geometry::Point8 { x: 4, y: 17 } },
                 reason: OverworldActionAbortedReason::Textbox,
-                at: Some(gb::geometry::Point8 { x: 8, y: 19 }),
+                at: Some(poke_core::geometry::Point8 { x: 8, y: 19 }),
             },
         ]
         .iter()
@@ -1185,8 +1185,8 @@ mod tests {
         // A gate: several landings, all on one map.
         let mut gate = base.clone();
         gate.map.warp_targets = [
-            (Map::Route7, gb::geometry::Point8 { x: 11, y: 10 }),
-            (Map::Route7, gb::geometry::Point8 { x: 18, y: 9 }),
+            (Map::Route7, poke_core::geometry::Point8 { x: 11, y: 10 }),
+            (Map::Route7, poke_core::geometry::Point8 { x: 18, y: 9 }),
         ].into_iter().collect();
         let turn = overworld_turn(&gate, &[]);
         assert!(turn.contains("Every way off this map leads back to Route7"), "{turn}");
@@ -1196,15 +1196,15 @@ mod tests {
 
         // A double-wide front door is two warp tiles onto one square, and is not this.
         let mut house = base.clone();
-        house.map.warp_targets = [(Map::Route7, gb::geometry::Point8 { x: 11, y: 10 })]
+        house.map.warp_targets = [(Map::Route7, poke_core::geometry::Point8 { x: 11, y: 10 })]
             .into_iter().collect();
         assert!(!overworld_turn(&house, &[]).contains("Every way off this map"));
 
         // Nor is a map whose doors go to different places.
         let mut crossroads = base.clone();
         crossroads.map.warp_targets = [
-            (Map::Route7, gb::geometry::Point8 { x: 11, y: 10 }),
-            (Map::Route8, gb::geometry::Point8 { x: 1, y: 9 }),
+            (Map::Route7, poke_core::geometry::Point8 { x: 11, y: 10 }),
+            (Map::Route8, poke_core::geometry::Point8 { x: 1, y: 9 }),
         ].into_iter().collect();
         assert!(!overworld_turn(&crossroads, &[]).contains("Every way off this map"));
     }
@@ -1227,8 +1227,8 @@ mod tests {
         // The turn reads `hidden_objects_for` alone, so the puzzle's hidden state cannot move it.
         let mut solved = state.clone();
         solved.trash_cans = Some(crate::pokemon::TrashCanPuzzle {
-            first_target: gb::geometry::Point8 { x: 1, y: 7 },
-            second_target: gb::geometry::Point8 { x: 9, y: 9 },
+            first_target: poke_core::geometry::Point8 { x: 1, y: 7 },
+            second_target: poke_core::geometry::Point8 { x: 9, y: 9 },
             first_opened: true,
             second_opened: false,
         });
@@ -1399,7 +1399,7 @@ mod tests {
         // A floor with no legal push says that, rather than promising rows that are not there.
         let mut none_left = state.clone();
         none_left.map.sprites.retain(|sprite| !sprite.name.starts_with("Boulder")
-            || sprite.position == gb::geometry::Point8 { x: 14, y: 2 });
+            || sprite.position == poke_core::geometry::Point8 { x: 14, y: 2 });
         assert!(none_left.map.boulder_pushes().is_empty(), "(14, 2) is walled in on its own square");
         // Chosen on goal rows, not `boulder_pushes()`: the two part company on a floor with legal
         // shoves and no reachable target.

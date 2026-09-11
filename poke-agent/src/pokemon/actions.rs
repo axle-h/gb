@@ -1,5 +1,5 @@
 use std::fmt::Display;
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
 use crate::pokemon::map::Map;
 use crate::pokemon::tile::MetaTile;

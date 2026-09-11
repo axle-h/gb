@@ -7,6 +7,8 @@ use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::symbols::pokered_symbols;
 use gb::ram::{RAM, ROM};
 
+pub use poke_core::party::PokemonBlockAddresses;
+
 pub trait PokemonEncoding {
 
     fn read_pokemon_party(&self, base_pointer: &DmgPointer) -> Result<PokemonParty, String>;
@@ -242,26 +244,6 @@ pub enum GameMode {
     /// The Pokémon nickname entry screen (`DisplayNamingScreen`) is active.
     #[strum(serialize = "Naming Screen")]
     NamingScreen,
-}
-
-pub struct PokemonBlockAddresses {
-    pub pokemon: DmgPointer,
-    pub trainer_name: DmgPointer,
-    pub nickname: DmgPointer,
-}
-
-impl PokemonBlockAddresses {
-    pub const PARTY_MAX: u16 = 6;
-    pub const POKEMON_BLOCK_SIZE: u16 = 0x2C;
-    pub const NAME_LENGTH: u16 = 0xB;
-
-    fn of_indexed(party_base_pointer: DmgPointer, index: u16) -> Self {
-        Self {
-            pokemon: party_base_pointer + index * Self::POKEMON_BLOCK_SIZE,
-            trainer_name: party_base_pointer + Self::PARTY_MAX * Self::POKEMON_BLOCK_SIZE + index * Self::NAME_LENGTH,
-            nickname: party_base_pointer + Self::PARTY_MAX * Self::POKEMON_BLOCK_SIZE + Self::PARTY_MAX * Self::NAME_LENGTH + index * Self::NAME_LENGTH,
-        }
-    }
 }
 
 pub fn reverse_bcd(mut value: u32) -> u32 {

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
 use gb::mmu::MMU;
 use crate::pokemon::bag::BagReader;
@@ -10,6 +10,17 @@ use crate::pokemon::map_header::{MapConnectionDirection, MapHeader, MapHeaderRea
 use crate::pokemon::sprite::{PictureId, Sprite, SpriteFacing};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::tile::{JumpDirection, MetaTile, WarpEvent};
+pub use poke_core::sprite::PlayerFacingDirection;
+
+/// The button that turns the player to face `facing`.
+pub fn facing_button(facing: PlayerFacingDirection) -> JoypadButton {
+    match facing {
+        PlayerFacingDirection::Up => JoypadButton::Up,
+        PlayerFacingDirection::Down => JoypadButton::Down,
+        PlayerFacingDirection::Left => JoypadButton::Left,
+        PlayerFacingDirection::Right => JoypadButton::Right,
+    }
+}
 use gb::ram::ROM;
 
 #[derive(Clone)]
@@ -1092,27 +1103,6 @@ impl MapRomReader for MMU {
             sprites.push(sprite);
         }
         Ok(sprites)
-    }
-}
-
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, strum_macros::Display, strum_macros::FromRepr)]
-#[repr(u8)]
-pub enum PlayerFacingDirection {
-    #[default]
-    Up = 8,
-    Down = 4,
-    Left = 2,
-    Right = 1,
-}
-
-impl Into<JoypadButton> for PlayerFacingDirection {
-    fn into(self) -> JoypadButton {
-        match self {
-            PlayerFacingDirection::Up => JoypadButton::Up,
-            PlayerFacingDirection::Down => JoypadButton::Down,
-            PlayerFacingDirection::Left => JoypadButton::Left,
-            PlayerFacingDirection::Right => JoypadButton::Right,
-        }
     }
 }
 

@@ -146,7 +146,7 @@ fn cut_seafoam_b3f_fixture() {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn both_seafoam_holes_are_filled_by_the_only_boulders_that_can_reach_them() {
-    use gb::geometry::Point8;
+    use poke_core::geometry::Point8;
     const HOLE_A: Point8 = Point8 { x: 3, y: 16 };
     const HOLE_B: Point8 = Point8 { x: 6, y: 16 };
     const ONLY_A: Point8 = Point8 { x: 3, y: 15 };
@@ -199,7 +199,7 @@ fn a_boulder_floors_action_menu_is_not_a_search_per_tick() {
 
 #[test]
 fn a_seafoam_warp_on_the_water_is_stepped_onto_rather_than_leant_on() {
-    use gb::geometry::Point8;
+    use poke_core::geometry::Point8;
     const HOLE: Point8 = Point8 { x: 21, y: 17 };
 
     let mut fixture = TestFixture::new(

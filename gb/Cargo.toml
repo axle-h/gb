@@ -14,5 +14,10 @@ bitflags = "2.9.3"
 image = "0.25"
 lz4_flex = "0.11"
 paste = "1.0"
+# The joypad tape, which the oracle commits as a fixture.
+serde = { version = "1.0", features = ["derive"] }
 strum = "0.27"
 strum_macros = "0.27.2"
+
+[dev-dependencies]
+serde_json = "1.0"

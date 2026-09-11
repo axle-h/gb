@@ -5,7 +5,7 @@ Read when a build fails before it reaches Rust, and before touching the `Dockerf
 
 - pokered needs rgbds ≥ 1.0.0 and fails hard below it, so an old rgbds produces no ROM rather than a
   wrong one. The container pins the version.
-- pokered's symbol names are upstream's to change. `poke-agent/build.rs` emits a constant per symbol, so a
+- pokered's symbol names are upstream's to change. `poke-core/build.rs` emits a constant per symbol, so a
   rename upstream is a compile error here, which is the point.
 - `web/dist` must exist for the crate to compile: `rust-embed`'s derive fails on a missing folder.
   `.gitkeep` is committed and `vite build` copies it back. A checkout that never ran `pnpm run build`
@@ -20,9 +20,9 @@ Read when a build fails before it reaches Rust, and before touching the `Dockerf
   leaves `pokered/gfx/pics_red.o` in the context, and a stale object from a newer rgbds stops the
   build inside the container.
 - The build stage copies each crate's manifest and `src/` rather than the crate directories whole, so
-  an edit to a doc does not invalidate the cargo layer. `poke-agent-sdl` is never built but must still
-  load: its real manifest keeps `Cargo.lock` exact, and a generated `fn main() {}` stands in for its
-  source, because cargo refuses a workspace member with no target at all.
+  an edit to a doc does not invalidate the cargo layer. The two SDL crates are never built but must
+  still load: their real manifests keep `Cargo.lock` exact, and a generated `fn main() {}` stands in
+  for each one's source, because cargo refuses a workspace member with no target at all.
 - `CMD` is exec form so the binary is PID 1 and receives SIGTERM itself. That signal is what
   checkpoints the run; a shell in between loses everything since the last periodic checkpoint.
 - Shutdown must not be axum's graceful one: the three streaming endpoints never finish, so it would

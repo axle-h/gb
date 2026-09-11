@@ -1,6 +1,6 @@
 //! Fossil revival, gift Pokémon, one-off rooms, and the party-menu script driver they share.
 
-use gb::geometry::Point8;
+use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
 use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent};
 use crate::pokemon::encoding::GameMode;

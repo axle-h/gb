@@ -24,7 +24,7 @@ arguments are in the module docs named below; this is the list of what not to br
   retype a shipped value: bincode is positional. Before writing a legacy struct, check whether the
   boundary can be re-cut instead; that is how CGB support cost zero fixture regeneration.
 - `every_committed_fixture_decodes` loads every `.bin` in `poke-agent/src/pokemon/data/`, so a
-  `.bin` there must be a save state. Other binary fixtures go in a subdirectory (`data/gfx/`), and
+  `.bin` there must be a save state. Other binary fixtures go elsewhere (`poke-core/src/data/gfx/`), and
   `poke-agent-sdl/pokemon-red.sav` is raw SRAM rather than a state.
 - A DMG state restored under `GB_HARDWARE=cgb` must not blank the screen. Every fixture and every
   deployed `state.gbst` is a DMG capture whose CGB palette section is all-white, and compatibility
