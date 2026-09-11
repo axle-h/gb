@@ -49,7 +49,6 @@ impl PokemonTextReader {
     }
 
     pub fn update<A: PokemonApiTrait>(&mut self, api: &mut A) {
-        // Mash the A button to advance the text
         self.update_with(api, JoypadButton::A);
     }
 
@@ -59,8 +58,7 @@ impl PokemonTextReader {
         self.accumulate(api);
     }
 
-    /// [`Self::update_with`] without the button: read this tick's screen into the buffer and
-    /// press nothing.
+    /// [`Self::update_with`] without the button: read this tick's screen and press nothing.
     pub fn accumulate<A: PokemonApiTrait>(&mut self, api: &A) {
         let Some(screen) = api.on_screen_text(self.message_box_only) else { return };
 
@@ -80,7 +78,7 @@ impl PokemonTextReader {
             self.mismatches = 0;
             return;
         }
-        // One read of something else is not a page break, because a *torn* frame reads like one.
+        // One read of something else is not a page break, because a torn frame reads like one.
         self.mismatches += 1;
         if self.mismatches < MISMATCHES_BEFORE_PAGE_BREAK {
             return;
@@ -102,7 +100,7 @@ impl PokemonTextReader {
         }
     }
 
-    /// Move the page on screen into the committed text.
+    /// Move the page on screen into the committed text, verbatim: deduplicating deletes real text.
     fn commit_page(&mut self) {
         if self.page.is_empty() {
             return;

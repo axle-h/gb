@@ -1,5 +1,4 @@
-//! Which Pokémon a TM or HM will actually teach, read out of the cartridge's own base-stats
-//! table.
+//! Which Pokémon a TM or HM will teach, read out of the cartridge's base-stats table.
 
 use crate::pokemon::item::ItemId;
 use crate::pokemon::mon_gfx::base_stats_entry;
@@ -9,7 +8,7 @@ use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::symbols::pokered_symbols;
 use crate::pokemon::GameState;
 
-/// `wMonHLearnset` — where the 7-byte TM/HM flag array sits within a 28-byte base-stats entry.
+/// Offset of the 7-byte TM/HM flag array in a base-stats entry (`wMonHLearnset`).
 const BASE_LEARNSET: usize = 20;
 
 /// The flag `CanLearnTM` tests for `item`, or `None` if the item is not a machine at all.
@@ -25,8 +24,7 @@ pub const fn tm_hm_flag(item: ItemId) -> Option<usize> {
 /// Whether the game will let `species` learn the machine `item`.
 pub fn can_learn(species: PokemonSpecies, item: ItemId) -> bool {
     let Some(flag) = tm_hm_flag(item) else { return true };
-    // `FlagAction` (`engine/flag_action.asm`): byte `c >> 3`, bit `c & 7`, least significant
-    // first.
+    // `FlagAction`: byte `c >> 3`, bit `c & 7`, least significant first.
     base_stats_entry(species)[BASE_LEARNSET + flag / 8] & (1 << (flag % 8)) != 0
 }
 
@@ -80,8 +78,7 @@ mod tests {
         assert!(!can_learn(PokemonSpecies::Gastly, ItemId::Hm04Strength), "Gastly cannot");
     }
 
-    /// TM01 is the low flag and HM05 the high one, so an off-by-one at either end of the array
-    /// shows up here rather than as a plausible answer about some Pokémon in the middle.
+    /// TM01 is the low flag and HM05 the high one.
     #[test]
     fn the_flag_runs_from_tm01_to_hm05() {
         assert_eq!(tm_hm_flag(ItemId::Hm01Cut), Some(50));
@@ -90,13 +87,11 @@ mod tests {
         assert_eq!(tm_hm_flag(ItemId::Tm45ThunderWave), Some(44));
         assert_eq!(tm_hm_flag(ItemId::RareCandy), None);
 
-        // Mega Punch is TM01 and Substitute TM50, at the two ends of the array.
         assert!(can_learn(PokemonSpecies::Mewtwo, ItemId::Tm45ThunderWave));
         assert!(!can_learn(PokemonSpecies::Caterpie, ItemId::Tm45ThunderWave), "Caterpie learns nothing");
     }
 
-    /// Mew is not in `BaseStats` (see [`base_stats_entry`]) and learns every machine, so a lookup
-    /// that forgot it would read Mewtwo's entry and answer plausibly rather than failing.
+    /// Mew, outside `BaseStats`, learns every machine rather than reading Mewtwo's entry.
     #[test]
     fn mew_learns_every_machine() {
         for item in [ItemId::Hm01Cut, ItemId::Hm02Fly, ItemId::Hm03Surf, ItemId::Hm04Strength,
@@ -105,8 +100,7 @@ mod tests {
         }
     }
 
-    /// Not a machine, so not a question — the stones and the Rare Candy ride the same menu chain
-    /// and must not be refused by a check written for TMs.
+    /// A stone or the Rare Candy is not refused by the machine check.
     #[test]
     fn a_stone_is_not_a_machine() {
         assert!(can_learn(PokemonSpecies::Pidgey, ItemId::RareCandy));

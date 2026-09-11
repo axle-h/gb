@@ -1,14 +1,14 @@
-//! Reading graphics straight out of the cartridge the binary already carries.
+//! Reading graphics straight out of the cartridge the binary carries.
 
 use crate::pokemon::roms::POKERED;
 use crate::pokemon::symbols::{DmgBank, DmgPointer};
 
 /// One 8×8 tile of 2bpp Game Boy graphics.
 pub const TILE_BYTES: usize = 16;
-/// Every bank but 0 is windowed here.
 const BANK_SIZE: usize = 0x4000;
 
-/// A ROM pointer as a slice running to the end of its bank.
+/// A ROM pointer as a slice running to the end of its bank. Bank 0 is a raw file offset and every
+/// other bank a `0x4000` window; read ROM through here rather than redoing that arithmetic.
 pub fn rom_slice(pointer: DmgPointer) -> &'static [u8] {
     let DmgBank::ROM { bank } = pointer.bank else {
         panic!("{pointer} is not a ROM pointer");
@@ -18,8 +18,7 @@ pub fn rom_slice(pointer: DmgPointer) -> &'static [u8] {
     &POKERED[bank * BANK_SIZE + (pointer.address as usize - window)..(bank + 1) * BANK_SIZE]
 }
 
-/// A `tiles_wide × tiles_high` rectangle of consecutive 2bpp tiles, as shade indices `0`
-/// (lightest) to `3` (darkest), row-major over the whole rectangle.
+/// A `tiles_wide × tiles_high` rectangle of consecutive 2bpp tiles as shade indices, row-major.
 pub fn tile_grid_shades(first_tile: DmgPointer, tiles_wide: usize, tiles_high: usize) -> Vec<u8> {
     let width = tiles_wide * 8;
     let bytes = rom_slice(first_tile);
@@ -35,7 +34,7 @@ pub fn tile_grid_shades(first_tile: DmgPointer, tiles_wide: usize, tiles_high: u
     shades
 }
 
-/// One 8×8 tile of 2bpp, as shade indices `0` (lightest) to `3` (darkest), row-major.
+/// One 8×8 tile of 2bpp as shade indices `0` (lightest) to `3` (darkest), row-major.
 pub fn decode_tile(tile: &[u8]) -> [u8; 64] {
     assert_eq!(tile.len(), TILE_BYTES, "a 2bpp tile is {TILE_BYTES} bytes");
     let mut pixels = [0u8; 64];
@@ -49,9 +48,7 @@ pub fn decode_tile(tile: &[u8]) -> [u8; 64] {
     pixels
 }
 
-/// The overworld Poké Ball — the sprite an item lying on the floor is drawn with, 2×2
-/// uncompressed tiles. It is the favicon, for want of anything else on this cartridge that says
-/// "Pokémon" in sixteen pixels and is not a logo somebody owns.
+/// The overworld Poké Ball an item on the floor is drawn with, 2×2 uncompressed tiles: the favicon.
 pub const BALL_PX: usize = 16;
 
 pub fn poke_ball_shades() -> Vec<u8> {
@@ -63,7 +60,7 @@ mod tests {
     use super::*;
     use crate::pokemon::symbols::pokered_symbols;
 
-    /// Bank 0 is the case the windowing gets wrong.
+    /// Bank 0 is not windowed and every other bank is.
     #[test]
     fn bank_zero_is_not_windowed_and_every_other_bank_is() {
         let bank_0 = DmgPointer { bank: DmgBank::ROM { bank: 0 }, address: 0x0100 };
@@ -76,8 +73,7 @@ mod tests {
         assert_eq!(rom_slice(bank_9)[..16], POKERED[9 * BANK_SIZE..9 * BANK_SIZE + 16]);
     }
 
-    /// The ball is line art on a transparent background: mostly-empty and entirely-full both mean
-    /// the window has slipped onto the wrong tiles.
+    /// The ball is a round drawing, neither mostly empty nor full.
     #[test]
     fn the_poke_ball_is_a_drawn_sixteen_pixel_sprite() {
         let shades = poke_ball_shades();
@@ -91,14 +87,12 @@ mod tests {
         let drawn = shades.iter().filter(|&&s| s != 0).count();
         assert!((32..192).contains(&drawn), "{drawn} of 256 pixels are drawn");
 
-        // A ball is round: the four corners of its box are background.
         for (x, y) in [(0, 0), (BALL_PX - 1, 0), (0, BALL_PX - 1), (BALL_PX - 1, BALL_PX - 1)] {
             assert_eq!(shades[y * BALL_PX + x], 0, "({x}, {y}) should be outside the ball");
         }
     }
 
-    /// The 2×2 assembly, checked without trusting the decoder: quadrant `n` must be tile `n`, in
-    /// reading order.
+    /// Quadrant `n` is tile `n` in reading order, decoded here by hand.
     #[test]
     fn quadrants_are_four_consecutive_tiles_in_reading_order() {
         let shades = tile_grid_shades(pokered_symbols::PokeBallSprite, 2, 2);

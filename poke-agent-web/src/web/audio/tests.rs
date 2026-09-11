@@ -2,8 +2,7 @@
 
 use super::*;
 
-/// 48 kHz, and every tone the tests below listen for is a harmonic-free choice well inside the
-/// band.
+/// Harmonic-free tones well inside the 48 kHz band.
 const TONES: [f32; 4] = [110.0, 440.0, 659.0, 1320.0];
 
 /// A stand-in for what the cartridge actually produces: square waves and a little noise.
@@ -41,11 +40,7 @@ fn packets_from(encoder: &mut AudioEncoder, stereo: &[f32]) -> Vec<Arc<[u8]>> {
     out
 }
 
-// ── The one that matters
-// ─────────────────────────────────────────────────────────────────────────
-
-/// The packets this module puts on the wire are ones a browser will decode into the sound the
-/// cartridge made — pinned by decoding them back and listening for the tones that went in.
+/// The packets decode back into the tones that went in.
 #[test]
 fn the_packets_are_ones_a_browser_can_decode() {
     let mono = chiptune(SAMPLE_RATE as usize * 2);
@@ -78,11 +73,7 @@ fn the_packets_are_ones_a_browser_can_decode() {
     }
 }
 
-// ── Framing
-// ──────────────────────────────────────────────────────────────────────────────────────
-
-/// A frame is 20 ms and a host tick is ~1 ms, so the accumulator spanning pushes is the ordinary
-/// case.
+/// A frame is 20 ms and a host tick about 1 ms, so a frame spanning pushes is the ordinary case.
 #[test]
 fn the_encoder_frames_across_ragged_pushes() {
     let mut encoder = AudioEncoder::new(DEFAULT_BITRATE);
@@ -91,7 +82,7 @@ fn the_encoder_frames_across_ragged_pushes() {
 
     let mut out = Vec::new();
     let mut at = 0;
-    // Deliberately co-prime-ish with FRAME_SAMPLES so no push lands on a frame boundary.
+    // Co-prime-ish with FRAME_SAMPLES so no push lands on a frame boundary.
     for step in [7usize, 1000, 3, 4001, 11, 2048, 9, 5000, 1, 6000, 13, 7000].iter().cycle() {
         if at >= stereo.len() {
             break;
@@ -126,8 +117,7 @@ fn a_silent_run_still_produces_packets() {
     assert!(packets.iter().all(|packet| !packet.is_empty()), "an empty packet is a keep-alive");
 }
 
-/// The two channels are averaged rather than summed, or a centred note clips exactly when the
-/// cartridge is loudest.
+/// The channels are averaged, not summed, or a centred note clips when the cartridge is loudest.
 #[test]
 fn stereo_is_downmixed_by_averaging_rather_than_summing() {
     let mut encoder = AudioEncoder::new(DEFAULT_BITRATE);
@@ -145,9 +135,6 @@ fn stereo_is_downmixed_by_averaging_rather_than_summing() {
     assert!(peak < 1.2, "a hard-panned-centre DC level came back at {peak:.2}; that is a sum");
 }
 
-// ── Lifecycle
-// ────────────────────────────────────────────────────────────────────────────────────
-
 #[test]
 fn restart_drops_the_frame_the_previous_run_was_halfway_through() {
     let mut encoder = AudioEncoder::new(DEFAULT_BITRATE);
@@ -157,13 +144,12 @@ fn restart_drops_the_frame_the_previous_run_was_halfway_through() {
 
     assert!(packets_from(&mut encoder, &stereo[..split]).is_empty());
     encoder.restart();
-    // Half a frame was thrown away, so half a frame is no longer enough to complete one.
+    // Half a frame was thrown away, so the other half cannot complete one.
     assert!(packets_from(&mut encoder, &stereo[split..]).is_empty(), "restart kept the old samples");
     assert!(!encoder.silenced());
 }
 
-/// The header is what the page configures its decoder from, so its shape is a contract with
-/// `web/src/audio.ts` and not an internal detail.
+/// The header's shape is a contract with `web/src/audio.ts`.
 #[test]
 fn the_header_says_what_the_page_needs_to_configure_a_decoder() {
     let header = header();
@@ -174,16 +160,12 @@ fn the_header_says_what_the_page_needs_to_configure_a_decoder() {
     assert_eq!(u16::from_le_bytes(header[10..12].try_into().unwrap()), FRAME_MS as u16);
 }
 
-/// A rate the crate is wrong at must not be reachable by editing one constant and running the
-/// suite: the round-trip test above is the alarm, and this is the label on it.
+/// Pins the one rate the encoder is known good at; the round-trip test above is the alarm.
 #[test]
 fn the_sample_rate_is_one_the_encoder_is_known_good_at() {
     assert_eq!(SAMPLE_RATE, 48_000, "see the ⚠️ in the module docs — 24 kHz is measurably broken");
     assert_eq!(FRAME_SAMPLES, 960);
 }
-
-// ── The bitstream, structurally
-// ──────────────────────────────────────────────────────────────────
 
 /// What a packet says about itself, read by hand out of its first byte.
 #[test]

@@ -2,10 +2,7 @@
 
 use super::*;
 
-/// From `post-volcano-badge.bin` (in Blaine's gym with 7 badges — exactly where the mainline is;
-/// the Seafoam detour is no longer on the route): Surf back to Pallet and up to Viridian, then
-/// clear Giovanni's Viridian Gym spinner-tile maze for the Earth Badge, the 8th and final gym
-/// badge.
+/// From `post-volcano-badge.bin`: Surf to Pallet, then Giovanni's spinner maze for the Earth Badge.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_earth_badge() {
@@ -19,9 +16,7 @@ fn can_get_earth_badge() {
     fixture.save_state_named("src/pokemon/data/post-earth-badge.bin").unwrap();
 }
 
-/// Victory Road 1F: reach the cave, catch a wild Machop with the Master Ball as a Strength
-/// HM-slave, teach it HM04, then push a boulder onto the (17,13) switch to open the (1,1) ladder
-/// and climb to VR2F.
+/// Victory Road 1F: catch a Machop, teach it HM04, push onto the (17,13) switch, climb to 2F.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_solve_victory_road_1f() {
@@ -40,7 +35,7 @@ fn can_solve_victory_road_1f() {
     fixture.save_state_named("src/pokemon/data/vr1f-strength.bin").unwrap();
 }
 
-/// The 1F boulder onto (17,13) and the climb to VR2F, split out from the approach above.
+/// The 1F boulder onto (17,13) and the climb to 2F, on its own.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_climb_victory_road_1f() {
@@ -56,12 +51,10 @@ fn can_climb_victory_road_1f() {
     fixture.save_state_named("src/pokemon/data/vr2f-ladder.bin").unwrap();
 }
 
-/// The interconnected VR2F/VR3F Strength puzzle, through to the Indigo Plateau lobby: switch1 →
-/// 3F → hole-drop reveals the hidden 2F boulder → fall → switch2 → return trip → exit.
+/// The VR2F/VR3F Strength puzzle, both switches and the hole-drop, through to the Indigo Plateau.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_solve_victory_road_2f_3f() {
-    // The 1F climb is part of this test, not a leftover.
     let mut steps = PolicyStep::victory_road_1f_climb_steps();
     steps.extend(PolicyStep::victory_road_2f_3f_steps());
     let mut fixture = TestFixture::new(
@@ -69,38 +62,32 @@ fn can_solve_victory_road_2f_3f() {
         Duration::from_mins(60),
         steps,
     );
-    // Stopped on the plateau *outside* the lobby, and the reason is not this test.
+    // Stopped on the plateau outside the lobby, which belongs to the next test.
     let s = fixture.run_until(|s| s.map.map == Map::IndigoPlateau);
     println!("final: {} @ {}", s.map.map, s.map.player_position);
     fixture.save_state_named("src/pokemon/data/at-indigo.bin").unwrap();
 }
 
-/// The Elite Four gauntlet, from the Indigo Plateau lobby to the credits: stock up, heal, then
-/// Lorelei → Bruno → Agatha → Lance → the rival, and on through Oak's post-Champion script into
-/// the Hall of Fame.
+/// From the Indigo Plateau lobby through the Elite Four and the rival to the Hall of Fame.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_beat_elite_four() {
     const FIXTURE: &[u8] = include_bytes!("../data/at-indigo-articuno.bin");
 
-    // 180 min covers the five rooms plus Oak's post-Champion speech and the walk to the Hall of
-    // Fame.
     let mut fixture = TestFixture::new(
         FIXTURE,
         Duration::from_mins(180),
         PolicyStep::elite_four_steps(),
     ).with_original_battle_timing();
 
-    // The rival's battle starts from a map script rather than from a step, and once it is won the
-    // agent hands itself to `drive_post_champion_cutscene`, which stops polling the policy — so
-    // the last steps stay queued and "done" is never an empty queue.
+    // The rival's battle starts from a map script and `drive_post_champion_cutscene` then stops
+    // polling the policy, so the queue never empties.
     fixture.run_until(|s| s.map.map == Map::ChampionsRoom);
     const SCRIPT_OAK_ARRIVES: u8 = 4;
     while fixture.gb.core().mmu().read_pointer(&pokered_symbols::wChampionsRoomCurScript) < SCRIPT_OAK_ARRIVES {
         fixture.step();
     }
-    // Bank the moment of victory: everything past here is Oak's script chain, and iterating on
-    // that from a snapshot takes seconds instead of re-fighting five rooms.
+    // Bank the moment of victory, so Oak's script chain can be iterated on from a snapshot.
     fixture.save_state_named("src/pokemon/data/post-champion.bin").unwrap();
 
     let s = fixture.run_until(|s| s.map.map == Map::HallOfFame);
@@ -109,9 +96,7 @@ fn can_beat_elite_four() {
     fixture.save_state_named("src/pokemon/data/post-hall-of-fame.bin").unwrap();
 }
 
-/// The post-Champion cutscene on its own, from `post-champion.bin` (rival beaten, Oak about to
-/// walk in) to the credits — no policy steps at all, because `drive_post_champion_cutscene`
-/// drives it.
+/// From `post-champion.bin` to the credits, driven by `drive_post_champion_cutscene` alone.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_enter_hall_of_fame() {
@@ -124,8 +109,7 @@ fn can_enter_hall_of_fame() {
     println!("credits rolling at {} @ {}", s.map.map, s.map.player_position);
 }
 
-/// The mainline's own tail: Victory Road 2F to the Hall of Fame, from the party the playthrough
-/// actually arrives with.
+/// Victory Road 2F to the Hall of Fame, from the party the playthrough arrives with.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_finish_from_victory_road() {
@@ -149,10 +133,9 @@ fn can_finish_from_victory_road() {
     for p in s.pokemon.iter() { println!("  {:?} lv{} {}/{}hp", p.species, p.level, p.current_hp, p.stats.hp); }
 }
 
-/// Wind the three gauntlet fighters up to what `victory_road_grind_steps` would have left them
-/// at.
+/// Wind the gauntlet fighters up to where `victory_road_grind_steps` would leave them.
 fn seed_gauntlet_levels(fixture: &mut TestFixture) {
-    // The Elixer is seeded for the same reason the levels are, and it is not decoration.
+    // The Elixer is seeded for the same reason as the levels.
     fixture.api().debug_take_item(crate::pokemon::item::ItemId::Tm06Toxic)
         .expect("the fixture carries TM06 and never teaches it");
     fixture.api().debug_give_item(crate::pokemon::item::ItemId::Elixer, 1)
@@ -188,20 +171,15 @@ fn can_grind_for_the_gauntlet() {
     fixture.step_until_exhausted();
     let s = fixture.game_state();
     for p in s.pokemon.iter() { println!("  {:?} lv{}", p.species, p.level); }
-    // One fighter, not three: the route grinds `STARTER_LINE` alone, and by the Mansion it is a
-    // Blastoise.
+    // One fighter: the route grinds `STARTER_LINE` alone, a Blastoise by the Mansion.
     let fighter = s.pokemon.iter().find(|p| p.species == PokemonSpecies::Blastoise)
         .expect("the grind's target is the starter line, which is a Blastoise by the Mansion");
     assert!(fighter.level >= PolicyStep::GAUNTLET_LEVEL,
         "the fighter only reached lv{}", fighter.level);
 }
 
-/// Hold a plan of buttons against a dropped save state and print the map, the position, the game
-/// mode and `wMovementFlags` as it goes, plus the map's raw tile ids up front.
-/// ```text
-/// GB_PROBE_STATE=target/test-artifacts/coverage/defect-X_state.bin GB_PROBE_BUTTONS=down:60,up:40,down:120 \
-/// cargo test --release --features slow-tests --lib -- probe_button_at_state --ignored --nocapture
-/// ```
+/// Hold a plan of buttons against a dropped save, printing map, position, mode, `wMovementFlags`.
+/// Set `GB_PROBE_STATE` to the save and `GB_PROBE_BUTTONS` to a plan like `down:60,up:40`.
 #[test]
 #[cfg(feature = "slow-tests")]
 #[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
@@ -246,12 +224,8 @@ fn probe_button_at_state() {
     }
 }
 
-/// Dump what the agent can see and reach from a save — map, position, money, party, bag, tile
-/// under foot, sprites and every action.
-/// ```text
-/// GB_PROBE_STATE=src/pokemon/data/post-articuno.bin \
-/// cargo test --release --features slow-tests --lib -- probe_stall_actions --ignored --nocapture
-/// ```
+/// Dump the map, position, money, party, bag, tile, sprites and every action from a save.
+/// Set `GB_PROBE_STATE` to the save.
 #[test]
 #[cfg(feature = "slow-tests")]
 #[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
@@ -296,35 +270,32 @@ fn probe_stall_actions() {
 /// A boulder that will not move says so, instead of being shoved at for a minute.
 #[test]
 fn a_boulder_that_cannot_move_is_refused_rather_than_shoved_at() {
-    // The save state out of `issues/turn-1701/` of run-20260902-215720, as the model was handed
-    // it.
+    // A save with the boulder shoved into the alcove, as a model was handed it.
     let mut stuck = TestFixture::new(VR1F_STUCK_PUSH, Duration::from_secs(30), Vec::new());
     let state = stuck.game_state();
     let map = &state.map;
     assert_eq!(map.player_position, Point8 { x: 5, y: 15 }, "the deployed run stood here");
     assert!(state.strength_active, "Strength was armed; the stall was not the arming gate");
 
-    // The tile is `Empty`, and that is the point.
+    // The tile is `Empty`.
     assert_eq!(map.tile_at(Point8 { x: 5, y: 13 }), crate::pokemon::tile::MetaTile::Empty);
     let refusal = map.boulder_push_refusal(Point8 { x: 5, y: 14 }, JoypadButton::Up)
         .expect("the push the deployed run hung on must be refused");
     assert!(refusal.contains("stairs"), "the reason has to be the real one: {refusal}");
     assert!(refusal.contains("(5, 13)"), "and has to name the square: {refusal}");
 
-    // Every way out of the alcove needs a push tile the boulder itself now seals off, so the
-    // honest answer is that this one is finished — which is a thing to be told, not to be shoved
-    // at.
+    // Every way out of the alcove needs a push tile the boulder now seals, so the answer is that it
+    // is finished.
     for dir in [JoypadButton::Down, JoypadButton::Left, JoypadButton::Right] {
         assert!(map.boulder_push_refusal(Point8 { x: 5, y: 14 }, dir).is_some(),
             "the alcove is sealed by the boulder in it, so no push works: {dir:?}");
     }
     assert!(map.solve_boulder_push(Point8 { x: 17, y: 13 }).is_none(),
         "and the planner must not offer a route through a push the cartridge refuses");
-    // The half that keeps this from reading as "the game is broken".
     assert!(refusal.contains("Leaving this map"), "a sealed boulder must name the way out: {refusal}");
 
-    // The same floor before the run shoved the boulder into the corner still solves, so the rules
-    // added here refuse the impossible push without taking the possible one away.
+    // The same floor before the shove still solves, so the refusal does not take the possible push
+    // away.
     let mut pristine = TestFixture::new(VR1F_STRENGTH, Duration::from_secs(30), Vec::new());
     let fresh = pristine.game_state();
     assert_eq!(fresh.map.boulder_push_refusal(Point8 { x: 5, y: 15 }, JoypadButton::Down), None,
@@ -338,7 +309,7 @@ fn a_boulder_that_cannot_move_is_refused_rather_than_shoved_at() {
     let nowhere = fresh.map.boulder_push_refusal(Point8 { x: 5, y: 15 }, JoypadButton::Left)
         .expect("a push with nowhere to stand must be refused");
     assert!(nowhere.contains("(6, 15)") && nowhere.contains("nowhere to stand"), "{nowhere}");
-    // And it is refused at the *row*, which is the seam the model actually meets.
+    // Refused at the row, the seam the model meets.
     let goals: Vec<_> = fresh.map.actions().into_iter()
         .filter(|action| matches!(action.tile, crate::pokemon::tile::MetaTile::BoulderGoal { .. }))
         .collect();
@@ -352,7 +323,7 @@ fn a_boulder_that_cannot_move_is_refused_rather_than_shoved_at() {
             "the row for {boulder} -> {at} opens on a push the cartridge would refuse");
     }
 
-    // And the driver, which is the seam that actually burned the minute.
+    // And the driver.
     let asked = PushOnce::new(Point8 { x: 5, y: 14 }, JoypadButton::Up);
     let mut fixture = TestFixture::with_policy(VR1F_STUCK_PUSH, Duration::from_secs(20), Box::new(asked));
     let mut said = None;
@@ -371,11 +342,7 @@ fn a_boulder_that_cannot_move_is_refused_rather_than_shoved_at() {
          took {:?}", fixture.total_cycles.to_duration());
 }
 
-/// ⚰️ `a_boulder_row_arms_strength_and_pushes_on_one_decision` and
-/// `victory_road_1f_is_solvable_from_the_action_menu_alone` were both here, and both are
-/// `a_strength_puzzle_is_one_decision_rather_than_one_per_shove` now.
-
-/// The one square the planner and the menu disagreed about.
+/// The one square the planner and the menu disagreed about: a push from a warp tile.
 #[test]
 fn a_push_from_a_warp_tile_is_offered_because_victory_road_needs_one() {
     use crate::pokemon::tile::MetaTile;
@@ -390,21 +357,20 @@ fn a_push_from_a_warp_tile_is_offered_because_victory_road_needs_one() {
     state.map.meta_tiles[to.x as usize + to.y as usize * width] = MetaTile::Sprite("Boulder 1");
     state.map.player_position = Point8 { x: 9, y: 15 };
 
-    // The square in question is a warp, and it is the only one the push can be made from.
+    // The only square the push can be made from is a warp.
     let stand = Point8 { x: 9, y: 17 };
     assert!(matches!(state.map.tile_at(stand), MetaTile::Warp { .. }), "(9, 17) is the entrance");
     assert_eq!(state.map.boulder_push_refusal(to, JoypadButton::Up), None,
         "the push the solver wants must be one the menu will offer");
 
-    // And the walk to it must exist under the same rules, or the row is a decision the driver
-    // cannot carry out — `PushingBoulder` finds no route and drops to `Idle` without a word.
+    // The walk to it exists under the same rules, or `PushingBoulder` finds no route and drops
+    // silently to `Idle`.
     let route = state.map.route_to_push_tile(stand).expect("a walk to the push tile");
     assert!(!route.is_empty() && !route.contains(&JoypadButton::Start), "{route:?}");
     assert_eq!(route.last(), Some(&JoypadButton::Right), "it arrives from the west, not from above");
 
-    // The way on has to be a *row*, and since the menu offers goals rather than shoves that means
-    // the switch is still offered from this layout — with a plan that opens on the warp-tile
-    // push.
+    // The switch is still offered as a goal from this layout, with a plan that opens on the
+    // warp-tile push.
     let switch = Point8 { x: 17, y: 13 };
     let goal = state.map.actions().into_iter()
         .find(|action| matches!(action.tile, MetaTile::BoulderGoal { at, .. } if at == switch))
@@ -421,8 +387,7 @@ const DRIVER_ESCAPE_SILENCE_SECS: Duration = Duration::from_secs(10);
 const VR1F_STUCK_PUSH: &[u8] = include_bytes!("../data/vr1f-stuck-push.bin");
 const VR1F_STRENGTH: &[u8] = include_bytes!("../data/vr1f-strength.bin");
 
-/// A policy that asks for one boulder push and nothing else, so the test drives the agent's
-/// `PushingBoulder` seam directly.
+/// Asks for one boulder push and nothing else, driving the `PushingBoulder` seam directly.
 struct PushOnce {
     boulder: Point8,
     dir: JoypadButton,
@@ -445,8 +410,7 @@ impl crate::pokemon::policy::Policy for PushOnce {
     }
 }
 
-/// And the way out of a boulder that cannot be pushed is the door, which is worth pinning because
-/// it is the sentence the refusal above ends on.
+/// Leaving a map puts its boulders back, the way out the refusal names.
 #[test]
 fn leaving_a_map_puts_its_boulders_back() {
     let mut fixture = TestFixture::new(VR1F_STUCK_PUSH, Duration::from_mins(4), vec![
@@ -457,7 +421,7 @@ fn leaving_a_map_puts_its_boulders_back() {
         && s.map.sprites.iter().any(|sprite| sprite.name == "Boulder 1" && !sprite.hidden
             && sprite.position == Point8 { x: 5, y: 15 }));
     assert_eq!(state.map.map, Map::VictoryRoad1F);
-    // Where the map header puts it, not the alcove the run had shoved it into.
+    // Where the map header puts it, not the alcove.
     let boulder = state.map.sprites.iter().find(|s| s.name == "Boulder 1")
         .expect("VictoryRoad1F has a boulder");
     assert_eq!(boulder.position, Point8 { x: 5, y: 15 }, "a re-entered map re-reads its objects");
@@ -465,36 +429,31 @@ fn leaving_a_map_puts_its_boulders_back() {
         "and the puzzle is winnable again");
 }
 
-/// The whole Victory Road 1F puzzle as one decision, which is what `MetaTile::BoulderGoal` is
-/// for.
+/// The whole Victory Road 1F puzzle is one decision, a `MetaTile::BoulderGoal` row.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn a_strength_puzzle_is_one_decision_rather_than_one_per_shove() {
     const SWITCH: Point8 = Point8 { x: 17, y: 13 };
 
-    // Generous: the whole point is that this is several shoves, and the first one pays for the
-    // Strength arming menu on top.
+    // Several shoves, plus the Strength arming menu on the first.
     let mut fixture = TestFixture::new(VR1F_STRENGTH, Duration::from_mins(30), vec![]);
     let state = fixture.game_state();
     assert!(state.map.can_strength, "the fixture carries Strength and the badge");
     assert!(!state.map.boulders().contains(&SWITCH), "nothing is on the switch yet");
 
-    // The row exists, names the goal, and its id carries the target — see `MetaTile::id_kind`.
+    // The row names the goal, and its id carries the target.
     let goal = state.map.actions().into_iter()
         .find(|action| matches!(action.tile, MetaTile::BoulderGoal { at, hole: false, .. } if at == SWITCH))
         .expect("the menu offers the switch as a goal");
     let MetaTile::BoulderGoal { boulder, .. } = goal.tile else { unreachable!() };
-    // The row names the boulder as well as the target, so a floor with two of each is not
-    // ambiguous — see `MetaTile::BoulderGoal`.
+    // The row names the boulder as well as the target, so a floor with two of each is unambiguous.
     assert!(format!("{}", goal.tile).contains("to push it onto the switch at (17, 13)"), "{}", goal.tile);
     assert!(format!("{}", goal.tile).contains(&format!("({}, {})", boulder.x, boulder.y)), "{}", goal.tile);
 
-    // And the *id* names neither the boulder nor the square the walk starts from, because both
-    // move on every push.
+    // The id names neither the boulder nor the start square, because both move on every push.
     assert_eq!(goal.id(), "VictoryRoad1F:17,13:PushBoulderOntoSwitch");
     let id = goal.id();
 
-    // One action, then nothing.
     fixture.agent.take_overworld_action(goal);
 
     let shoved = fixture.run_until(|state| !state.map.boulders().contains(&boulder));
@@ -505,7 +464,7 @@ fn a_strength_puzzle_is_one_decision_rather_than_one_per_shove() {
     let landed = fixture.run_until(|state| state.map.boulders().contains(&SWITCH));
     println!("boulder landed on the switch at {} after one decision", landed.map.player_position);
 
-    // And it has to *say* it landed.
+    // And it reports that it landed.
     let mut reported = false;
     for _ in 0..600 {
         for event in fixture.agent.drain_events() {
@@ -521,13 +480,12 @@ fn a_strength_puzzle_is_one_decision_rather_than_one_per_shove() {
     assert!(reported, "the goal completed and never said so");
 }
 
-/// Scratch: a fixture standing on VictoryRoad3F with Strength armed, before its switch puzzle.
+/// Cuts a fixture on VictoryRoad3F with Strength armed, before its switch puzzle.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn cut_vr3f_fixture() {
     let mut steps = PolicyStep::victory_road_1f_climb_steps();
-    // The 2F half, up to and including arming Strength on 3F — i.e. stop before `SolveBoulders`
-    // for the (3, 5) switch, which is the puzzle under test.
+    // The 2F half, up to arming Strength on 3F: stop before `SolveBoulders` for the (3, 5) switch.
     let half = PolicyStep::victory_road_2f_3f_steps();
     let stop = half.iter().enumerate()
         .filter(|(_, s)| matches!(s, PolicyStep::SolveBoulders { switch, .. } if *switch == Point8 { x: 3, y: 5 }))
@@ -542,8 +500,8 @@ fn cut_vr3f_fixture() {
     fixture.save_state_named("src/pokemon/data/vr3f-strength.bin").unwrap();
 }
 
-/// A policy that answers with the goal row for `switch` every time it is asked, which is what
-/// both the coverage explorer and a model do: an aborted action comes back to be chosen again.
+/// Answers with the goal row for `switch` every time, as the coverage explorer and a model
+/// re-choose an aborted action.
 struct AlwaysTheGoal { switch: Point8, battles: crate::pokemon::policy::RandomPolicy }
 impl AlwaysTheGoal {
     fn new(switch: Point8) -> Self {
@@ -587,7 +545,7 @@ fn victory_roads_hardest_switch_is_one_decision_however_many_shoves_it_takes() {
              plan.len(), landed.map.player_position);
 }
 
-/// A goal survives being re-chosen, on the floor where that is hardest.
+/// A goal re-chosen after every battle still arrives.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn a_boulder_goal_re_chosen_after_every_battle_still_arrives() {
@@ -614,8 +572,7 @@ fn a_boulder_goal_re_chosen_after_every_battle_still_arrives() {
     assert_eq!(ids.len(), 1, "the goal must keep one id across every re-pick: {ids:?}");
 }
 
-/// A Strength floor that has been wedged says the door is the way out, not that the pathfinder is
-/// broken.
+/// A wedged Strength floor names the door as the way out, not a pathfinder fault.
 #[test]
 fn a_wedged_strength_floor_is_reported_as_a_reset_rather_than_a_missing_route() {
     use crate::pokemon::agent::OverworldActionAbortedReason;
@@ -623,7 +580,6 @@ fn a_wedged_strength_floor_is_reported_as_a_reset_rather_than_a_missing_route() 
     let reason = OverworldActionAbortedReason::PuzzleUnsolvable;
     let said = format!("{reason}");
     assert!(said.contains("no boulder on this floor"), "{said}");
-    // It must not say "route", which is the word that reads as a pathfinder fault.
     assert!(!said.contains("route"), "the one word this sentence must not use: {said}");
     assert!(said.contains("leaving this floor and coming back"), "it has to name the way out: {said}");
 
@@ -656,8 +612,8 @@ fn a_boulder_goal_that_keeps_shoving_is_not_a_driver_the_game_has_gone_quiet_on(
     let mut silences: Vec<String> = Vec::new();
     let (mut peak_poll, mut peak_answer) = (Duration::ZERO, Duration::ZERO);
     while fixture.total_cycles < fixture.max_cycles && ended.is_none() {
-        // Held up rather than set once: the counter is spent one per overworld step and this goal
-        // walks further than the byte can count.
+        // Held up every tick: the counter drops per step and this goal walks further than a byte
+        // counts.
         fixture.api().debug_set_repel_steps(u8::MAX);
         fixture.step();
         peak_poll = peak_poll.max(fixture.agent.since_last_policy_poll());
@@ -681,7 +637,6 @@ fn a_boulder_goal_that_keeps_shoving_is_not_a_driver_the_game_has_gone_quiet_on(
     assert!(silences.is_empty(), "the game answered every shove: {silences:?}");
     assert_eq!(ended.as_deref(), Some("completed"),
         "a {took:?} boulder goal that lands every shove has to finish");
-    // This is the line the fix is about.
     assert!(peak_poll > DRIVER_ESCAPE_SILENCE / 2,
         "the goal has to spend a good part of the bound with the policy unasked or this test proves \
          nothing; it was only {peak_poll:?}. Is the Repel holding?");

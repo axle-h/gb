@@ -14,7 +14,7 @@ impl JoypadRegister {
         let before = self.low_nibble();
         self.select_buttons = (value & 0x20) == 0;
         self.select_directions = (value & 0x10) == 0;
-        // D9: writing the select bits can reveal an already-held button, and that edge is an
+        // Writing the select bits can reveal an already-held button, and that edge is an
         // interrupt just as much as a fresh press is.
         self.raise_on_falling_edge(before);
     }
@@ -25,7 +25,6 @@ impl JoypadRegister {
         self.get() & 0x0F
     }
 
-    /// D9.
     fn raise_on_falling_edge(&mut self, before: u8) {
         let after = self.low_nibble();
         if before & !after != 0 {
@@ -172,7 +171,6 @@ mod tests {
         assert!(joypad.is_activation_pending()); // still interrupt required until read
     }
 
-    /// D9.
     #[test]
     fn a_press_in_an_unselected_group_raises_nothing() {
         let mut joypad = JoypadRegister::default();

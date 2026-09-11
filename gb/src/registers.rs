@@ -81,7 +81,7 @@ impl RegisterSet {
         }
     }
 
-    /// B11. The DMG boot ROM's final register block.
+    /// The DMG boot ROM's final register block.
     pub fn dmg(cart: &[u8]) -> Self {
         let checksum = cart.get(0x014D).copied().unwrap_or(0);
         Self {
@@ -211,7 +211,6 @@ mod tests {
         assert_eq!(registers.h, 0x01);
     }
 
-    /// B11.
     #[test]
     fn the_boot_flags_follow_the_header_checksum() {
         fn flags_for(checksum: u8) -> u8 {
@@ -291,7 +290,6 @@ mod tests {
         assert_eq!(registers.hl(), 0x0000); // Should wrap around to 0x0000
     }
 
-    /// B9.
     #[test]
     fn the_boot_register_file_matches_the_boot_rom() {
         use crate::model::ColorMode;
@@ -299,7 +297,7 @@ mod tests {
         let dmg = RegisterSet::boot(ColorMode::Dmg, crate::test_fixtures::POKERED);
         assert_eq!(dmg, RegisterSet::dmg(crate::test_fixtures::POKERED));
         assert_eq!(dmg.a, 0x01);
-        // B11: `F` is header-derived, and pokered's checksum of 0x20 makes it 0x90 — see
+        // `F` is header-derived, and pokered's checksum of 0x20 makes it 0x90 — see
         // `the_boot_flags_follow_the_header_checksum`.
         assert_eq!(dmg.flags.to_byte(), 0x90);
 

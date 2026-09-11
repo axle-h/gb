@@ -1,10 +1,4 @@
-//! Command-line parsing — hand-rolled over `std::env::args`, no `clap`.
-//! ```text
-//! poke-agent-web                       web UI + LlmPolicy, resuming the newest run if there is one
-//! poke-agent-web --policy random       web UI, RandomPolicy — no API key, the video-pipeline harness
-//! poke-agent-web --policy deterministic web UI, DeterministicPolicy on the scripted route — ditto
-//! poke-agent-web --new-run             start from the beginning of the game rather than resuming
-//! ```
+//! Command-line parsing, hand-rolled over `std::env::args`. `USAGE` names every flag and variable.
 
 /// The crate version, from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -67,24 +61,21 @@ pub enum Command {
     Serve {
         port: u16,
         policy: ServePolicy,
-        /// Ignore any resumable run under `GB_RUN_DIR` and start the game from the beginning in a
-        /// directory of its own.
+        /// Start the game from the beginning in a new directory rather than resuming.
         new_run: bool,
     },
     /// `--help`.
     Help,
 }
 
-/// Who makes the decisions under `gb serve`.
+/// Who makes the decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServePolicy {
     /// An LLM over an OpenAI-compatible API.
     Llm,
     /// Random legal choices.
     Random,
-    /// `DeterministicPolicy` on `PolicyStep::complete_game_steps` — the same queue
-    /// `full_playthrough` runs, on the same fresh save, played out on the page instead of in a
-    /// test harness.
+    /// `DeterministicPolicy` on the queue and fresh save `full_playthrough` runs.
     Deterministic,
 }
 
@@ -135,10 +126,7 @@ where
         },
         None => DEFAULT_PORT,
     };
-    // `GB_POLICY` is the container's way of setting this and `--policy` is the operator's,
-    // exactly as above — so the ConfigMap can move a deployment between the model, the random
-    // harness and the scripted playthrough with a `kubectl rollout restart` rather than an edited
-    // command line.
+    // `GB_POLICY` is the container's setting and `--policy` the operator's, which wins.
     let mut policy = match env("GB_POLICY").map(|value| value.trim().to_string()).filter(|v| !v.is_empty()) {
         Some(value) => match ServePolicy::parse(&value) {
             Some(parsed) => parsed,
@@ -148,9 +136,7 @@ where
     };
     let mut new_run = false;
     while let Some(flag) = rest.next() {
-        // `--new-run` is the only flag that is a switch rather than a setting, so it is taken
-        // before a value is demanded — every other missing value is the same mistake and reports
-        // the same way rather than silently defaulting.
+        // The one switch, taken before a value is demanded.
         if flag == "--new-run" {
             new_run = true;
             continue;
@@ -223,17 +209,14 @@ mod tests {
             "GB_PORT", "GB_POLICY", "GB_RUN_DIR", "GB_STATUS_HZ", "GB_HARDWARE", "GB_AUDIO_BITRATE",
             "OPENAI_API_KEY", "GB_MODEL", "OPENAI_BASE_URL",
             "GB_CONTEXT_LIMIT", "GB_TEMPERATURE", "GB_MAX_TOOL_STEPS", "GB_STUCK_TIMEOUT_SECS",
-            // Every spelling `--policy` and `GB_POLICY` accept, since the same argument holds for
-            // a value as for a flag: for a tool whose only discovery mechanism is `--help`, a
-            // policy the parser takes and the usage does not name may as well not exist.
+            // Every spelling `--policy` and `GB_POLICY` accept: `--help` is the only discovery.
             "llm", "random", "deterministic",
         ] {
             assert!(USAGE.contains(name), "`{name}` is accepted but `--help` does not mention it");
         }
     }
 
-    /// The flag and the variable are one parser, and this is what says so: a name accepted by one
-    /// and not the other is the trap the shared [`ServePolicy::parse`] exists to close.
+    /// The flag and the variable accept the same names, through `ServePolicy::parse`.
     #[test]
     fn every_policy_is_spelled_the_same_on_the_command_line_and_in_the_environment() {
         for (name, expected) in [
@@ -268,8 +251,7 @@ mod tests {
             Ok(Command::Serve { port: DEFAULT_PORT, policy: ServePolicy::Llm, new_run: false }),
         );
 
-        // Blank and whitespace are what a placeholder looks like in a Deployment, and mean
-        // "unset".
+        // Blank is what a placeholder looks like in a Deployment, and means unset.
         for blank in ["", "   "] {
             let env = |name: &str| (name == "GB_POLICY").then(|| blank.to_string());
             assert_eq!(
@@ -279,8 +261,7 @@ mod tests {
             );
         }
 
-        // Anything else is reported rather than silently ignored, and the message names the
-        // variable and the value — a container playing the wrong game costs whatever it plays.
+        // Anything else is refused, naming the variable and the value.
         let env = |name: &str| (name == "GB_POLICY").then(|| "magic-8-ball".to_string());
         let error = parse_with_env(Vec::<String>::new(), &env).expect_err("not a policy");
         assert!(error.contains("GB_POLICY") && error.contains("magic-8-ball"), "{error}");

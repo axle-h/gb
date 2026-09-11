@@ -1,10 +1,5 @@
-// The client half of the block-diff codec in `src/web/video.rs`. That module's docs are the wire
-// format's specification; this is a direct port of its `VideoDecoder`, which is the reference
-// implementation and the thing the Rust tests hold to.
-//
-// Deliberately DOM-free: it owns a plain RGBA buffer rather than an `ImageData`, so the whole
-// decoder can be exercised under node against a live server without a browser. `<Screen>` wraps the
-// buffer in an `ImageData` once, with no copy.
+// The client half of `src/web/video.rs`'s block-diff codec: a port of its `VideoDecoder`, which
+// specifies the wire format. DOM-free: it owns a plain RGBA buffer that `<Screen>` wraps once.
 
 import type { Connection } from './api';
 import { subscribeFramed } from './stream';
@@ -28,10 +23,10 @@ export interface AppliedMessage {
 }
 
 export class VideoDecoder {
-  /** RGBA, row-major, ready to hand to `new ImageData(...)`. Alpha is opaque and stays that way. */
+  /** RGBA, row-major; alpha stays opaque. */
   readonly rgba = new Uint8ClampedArray(WIDTH * HEIGHT * 4);
 
-  /** Persists across messages: replaced outright by a keyframe, appended to by a delta. */
+  /** Replaced outright by a keyframe, appended to by a delta. */
   private palette: number[][] = [];
 
   constructor() {
@@ -63,9 +58,7 @@ export class VideoDecoder {
     if (keyframe) this.palette = [];
     for (let i = 0; i < paletteLength; i++) this.palette.push([u8(), u8(), u8()]);
 
-    // A keyframe's block list is implicit — every block, in order — which is what makes it
-    // standalone. A delta names its blocks either as a bitmap or as a list of indices, whichever the
-    // encoder found smaller.
+    // A keyframe names every block in order; a delta uses a bitmap or an index list.
     const blocks: number[] = [];
     if (keyframe) {
       for (let b = 0; b < BLOCK_COUNT; b++) blocks.push(b);
@@ -115,15 +108,7 @@ export class VideoDecoder {
   }
 }
 
-/**
- * `/api/video` is a length-prefixed binary stream, deflated across the whole connection — see the
- * route's docs in `src/web/mod.rs` for the measurements that made it one, and `stream.ts` for the
- * transport itself, which `/api/audio` shares.
- *
- * ⚠️ **A reconnect is also the resync.** Every connection opens with a keyframe, so a decoder that
- * has lost the thread is repaired by dropping the connection and starting another. That is why the
- * caller does not need a resync path of its own.
- */
+/** `/api/video` over `stream.ts`; every connection opens with a keyframe, so a reconnect is the resync. */
 export function subscribeVideo(
   url: string,
   onMessage: (message: ArrayBuffer) => void,

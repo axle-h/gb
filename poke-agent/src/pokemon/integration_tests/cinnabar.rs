@@ -1,11 +1,8 @@
-//! Surf to Cinnabar → Pokémon Mansion (Secret Key) → Volcano Badge → the Seafoam Islands
-//! (Articuno).
+//! Surf to Cinnabar, the Mansion's Secret Key, the Volcano Badge and the Seafoam Islands.
 
 use super::*;
 
-/// Offline proof that the Articuno route exists at all, straight from the ROM: BFS the Seafoam
-/// warp graph out of the Route-20 east entrance with Surf enabled, and check that some
-/// floor/entry pair puts a walkable tile next to Articuno at B4F (6,1).
+/// From the ROM alone, Seafoam's warp graph with Surf reaches a tile beside Articuno at B4F (6,1).
 #[test]
 fn seafoam_articuno_is_reachable_offline() {
     use crate::pokemon::map_metadata::MapMetadataReader;
@@ -20,7 +17,6 @@ fn seafoam_articuno_is_reachable_offline() {
             player_position: at,
             player_direction: crate::pokemon::map_metadata::PlayerFacingDirection::Down,
             sprites: vec![], metadata, closed_doors: vec![], card_key_locked: false,
-            // Seafoam is surf routing; grass never enters into it.
             grass_encounter_rate: 0,
             header_loaded: true,
             surfing: true,
@@ -42,7 +38,6 @@ fn seafoam_articuno_is_reachable_offline() {
         let tm = build(map, at);
         let reach = tm.reachable_tiles();
         if map == Map::SeafoamIslandsB4F && articuno_entry.is_none() {
-            // Articuno is at (6,1); reaching it means standing on one of its four neighbours.
             let adj = [Point8 { x: 6, y: 0 }, Point8 { x: 6, y: 2 },
                        Point8 { x: 5, y: 1 }, Point8 { x: 7, y: 1 }];
             if adj.iter().any(|p| reach.contains(p)) { articuno_entry = Some((map, at)); }
@@ -51,8 +46,7 @@ fn seafoam_articuno_is_reachable_offline() {
             if let MetaTile::Warp { to_map, to_position } = tile {
                 if !matches!(to_map, Map::SeafoamIslands1F | Map::SeafoamIslandsB1F
                     | Map::SeafoamIslandsB2F | Map::SeafoamIslandsB3F | Map::SeafoamIslandsB4F) { continue; }
-                // Only ever enqueue a node once: two floors that warp to each other otherwise
-                // keep re-queueing one another and the walk never terminates.
+                // Enqueue each node once, or two floors that warp to each other loop for ever.
                 if seen.insert((to_map, to_position)) { queue.push_back((to_map, to_position)); }
             }
         }
@@ -62,9 +56,7 @@ fn seafoam_articuno_is_reachable_offline() {
     println!("Articuno reachable from {} @ {}", entry.0, entry.1);
 }
 
-/// Saffron → Cinnabar Island: Route 6 (threading its gate) → Vermilion → Diglett's Cave → Route 2
-/// (two Cut trees either side of its mid-route gate) → Viridian → Route 1 → Pallet, then Surf
-/// across Route 21.
+/// Saffron to Cinnabar by Route 6, Diglett's Cave, Route 2's Cut trees and Pallet, then Surf.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_surf_to_cinnabar() {
@@ -78,8 +70,7 @@ fn can_surf_to_cinnabar() {
     fixture.save_state_named("src/pokemon/data/at-cinnabar.bin").unwrap();
 }
 
-/// Navigate the Pokémon Mansion switch-gate maze and collect the Secret Key that unlocks the
-/// Cinnabar Gym.
+/// The Pokémon Mansion switch-gate maze to the Secret Key.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_secret_key() {
@@ -95,13 +86,11 @@ fn can_get_secret_key() {
     fixture.save_state_named("src/pokemon/data/post-secret-key.bin").unwrap();
 }
 
-/// Exit the mansion, heal, and clear the Cinnabar Gym's quiz-gate snake maze — `DefeatGymLeader`
-/// beats each fire trainer via line of sight to unlock the gate ahead — then beat Blaine for the
-/// Volcano Badge.
+/// Heal, clear the Cinnabar Gym's quiz-gate maze, and beat Blaine for the Volcano Badge.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_volcano_badge() {
-    // Pinned to the pre-J battle timing — see `TestFixture::with_original_battle_timing`.
+    // Animations on: `TestFixture::with_original_battle_timing`.
     let mut fixture = TestFixture::new(
         include_bytes!("../data/post-secret-key.bin"),
         Duration::from_mins(40),
@@ -112,9 +101,7 @@ fn can_get_volcano_badge() {
     fixture.save_state_named("src/pokemon/data/post-volcano-badge.bin").unwrap();
 }
 
-/// The Seafoam Islands detour, off Cinnabar and back: Sokoban-push the B3F boulders into the two
-/// floor holes to kill the B4F current, fall through to B4F, and take Articuno with the Master
-/// Ball.
+/// Seafoam: fill both B3F holes to stop the B4F current, fall through, and catch Articuno.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_catch_articuno() {
@@ -136,8 +123,7 @@ fn can_catch_articuno() {
     fixture.save_state_named("src/pokemon/data/post-articuno.bin").unwrap();
 }
 
-/// The fixture the boulder test below stands on: B3F with Strength armed and all four boulders
-/// untouched.
+/// Cuts the fixture the boulder test stands on: B3F, Strength armed, all four boulders untouched.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn cut_seafoam_b3f_fixture() {
@@ -155,7 +141,7 @@ fn cut_seafoam_b3f_fixture() {
     fixture.save_state_named("src/pokemon/data/seafoam-b3f.bin").unwrap();
 }
 
-/// Seafoam B3F's two holes, and it is the floor that catches what Victory Road's cannot.
+/// Seafoam B3F's two holes are each filled by the one boulder that can reach it.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn both_seafoam_holes_are_filled_by_the_only_boulders_that_can_reach_them() {
@@ -176,7 +162,6 @@ fn both_seafoam_holes_are_filled_by_the_only_boulders_that_can_reach_them() {
     let after = fixture.game_state().map.boulders();
     println!("boulders {before:?} -> {after:?}");
 
-    // Which two went matters as much as how many.
     assert!(!after.contains(&ONLY_A), "(3,15) should be in hole A: {after:?}");
     assert!(!after.contains(&ONLY_B), "(8,14) should be in hole B: {after:?}");
     assert_eq!(after.len(), 2, "exactly the two named boulders should have left: {after:?}");
@@ -252,7 +237,7 @@ fn a_walk_the_surf_mount_itself_finishes_says_that_it_arrived() {
         .collect();
     assert!(quiet.is_empty(),
         "the mount crossed the seam and nothing reported the arrival: {quiet:?}\n{}", log.report());
-    // …and it is a *completion*, not merely not-a-silence: the walk arrived.
+    // A completion, not merely no silence: the walk arrived.
     assert!(
         log.entries().any(|entry| entry.id.contains("ConnectionWater")
             && entry.verdict == crate::pokemon::integration_tests::coverage::Verdict::Completed),

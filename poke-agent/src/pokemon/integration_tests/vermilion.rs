@@ -1,8 +1,8 @@
-//! S.S.
+//! Vermilion: the S.S. Anne, Cut, the trash cans and the Thunder Badge.
 
 use super::*;
 
-/// Board the S.S.
+/// Board the S.S. Anne from `at-vermilion.bin` and leave with HM01 Cut.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_clear_ss_anne() {
@@ -17,12 +17,11 @@ fn can_clear_ss_anne() {
         s.pokemon.iter().map(|p| p.level).collect::<Vec<_>>(), s.bag.iter().collect::<Vec<_>>());
     assert!(s.bag.contains(&ItemId::Hm01Cut), "should have HM01 Cut after clearing the S.S. Anne");
     assert_eq!(s.map.map, Map::VermilionCity, "should have disembarked back to Vermilion City");
-    // Snapshot post-S.S.-Anne (HM01 in bag, party ~lv32) for the next leg (teach Cut → Lt.
+    // Snapshot after the S.S. Anne for the next leg, teaching Cut.
     fixture.save_state_named("src/pokemon/data/post-ss-anne.bin").unwrap();
 }
 
-/// Teach HM01 Cut via the bag (START → ITEM → HM01 → USE → choose Pokémon), from the
-/// post-S.S.-Anne save.
+/// Teach HM01 Cut from the bag, from `post-ss-anne.bin`.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_teach_cut() {
@@ -36,11 +35,11 @@ fn can_teach_cut() {
     let s = fixture.game_state();
     for p in s.pokemon.iter() { println!("{} moves: {:?}", p.species, p.moves); }
     assert!(s.can_use_cut, "the Cut carrier should know Cut (can_use_cut true) after TeachMove");
-    // Snapshot with Cut taught (at Vermilion) for the next leg (cut the gym tree → trash cans).
+    // Snapshot with Cut taught, for the gym tree and the trash cans.
     fixture.save_state_named("src/pokemon/data/post-teach-cut.bin").unwrap();
 }
 
-/// The two field mechanics that gate Lt.
+/// From `post-teach-cut.bin`, cut the gym tree and solve the trash cans that gate Lt. Surge.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_solve_gym_trash_cans() {
@@ -62,9 +61,7 @@ fn can_solve_gym_trash_cans() {
     fixture.save_state_named("src/pokemon/data/gym-trash-solved.bin").unwrap();
 }
 
-/// The integrated Thunder-Badge leg exactly as folded into `complete_game_steps`: from
-/// post-S.S.-Anne (HM01 Cut in the bag, in Vermilion City) run `thunder_badge_steps()` — teach
-/// Cut, cut the gym tree, solve the trash-can puzzle, beat Lt.
+/// `thunder_badge_steps()` as `complete_game_steps` runs it, from `post-ss-anne.bin` to the badge.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_thunder_badge() {
@@ -73,17 +70,14 @@ fn can_get_thunder_badge() {
         Duration::from_mins(20),
         PolicyStep::thunder_badge_steps(),
     );
-    // `DefeatGymLeader` never pops on its own, and the trailing `Interact` retries keep talking
-    // to Surge after the win — so stop on the badge, not on an empty queue.
+    // `DefeatGymLeader` never pops, and trailing `Interact` retries keep talking to Surge, so stop
+    // on the badge.
     let s = fixture.run_until(|s| s.badges.contains(Badge::ThunderBadge));
     println!("badges={:?} on {}", s.badges, s.map.map);
     fixture.save_state_named("src/pokemon/data/post-thunder-badge.bin").unwrap();
 }
 
-/// From the post-Thunder-Badge state (inside the Vermilion Gym), exit the gym, re-cut the
-/// enclosure tree (it regrew when the map reloaded), heal, catch and grind the Route 11 Drowzee,
-/// teach the starter Dig, and trek back to Cerulean City via the Underground Path (Route 6 →
-/// Route 5) — Saffron's Route 6 gate is guard-blocked, so the tunnel is the only way north.
+/// From the Vermilion Gym: re-cut the tree, a Drowzee for Dig, the Underground Path to Cerulean.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_return_to_cerulean() {
@@ -99,12 +93,10 @@ fn can_return_to_cerulean() {
     fixture.save_state_named("src/pokemon/data/back-in-cerulean.bin").unwrap();
 }
 
-/// A door the cartridge draws shut is a wall, and Vermilion Gym's are the only ones a finished
-/// save can never show you.
+/// Lt. Surge is not a row while the cartridge draws his doors shut.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn lt_surge_is_not_a_row_while_his_doors_are_shut() {
-    // `post-teach-cut`, and the tree first.
     let mut fixture = TestFixture::new(
         include_bytes!("../data/post-teach-cut.bin"), Duration::from_mins(10),
         vec![
@@ -118,9 +110,8 @@ fn lt_surge_is_not_a_row_while_his_doors_are_shut() {
 
     let rows: Vec<String> = state.map.actions().iter().map(|a| format!("{:?}", a.tile)).collect();
     println!("in the gym on {} badges: {}", state.badges.bits().count_ones(), rows.join(", "));
-    // He is on the map — the row is withheld because the doorway is a wall, not because the
-    // sprite is missing, and a test that could not tell those apart would pass on an empty sprite
-    // table.
+    // He is on the map: the row is withheld because the doorway is a wall, not because the sprite
+    // is missing.
     assert!(
         state.map.sprites.iter().any(|sprite| sprite.name.contains("Surge") && !sprite.hidden),
         "Lt. Surge has to be on the map for this to mean anything: {:?}",
@@ -130,14 +121,14 @@ fn lt_surge_is_not_a_row_while_his_doors_are_shut() {
         !rows.iter().any(|row| row.contains("Surge")),
         "the doors are shut, so there is no route to Lt. Surge and no row for him: {rows:?}",
     );
-    // And the trash cans that open them *are* rows, so the floor is not simply unreachable.
+    // The trash cans that open them are rows, so the floor is reachable.
     assert!(
         state.map.actions().len() > 1,
         "the front room has to be reachable: {rows:?}",
     );
 }
 
-/// Cut a coverage start that is standing *on* the ship: `on-the-ss-anne.bin`.
+/// Cut a coverage start standing on the ship: `on-the-ss-anne.bin`.
 #[test]
 #[cfg(feature = "slow-tests")]
 #[ignore = "tool: recuts on-the-ss-anne.bin; needs GB_REGEN_FIXTURES=1"]

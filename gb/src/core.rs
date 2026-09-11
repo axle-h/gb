@@ -1692,8 +1692,8 @@ mod tests {
         #[test]
         fn rotate_left_accumulator() {
             let mut core = Core::dmg_hello_world();
-            // B11: the boot `F` now follows the cartridge header, and these rotate-through- carry
-            // opcodes read the incoming carry — so set it explicitly rather than inherit it.
+            // The boot `F` follows the cartridge header, and these rotate-through-carry opcodes read
+            // the incoming carry, so set it explicitly rather than inherit it.
             core.registers.flags.c = false;
             core.registers.a = 0b10101010;
             core.execute(OpCode::RotateLeftAccumulator);
@@ -1714,8 +1714,8 @@ mod tests {
         #[test]
         fn rotate_right_accumulator() {
             let mut core = Core::dmg_hello_world();
-            // B11: the boot `F` now follows the cartridge header, and these rotate-through- carry
-            // opcodes read the incoming carry — so set it explicitly rather than inherit it.
+            // The boot `F` follows the cartridge header, and these rotate-through-carry opcodes read
+            // the incoming carry, so set it explicitly rather than inherit it.
             core.registers.flags.c = false;
             core.registers.a = 0b10101001;
             core.execute(OpCode::RotateRightAccumulator);
@@ -1774,8 +1774,8 @@ mod tests {
         #[test]
         fn rotate_left_register() {
             let mut core = Core::dmg_hello_world();
-            // B11: the boot `F` now follows the cartridge header, and these rotate-through- carry
-            // opcodes read the incoming carry — so set it explicitly rather than inherit it.
+            // The boot `F` follows the cartridge header, and these rotate-through-carry opcodes read
+            // the incoming carry, so set it explicitly rather than inherit it.
             core.registers.flags.c = false;
             core.registers.b = 0b10101010;
             core.execute(OpCode::RotateLeft { register: Register::B });
@@ -1796,8 +1796,8 @@ mod tests {
         #[test]
         fn rotate_right_register() {
             let mut core = Core::dmg_hello_world();
-            // B11: the boot `F` now follows the cartridge header, and these rotate-through- carry
-            // opcodes read the incoming carry — so set it explicitly rather than inherit it.
+            // The boot `F` follows the cartridge header, and these rotate-through-carry opcodes read
+            // the incoming carry, so set it explicitly rather than inherit it.
             core.registers.flags.c = false;
             core.registers.b = 0b10101001;
             core.execute(OpCode::RotateRight { register: Register::B });
@@ -2176,14 +2176,14 @@ mod tests {
             core.execute(OpCode::Stop);
             assert_eq!(core.mode, CoreMode::Stop);
 
-            // D9: the group has to be selected first.
+            // The group has to be selected first.
             core.mmu.joypad_mut().set(0x10); // select the buttons
             core.mmu.joypad_mut().press_button(JoypadButton::A);
             core.execute(OpCode::Nop); // update core state
             assert_eq!(core.mode, CoreMode::Normal);
         }
 
-        /// The other half of D9's quirk: with neither group selected, no button moves a line, so
+        /// The other half of the select quirk: with neither group selected, no button moves a line, so
         /// STOP is not woken by one.
         #[test]
         fn stop_is_not_woken_while_both_joypad_groups_are_deselected() {
@@ -2197,9 +2197,8 @@ mod tests {
             assert_eq!(core.mode, CoreMode::Stop, "no line moved, so nothing woke it");
         }
 
-        /// A3: `MMU::stop` switches the divider and timer off, and before this fix nothing ever
-        /// switched them back on — so a single STOP killed DIV, TIMA and every APU
-        /// length/envelope/sweep for the rest of the run.
+        /// `MMU::stop` switches the divider and timer off, so waking has to switch them back on,
+        /// or one STOP kills DIV, TIMA and every APU length/envelope/sweep for the rest of the run.
         #[test]
         fn stop_wake_restarts_the_clocks() {
             let mut core = Core::dmg_hello_world();
@@ -2221,7 +2220,7 @@ mod tests {
             assert_ne!(core.mmu.divider().value(), before, "DIV is frozen after STOP+wake");
         }
 
-        /// A3: STOP is a two-byte instruction.
+        /// STOP is a two-byte instruction.
         #[test]
         fn stop_consumes_its_pad_byte() {
             let mut core = Core::dmg_hello_world();
@@ -2236,7 +2235,7 @@ mod tests {
             assert_eq!(core.registers.pc, start + 2, "STOP must consume its pad byte");
         }
 
-        /// A4: an illegal opcode locks the CPU, but the rest of the machine keeps running.
+        /// An illegal opcode locks the CPU, but the rest of the machine keeps running.
         #[test]
         fn illegal_opcode_locks_the_cpu_but_not_the_machine() {
             let mut core = Core::dmg_hello_world();

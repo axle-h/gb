@@ -9,8 +9,7 @@ use crate::run::files;
 
 /// How many items the list holds, finished ones included.
 pub const MAX_ITEMS: usize = 5;
-/// Long enough for the intent *and* the reason it exists, because there is no longer a note
-/// beside it to hold the second half. See the module's second .
+/// Long enough for the intent and the reason for it.
 pub const MAX_TEXT: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -27,8 +26,7 @@ impl From<&TodoItem> for crate::published::TodoView {
     }
 }
 
-/// One tool call against the list, parsed. Answered on the worker thread — none of this needs the
-/// emulator, so unlike a read it costs no round trip through `service_tools`.
+/// One tool call against the list, answered on the worker thread with no emulator round trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TodoCall {
     /// The three edits: no `id` appends a new item, an `id` with text rewrites that item (and
@@ -40,8 +38,7 @@ pub enum TodoCall {
 /// What one [`TodoCall`] did: the sentence the model is shown, and whether the list acted on it.
 pub struct TodoAnswer {
     pub text: String,
-    /// True when nothing changed — a number that is not on the list, an item with no text, a plan
-    /// with no room. See [`TodoList::apply_reporting`].
+    /// Nothing changed: an id not on the list, an item with no text, or a plan with no room.
     pub refused: bool,
 }
 
@@ -56,15 +53,13 @@ impl TodoAnswer {
 }
 
 pub struct TodoList {
-    /// `None` for a run with no directory — the tests, and any future caller that wants the tools
-    /// without the persistence.
+    /// `None` for a run with no directory, which persists nothing.
     path: Option<PathBuf>,
     items: Vec<TodoItem>,
     next_id: u32,
 }
 
 impl TodoList {
-    /// Open the list in a run directory.
     pub fn open(run_dir: Option<&Path>) -> Self {
         let Some(run_dir) = run_dir else {
             return Self { path: None, items: Vec::new(), next_id: 1 };
@@ -76,7 +71,7 @@ impl TodoList {
             .unwrap_or_default();
         let next_id = items.iter().map(|item| item.id).max().unwrap_or(0) + 1;
         let mut list = Self { path: Some(path), items, next_id };
-        // Trimmed on the way in, not only on the way up.
+        // A list over the cap is trimmed on open, not only on add.
         if list.trim_to_cap() {
             list.persist();
         }
@@ -155,7 +150,6 @@ impl TodoList {
         }
     }
 
-    /// The ids the list actually holds, for an answer that has to name them.
     fn numbers(&self) -> Option<String> {
         match self.items.is_empty() {
             true => None,
@@ -181,9 +175,7 @@ impl TodoList {
         if text.is_empty() {
             return TodoAnswer::refused("An empty TODO is not a TODO.");
         }
-        // Dropping the oldest *done* item is what makes room, since the cap counts them: a plan
-        // whose finished half is squeezing out the live half is the failure this exists to
-        // prevent.
+        // The cap counts done items, so the oldest done one makes room and live work never does.
         let mut evicted = None;
         if self.items.len() >= MAX_ITEMS {
             if let Some(position) = self.items.iter().position(|item| item.done) {
@@ -268,13 +260,11 @@ impl TodoList {
     }
 }
 
-/// What [`TodoList::render`] opens with, and therefore how the worker finds the copy already in
-/// the history in order to replace it. It has to be unique among the things a `user` message can
-/// start with — [`crate::llm::compaction::SUMMARY_HEADING`] is the other one.
+/// How the worker finds the plan already in the history, so it must be unique among `user`
+/// message openings; [`crate::llm::compaction::SUMMARY_HEADING`] is the other one.
 pub const PLAN_HEADING: &str = "## Your plan";
 
-/// Truncate on a character boundary, because [`MAX_TEXT`] lands in the middle of a multi-byte
-/// character the first time a model writes about a Pokémon with an accent in its name.
+/// Truncate on a character boundary, since [`MAX_TEXT`] can land inside a multi-byte character.
 fn truncated(text: &str, limit: usize) -> String {
     match text.len() <= limit {
         true => text.to_string(),
@@ -318,8 +308,6 @@ mod tests {
         assert!(todo.apply(add("reach Cerulean")).contains("TODO 3"));
     }
 
-    /// The caps are what stop the plan becoming the context problem it exists to solve — and the
-    /// tail of finished work is the part that grows without bound in a long run.
     #[test]
     fn the_caps_hold_and_say_why() {
         let mut todo = TodoList::open(None);
@@ -329,7 +317,7 @@ mod tests {
         let full = todo.apply(add("one more"));
         assert!(full.contains("full"), "{full}");
         assert!(full.contains("It holds 1, 2, 3, 4, 5"), "a refusal names the ids: {full}");
-        // And it must not end by suggesting the very call it just refused — see `add`.
+        // It must not suggest the very call it just refused.
         assert!(!full.contains("no `id` to put this on the end"), "{full}");
 
         // Completing one makes room, and it is the completed one that is dropped.
@@ -340,15 +328,12 @@ mod tests {
         assert!(todo.apply(add("  ")).contains("not a TODO"));
         assert!(todo.apply(TodoCall::Complete { id: 9999 }).contains("no TODO 9999"));
 
-        // Two bytes a character, so the cap bites at half the characters — and lands *on* a
-        // boundary rather than splitting one, which is the thing worth asserting.
+        // Two bytes a character: the cap bites at half the characters, on a boundary.
         let mut todo = TodoList::open(None);
         todo.apply(add("é".repeat(MAX_TEXT)));
         assert_eq!(todo.items()[0].text.chars().count(), MAX_TEXT / 2);
     }
 
-    /// `todo_set` is one tool doing two jobs — append without an `id`, rewrite with one — and the
-    /// delete arm behind it is what `todo_delete` reaches.
     #[test]
     fn set_rewrites_and_deletes_as_well_as_adding() {
         let mut todo = TodoList::open(None);
@@ -372,7 +357,6 @@ mod tests {
         assert!(todo.apply(TodoCall::Set { id: None, text: None }).contains("not a TODO"));
     }
 
-    /// A number that is not on the list changes nothing, and the answer says which numbers are.
     #[test]
     fn an_id_that_is_not_on_the_list_changes_nothing_and_the_answer_names_the_ones_that_are() {
         let mut todo = TodoList::open(None);
@@ -397,8 +381,7 @@ mod tests {
         assert!(empty.apply(TodoCall::Complete { id: 1 }).contains("plan is empty"));
     }
 
-    /// An id that vanishes is an id the model goes on calling, so the eviction is named in the
-    /// answer of the call that caused it.
+    /// An id that vanishes unannounced is one the model goes on calling.
     #[test]
     fn the_item_squeezed_out_to_make_room_is_named() {
         let mut todo = TodoList::open(None);
@@ -413,7 +396,6 @@ mod tests {
         assert!(answer.contains("thing 0"), "it names what went, not only its number: {answer}");
     }
 
-    /// The model's copy is not the UI's.
     #[test]
     fn finished_work_is_squeezed_out_by_the_cap_rather_than_hidden() {
         let mut todo = TodoList::open(None);
@@ -425,7 +407,7 @@ mod tests {
 
         assert_eq!(todo.items().len(), MAX_ITEMS, "the cap counts finished items too");
         let rendered = todo.render();
-        // Nothing is hidden from the model any more: what it holds is what it is shown.
+        // What the list holds is what the model is shown.
         assert_eq!(
             rendered.matches("- [").count(),
             MAX_ITEMS,
@@ -437,7 +419,6 @@ mod tests {
         assert!(!rendered.contains("thing 0"), "the oldest was evicted: {rendered}");
     }
 
-    /// The order the model writes is the order it reads back, done items in place.
     #[test]
     fn the_list_is_rendered_in_the_order_the_model_maintains() {
         let mut todo = TodoList::open(None);
@@ -466,8 +447,7 @@ mod tests {
         assert_eq!(lines[0], "- [ ] 1 — first, revised", "{first}");
     }
 
-    /// A list written when the cap was 32 has to come under it on the way in, not merely stop
-    /// growing — a model that never adds again would otherwise keep the long list for ever.
+    /// An over-long list comes under the cap on open, or a model that never adds keeps it for ever.
     #[test]
     fn a_list_from_before_the_cap_is_trimmed_when_it_is_opened() {
         let scratch = crate::run::Scratch::new("todo-legacy-cap");
@@ -490,7 +470,6 @@ mod tests {
         assert_eq!(reopened.items().len(), MAX_ITEMS);
     }
 
-    /// `POST /api/clear` deletes the file, and an empty list in memory is not enough.
     #[test]
     fn a_cleared_list_takes_the_file_with_it() {
         let scratch = crate::run::Scratch::new("todo-cleared");
@@ -505,14 +484,12 @@ mod tests {
         // Ids start again, so the first item of the next plan is 1 rather than 2.
         assert!(TodoList::open(Some(&scratch.0)).render().contains("(empty"), "and the next process sees none");
 
-        // Clearing a run that never wrote a plan is not an error, and there is no file left
-        // behind.
+        // Clearing a run that never wrote a plan is not an error.
         let empty = crate::run::Scratch::new("todo-cleared-empty");
         assert!(TodoList::cleared(Some(&empty.0)).items().is_empty());
         assert!(TodoList::cleared(None).items().is_empty(), "…nor is one without a directory at all");
     }
 
-    /// With no run directory the tools still work — they simply keep nothing.
     #[test]
     fn a_list_without_a_directory_still_answers() {
         let mut todo = TodoList::open(None);

@@ -29,8 +29,7 @@ impl<const MAX_PHASE: u8, const SPEED_MULTIPLIER: usize> PhaseTimer<MAX_PHASE, S
     }
 
     pub fn trigger(&mut self) {
-        // TODO When triggering Ch1 and Ch2, the low two bits of the frequency timer are NOT
-        // modified.
+        // TODO triggering Ch1 and Ch2 must leave the frequency timer's low two bits alone.
         self.phase = 0;
         self.counter = self.period;
     }

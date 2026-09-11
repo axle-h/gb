@@ -241,7 +241,6 @@ mod tests {
         assert_eq!(CartHeader::parse(&rom).expect("loads").ram_banks(), 1);
     }
 
-    /// D7.
     #[test]
     fn an_unsupported_mapper_is_rejected() {
         let mut rom = crate::test_fixtures::POKERED.to_vec();
@@ -261,7 +260,6 @@ mod tests {
         assert_eq!(CartHeader::parse(&[0; 0x100]), Err(LoadError::TooSmall { len: 0x100 }));
     }
 
-    /// D8.
     #[test]
     fn try_dmg_reports_a_bad_cartridge() {
         let mut rom = crate::test_fixtures::POKERED.to_vec();

@@ -49,8 +49,8 @@ impl MachineCycles {
         Duration::from_nanos(nanos as u64)
     }
 
-    /// Subtraction that clamps at zero. The plain [`Sub`] impl deliberately does not do this —
-    /// see its comment — so the two callers that genuinely want a floor ask for it by name.
+    /// Subtraction that clamps at zero. The plain [`Sub`] impl does not do this (see its
+    /// comment), so the two callers that genuinely want a floor ask for it by name.
     pub const fn saturating_sub(self, other: Self) -> Self {
         Self(self.0.saturating_sub(other.0))
     }

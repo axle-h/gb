@@ -5,14 +5,10 @@ metadata:
   labels:
     app: gb
 spec:
-  # ⚠️ One replica, and it is not a scaling decision — it is the only correct number. A run
-  # directory has exactly one writer: two pods on the same volume would checkpoint over each other's
-  # save state, and two pods on different volumes would be two playthroughs behind one URL.
+  # One replica, because a run directory has exactly one writer.
   replicas: 1
-  # ⚠️ Recreate, not the default RollingUpdate. A rolling update starts the new pod before the old
-  # one has stopped — with ReadWriteOnce that pod simply never schedules, and if it did it would be
-  # a second writer. Recreate also guarantees the outgoing pod has finished its SIGTERM checkpoint
-  # before the incoming one reads the state it wrote.
+  # Recreate, because a rolling update would start a second writer before the old pod has
+  # finished its SIGTERM checkpoint.
   strategy:
     type: Recreate
   selector:
@@ -23,16 +19,10 @@ spec:
       labels:
         app: gb
     spec:
-      # ⚠️ Not optional, and the failure is a crash loop with no obvious cause. Kubernetes injects
-      # Docker-link-style env vars for every Service in the namespace, named after the service in
-      # SHOUT_CASE — and this Service is `gb`, so the pod is handed `GB_PORT=tcp://<clusterIP>:80`.
-      # `gb` reads GB_PORT as the port to listen on, cannot parse that, and exits with its usage
-      # text. Every one of the app's own variables is `GB_*`, so any future service in this
-      # namespace whose name starts a collision would do the same thing.
+      # Otherwise Kubernetes injects `GB_PORT=tcp://<clusterIP>:80` for the `gb` Service, which
+      # `gb` reads as its listen port and exits on.
       enableServiceLinks: false
-      # The image creates uid 10001 and owns /runs to it, but a fresh PersistentVolume is mounted
-      # over that. `fsGroup` is what makes the mounted directory writable by the process rather than
-      # by root.
+      # `fsGroup` makes the mounted volume writable by the image's uid 10001.
       securityContext:
         runAsUser: 10001
         runAsGroup: 10001
@@ -41,49 +31,14 @@ spec:
         - name: runs
           persistentVolumeClaim:
             claimName: runs
-      # ⚠️ SIGTERM is what checkpoints the run (W7), and `gb` is PID 1 (the Dockerfile's CMD is exec
-      # form) so it receives it directly. Kubernetes' default grace period is 30 s and the
-      # checkpoint is a save state plus two small files — far quicker — but there is no reason to be
-      # tight about it, and a SIGKILL costs everything since the last periodic checkpoint.
+      # SIGTERM checkpoints the run, so the grace period must exceed the checkpoint time.
       terminationGracePeriodSeconds: 30
       containers:
         - name: gb
           image: ghcr.io/axle-h/gb:latest
           imagePullPolicy: Always
-          # ⚠️ **No `--policy` here any more: `GB_POLICY` in `configmap.yml` is what chooses the
-          # decider, and that is the one line to edit to move the run between the model, the random
-          # harness and the scripted playthrough.** `--policy` still exists and still *wins* over the
-          # variable, which is what makes it the right shape for a one-off `kubectl -n gb set args`
-          # and the wrong shape for the standing configuration — a flag lives in a file nobody reads
-          # while looking for a knob, and this one already caused a crash loop once: the live
-          # Deployment was applied from a generated copy carrying `--policy random` while the line
-          # here said `llm`, so a plain `kubectl -n gb apply -f ./gb` silently switched the run to a
-          # placeholder key. Both halves of that trap are now closed by the files that own them —
-          # `configmap.yml` for the policy, `secret.axh.yml` for the key.
-          #
-          # ⚠️ **A ConfigMap edit restarts nothing.** `envFrom` is read once at process start and
-          # this template has no checksum annotation, so a policy change is always
-          # `apply` **then** `kubectl -n gb rollout restart deploy/gb`.
-          #
-          # The live setting is **`GB_POLICY: "llm"`**, against OpenRouter — see `configmap.yml` for
-          # that line, the endpoint, the model and the context limit, and the ⚠️ there about `:floor`
-          # buying the flex service tier at half price in exchange for a queue.
-          #
-          # ⚠️ `OPENAI_API_KEY` must be present and non-empty in the Secret for `GB_POLICY=llm` to
-          # start at all, and against OpenRouter it must also be **valid** — every request is
-          # authenticated, so a placeholder gets a 401 per turn rather than being ignored. The two
-          # policies that need neither an endpoint nor a key still exercise the whole stack — the
-          # agent, the video pipeline, the page and the volume — so one of them is what to switch to
-          # when the credit runs out or the endpoint is refusing, rather than leaving the pod
-          # erroring at every turn. ⚠️ **The model is paid now, so a wedged run costs money rather
-          # than a quota**: that is also the right answer while an agent bug is being fixed.
-          #
-          # It RESUMES the newest run under $GB_RUN_DIR, which is what makes a pod restart
-          # continue the playthrough instead of starting a new one. **To start the game over, do not
-          # edit this** — `POST /api/new-run` does it in place, with no rollout and nothing to undo
-          # (see ../README.md). `--new-run` here is the fallback for a process that is not answering,
-          # and ⚠️ left in place it would wipe the run on *every* restart, which is why it is not the
-          # first thing this comment offers any more.
+          # The policy is `GB_POLICY` in `configmap.yml`; `--policy` here would override it.
+          # This resumes the newest run; `--new-run` here would wipe the run on every restart.
           args: ["poke-agent-web"]
           envFrom:
             - configMapRef:
@@ -98,34 +53,21 @@ spec:
               containerPort: 8080
           resources:
             requests:
-              # The emulator thread runs flat out — it is not event-driven, it emulates every frame
-              # as fast as the schedule allows — so it wants a core to itself and the scheduler
-              # should know that.
+              # The emulator thread runs flat out, so it wants a core to itself.
               cpu: "1"
               memory: 256Mi
             limits:
-              # ⚠️ Deliberately no CPU limit. A limit throttles the emulator thread against the CFS
-              # quota, which shows up as the game running slower than real time rather than as
-              # anything that looks like a resource problem.
-              #
-              # Memory was 1Gi and the pod was OOMKilled twelve times over four days — an exit 137
-              # every few hours, each one resuming from the last checkpoint and each one costing
-              # whatever had happened since. The node has ~7.5Gi allocatable and this is the only
-              # thing on it that wants any of it.
+              # No CPU limit: a CFS quota shows up as the game running slow, not as a resource error.
               memory: 2Gi
-          # Resuming reads a save state and rebuilds the world graph from ROM headers; it is fast,
-          # but the startup probe is what stops liveness counting against that.
+          # Keeps liveness from counting against the resume at startup.
           startupProbe:
             httpGet:
               path: /api/healthz
               port: http
             periodSeconds: 2
             failureThreshold: 30
-          # ⚠️ This proves the HTTP server is answering, which is not the same as the agent making
-          # progress — `healthz` is served by axum and knows nothing about the emulator thread. The
-          # thing that catches a wedged *run* is W9's watchdog inside the process
-          # (GB_STUCK_TIMEOUT_SECS), not this probe. Restarting on a stuck run would be wrong
-          # anyway: the state is checkpointed, so the restart would resume into the same jam.
+          # Proves the HTTP server only; a wedged run is caught by the in-process watchdog,
+          # and a restart would resume into the same jam.
           livenessProbe:
             httpGet:
               path: /api/healthz

@@ -8,9 +8,7 @@ use poke_agent::pokemon::agent::{AGENT_RESOLUTION, PokemonAgent};
 use poke_agent::pokemon::map_metadata::MapMetadataCache;
 use poke_agent::pokemon::{PokemonApi, roms};
 
-/// Real frames, from the emulator actually playing — a synthetic gradient would exercise none of
-/// what makes this codec cheap (long runs, a handful of colours, most blocks unchanged between
-/// frames) and would not catch a regression that only shows up on a sprite edge.
+/// Real frames from the emulator: long runs, few colours and mostly unchanged blocks.
 fn recorded_frames(count: usize) -> Vec<Box<Frame>> {
     let mut gb = GameBoy::dmg(roms::POKERED);
     gb.load_state(poke_agent::pokemon::data::START_OF_GAME).expect("fixture should load");
@@ -19,8 +17,7 @@ fn recorded_frames(count: usize) -> Vec<Box<Frame>> {
 
     let mut frames = Vec::with_capacity(count);
     while frames.len() < count {
-        // Two agent ticks per captured frame ≈ 25 fps of emulated time, close to what the host
-        // publishes at.
+        // Two agent ticks per captured frame, close to the rate the host publishes at.
         let mut ran = MachineCycles::ZERO;
         for _ in 0..2 {
             ran += gb.run(AGENT_RESOLUTION);
@@ -32,8 +29,7 @@ fn recorded_frames(count: usize) -> Vec<Box<Frame>> {
     frames
 }
 
-/// A frame of `distinct` different colours, laid out so consecutive blocks differ — the shape
-/// that exhausts a palette, which no real Game Boy frame does.
+/// A frame of `distinct` colours laid out so consecutive blocks differ, to exhaust a palette.
 fn synthetic_frame(distinct: usize, offset: u32) -> Box<Frame> {
     let mut frame = Box::new([LcdColor::default(); PIXELS]);
     for (p, pixel) in frame.iter_mut().enumerate() {
@@ -60,8 +56,7 @@ fn roundtrip_recorded_frames() {
     assert!(messages > 2, "only {messages} messages — the capture never changed, so this proved nothing");
 }
 
-/// The whole reason for a diff format: a screen nobody is touching costs zero bytes, not a
-/// frame's worth every 33 ms.
+/// A screen nobody is touching costs zero bytes.
 #[test]
 fn an_unchanged_frame_sends_nothing() {
     let frames = recorded_frames(1);
@@ -87,8 +82,7 @@ fn a_keyframe_catches_a_fresh_decoder_up_exactly() {
     joining.apply(&keyframe.bytes).unwrap();
     assert_eq!(joining.pixels(), following.pixels(), "the keyframe did not catch the joiner up");
 
-    // …and both stay in step across the deltas that follow, which is the part a keyframe carrying
-    // only the colours it needed would have broken.
+    // …and both stay in step across the deltas, which a keyframe of only the colours used breaks.
     for (n, frame) in frames[30..].iter().enumerate() {
         if let Some(encoded) = encoder.encode(frame) {
             following.apply(&encoded.bytes).unwrap();
@@ -118,16 +112,13 @@ fn palette_exhaustion_forces_a_keyframe() {
     decoder.apply(&reset.bytes).unwrap();
     assert_eq!(decoder.pixels(), second.as_ref(), "reconstruction survived the palette reset");
 
-    // A decoder that only ever sees the reset — a viewer who joined one frame ago — must land in
-    // the same place, which is only true because the keyframe replaced the palette rather than
-    // appending to it.
+    // A viewer who sees only the reset lands in the same place: the keyframe replaced the palette.
     let mut fresh = VideoDecoder::default();
     fresh.apply(&reset.bytes).unwrap();
     assert_eq!(fresh.pixels(), second.as_ref());
 }
 
-/// A palette filled to the brim, and then overflowed within a single frame — the one case the
-/// encoder cannot solve by spending a keyframe, because there is no smaller palette to reset to.
+/// A palette overflowed within one frame, which no keyframe can fix, stays in sync.
 #[test]
 fn a_frame_that_overflows_the_palette_degrades_without_desynchronising() {
     let overflowing = synthetic_frame(400, 0);
@@ -139,8 +130,7 @@ fn a_frame_that_overflows_the_palette_degrades_without_desynchronising() {
     assert_eq!(encoded.bytes[5], 255, "the palette filled to the cap and the length byte held it");
     following.apply(&encoded.bytes).unwrap();
 
-    // Lossy by construction — 400 colours will not fit in 255 slots — so this is *not*
-    // pixel-exact against the source, and asserting that it were would be asserting a lie.
+    // Lossy by construction: 400 colours do not fit in 255 slots.
     assert_ne!(following.pixels(), overflowing.as_ref());
 
     // …but re-offering the same frame must produce nothing, i.e. the encoder knows what it sent.
@@ -152,8 +142,7 @@ fn a_frame_that_overflows_the_palette_degrades_without_desynchronising() {
     assert_eq!(joining.pixels(), following.pixels(), "the keyframe described the source, not what was sent");
 }
 
-/// The index is exactly as wide as the palette needs and no wider — the whole reason v2 dropped
-/// v1's per-block sub-palette.
+/// The index is exactly as wide as the palette needs and no wider.
 #[test]
 fn the_index_is_as_wide_as_the_palette_needs() {
     // Pokémon Red on a DMG is four shades, and four shades is two bits.
@@ -215,8 +204,7 @@ fn the_block_list_is_a_bitmap_only_when_that_is_smaller() {
     assert_eq!(decoder.pixels(), &base);
 }
 
-/// The bytes v2 exists to save, pinned against real frames so a regression shows up as a number
-/// rather than as a bill.
+/// A changed block's cost, pinned against real frames.
 #[test]
 fn a_changed_block_costs_its_payload_and_little_else() {
     let frames = recorded_frames(120);
@@ -264,8 +252,7 @@ fn a_corrupt_message_is_an_error_not_a_panic() {
         assert!(decoder.apply(&good[..cut]).is_err(), "truncating to {cut} bytes was accepted");
     }
 
-    // A delta whose palette index has never been sent is a desynchronised stream, not a black
-    // pixel.
+    // A palette index never sent is a desynchronised stream, not a black pixel.
     let mut orphan = vec![VERSION, 0, 1, 0, /* bits */ 2, /* palette */ 0];
     orphan.extend_from_slice(&1u16.to_le_bytes()); // one block…
     orphan.extend_from_slice(&0u16.to_le_bytes()); // …block 0
@@ -278,11 +265,7 @@ fn a_corrupt_message_is_an_error_not_a_panic() {
     assert!(VideoDecoder::default().apply(&silly).is_err());
 }
 
-// ── The ordering `Published` and this codec have to agree on
-// ─────────────────────────────────────
-
-/// A frame that differs from its neighbours in a handful of blocks — enough for a delta to be
-/// non-empty, which is all the ordering test needs.
+/// A frame that differs from its neighbours in a handful of blocks.
 fn frame(n: usize) -> Box<Frame> {
     let mut pixels = Box::new([LcdColor::WHITE; PIXELS]);
     for p in 0..PIXELS {

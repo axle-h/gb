@@ -1,25 +1,8 @@
 import type { TodoView } from '../api';
 
-/**
- * **W6b / §10** — the model's own plan.
- *
- * The one panel here that is about the *player* rather than the game. The screen says where the run
- * is and the conversation says what it is thinking about right now; neither says what it is trying
- * to do, and over a playthrough of thousands of turns that is the thread a viewer is actually
- * following. It is the same list the model is sent every turn, which is what makes it honest —
- * nothing here is a rendering of something else.
- *
- * ⚠️ **In the model's own order, finished items in place.** This used to render open items first
- * and finished ones after, which reordered the list the moment anything was ticked off: an item
- * completed in the middle jumped to the bottom and the numbering stopped matching what the model
- * had written. A plan is a sequence, and re-sorting someone else's sequence for them is a way to
- * make it say something they did not. Done items are greyed rather than moved, and the list is
- * capped at `todo::MAX_ITEMS` including them, so there is no tail to push out of the way.
- */
+/** The model's plan in its own order; done items are greyed in place, never moved. */
 export function PlanPanel({ plan }: { plan: TodoView[] }) {
-  // Nothing published yet: a fresh run, or a policy that is not an LLM, which has no plan and
-  // never will. Rendering an empty box in either case would be a panel that is permanently blank
-  // on half the deployments.
+  // Nothing published yet, or a policy with no plan.
   if (plan.length === 0) return null;
 
   const open = plan.filter((item) => !item.done).length;

@@ -115,7 +115,7 @@ mod tests {
         assert_eq!(s.next(), 40);
 
         // Relaxing the minimum itself forces a recompute — this is the case a naive `set` gets
-        // wrong, leaving `next` pointing at a time that is no longer scheduled.
+        // wrong, leaving `next` pointing at a time nothing is scheduled for.
         s.set(Ev::Video, 5000);
         assert_eq!(s.next(), 900);
 

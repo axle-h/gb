@@ -39,22 +39,18 @@ thing with a hard-coded early return, rebuild into its own target dir, and take 
 |---|---|---|
 | pixel rendering | 35% | bound only |
 | the whole APU | 30% | bound only |
-| the audio output side alone | 9% | **done** — gated when nobody is listening, +10.2% |
-| the four channels advancing | 20% of the gated run | **done** — deadline-driven, +10.4% |
-| letting a listener have the batch too | | **done**, +13.8% |
+| the audio output side alone | 9% | done: gated when nobody is listening |
+| the four channels advancing | 20% of the gated run | done: deadline-driven |
+| letting a listener have the batch too | | done |
 | render per scanline, not per instruction | 5.6% | not done: needs a catch-up on every write to VRAM, OAM, LCDC, the scroll registers and the palettes |
 | a base-cycle table for `OpCode::machine_cycles` | 4.1% self | not done, untested; `OpCode` does not keep its byte |
-| a combined "any interrupt pending" mask | ~1-2%, unmeasured | the ablation cannot be run — removing the poll stops the game |
+| a combined "any interrupt pending" mask | ~1-2%, unmeasured | the ablation cannot be run: removing the poll stops the game |
 
-Five things measured worse or made no difference, recorded so nobody spends an afternoon
-rediscovering them: hoisting the tile-map base out of the per-pixel path (+0.8%, the compiler was
-already doing it); resolving all eight of a tile row's pixels at fetch time (**−2.4%** — it inflates
-the row enough that the cache-key compare costs more than the bit-twiddling saved); flushing
-defensively in the powered-off branch of `Audio::update` (**−1.5%**, and the cost is the layout
-rather than the compare, because the function inlines into `MMU::update`); folding
-`soonest_channel_event`'s four `Option`s by hand (no change — the samples were attribution, not
-work); and `-C target-cpu=native`.
+Measured worse or no different, so not worth retrying: hoisting the tile-map base out of the
+per-pixel path (the compiler already does it); resolving a tile row's eight pixels at fetch time
+(slower, the cache-key compare outgrows the saving); flushing in the powered-off branch of
+`Audio::update` (slower, a layout cost since it inlines into `MMU::update`); folding
+`soonest_channel_event`'s four `Option`s by hand; and `-C target-cpu=native`.
 
-The pixel loop has no cheap wins left: it is 35% of the run, it has already been hoisted hard, and
-the two obvious ideas came out at +0.8% and −2.4%. Anything further is a restructuring, and deserves
-an ablation measuring its ceiling *before* anyone starts writing it.
+The pixel loop has no cheap wins left. Anything further is a restructuring, and needs an ablation
+measuring its ceiling before it is written.

@@ -1,20 +1,17 @@
-
 use super::super::*;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::postgame::items;
 
 const AIDES: &[u8] = include_bytes!("../../data/postgame-aides.bin");
 
-/// The three bag rows I1 spends: two TMs nothing in this repo teaches, and a Full Heal for a
-/// party that has no status to cure.
+/// Three rows to spend: two TMs nothing here teaches, and a Full Heal with no status to cure.
 const JUNK: &[ItemId] = &[ItemId::Tm29Psychic, ItemId::Tm31Mimic, ItemId::FullHeal];
 
-/// Task I1 — `ItemUseMedicine` out of battle: a Revive on a fainted mon and a Potion on a hurt
-/// one, then a Potion on a healthy one that must be *refused*.
+/// `ItemUseMedicine` out of battle: a Revive, a Potion, and a refused use on a healthy mon.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_revive_and_heal_a_party_member() {
-    /// Venusaur — the credits left it at 0 HP and nothing since has healed it.
+    /// Venusaur, left at 0 HP by the credits.
     const FAINTED: u8 = 0;
     /// Articuno at 64/259.
     const HURT: u8 = 1;
@@ -25,17 +22,16 @@ fn can_revive_and_heal_a_party_member() {
         PolicyStep::Fly { to: Map::FuchsiaCity },
         PolicyStep::enter(Map::FuchsiaPokecenter),
     ];
-    // Three rows out for three items in — a withdraw into a 20/20 bag does nothing, quietly.
+    // Three rows out for three in: a withdraw into a 20/20 bag does nothing, quietly.
     steps.extend(JUNK.iter().map(|&it| PolicyStep::deposit_item(it, u8::MAX, Map::FuchsiaPokecenter)));
     steps.extend([
         PolicyStep::withdraw_item(ItemId::Revive, 1, Map::FuchsiaPokecenter),
         PolicyStep::withdraw_item(ItemId::Potion, 1, Map::FuchsiaPokecenter),
-        // The PC holds exactly one Potion, which the heal below spends — so the declined use
-        // needs a *different* item or it pops on "not in the bag" and proves nothing.
+        // The one Potion is spent below, so the refused use needs a different item.
         PolicyStep::withdraw_item(ItemId::FullRestore, 1, Map::FuchsiaPokecenter),
         PolicyStep::use_medicine(ItemId::Revive, FAINTED),
         PolicyStep::use_medicine(ItemId::Potion, HURT),
-        // …and the one that must be declined rather than retried.
+        // The one that must be declined rather than retried.
         PolicyStep::use_medicine(ItemId::FullRestore, HEALTHY),
         PolicyStep::enter(Map::FuchsiaCity),
     ]);
@@ -57,7 +53,7 @@ fn can_revive_and_heal_a_party_member() {
     assert!(state.pokemon[FAINTED as usize].current_hp > 0, "the Revive should have stuck");
     assert!(state.pokemon[HURT as usize].current_hp > hurt_hp,
         "slot {HURT} should have healed: {} → {}", hurt_hp, state.pokemon[HURT as usize].current_hp);
-    // The declined use: the queue drained (so no wedge) and the Potion is still in the bag.
+    // The declined use: the queue drained, and the item is still in the bag.
     assert!(fixture.agent.policy_exhausted(), "the full-HP Full Restore should have popped, not stalled");
     assert!(items::bag_quantity(&state, ItemId::FullRestore) > 0,
         "the declined Full Restore should still be in the bag — the ROM does not consume a \
@@ -68,17 +64,16 @@ fn can_revive_and_heal_a_party_member() {
     fixture.save_state_named("src/pokemon/data/postgame-medicine.bin").unwrap();
 }
 
-/// I1's output: Fuchsia City, Venusaur revived, Articuno topped up, two bag rows spare.
+/// `can_revive_and_heal_a_party_member`'s output: Fuchsia City, Venusaur revived, two rows spare.
 const MEDICINE: &[u8] = include_bytes!("../../data/postgame-medicine.bin");
 
-/// Task I7 — press the Itemfinder, both ways.
+/// The Itemfinder pressed both ways.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_press_the_itemfinder_both_ways() {
     let mut fixture = TestFixture::new(MEDICINE, Duration::from_mins(90),
         PolicyStep::press_the_itemfinder_steps(Map::VermilionTradeHouse));
 
-    // Collect every distinct Itemfinder text the run prints, in order.
     let mut said: Vec<String> = Vec::new();
     while !fixture.agent.policy_exhausted() {
         fixture.step();
@@ -105,21 +100,20 @@ fn can_press_the_itemfinder_both_ways() {
     fixture.save_state_named("src/pokemon/data/postgame-finder.bin").unwrap();
 }
 
-/// I7's output: Fuchsia City, one Repel in the bag, ¥5,544.
+/// `can_press_the_itemfinder_both_ways`'s output: Fuchsia City, one Repel in the bag.
 const FINDER: &[u8] = include_bytes!("../../data/postgame-finder.bin");
 
 /// Venusaur's move slots on this chain: Solarbeam (5 of 10 PP), Razor Leaf, Cut, Vine Whip.
 const SOLARBEAM_SLOT: u8 = 0;
 const RAZOR_LEAF_SLOT: u8 = 1;
 
-/// Task I2 — `ItemUsePPRestore` and `ItemUsePPUp`.
+/// `ItemUsePPRestore` and `ItemUsePPUp`.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_restore_pp_and_raise_it() {
     let mut fixture = TestFixture::new(FINDER, Duration::from_mins(120),
         PolicyStep::pp_restore_steps(ItemId::Ether, 0, SOLARBEAM_SLOT, RAZOR_LEAF_SLOT));
-    // Debug tier, deliberately — see `PolicyStep::pp_restore_steps`: nothing in Kanto sells an
-    // Ether and every one on the floor is behind a trek this leg is not about.
+    // Debug tier: nothing in Kanto sells an Ether (see `PolicyStep::pp_restore_steps`).
     fixture.api().debug_give_item(ItemId::Ether, 1).expect("bag should have a free row for the Ether");
 
     let before = fixture.game_state();
@@ -129,8 +123,7 @@ fn can_restore_pp_and_raise_it() {
         "I2 needs a move that is missing PP; {:?} is at {}", solarbeam.name, items::move_pp(&solarbeam));
     assert_eq!(items::pp_ups(&razor_leaf), 0, "the PP Up target should have none spent on it yet");
 
-    // ── the Ether
-    // ────────────────────────────────────────────────────────────────────────────────
+    // ── the Ether ──
     let restored = fixture.run_until(|s| s.pokemon[0].moves[SOLARBEAM_SLOT as usize].as_ref()
         .is_some_and(|m| items::move_pp(m) > items::move_pp(&solarbeam)));
     let now = restored.pokemon[0].moves[SOLARBEAM_SLOT as usize].as_ref().unwrap();
@@ -138,10 +131,7 @@ fn can_restore_pp_and_raise_it() {
         items::max_pp(now));
     assert!(items::move_pp(now) > items::move_pp(&solarbeam), "the Ether should have restored PP");
 
-    // ── the PP Up
-    // ──────────────────────────────────────────────────────────────────────────────── Seeded
-    // here rather than up with the Ether, because the bag is at its 20-slot cap, and waited for
-    // rather than assumed.
+    // ── the PP Up ── Seeded here rather than with the Ether because the bag is at its 20-slot cap.
     fixture.run_until(|s| items::bag_quantity(s, ItemId::Ether) == 0);
     fixture.api().debug_give_item(ItemId::PpUp, 1).expect("the spent Ether should have freed a row");
     let state = fixture.run_leg(|s| s.pokemon[0].moves[RAZOR_LEAF_SLOT as usize].as_ref()
@@ -155,7 +145,7 @@ fn can_restore_pp_and_raise_it() {
         "…and RestoreBonusPP hands the same bonus to the current PP");
     println!("{:?}: {} PP Ups, max now {}", leaf.name, items::pp_ups(leaf), items::max_pp(leaf));
 
-    // The 1-indexed move menu: everything the two uses did not target must be untouched.
+    // Everything the two uses did not target is untouched.
     for i in [2usize, 3] {
         assert_eq!(before.pokemon[0].moves[i].as_ref().map(|m| m.pp),
                    state.pokemon[0].moves[i].as_ref().map(|m| m.pp),
@@ -167,10 +157,10 @@ fn can_restore_pp_and_raise_it() {
     fixture.save_state_named("src/pokemon/data/postgame-ether.bin").unwrap();
 }
 
-/// I2's output: Celadon City, Solarbeam topped up, one PP Up on Razor Leaf, a Repel in the bag.
+/// `can_restore_pp_and_raise_it`'s output: Celadon City, Solarbeam topped up, Razor Leaf PP Up.
 const ETHER: &[u8] = include_bytes!("../../data/postgame-ether.bin");
 
-/// Task I5 — the Repel family.
+/// The Repel family.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_set_a_repel_running() {
@@ -188,11 +178,11 @@ fn can_set_a_repel_running() {
     println!("after walking to {}: {} steps left", walked.map.map, walked.repel_steps);
 }
 
-/// Task I6 — ride the Bicycle.
+/// Ride the Bicycle.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_ride_the_bicycle() {
-    // On foot first, so the two numbers are the same walk between the same two maps.
+    // On foot first, so both numbers are the same walk.
     let walk_cycles = {
         let mut fixture = TestFixture::new(ETHER, Duration::from_mins(30),
             vec![PolicyStep::enter(Map::Route7)]);
@@ -218,14 +208,13 @@ fn can_ride_the_bicycle() {
     println!("Celadon → Route 7: walked {:?}, cycled {:?}",
         walk_cycles.to_duration(), ride_cycles.to_duration());
 
-    // …and off again — the same item, the same step, the other direction.
     let state = fixture.run_leg(|s| !s.on_bicycle);
     assert!(!state.on_bicycle,
         "using the Bicycle a second time should have dismounted (it toggles wWalkBikeSurfState)");
     println!("dismounted at {} @ {}", state.map.map, state.map.player_position);
 }
 
-/// Tasks I3 + I4 — the seven in-battle stat items and the Poké Doll, in one wild battle.
+/// The seven in-battle stat items and the Poké Doll, in one wild battle.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_use_the_stat_items_and_a_poke_doll_in_battle() {
@@ -246,7 +235,6 @@ fn can_use_the_stat_items_and_a_poke_doll_in_battle() {
     let bag_before = fixture.api().mmu().read_pointer(&pokered_symbols::wNumBagItems);
     println!("shopping with ¥{} and {bag_before}/20 bag rows", before.money);
 
-    // The shedding, asserted on its own.
     let shed = fixture.run_until(|s| SHED.iter().all(|&i| items::bag_quantity(s, i) == 0));
     let bag_after = fixture.api().mmu().read_pointer(&pokered_symbols::wNumBagItems);
     println!("shed {} items: bag {bag_before} → {bag_after}", SHED.len());
@@ -255,13 +243,12 @@ fn can_use_the_stat_items_and_a_poke_doll_in_battle() {
          mart will refuse the last of them silently", IN_BATTLE.len());
     let _ = shed;
 
-    // Everything on the list has to actually arrive, or the battle proves nothing about the items
-    // that did not.
+    // Every item on the list has to arrive, or the battle proves nothing about the missing ones.
     let stocked = fixture.run_until(|s|
         IN_BATTLE.iter().all(|&i| items::bag_quantity(s, i) > 0));
     println!("bought all {} items, ¥{} left", IN_BATTLE.len(), stocked.money);
 
-    // Sample the two battle-scoped observables every tick — they are wiped when the battle ends.
+    // Sample the two battle-scoped observables every tick; the battle's end wipes them.
     let mut best = StatMods::NEUTRAL;
     let mut status2 = 0u8;
     let mut battled = false;

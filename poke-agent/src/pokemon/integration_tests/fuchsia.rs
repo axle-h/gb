@@ -2,9 +2,7 @@
 
 use super::*;
 
-/// From the hideout (post-Silph-Scope), leave, travel to Lavender, climb Pokémon Tower
-/// (Channelers + the Scope-revealed ghost Marowak), beat the 7F Rockets and rescue Mr. Fuji, who
-/// hands over the Poké Flute.
+/// From the hideout: Lavender, Pokémon Tower and its ghost Marowak, and Mr. Fuji's Poké Flute.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_poke_flute() {
@@ -18,8 +16,7 @@ fn can_get_poke_flute() {
     fixture.save_state_named("src/pokemon/data/post-poke-flute.bin").unwrap();
 }
 
-/// Use the Poké Flute to wake the Route 12 Snorlax (the field item-use capability), beating it in
-/// the wild battle to clear the road south.
+/// The Poké Flute wakes the Route 12 Snorlax, beaten in the wild battle to clear the road.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_wake_snorlax() {
@@ -30,7 +27,6 @@ fn can_wake_snorlax() {
     );
     fixture.step_until_exhausted();
     let s = fixture.game_state();
-    // The Snorlax sprite is gone once beaten; the step completes on that.
     let snorlax_present = s.map.sprites.iter().any(|sp| !sp.hidden && sp.name == "Snorlax");
     println!("ended on {} @ {} snorlax_present={}", s.map.map, s.map.player_position, snorlax_present);
     assert_eq!(s.map.map, Map::Route12, "should be on Route 12 after waking the Snorlax");
@@ -38,8 +34,7 @@ fn can_wake_snorlax() {
     fixture.save_state_named("src/pokemon/data/post-snorlax.bin").unwrap();
 }
 
-/// From Route 12 (post-Snorlax), travel Route 13 → 14 → 15 → Fuchsia City and beat Koga for the
-/// Soul Badge.
+/// From Route 12 after the Snorlax, through Routes 13 to 15 to Fuchsia, and Koga's Soul Badge.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_soul_badge() {
@@ -55,8 +50,7 @@ fn can_get_soul_badge() {
     fixture.save_state_named("src/pokemon/data/post-soul-badge.bin").unwrap();
 }
 
-/// Safari Zone run for HM03 Surf + the Gold Teeth (exercises the Safari battle handling — the
-/// agent RUNs from every encounter).
+/// A Safari Zone run for HM03 Surf and the Gold Teeth, running from every encounter.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_surf_safari() {

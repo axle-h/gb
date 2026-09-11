@@ -80,7 +80,7 @@ impl Serial {
         self.data = data;
     }
 
-    /// D9. `SB` as the guest sees it *during* a transfer.
+    /// `SB` as the guest sees it during a transfer.
     pub fn data_at(&self, now: u64, fast: bool) -> u8 {
         let Some(started) = self.started else { return self.data };
         let bits = ((now.saturating_sub(started)) * 8 / Self::period(fast)).min(8) as u32;

@@ -10,7 +10,7 @@ use crate::pokemon::sprite::{PictureId, SpriteFacing};
 use crate::pokemon::tile::{JumpDirection, MetaTile};
 use crate::pokemon::tile_map::MetaTileMap;
 
-/// One meta-tile, in pixels. Two graphical tiles each way.
+/// One meta-tile, in pixels: two graphical tiles each way.
 pub const CELL_PX: usize = TILE_PX * 2;
 /// Room for a three-digit coordinate down the left edge.
 pub const RULER_LEFT: usize = 3 * TILE_PX;
@@ -19,11 +19,9 @@ pub const RULER_TOP: usize = TILE_PX + 2;
 /// A coordinate is printed every this many meta-tiles.
 const RULER_EVERY: usize = 4;
 
-// ── Palette
-// ──────────────────────────────────────────────────────────────────────────────────────
+// ── Palette ──────────────────────────────────────────────────────────────────────────────────────
 
-/// The emulator's own four shades (`DMGColor::to_rgb`, `src/lcd_palette.rs`), so the map and the
-/// screenshot beside it are visibly the same game.
+/// The emulator's own four shades (`DMGColor::to_rgb`), so the map matches the screenshot.
 const SHADE: [[u8; 4]; 4] = [
     [0xFF, 0xFF, 0xFF, 0xFF],
     [0xAA, 0xAA, 0xAA, 0xFF],
@@ -58,9 +56,8 @@ const RULER_INK: [u8; 4] = [0x9A, 0xA4, 0xB4, 0xFF];
 const GUTTER: [u8; 4] = [0x12, 0x14, 0x1A, 0xFF];
 const GRID_LINE: Tint = ([0x00, 0x00, 0x00], 28);
 
-/// `Empty` and `Obstacle` are deliberately untinted: the ROM art already says which is which, and
-/// it is the *absence* of a wash on most of the map that makes the washed squares read at a
-/// glance.
+/// `Empty` and `Obstacle` are untinted: the art tells them apart, and an unwashed majority is
+/// what makes the washed squares read.
 fn tint_for(tile: MetaTile) -> Option<Tint> {
     Some(match tile {
         MetaTile::Grass => GRASS,
@@ -71,22 +68,17 @@ fn tint_for(tile: MetaTile) -> Option<Tint> {
         MetaTile::Connection { .. } => CONNECTION,
         MetaTile::CutTree => CUT_TREE,
         MetaTile::Counter => COUNTER,
-        // Neither a PC nor a hidden object is ever *in* `meta_tiles` — both are looked up per
-        // map, and the tile they sit on reads as the wall they are drawn in.
+        // Never in `meta_tiles`: a PC and a hidden object are looked up per map.
         MetaTile::Pc | MetaTile::Switch { .. } => PC,
-        // Nor is `Boulder` or `Cut`: both are *actions* on the ordinary floor beside the thing
-        // they are about, and the tree and the boulder are drawn as the terrain and the sprite
-        // they are.
+        // Nor these: both are actions on ordinary floor beside a tree or boulder drawn as art.
         MetaTile::Cut { .. } | MetaTile::BoulderGoal { .. } => return None,
-        // Nor is `Fish`: it is a shore *action*, and the shore itself is ordinary ground already
-        // tinted by the water beside it.
+        // Nor `Fish`: a shore action, beside water that is already tinted.
         MetaTile::Fish { .. } => return None,
         MetaTile::Empty | MetaTile::Obstacle | MetaTile::Sprite(_) => return None,
     })
 }
 
-// ── Rendering
-// ────────────────────────────────────────────────────────────────────────────────────
+// ── Rendering ────────────────────────────────────────────────────────────────────────────────────
 
 /// The whole of `map` as an RGBA image at one pixel per game pixel.
 pub fn render(map: &MetaTileMap) -> Option<RgbaImage> {
@@ -106,8 +98,7 @@ pub fn render(map: &MetaTileMap) -> Option<RgbaImage> {
     Some(canvas)
 }
 
-/// Wash the whole canvas for an unlit map. Separate from [`render`] because darkness is a
-/// `GameState` fact rather than a `MetaTileMap` one.
+/// Wash an unlit map; apart from [`render`] because darkness is a `GameState` fact.
 pub fn darken(canvas: &mut RgbaImage) {
     let (width, height) = canvas.dimensions();
     for y in 0..height {
@@ -139,8 +130,8 @@ fn draw_terrain(
         }
     }
 
-    // Each strip carries its own tileset — `strip_cells` and `tile_ids_at` are shared with the
-    // classification pass precisely so the two cannot place or read a strip differently.
+    // Each strip has its own tileset; `strip_cells` and `tile_ids_at` are shared with the
+    // classification pass so the two cannot place or read a strip differently.
     for (strip, strip_idx, mx, my) in metadata.strip_cells() {
         let Some(tile_ids) = strip.tile_ids_at(strip_idx) else { continue };
         for (quadrant, tile_id) in tile_ids.into_iter().enumerate() {
@@ -170,8 +161,7 @@ fn draw_tints(canvas: &mut RgbaImage, map: &MetaTileMap) {
     }
 }
 
-/// A faint rule every four meta-tiles, so the ruler's numbers can be carried into the middle of a
-/// wide map by eye.
+/// A faint rule every four meta-tiles, to carry the ruler's numbers into a wide map.
 fn draw_grid(canvas: &mut RgbaImage, map: &MetaTileMap) {
     let (width, height) = canvas.dimensions();
     for mx in (0..=map.width).step_by(RULER_EVERY) {
@@ -193,9 +183,7 @@ fn draw_grid(canvas: &mut RgbaImage, map: &MetaTileMap) {
 }
 
 fn draw_people(canvas: &mut RgbaImage, map: &MetaTileMap) {
-    // Index order, not `sprites`' own — two renders of one state must be byte-identical, and
-    // `sprites` is built by iteration over slots so it is already stable; sorting keeps it that
-    // way if that ever changes.
+    // Sorted, so two renders of one state are byte-identical whatever order `sprites` is in.
     let mut people: Vec<_> = map.sprites.iter().filter(|s| !s.hidden).collect();
     people.sort_by_key(|s| (s.position.y, s.position.x, s.index));
     for sprite in people {
@@ -218,8 +206,8 @@ fn draw_people(canvas: &mut RgbaImage, map: &MetaTileMap) {
     draw_facing_pip(canvas, map.player_position, facing);
 }
 
-/// Dim every square the player can neither stand on nor act on — the single most useful thing the
-/// picture can say that the raw art cannot.
+/// Dim every square the player can neither stand on nor act on. `reachable_tiles` is routable-to,
+/// so walls it ends routes at are subtracted here.
 fn draw_unreachable(canvas: &mut RgbaImage, map: &MetaTileMap) {
     let routable = map.reachable_tiles();
     for my in 0..map.height {
@@ -246,8 +234,7 @@ fn draw_ruler(canvas: &mut RgbaImage, map: &MetaTileMap) {
     }
 }
 
-// ── Labels
-// ───────────────────────────────────────────────────────────────────────────────────────
+// ── Labels ───────────────────────────────────────────────────────────────────────────────────────
 
 /// A destination named on the picture: which cells it covers and what it is called.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,7 +242,7 @@ struct Label {
     /// Bounding box of the cells this names, in meta-tiles: `(x0, y0, x1, y1)` inclusive.
     cells: (usize, usize, usize, usize),
     text: Vec<String>,
-    /// Whether *any* cell this label names can be routed to from where the player is standing.
+    /// Whether any cell this label names can be routed to from where the player is standing.
     reachable: bool,
 }
 
@@ -333,7 +320,7 @@ fn layout_labels(map: &MetaTileMap, canvas: (usize, usize)) -> Vec<(Label, Place
 
 /// One label per destination, grouped so the picture says each name once.
 fn collect_labels(map: &MetaTileMap) -> Vec<Label> {
-    // Per cell, not per bounding box.
+    // Per cell, not per bounding box: one building can have doors on two terraces.
     let routable = map.reachable_tiles();
     let mut groups: Vec<(Map, bool, usize, usize, usize, usize, bool)> = Vec::new();
     for (index, &tile) in map.meta_tiles.iter().enumerate() {
@@ -344,8 +331,7 @@ fn collect_labels(map: &MetaTileMap) -> Vec<Label> {
             _ => continue,
         };
         let (x, y) = (index % map.width, index / map.width);
-        // A water crossing needs Surf before it is a way anywhere, exactly as it does in
-        // `MetaTileMap::actions()` — being able to walk to the shore is not being able to cross.
+        // A water crossing needs Surf, as it does in `MetaTileMap::actions()`.
         let here = routable.contains(&Point8 { x: x as u8, y: y as u8 })
             && (map.can_surf || !matches!(tile, MetaTile::ConnectionWater(_)));
         match groups.iter_mut().find(|(m, edge, x0, y0, x1, y1, _)| {
@@ -364,10 +350,8 @@ fn collect_labels(map: &MetaTileMap) -> Vec<Label> {
             None => groups.push((to_map, is_edge, x, y, x, y, here)),
         }
     }
-    // A warp's label carries its coordinate, because the menu row it has to be matched to is
-    // keyed on nothing else: three ladders on one floor are three plates saying `MtMoonB1F`, and
-    // a model that cannot read them off the ruler (the deployed one could not) cannot tell which
-    // row is which. A map edge is named by where it leads; every cell of it is one row.
+    // A warp's label carries its coordinate, the only key to its menu row when three ladders
+    // share a name. A map edge is one row, named by where it leads.
     groups.into_iter()
         .map(|(to_map, is_edge, x0, y0, x1, y1, reachable)| {
             let mut text = wrap(&format!("{to_map}"));
@@ -432,8 +416,7 @@ fn draw_labels(canvas: &mut RgbaImage, map: &MetaTileMap) {
     }
 }
 
-// ── Drawing primitives
-// ───────────────────────────────────────────────────────────────────────────
+// ── Drawing primitives ───────────────────────────────────────────────────────────────────────────
 
 fn cell_x(mx: usize) -> usize { RULER_LEFT + mx * CELL_PX }
 fn cell_y(my: usize) -> usize { RULER_TOP + my * CELL_PX }
@@ -493,8 +476,7 @@ fn outline_cell(canvas: &mut RgbaImage, mx: usize, my: usize, rgb: [u8; 3]) {
     }
 }
 
-/// A three-pixel pip on the edge of the player's cell they are facing — the picture's answer to
-/// "and which way am I pointing", which decides whether an `A` press talks to anyone.
+/// A pip on the side of the player's cell they face, which decides what an `A` press talks to.
 fn draw_facing_pip(canvas: &mut RgbaImage, at: Point8, facing: SpriteFacing) {
     let (left, top) = (cell_x(at.x as usize) as i64, cell_y(at.y as usize) as i64);
     let mid = CELL_PX as i64 / 2;
@@ -550,19 +532,16 @@ fn draw_text(canvas: &mut RgbaImage, text: &str, left: usize, top: usize, ink: [
     }
 }
 
-// ── Delivery
-// ─────────────────────────────────────────────────────────────────────────────────────
+// ── Delivery ─────────────────────────────────────────────────────────────────────────────────────
 
-/// PNG bytes. Same three lines as every other encoder in the repo (`src/web/sprites.rs`).
+/// PNG bytes.
 pub fn encode(canvas: &RgbaImage) -> Vec<u8> {
     let mut png = std::io::Cursor::new(Vec::new());
     canvas.write_to(&mut png, image::ImageFormat::Png).expect("an in-memory image encodes to PNG");
     png.into_inner()
 }
 
-/// What the picture is and how to read a coordinate off it. The formula is stated because it is
-/// the whole reason the ruler is there: without it a model cannot turn "the door two squares left
-/// of me" into the id the action menu wants.
+/// What the picture is, and the pixel formula that turns a ruler reading into a menu id.
 pub fn caption(map: &MetaTileMap, is_dark: bool) -> String {
     let dark = match is_dark {
         true => " This map is unlit — the game's own screen shows almost nothing here, so this is \
@@ -589,10 +568,8 @@ mod tests {
     use crate::pokemon::integration_tests::fixture::TestFixture;
     use std::time::Duration;
 
-    /// Fixtures chosen for what they make *drawable*, the way `soak`'s states are chosen for what
-    /// they make reachable: an outdoor town with connection strips on two edges, a dense city, a
-    /// cave with none, a `Plateau` map whose strip tileset differs from its own, and a map whose
-    /// blocks are read from `wOverworldMap` at runtime rather than from ROM.
+    /// Strips on two edges, a dense city, a cave, a `Plateau` strip tileset unlike its map's, and
+    /// blocks read from `wOverworldMap` at runtime.
     fn fixtures() -> Vec<(&'static str, &'static [u8])> {
         vec![
             ("pallet-town", &include_bytes!("../pokemon/data/pallet-town-state.bin")[..]),
@@ -622,8 +599,7 @@ mod tests {
         }
     }
 
-    /// Catches the two ways a renderer fails silently: drawing nothing, and drawing one flat
-    /// colour because the tile lookup landed outside the sheet.
+    /// The two silent failures: drawing nothing, and one flat colour from a lookup off the sheet.
     #[test]
     fn the_render_is_neither_blank_nor_uniform() {
         for (name, snapshot) in fixtures() {
@@ -640,7 +616,6 @@ mod tests {
         }
     }
 
-    /// The load-bearing one.
     #[test]
     fn the_player_ring_is_where_the_json_says_it_is() {
         for (name, snapshot) in fixtures() {
@@ -663,7 +638,6 @@ mod tests {
         }
     }
 
-    /// Two reads of one unchanged map must be the same picture.
     #[test]
     fn two_renders_of_one_state_are_identical() {
         for (name, snapshot) in fixtures() {
@@ -677,7 +651,6 @@ mod tests {
         }
     }
 
-    /// Labels are the one part with a placement search in it.
     #[test]
     fn labels_stay_inside_the_canvas_and_off_each_other() {
         for (name, snapshot) in fixtures() {
@@ -699,7 +672,6 @@ mod tests {
         }
     }
 
-    /// A label for somewhere there is no way to is greyed out and says `no route`.
     #[test]
     fn a_label_for_somewhere_out_of_reach_is_greyed_and_says_so() {
         let mut fixture = TestFixture::new(
@@ -712,13 +684,11 @@ mod tests {
         // The trashed house, both ways in.
         assert!(!at(28, 10).reachable, "the front door is on the terrace above: {:?}", at(28, 10));
         assert!(at(28, 12).reachable, "the back door is the one that works: {:?}", at(28, 12));
-        // Said in words as well as in ink, because a dimmed plate is a thing a model has to
-        // notice.
+        // In words as well as ink: a dimmed plate is easy to miss.
         assert!(at(28, 10).text.contains(&NO_ROUTE.to_string()), "{:?}", at(28, 10));
         assert!(!at(28, 12).text.contains(&NO_ROUTE.to_string()), "{:?}", at(28, 12));
 
-        // And a map edge, which groups differently and must reach the same answer: Route 4 is off
-        // this terrace, Route 5 is two terraces down.
+        // A map edge groups differently: Route 4 is off this terrace, Route 5 two terraces down.
         assert!(labels.iter().any(|l| l.text[0] == "Route4" && l.reachable), "{labels:?}");
         assert!(labels.iter().any(|l| l.text[0] == "Route5" && !l.reachable), "{labels:?}");
 
@@ -739,8 +709,6 @@ mod tests {
         assert!(checked > 0, "no out-of-reach label was placed, so the ink is untested");
     }
 
-    /// A warp's plate names its own coordinate, so it can be matched to a menu row keyed on
-    /// nothing else; a map edge's does not, because every cell of an edge is one row.
     #[test]
     fn a_warp_label_carries_its_coordinate_and_an_edge_does_not() {
         let mut fixture = TestFixture::new(&include_bytes!("../pokemon/data/mt-moon.bin")[..], Duration::from_secs(10), vec![]);
@@ -759,7 +727,6 @@ mod tests {
         assert!(!edge.text.iter().any(|t| t.starts_with('(')), "{edge:?}");
     }
 
-    /// The ground truth.
     #[test]
     fn the_tiles_drawn_are_the_tiles_the_game_laid_out() {
         use crate::pokemon::symbols::DmgPointerRead;
@@ -776,8 +743,7 @@ mod tests {
                 metadata.map_header.width as usize * 4,
                 metadata.map_header.height as usize * 4,
             );
-            // The view can hang off the edge of the map, where the game draws the border block
-            // and this renderer draws nothing.
+            // The view can hang off the map's edge, where this renderer draws nothing.
             let mut matches = Vec::new();
             for oy in -(SCREEN.1 as i64)..tiles_high as i64 {
                 for ox in -(SCREEN.0 as i64)..tiles_wide as i64 {
@@ -800,8 +766,7 @@ mod tests {
                      screen — the block, blockset or within-block tile order is wrong",
                     SCREEN.0, SCREEN.1);
 
-            // …and the window the game is showing is the one around the player, which is what
-            // stops a repetitive map from passing this at an arbitrary offset.
+            // Centred on the player, so a repetitive map cannot pass at an arbitrary offset.
             let dimensions = metadata.dimensions();
             let player = (
                 (state.map.player_position.x as i64 - dimensions.west_extra as i64) * 2,
@@ -815,9 +780,7 @@ mod tests {
         }
     }
 
-    /// What "dimmed" means, pinned — because the obvious reading of
-    /// [`MetaTileMap::reachable_tiles`] is wrong and produces a picture that still looks like a
-    /// map.
+    /// [`MetaTileMap::reachable_tiles`] is routable-to, not standable-on.
     #[test]
     fn a_wall_is_dimmed_even_though_the_agent_can_route_to_it() {
         let mut fixture = TestFixture::new(
@@ -847,7 +810,7 @@ mod tests {
                 "a wall at {wall_beside_a_street:?} is routable-to, and must still read as \
                  out of reach — it rendered {wall:?}");
 
-        // …and the door in the same town does not dim, because walking to it is the whole point.
+        // The door in the same town does not dim.
         let door = (0..map.width * map.height)
             .map(|i| (i % map.width, i / map.width))
             .find(|&(x, y)| matches!(map.meta_tiles[x + y * map.width], MetaTile::Warp { .. })
@@ -856,8 +819,6 @@ mod tests {
         assert!(sum(lit(door)) > sum(wall), "the door at {door:?} dimmed like a wall");
     }
 
-    /// A CamelCase map name has to come apart into words a 12-character line can hold, and stay
-    /// readable when it does.
     #[test]
     fn map_names_wrap_into_words() {
         assert_eq!(wrap("PalletTown"), vec!["Pallet Town"]);
@@ -872,7 +833,6 @@ mod tests {
         assert!(render(&MetaTileMap::default()).is_none());
     }
 
-    /// Renders every committed save state.
     #[test]
     fn every_committed_fixture_renders() {
         let mut rendered = 0;
@@ -892,8 +852,7 @@ mod tests {
         assert!(rendered > 20, "only {rendered} fixtures rendered — did the walk find them?");
     }
 
-    /// Writes the renders out as real PNGs so a human can look at them, and prints what each one
-    /// would cost the model.
+    /// Writes the renders to `target/map-renders` and prints what each costs the model.
     #[cfg(feature = "slow-tests")]
     #[test]
     #[ignore = "probe: prints what a map picture costs the model"]

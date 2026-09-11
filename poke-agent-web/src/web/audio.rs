@@ -5,15 +5,11 @@ use std::sync::Arc;
 
 use opus_rs::{Application, OpusEncoder};
 
-/// Not 24 kHz. See the module docs — the crate is measurably wrong at that rate.
+/// Not 24 kHz: `opus-rs` keeps the loudness and destroys the spectrum at that rate.
 pub const SAMPLE_RATE: u32 = 48_000;
-/// The Game Boy is stereo and this is not, which is a bandwidth choice rather than a technical
-/// one: `NR51` panning is mostly centred in this cartridge and a second channel is not worth
-/// doubling the stream for. [`AudioEncoder::push`] does the downmix.
+/// Mono, for bandwidth: this cartridge's `NR51` panning is mostly centred. [`AudioEncoder::push`] downmixes.
 pub const CHANNELS: u8 = 1;
-/// One Opus frame.
 pub const FRAME_MS: u32 = 20;
-/// Samples of mono audio in one frame.
 pub const FRAME_SAMPLES: usize = (SAMPLE_RATE as usize / 1000) * FRAME_MS as usize;
 /// RFC 6716's ceiling on a single packet.
 pub const MAX_PACKET: usize = 1276;
@@ -22,16 +18,13 @@ pub const HEADER_LEN: usize = 12;
 const MAGIC: &[u8; 4] = b"GBA1";
 const VERSION: u8 = 1;
 
-/// What `GB_AUDIO_BITRATE` defaults to, and what the README quotes.
+/// What `GB_AUDIO_BITRATE` defaults to.
 pub const DEFAULT_BITRATE: i32 = 24_000;
-/// The range `GB_AUDIO_BITRATE` is accepted in. Refused rather than clamped, for the reason
-/// `GB_COMPACT_ABOVE` is: a value outside this is a misunderstanding, and silently playing
-/// something other than what was asked for is the worse answer.
+/// The range `GB_AUDIO_BITRATE` is accepted in; a value outside it is refused, not clamped.
 pub const MIN_BITRATE: i32 = 6_000;
 pub const MAX_BITRATE: i32 = 128_000;
 
-/// The first message on every connection: enough for the page to `configure()` its decoder
-/// without knowing anything this module might change.
+/// The first message on every connection: enough for the page to `configure()` its decoder.
 pub fn header() -> [u8; HEADER_LEN] {
     let mut out = [0u8; HEADER_LEN];
     out[..4].copy_from_slice(MAGIC);
@@ -49,7 +42,6 @@ pub struct AudioEncoder {
     bitrate: i32,
     /// Mono samples not yet a whole frame.
     pending: Vec<f32>,
-    /// Reused across every packet, so a run allocates nothing per frame.
     packet: Vec<u8>,
     packets: u64,
     bytes: u64,
@@ -70,31 +62,25 @@ impl AudioEncoder {
     }
 
     fn build(&self) -> Option<OpusEncoder> {
-        // `Application::Audio` rather than `Voip`: this is music, and the voice model at a low
-        // bitrate is what makes a chiptune sound like a modem.
+        // `Audio`, not `Voip`: the voice model at a low bitrate makes a chiptune sound like a modem.
         let mut opus = OpusEncoder::new(SAMPLE_RATE as i32, CHANNELS as usize, Application::Audio)
             .map_err(|failure| eprintln!("gb serve — the Opus encoder would not start: {failure}"))
             .ok()?;
         opus.bitrate_bps = self.bitrate;
-        // Measured identical to complexity 5 on this content (0.031 ms/frame either way), so
-        // there is nothing to buy by turning it down.
         opus.complexity = 9;
-        // VBR: a Game Boy is silent for a good part of a run — menus, dialogue, a parked run —
-        // and CBR would spend the full bitrate saying so.
+        // VBR: a Game Boy is silent for much of a run, and CBR would spend the full bitrate on it.
         opus.use_cbr = false;
-        // Both off, deliberately, and the reason is the transport.
+        // Both off: the transport is TCP, so no packet is ever lost.
         opus.use_inband_fec = false;
         opus.packet_loss_perc = 0;
         Some(opus)
     }
 
-    /// Whether audio has given up for the rest of this process.
     pub fn silenced(&self) -> bool {
         self.opus.is_none()
     }
 
-    /// Packets emitted since this encoder was built. Read by the host's tests and by the bench;
-    /// not reset by [`Self::restart`], which is about the audio and not about the counters.
+    /// Packets emitted since this encoder was built; [`Self::restart`] does not reset it.
     pub fn packets(&self) -> u64 {
         self.packets
     }
@@ -105,7 +91,6 @@ impl AudioEncoder {
         self.bytes
     }
 
-    /// Accumulate interleaved stereo and append one packet per whole frame.
     pub fn push(&mut self, interleaved_stereo: &[f32], out: &mut Vec<Arc<[u8]>>) {
         if self.opus.is_none() {
             return;
@@ -148,7 +133,6 @@ impl AudioEncoder {
         }
     }
 
-    /// A fresh codec and an empty accumulator.
     pub fn restart(&mut self) {
         self.pending.clear();
         if self.opus.is_some() {

@@ -1,8 +1,4 @@
-//! `GET /version` — which build is answering.
-//! ```shell
-//! GB_GIT_SHA=$(git rev-parse --short HEAD) GB_GIT_BRANCH=$(git branch --show-current) \
-//!   cargo run --release -- serve --policy random
-//! ```
+//! `GET /version`: which build is answering, from what CI injects into the environment.
 
 use axum::response::Json;
 
@@ -28,8 +24,7 @@ impl BuildInfo {
         }
     }
 
-    /// One line for the startup banner, so `docker logs` answers the same question `/version`
-    /// does.
+    /// One line for the startup banner, so the log answers what `/version` does.
     pub fn summary(&self) -> String {
         let built = match (&self.branch, &self.commit) {
             (Some(branch), Some(commit)) => format!(" ({branch} {commit})"),
@@ -55,9 +50,6 @@ pub async fn version() -> Json<BuildInfo> {
 mod tests {
     use super::*;
 
-    /// The environment is process-global and the suite is threaded, so the parts that read it are
-    /// not what these test — `injected` is trivial and [`BuildInfo::summary`] is where the shape
-    /// lives.
     fn info(build_date: Option<&str>, branch: Option<&str>, commit: Option<&str>) -> BuildInfo {
         BuildInfo {
             version: "1.0.0",
@@ -73,8 +65,7 @@ mod tests {
         assert_eq!(built.summary(), "1.0.0 (main a1b2c3d) built 2026-08-12T14:22:33Z");
     }
 
-    /// A local build must not print `1.0.0 (unknown unknown) built unknown` — the absence *is*
-    /// the information, and the parenthesis has to disappear with its contents.
+    /// An unknown fact is left out, parenthesis and all.
     #[test]
     fn a_local_build_says_only_what_it_knows() {
         assert_eq!(info(None, None, None).summary(), "1.0.0");
@@ -82,8 +73,7 @@ mod tests {
         assert_eq!(info(None, None, Some("a1b2c3d")).summary(), "1.0.0 (a1b2c3d)");
     }
 
-    /// The field names are the wire contract — `/version` is read by a person at a terminal and
-    /// by whatever they pipe it into, and a rename is a break with no compile error behind it.
+    /// The field names are the wire contract, and a rename breaks it with no compile error.
     #[test]
     fn the_json_names_the_four_fields_and_nulls_what_it_does_not_know() {
         let json = serde_json::to_value(info(Some("2026-08-12T14:22:33Z"), Some("main"), None)).unwrap();

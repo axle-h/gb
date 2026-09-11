@@ -1,4 +1,4 @@
-//! D5.
+//! The MBC3 real-time clock.
 
 use bincode::{Decode, Encode};
 
@@ -48,7 +48,7 @@ pub struct Rtc {
     base: i64,
     halted_at: u64,
     halted: bool,
-    /// Sticky, and deliberately not derived from the counter: the counter wraps every 512 days
+    /// Sticky, and not derived from the counter: the counter wraps every 512 days
     /// and cannot tell you that it did.
     day_carry: bool,
     /// What `0xA000` shows.

@@ -1,4 +1,3 @@
-
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "slow-tests")]
 use std::time::{Duration, Instant};
@@ -9,35 +8,30 @@ use crate::pokemon::integration_tests::cheats::Cheats;
 use crate::pokemon::integration_tests::llm_harness::LlmRun;
 use crate::pokemon::integration_tests::llm_harness::{Brain, Call, Reply, TurnRequest};
 
-/// One thing the run means to do next, resolved against the rendered action menu and nothing
-/// else.
+/// One thing the run means to do next, resolved against the rendered action menu alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Intent {
-    /// Take the one transition on this map that leads to `map`, and keep taking transitions until
-    /// the `Location:` line says we are there.
+    /// Take transitions toward `map` until the `Location:` line says the player is there.
     Enter(&'static str),
     /// Choose the row whose id ends in `:{0}` — a person's name, `Pc`, `CutTree`, `Grass`.
     Row(&'static str),
     /// Choose the first row whose *description* contains `{0}`.
     Says(&'static str),
-    /// Choose the row whose description contains `{0}`, and keep choosing it until the menu stops
-    /// offering it.
+    /// Choose the row whose description contains `{0}` until the menu stops offering it.
     Repeat(&'static str),
     /// Nothing to do: end the turn without moving.
     Wait,
 }
 
 impl Intent {
-    /// Whether the situation says this intent is already satisfied, so the list can move on
-    /// without spending a turn.
+    /// Whether the situation says this intent is already satisfied, so no turn is spent.
     fn satisfied_by(&self, request: &TurnRequest) -> bool {
         match self {
             Self::Enter(map) => request.location().as_deref() == Some(map),
-            // Done when the row is no longer on offer.
             Self::Repeat(fragment) => !request.menu_rows().iter()
                 .any(|(_, description)| description.contains(fragment)),
-            // Nothing else can be told from a situation alone: a person talked to leaves no mark
-            // on the next turn's rendering, so those are one intent per turn by construction.
+            // A situation cannot show that a person was talked to, so these are one intent per
+            // turn.
             Self::Row(_) | Self::Says(_) | Self::Wait => false,
         }
     }
@@ -49,8 +43,8 @@ impl Intent {
             Self::Wait => None,
             Self::Enter(map) => rows
                 .iter()
-                // A connection row says "go to ViridianCity"; a warp row says "take the warp to
-                // OaksLab, arriving at (12, 12)".
+                // A connection row says "go to ViridianCity"; a warp row "take the warp to OaksLab,
+                // arriving at (12, 12)".
                 .find(|(_, description)| names_map(description, map))
                 .map(|(id, _)| id.clone()),
             Self::Row(kind) => rows
@@ -84,8 +78,8 @@ pub struct ScriptedBrain {
     unresolved: usize,
     /// How many times the current [`Intent::Repeat`] has been re-issued.
     reissued: usize,
-    /// How many requests this brain has answered, and how many of them were battle turns. A
-    /// battle turn reaching here at all means the script did not decide it.
+    /// Requests answered, and how many were battle turns, each of which the script failed to
+    /// decide.
     pub turns: Arc<Mutex<(usize, usize)>>,
 }
 
@@ -125,8 +119,7 @@ impl Brain for ScriptedBrain {
         }
 
         if request.is_battle() {
-            // The script should have decided this; if the turn reached here, take the first
-            // attack.
+            // The script should have decided this; take the first attack.
             let id = request
                 .menu_ids()
                 .into_iter()
@@ -140,14 +133,12 @@ impl Brain for ScriptedBrain {
                 serde_json::json!({ "buttons": ["a"], "why": "the agent reached no decision point" }),
             );
         }
-        // Every other kind — a nickname, a mart, a move to forget — is answered with the game's
-        // own default, because none of them is what this brain is for.
+        // Every other kind is answered with the game's own default.
         if !request.has_tool("choose_action") {
             return default_for(request);
         }
 
-        // Armed on the first overworld turn, as a read tool, so the turn still ends in a
-        // decision.
+        // Armed on the first overworld turn as a read tool, so the turn still ends in a decision.
         let mut calls = Vec::new();
         if let Some(script) = self.script.filter(|_| !self.armed) {
             self.armed = true;
@@ -181,13 +172,11 @@ impl Brain for ScriptedBrain {
                     "choose_action",
                     serde_json::json!({ "id": id, "resume_after_battle": true }),
                 ));
-                // A `Row`/`Says` intent is done the moment it is chosen; an `Enter` is done when
-                // the location says so and a `Repeat` when its row stops being offered, both of
-                // which the loop above checks on the next turn.
+                // A `Row` or `Says` is done once chosen; `Enter` and `Repeat` are checked by the
+                // loop above next turn.
                 if !matches!(intent, Intent::Enter(_) | Intent::Repeat(_)) {
                     self.at += 1;
                 }
-                // A `Repeat` that is still being re-issued after this many turns is a loop.
                 if matches!(intent, Intent::Repeat(_)) {
                     self.reissued += 1;
                     if self.reissued > Self::MAX_REISSUES {
@@ -205,13 +194,13 @@ impl Brain for ScriptedBrain {
                 Reply::Calls(calls)
             }
             None => {
-                // Give it [`Self::PATIENCE`] turns before believing the row is really absent.
+                // Give it [`Self::PATIENCE`] turns before believing the row is absent.
                 self.unresolved += 1;
                 if self.unresolved < Self::PATIENCE {
                     calls.push(Call::wait(10));
                     return Reply::Calls(calls);
                 }
-                // Recorded rather than panicked, and the menu goes with it.
+                // Recorded rather than panicked, with the menu.
                 let mut stuck = self.stuck.lock().expect("not poisoned");
                 if stuck.is_none() {
                     *stuck = Some(format!(
@@ -256,17 +245,17 @@ fn pallet_to_the_hall_of_fame() -> Vec<Intent> {
         // ── Out of the bedroom and into the lab ──
         Intent::Enter("RedsHouse1F"),
         Intent::Enter("PalletTown"),
-        // `Says`, not `Enter`, and this is the one hop where the difference matters.
+        // `Says`, not `Enter`: the one hop where the difference matters.
         Intent::Says("Route1"),
         Intent::Row("SquirtlePokeBall"),
-        // Oak's parcel errand is not on this route: the Pokédex is not a gate on anything west.
+        // Oak's parcel errand is not on this route; the Pokédex gates nothing west.
         Intent::Enter("PalletTown"),
         Intent::Enter("Route1"),
         Intent::Enter("ViridianCity"),
         // ── West out of Viridian: the badge gates ──
         Intent::Enter("Route22"),
         Intent::Enter("Route22Gate"),
-        // The guard is a *conversation*, and it is what flips the gate's dynamic warp north.
+        // The guard is a conversation, and it flips the gate's dynamic warp north.
         Intent::Row("Guard"),
         Intent::Enter("Route23"),
         Intent::Enter("VictoryRoad1F"),
@@ -280,7 +269,7 @@ fn pallet_to_the_hall_of_fame() -> Vec<Intent> {
         // Down the east ladder, onto the side the revealed boulder is on.
         Intent::Says("VictoryRoad2F, arriving at (22, 16)"),
         Intent::Repeat("switch at (9, 16)"),
-        // Both of these name their landing, and both had to.
+        // Both of these name their landing, and must.
         Intent::Says("VictoryRoad3F, arriving at (27, 15)"),
         Intent::Says("VictoryRoad2F, arriving at (27, 7)"),
         Intent::Enter("Route23"),
@@ -322,7 +311,7 @@ fn godmode_run() {
     });
     let elapsed = started.elapsed();
 
-    // The stuck report first, because it is the useful failure.
+    // The stuck report first, the useful failure.
     if let Some(why) = stuck.lock().expect("not poisoned").clone() {
         let live = match run.fixture().try_game_state() {
             Ok(state) => format!(
@@ -369,8 +358,7 @@ fn godmode_run() {
 mod tests {
     use super::*;
 
-    /// The resolver reads the menu and nothing else, and it does not confuse `Route1` with
-    /// `Route11`.
+    /// The resolver reads only the menu, and does not confuse `Route1` with `Route11`.
     #[test]
     fn an_intent_is_resolved_against_the_rendered_menu() {
         let request = request_with(
@@ -394,10 +382,9 @@ mod tests {
             Intent::Says("ViridianMart").resolve(&request).as_deref(),
             Some("ViridianCity:23,26:Warp"),
         );
-        // Not offered: recorded as a finding rather than resolved to something near enough.
+        // Not offered: a finding, not something near enough.
         assert_eq!(Intent::Enter("PewterCity").resolve(&request), None);
-        // And a prefix is not a match. `Route1` must not take the connection to `Route2`, and on
-        // a map that offers both, `Route1` must not take `Route11`.
+        // A prefix is not a match: `Route1` takes neither `Route2`'s connection nor `Route11`.
         assert_eq!(Intent::Enter("Route1").resolve(&request), None);
 
         assert!(Intent::Enter("ViridianCity").satisfied_by(&request), "we are already there");
@@ -412,8 +399,7 @@ mod tests {
         assert!(Intent::Repeat("Nurse").satisfied_by(&request), "no such row: nothing left to repeat");
     }
 
-    /// A situation with no `Location:` line — a battle, a naming screen — has no location, and an
-    /// `Enter` intent is then simply not satisfied rather than matching an empty string.
+    /// A situation with no `Location:` line satisfies no `Enter` intent.
     #[test]
     fn a_turn_with_no_location_line_satisfies_nothing() {
         let request = request_with("### Battle\nA wild PIDGEY appeared!\n");

@@ -1,14 +1,12 @@
-//! Saffron: entry past the Route-7 guard → Eevee/Vaporeon → Silph Co (Card Key → Giovanni →
-//! liberation) → Marsh Badge.
+//! Saffron: past the Route 7 guard, Eevee to Vaporeon, Silph Co and Giovanni, the Marsh Badge.
 
 use super::*;
 
-/// From Fuchsia (post-Safari), trek to Celadon, buy a Fresh Water from the roof vending machine
-/// (`UseVendingMachine`), and pass the Route-7 guard into Saffron.
+/// From post-Safari Fuchsia: a Fresh Water from Celadon's roof, then past the Route 7 guard.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_enter_saffron() {
-    // Pinned to the pre-J battle timing — see `TestFixture::with_original_battle_timing`.
+    // Animations on: `TestFixture::with_original_battle_timing`.
     let mut fixture = TestFixture::new(
         include_bytes!("../data/post-safari.bin"),
         Duration::from_mins(60),
@@ -28,8 +26,8 @@ fn can_get_vaporeon() {
     use crate::pokemon::map::MapSprite as MS;
     use gb::geometry::Point8;
     let steps = vec![
-        // Free Eevee from the Celadon Mansion roof house (BACK entrance (24,3)→1F(4,0); the front
-        // door is the dead-end condos).
+        // The free Eevee in the Celadon Mansion roof house, by the back entrance; the front door is
+        // the dead-end condos.
         PolicyStep::EnterMap { to_map: Map::CeladonMansion1F, to_position: Some(Point8 { x: 4, y: 0 }) },
         PolicyStep::enter(Map::CeladonMansion2F),
         PolicyStep::enter(Map::CeladonMansion3F),
@@ -41,7 +39,6 @@ fn can_get_vaporeon() {
         PolicyStep::enter(Map::CeladonMansion2F),
         PolicyStep::EnterMap { to_map: Map::CeladonMansion1F, to_position: Some(Point8 { x: 4, y: 0 }) },
         PolicyStep::enter(Map::CeladonCity),
-        // Dept Store 4F: buy a Water Stone.
         PolicyStep::enter(Map::CeladonMart1F),
         PolicyStep::enter(Map::CeladonMart2F),
         PolicyStep::enter(Map::CeladonMart3F),
@@ -49,8 +46,8 @@ fn can_get_vaporeon() {
         PolicyStep::BuyFromMart { item: BagItem::new(ItemId::WaterStone, 1), map: Map::CeladonMart4F },
         PolicyStep::enter(Map::CeladonMart1F),
         PolicyStep::enter(Map::CeladonCity),
-        // By species: where the gift Eevee lands depends on how many members the party already
-        // has, which is exactly what a `Slot` target gets wrong.
+        // By species: where the gift Eevee lands depends on the party's size, which a `Slot` gets
+        // wrong.
         PolicyStep::EvolveWithStone { stone: ItemId::WaterStone,
                                       target: PartyRef::Species(PokemonSpecies::Eevee) },
     ];
@@ -67,8 +64,7 @@ fn can_get_vaporeon() {
     println!("Vaporeon lv{} {:?}", vaporeon.level, vaporeon.moves);
 }
 
-/// Enter Silph Co, ride the elevator to 5F, thread the teleport-pad maze to the Card Key pocket,
-/// and grab the Card Key (restocking Hyper Potions in Saffron on the way).
+/// Silph Co 5F's teleport-pad maze to the Card Key, restocking Hyper Potions on the way.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_silph_card_key() {
@@ -82,8 +78,7 @@ fn can_get_silph_card_key() {
     fixture.save_state_named("src/pokemon/data/silph-card-key.bin").unwrap();
 }
 
-/// The Silph Co endgame: pads and the elevator up to 11F, the 7F rival, Giovanni, and the
-/// President.
+/// The Silph Co endgame: up to 11F, the 7F rival, Giovanni, and the President.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_beat_silph_giovanni() {
@@ -119,7 +114,7 @@ fn can_get_marsh_badge() {
     fixture.save_state_named("src/pokemon/data/post-marsh-badge.bin").unwrap();
 }
 
-/// Every teleport pad in Saffron Gym is a row, named by its own square.
+/// An elevator door you warped onto is taken with a step off and a step back on.
 #[test]
 fn an_elevator_door_you_warped_onto_is_stepped_onto_rather_than_leant_on() {
     use gb::geometry::Point8;
@@ -139,8 +134,7 @@ fn an_elevator_door_you_warped_onto_is_stepped_onto_rather_than_leant_on() {
     let door = start.map.actions().into_iter()
         .find(|action| action.destination == DOOR)
         .expect("the door underfoot is a row");
-    // The step off and the step back on, rather than the one held button a walked-onto entry
-    // gets.
+    // The step off and the step back on, not the held button a walked-onto entry gets.
     assert_eq!(door.route.len(), 2, "route was {:?}", door.route);
     fixture.agent.take_overworld_action(door);
 
@@ -150,6 +144,7 @@ fn an_elevator_door_you_warped_onto_is_stepped_onto_rather_than_leant_on() {
         "the door has to fire, and holding the outward direction on it never will");
 }
 
+/// Every teleport pad in Saffron Gym is a row, named by its own square.
 #[test]
 fn every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot() {
     use gb::geometry::Point8;
@@ -159,8 +154,7 @@ fn every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot() {
 
     let mmu = gb::mmu::MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
     let metadata = Arc::new(mmu.read_map_metadata(Map::SaffronGym).unwrap());
-    // (1, 5) is a pad in the top-left room; its landing is (11, 11), the centre room's only pad,
-    // and the centre room is where Sabrina stands.
+    // (1, 5) is a top-left pad landing on (11, 11), the only pad in Sabrina's centre room.
     let standing_on: Point8 = match std::env::var("GB_PROBE_AT").ok().as_deref() {
         Some("floor") => Point8 { x: 1, y: 10 },
         _ => Point8 { x: 1, y: 5 },
@@ -187,8 +181,7 @@ fn every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot() {
     assert_eq!(pads.len(), 30, "the gym's 32 warps are 30 pads and the two halves of its door");
 
     let ids: Vec<String> = map.actions().iter().map(|a| a.id()).collect();
-    // One row is deliberately missing: the pad whose landing is the square the player is standing
-    // on.
+    // The pad whose landing is the square underfoot is the one row missing.
     let landing_of = |p: Point8| match map.tile_at(p) {
         MetaTile::Warp { to_position, .. } => to_position,
         other => panic!("{p} is {other:?}, not a pad"),
@@ -203,14 +196,14 @@ fn every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot() {
             "{want} — offered when it should not be, or missing when it should be: {ids:?}");
     }
 
-    // The pad underfoot re-fires with a step off and a step back on (`WarpTrigger::StepOn`), and
-    // everything behind it is reachable again.
+    // The pad underfoot re-fires with a step off and back on (`WarpTrigger::StepOn`), and what is
+    // behind it is reachable.
     if standing_on != (Point8 { x: 1, y: 5 }) { return }
     let underfoot = map.actions().into_iter()
         .find(|a| a.id() == format!("SaffronGym:{},{}:Warp", standing_on.x, standing_on.y))
         .expect("the pad the player is standing on is still a way to go somewhere");
     assert_eq!(underfoot.route.len(), 2, "off and back on: {:?}", underfoot.route);
-    // …and the room it leads to comes back with it.
+    // And the room it leads to comes back.
     assert!(map.route_to(Point8 { x: 9, y: 9 }).is_some(),
         "the centre room is behind the pad underfoot and nothing else");
     assert!(ids.iter().any(|id| id == "SaffronGym:9,17:Warp"), "and the way out: {ids:?}");
@@ -229,7 +222,7 @@ fn a_teleport_pad_reports_arriving_even_though_the_map_never_changed() {
         fn name(&self) -> &'static str { "take-the-pad" }
         fn pick_overworld_action(&mut self, state: &GameState, _: &crate::pokemon::world_graph::WorldGraph)
             -> Option<crate::pokemon::actions::OverworldAction> {
-            // Once only: a re-issued row would hide a completion that never came.
+            // Once only: a re-issued row would hide a missing completion.
             (state.map.player_position != LANDING).then(|| state.map.actions().into_iter()
                 .find(|a| a.destination == PAD))?
         }
@@ -245,7 +238,7 @@ fn a_teleport_pad_reports_arriving_even_though_the_map_never_changed() {
         MetaTile::Warp { to_map: Map::SaffronGym, to_position: LANDING });
     println!("from {} ", start.map.player_position);
 
-    // Arriving is not the assertion — being *told* is.
+    // Being told is the assertion, not arriving.
     let mut reported = false;
     for _ in 0..3_000 {
         for event in fixture.agent.drain_events() {

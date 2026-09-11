@@ -1,9 +1,8 @@
-
 use super::super::*;
 
 const FLY_BIKE: &[u8] = include_bytes!("../../data/postgame-fly-bike.bin");
 
-/// Task G1 — revive the Helix Fossil into an Omanyte at the Cinnabar Lab.
+/// Revive the Helix Fossil into an Omanyte at the Cinnabar Lab.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_revive_the_helix_fossil() {
@@ -26,10 +25,10 @@ fn can_revive_the_helix_fossil() {
     fixture.save_state_named("src/pokemon/data/postgame-omanyte.bin").unwrap();
 }
 
-/// G1's output: Cinnabar Island, Omanyte lv30 in the party (5), the Helix Fossil spent.
+/// `can_revive_the_helix_fossil`'s output: Cinnabar Island, Omanyte lv30 in the party.
 const OMANYTE: &[u8] = include_bytes!("../../data/postgame-omanyte.bin");
 
-/// Task G2 — the Old Amber out of the Pewter Museum, revived into an Aerodactyl.
+/// The Old Amber from the Pewter Museum, revived into an Aerodactyl.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_the_old_amber_and_revive_it() {
@@ -54,11 +53,10 @@ fn can_get_the_old_amber_and_revive_it() {
     fixture.save_state_named("src/pokemon/data/postgame-aerodactyl.bin").unwrap();
 }
 
-/// G2's output: Cinnabar Island, party 6 (Venusaur / Articuno / Vaporeon / Slowpoke / Omanyte /
-/// Aerodactyl), both fossils spent, dex 9 owned.
+/// `can_get_the_old_amber_and_revive_it`'s output: Cinnabar Island, a party of six.
 const AERODACTYL: &[u8] = include_bytes!("../../data/postgame-aerodactyl.bin");
 
-/// Task G3 — the Lapras the rescued Silph employee has been holding all along.
+/// The Lapras the rescued Silph employee holds goes to the box when the party is full.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn a_full_party_sends_the_silph_lapras_to_the_box() {
@@ -85,14 +83,14 @@ fn a_full_party_sends_the_silph_lapras_to_the_box() {
     fixture.save_state_named("src/pokemon/data/postgame-lapras.bin").unwrap();
 }
 
-/// G3's output: Saffron City, party 6, Lapras in box 1, dex 10 owned.
+/// `a_full_party_sends_the_silph_lapras_to_the_box`'s output: Saffron City, Lapras in box 1.
 const LAPRAS: &[u8] = include_bytes!("../../data/postgame-lapras.bin");
 
-/// Task G4 — the Fighting Dojo: beat the Karate Master, take a Hitmonlee.
+/// The Fighting Dojo: beat the Karate Master and take a Hitmonlee.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_beat_the_karate_master_and_take_a_hitmonlee() {
-    /// Omanyte, G1's trophy — dex-registered, so banking it costs nothing.
+    /// Omanyte, dex-registered, so banking it costs nothing.
     const BANK_SLOT: u8 = 4;
 
     let mut fixture = TestFixture::new(LAPRAS, Duration::from_mins(45),
@@ -116,16 +114,15 @@ fn can_beat_the_karate_master_and_take_a_hitmonlee() {
     fixture.save_state_named("src/pokemon/data/postgame-hitmonlee.bin").unwrap();
 }
 
-/// G4's output: Saffron City, party 6 with Hitmonlee, box 1 holding Lapras + Omanyte, bag 15/20,
-/// dex 11 owned.
+/// `can_beat_the_karate_master_and_take_a_hitmonlee`'s output: Saffron, Hitmonlee in the party.
 const HITMONLEE: &[u8] = include_bytes!("../../data/postgame-hitmonlee.bin");
 
-/// Task G7 — the five Silph floors the main quest skips, and everything left on them.
+/// The five Silph floors the main quest skips, and everything left on them.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_clear_the_skipped_silph_floors() {
-    /// Six entries nothing needs again: the S.S.
     const ALL: u8 = u8::MAX;
+    /// Six entries nothing needs again: the S.S. Ticket, Lift Key, Silph Scope and three stacks.
     const BANK: &[(ItemId, u8)] = &[(ItemId::SSTicket, 1), (ItemId::LiftKey, 1), (ItemId::SilphScope, 1),
                                     (ItemId::GreatBall, ALL), (ItemId::Revive, ALL), (ItemId::FullRestore, ALL)];
 
@@ -157,16 +154,14 @@ fn can_clear_the_skipped_silph_floors() {
     fixture.save_state_named("src/pokemon/data/postgame-silph-floors.bin").unwrap();
 }
 
-/// G7's output: Saffron City, bag 19/20 with the ten Silph items, PC storage holding the six
-/// banked entries, party healed.
+/// `can_clear_the_skipped_silph_floors`'s output: Saffron City, the ten Silph items taken.
 const SILPH_FLOORS: &[u8] = include_bytes!("../../data/postgame-silph-floors.bin");
 
-/// Task G8a — the two Saffron TM gifts, one of which has to be *bought*.
+/// The two Saffron TM gifts, one of which has to be bought.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_collect_the_saffron_tm_gifts() {
-    /// Two of G7's own pickups go straight back into storage: at 19/20 there is not room for the
-    /// doll *and* two TMs, and these are the two nothing else in the plan wants.
+    /// At 19/20 there is no room for the doll and two TMs, so two pickups nothing wants go back.
     const BANK: &[(ItemId, u8)] = &[(ItemId::HpUp, u8::MAX), (ItemId::XAccuracy, u8::MAX)];
 
     let mut fixture = TestFixture::new(SILPH_FLOORS, Duration::from_mins(45),
@@ -190,14 +185,14 @@ fn can_collect_the_saffron_tm_gifts() {
     fixture.save_state_named("src/pokemon/data/postgame-gifts.bin").unwrap();
 }
 
-/// G8a's output: Saffron City with TM29 + TM31, ¥44,384.
+/// `can_collect_the_saffron_tm_gifts`'s output: Saffron City with TM29 and TM31.
 const GIFTS: &[u8] = include_bytes!("../../data/postgame-gifts.bin");
 
-/// Task G8b — the Day Care, the last unexercised mechanic in G.
+/// Leave a Pokémon at the Day Care.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_leave_a_pokemon_at_the_day_care() {
-    /// Hitmonlee — the one party member with no HM move, which is what the gentleman checks.
+    /// Hitmonlee, the one party member with no HM move, which the gentleman checks.
     const HM_FREE_SLOT: u8 = 5;
     let mut fixture = TestFixture::new(GIFTS, Duration::from_mins(45),
         PolicyStep::daycare_steps(HM_FREE_SLOT));
@@ -219,7 +214,7 @@ fn can_leave_a_pokemon_at_the_day_care() {
 
     assert!(state.pokemon.iter().any(|p| p.species == PokemonSpecies::Hitmonlee), "it never came back");
     assert_eq!(money_before - state.money, 100, "¥100 × (levels grown + 1), and nothing grew");
-    // Handing over slot 0 promotes the mon behind it, so the Cut holder leads again for free.
+    // Handing over slot 0 promotes the one behind it, so the Cut holder leads again.
     assert_eq!(state.pokemon[0].species, PokemonSpecies::Venusaur, "the Cut holder must lead again");
     assert_eq!(state.pokemon[5].species, PokemonSpecies::Hitmonlee, "a collected mon is appended");
     assert_eq!(state.map.map, Map::Route5, "the leg ends outdoors so the next Fly is allowed");
@@ -228,7 +223,7 @@ fn can_leave_a_pokemon_at_the_day_care() {
     fixture.save_state_named("src/pokemon/data/postgame-daycare.bin").unwrap();
 }
 
-/// The Day Care does not board a Pokémon nobody chose — every time, rather than sometimes.
+/// The Day Care boards no Pokémon nobody chose, every time.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn talking_to_the_day_care_does_not_board_a_pokemon_nobody_chose() {
@@ -236,8 +231,7 @@ fn talking_to_the_day_care_does_not_board_a_pokemon_nobody_chose() {
     const HM_FREE_SLOT: u8 = 5;
 
     let mut steps = PolicyStep::daycare_steps(HM_FREE_SLOT);
-    // Everything up to and including the shuffle, then the row a model would take instead of the
-    // `PartyScript` driver.
+    // Everything up to the shuffle, then the row a model would take instead of the `PartyScript`.
     steps.truncate(1 + steps.iter().position(|step| matches!(step, PolicyStep::MovePokemonToFront { .. }))
         .expect("daycare_steps arranges the party before it deposits"));
     steps.extend(std::iter::repeat_n(PolicyStep::Interact(MapSprite::DAYCARE_GENTLEMAN), 3));
@@ -245,12 +239,11 @@ fn talking_to_the_day_care_does_not_board_a_pokemon_nobody_chose() {
     let mut fixture = TestFixture::new(GIFTS, Duration::from_mins(45), steps);
     let money_before = fixture.game_state().money;
     fixture.run_until(|s| s.map.map == Map::Daycare);
-    // After the shuffle, not before it.
     let party_before: Vec<_> = fixture.run_until(|s| s.pokemon[0].species == PokemonSpecies::Hitmonlee)
         .pokemon.iter().map(|mon| mon.species).collect();
 
     fixture.step_until_exhausted();
-    // Long enough for a deposit to have shown up if one were going to.
+    // Long enough for a deposit to show.
     for _ in 0..600 { fixture.step(); }
 
     let state = fixture.game_state();
@@ -262,14 +255,14 @@ fn talking_to_the_day_care_does_not_board_a_pokemon_nobody_chose() {
     println!("day care declined · party {party_after:?} · ¥{}", state.money);
 }
 
-/// G8b's output: Route 5, party 6 with Hitmonlee back from the Day Care, ¥44,284.
+/// `can_leave_a_pokemon_at_the_day_care`'s output: Route 5, Hitmonlee back from the Day Care.
 const DAYCARE: &[u8] = include_bytes!("../../data/postgame-daycare.bin");
 
-/// Task G8c — the Name Rater, and the last three never-visited rooms.
+/// The Name Rater, and the last three never-visited rooms.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_rename_a_pokemon_and_visit_the_last_rooms() {
-    /// Articuno — the one party member not already called what the picker draws first.
+    /// Articuno, the one member not already called what the picker draws first.
     const RENAME_SLOT: u8 = 1;
 
     let mut fixture = TestFixture::new(DAYCARE, Duration::from_mins(45),

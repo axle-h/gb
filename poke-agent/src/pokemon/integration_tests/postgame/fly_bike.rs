@@ -1,9 +1,8 @@
-
 use super::super::*;
 
 const PHASE0: &[u8] = include_bytes!("../../data/postgame-phase0.bin");
 
-/// Task B1 — the Bike Voucher, from the Pokémon Fan Club chairman in Vermilion.
+/// The Bike Voucher from the Pokémon Fan Club chairman in Vermilion.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_the_bike_voucher() {
@@ -19,10 +18,10 @@ fn can_get_the_bike_voucher() {
     fixture.save_state_named("src/pokemon/data/postgame-bike-voucher.bin").unwrap();
 }
 
-/// B1's output: standing in the Vermilion Pokémon Fan Club with the Bike Voucher in the bag.
+/// `can_get_the_bike_voucher`'s output: in the Fan Club with the Bike Voucher.
 const BIKE_VOUCHER: &[u8] = include_bytes!("../../data/postgame-bike-voucher.bin");
 
-/// Task B2 — trade the voucher for the Bicycle at the Cerulean Bike Shop.
+/// The voucher traded for the Bicycle at the Cerulean Bike Shop.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_trade_the_voucher_for_a_bicycle() {
@@ -40,10 +39,10 @@ fn can_trade_the_voucher_for_a_bicycle() {
     fixture.save_state_named("src/pokemon/data/postgame-bicycle.bin").unwrap();
 }
 
-/// B2's output: inside the Cerulean Bike Shop with the Bicycle in the bag.
+/// `can_trade_the_voucher_for_a_bicycle`'s output: in the Bike Shop with the Bicycle.
 const BICYCLE: &[u8] = include_bytes!("../../data/postgame-bicycle.bin");
 
-/// Task B3 — HM02 Fly, from the girl in the Route 16 house.
+/// HM02 Fly from the girl in the Route 16 house.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_hm02_fly() {
@@ -58,15 +57,13 @@ fn can_get_hm02_fly() {
     fixture.save_state_named("src/pokemon/data/postgame-hm02.bin").unwrap();
 }
 
-/// B3's output: inside `Route16FlyHouse` with HM02 in the bag (at bag index 15 of 16) and the
-/// party rotated to Venusaur / Articuno / Vaporeon / Slowpoke — Articuno is the only party member
-/// HM02 is compatible with (`pokered/data/pokemon/base_stats/articuno.asm:17-20`).
+/// `can_get_hm02_fly`'s output: `Route16FlyHouse`, HM02 in the bag; only Articuno can learn it.
 const HM02: &[u8] = include_bytes!("../../data/postgame-hm02.bin");
 
-/// The party slot Fly goes on, in every fixture from B3 onward.
+/// The party slot Fly goes on, from `can_get_hm02_fly` onward.
 const FLY_SLOT: u8 = 1;
 
-/// Task B4 — teach Fly to Articuno. Measured: well under a minute emulated, <1 s wall clock.
+/// Fly taught to Articuno.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_teach_fly() {
@@ -86,7 +83,7 @@ fn can_teach_fly() {
         state.pokemon[FLY_SLOT as usize].moves.iter().flatten().map(|m| m.name).collect::<Vec<_>>());
 }
 
-/// Task B5 — the Fly driver: teach Fly, step outside, and fly Route 16 → Pewter City.
+/// Teach Fly, step outside, and fly from Route 16 to Pewter City.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_fly_between_towns() {
@@ -102,24 +99,22 @@ fn can_fly_between_towns() {
     assert_eq!(state.pokemon.len(), 4);
     assert!(state.pokemon[FLY_SLOT as usize].moves.iter().flatten().any(|m| m.name == PokemonMoveName::Fly));
 
-    // Let the bird animation finish before snapshotting.
+    // Let the bird animation finish.
     for _ in 0..200 {
         fixture.step();
     }
     fixture.save_state_named("src/pokemon/data/postgame-fly.bin").unwrap();
 }
 
-/// B5's output: Fly taught and proven, standing in Pewter City — i.e. every town is one step
-/// away.
+/// `can_fly_between_towns`'s output: Fly taught, standing in Pewter City.
 const FLY: &[u8] = include_bytes!("../../data/postgame-fly.bin");
 
-/// Tasks B7 + B6 — wake the Route 16 Snorlax, then ride Cycling Road from Celadon to Fuchsia.
+/// Wake the Route 16 Snorlax, then ride Cycling Road from Celadon to Fuchsia.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_ride_cycling_road_to_fuchsia() {
     let mut fixture = TestFixture::new(FLY, Duration::from_mins(60), PolicyStep::cycling_road_steps());
 
-    // Route 16's Snorlax is a *sprite* on the map, hidden once it has been woken and beaten.
     let snorlax_present = |f: &mut TestFixture| f.game_state().map.sprites.iter()
         .any(|s| !s.hidden && s.name == MapSprite::ROUTE16_SNORLAX.name);
 

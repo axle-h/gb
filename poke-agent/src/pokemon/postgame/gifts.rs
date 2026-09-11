@@ -1,4 +1,4 @@
-//! Workstream G-gifts — fossil revival, gift Pokémon, one-off rooms.
+//! Fossil revival, gift Pokémon, one-off rooms, and the party-menu script driver they share.
 
 use gb::geometry::Point8;
 use gb::joypad::JoypadButton;
@@ -14,18 +14,17 @@ use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use gb::ram::ROM;
 use crate::pokemon::{GameState, PokemonApi, PokemonApiTrait};
 
-/// Silph's lift panel — a bg-event at (3,0) in `SilphCoElevator`
-/// (`data/maps/objects/SilphCoElevator.asm:8`), shared by every floor.
+/// Silph's lift panel, a bg-event in `SilphCoElevator` shared by every floor.
 const SILPH_ELEVATOR_PANEL: Point8 = Point8 { x: 3, y: 0 };
 
-/// The Silph floors G7 visits, as `(lift menu index, item balls, somewhere to walk)`.
+/// The Silph floors `silph_floors_steps` visits.
 const SILPH_FLOORS: &[SilphFloor] = &[
     SilphFloor { lift: 1, items: &[], walk_to: Some(MapSprite::SILPHCO2F_SILPH_WORKER_F) },
     SilphFloor { lift: 3, walk_to: None, items: &[
         MapSprite::SILPHCO4F_FULL_HEAL, MapSprite::SILPHCO4F_MAX_REVIVE, MapSprite::SILPHCO4F_ESCAPE_ROPE] },
     SilphFloor { lift: 5, walk_to: None, items: &[
         MapSprite::SILPHCO6F_HP_UP, MapSprite::SILPHCO6F_X_ACCURACY] },
-    // 7F's *lift* side, which G3's route into the rival pocket could not reach.
+    // 7F's lift side, which the route into the rival pocket cannot reach.
     SilphFloor { lift: 6, walk_to: None, items: &[
         MapSprite::SILPHCO7F_CALCIUM, MapSprite::SILPHCO7F_TM_SWORDS_DANCE] },
     SilphFloor { lift: 7, items: &[], walk_to: Some(MapSprite::SILPHCO8F_SILPH_WORKER_M) },
@@ -38,17 +37,17 @@ struct SilphFloor {
     lift: u8,
     /// Item balls to collect, in the order the walk is cheapest.
     items: &'static [MapSprite],
-    /// An NPC to go and talk to when `items` is empty — see the warning above.
+    /// An NPC to talk to when `items` is empty.
     walk_to: Option<MapSprite>,
 }
 
 impl PolicyStep {
-    /// G1 — hand the Helix Fossil to the Cinnabar Lab and come back for the Omanyte.
+    /// Hand the Helix Fossil to the Cinnabar Lab and come back for the Omanyte.
     pub fn fossil_revival_steps() -> Vec<Self> {
         let mut s = vec![Self::Fly { to: Map::CinnabarIsland }];
         s.extend(Self::into_fossil_room());
         s.extend(std::iter::repeat_n(Self::Interact(MapSprite::CINNABARLABFOSSILROOM_SCIENTIST1), 3));
-        // The walk: out to the island (which clears EVENT_LAB_STILL_REVIVING_FOSSIL) and back in.
+        // Out to the island, which clears `EVENT_LAB_STILL_REVIVING_FOSSIL`, and back in.
         s.extend(Self::out_of_fossil_room());
         s.extend(Self::into_fossil_room());
         s.extend(std::iter::repeat_n(Self::Interact(MapSprite::CINNABARLABFOSSILROOM_SCIENTIST1), 3));
@@ -56,7 +55,7 @@ impl PolicyStep {
         s
     }
 
-    /// G2 — the Old Amber from the Pewter Museum, revived into an Aerodactyl.
+    /// The Old Amber from the Pewter Museum, revived into an Aerodactyl.
     pub fn old_amber_steps() -> Vec<Self> {
         let mut s = vec![
             Self::Fly { to: Map::PewterCity },
@@ -77,8 +76,7 @@ impl PolicyStep {
         s
     }
 
-    /// G3 — the Lapras the rescued Silph employee has been holding since the building was
-    /// liberated.
+    /// The Lapras the rescued Silph employee gives.
     pub fn lapras_steps() -> Vec<Self> {
         let mut s = vec![
             Self::Fly { to: Map::SaffronCity },
@@ -93,7 +91,7 @@ impl PolicyStep {
         s
     }
 
-    /// G4 — beat the Saffron Karate Master and take a Hitmonlee.
+    /// Beat the Saffron Karate Master and take a Hitmonlee.
     pub fn hitmonlee_steps(bank_slot: u8) -> Vec<Self> {
         let mut s = vec![
             Self::Fly { to: Map::SaffronCity },
@@ -109,8 +107,7 @@ impl PolicyStep {
         s
     }
 
-    /// G7 — the five Silph floors `complete_game_steps` never opened, plus the two items on 7F it
-    /// walked past.
+    /// The five Silph floors `complete_game_steps` never opens, and the two items on 7F it passes.
     pub fn silph_floors_steps(bank: &[(ItemId, u8)]) -> Vec<Self> {
         let mut s = vec![
             Self::Fly { to: Map::SaffronCity },
@@ -130,7 +127,7 @@ impl PolicyStep {
         s
     }
 
-    /// G8a — the two TM gifts in the one-off Saffron houses, and the purchase one of them needs.
+    /// The two TM gifts in the one-off Saffron houses, and the purchase one of them needs.
     pub fn saffron_tm_gifts_steps(bank: &[(ItemId, u8)]) -> Vec<Self> {
         let mut s = vec![
             Self::Fly { to: Map::SaffronCity },
@@ -139,7 +136,6 @@ impl PolicyStep {
         s.extend(bank.iter().map(|&(item, qty)| Self::deposit_item(item, qty, Map::SaffronPokecenter)));
         s.extend([
             Self::enter(Map::SaffronCity),
-            // The Poké Doll, four floors up the department store.
             Self::Fly { to: Map::CeladonCity },
             Self::enter(Map::CeladonMart1F),
             Self::enter(Map::CeladonMart2F),
@@ -162,15 +158,13 @@ impl PolicyStep {
         s
     }
 
-    /// G8b — the Day Care on Route 5: leave a Pokémon, collect it, pay the bill.
+    /// The Day Care on Route 5: leave a Pokémon, collect it, pay the bill.
     pub fn daycare_steps(hm_free_slot: u8) -> Vec<Self> {
         vec![
             Self::Fly { to: Map::CeruleanCity },
-            // Cerulean is cut in two and Fly lands on the wrong half; the trashed house is the
-            // bridge to the Route 5 terrace, exactly as `cerulean_to_lavender_steps` does it.
+            // Fly lands on the wrong half of Cerulean; the trashed house bridges to the Route 5 side.
             Self::enter(Map::CeruleanTrashedHouse),
             Self::enter_at(Map::CeruleanCity, 27, 9),
-            // Not a plain `enter(Route5)`.
             Self::enter_at(Map::Route5, 10, 0),
             Self::enter(Map::Daycare),
             Self::MovePokemonToFront { target: PartyRef::Slot(hm_free_slot) },
@@ -182,7 +176,7 @@ impl PolicyStep {
         ]
     }
 
-    /// G8c — rename a party mon at the Lavender Name Rater, then the four rooms that are nothing
+    /// Rename a party mon at the Lavender Name Rater, then the four rooms that are nothing
     /// but text.
     pub fn name_rater_and_rooms_steps(rename_slot: u8) -> Vec<Self> {
         vec![
@@ -213,39 +207,32 @@ impl PolicyStep {
         ]
     }
 
-    /// Cinnabar Island → `CinnabarLab` → its testing room.
     fn into_fossil_room() -> Vec<Self> {
         vec![Self::enter(Map::CinnabarLab), Self::enter(Map::CinnabarLabFossilRoom)]
     }
 
-    /// The reverse, ending on the island — which is both the "walk" the scientist asks for and
-    /// the outdoor tile the next `Fly` needs.
+    /// Ends on the island, both the walk the scientist asks for and the outdoor tile `Fly` needs.
     fn out_of_fossil_room() -> Vec<Self> {
         vec![Self::enter(Map::CinnabarLab), Self::enter(Map::CinnabarIsland)]
     }
 }
 
-// ── The Day Care driver (G8b)
-// ───────────────────────────────────────────────────────────────────
-
 /// A wedged conversation reports itself instead of pulsing A for the whole test budget.
 const TICK_BUDGET: u32 = 1200;
 
-/// A trade needs a much bigger budget than a Day Care visit, and 1200 is not it.
+/// A trade takes much longer than a Day Care visit.
 const TRADE_TICK_BUDGET: u32 = 2400;
 
 /// A one-NPC script that opens the party menu and needs the cursor driven to a chosen slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartyScript {
-    /// The Route 5 Day Care gentleman.
     Daycare,
-    /// The Lavender Name Rater.
     NameRater,
     Trade { at: Map, npc: MapSprite, give: PokemonSpecies },
 }
 
 impl PartyScript {
-    /// The map the NPC is on. The caller routes there; this driver only owns the last few tiles.
+    /// The caller routes to this map; the driver owns only the last few tiles.
     pub const fn map(self) -> Map {
         match self {
             Self::Daycare => Map::Daycare,
@@ -263,29 +250,24 @@ impl PartyScript {
     }
 }
 
-/// Length of a `wPartyMonNicks` entry (`NAME_LENGTH`, `pokered/macros/ram.asm`).
+/// Length of a `wPartyMonNicks` entry.
 const NAME_LENGTH: usize = 11;
 
 /// What "done" looks like, captured before the conversation starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Baseline {
-    /// Day Care: the party shrinks by one on a deposit and grows by one on a collection, so *any*
-    /// change is completion and one test serves both branches.
+    /// Day Care: any change is completion, so one test serves deposit and collection.
     PartyCount(u8),
-    /// Name Rater: the chosen slot's nickname bytes.
     Nickname([u8; NAME_LENGTH]),
-    /// Trade: the give-species leaving the party.
     SpeciesGone(PokemonSpecies),
 }
 
-/// Live state of a party-menu script. Carried in `AgentState::UsingPartyScript`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PartyScriptState {
     pub script: PartyScript,
-    /// Party slot to act on — the mon to hand over, or the one to rename. Ignored when collecting
-    /// from the Day Care: the gentleman gives back what he has.
+    /// The mon to hand over or rename; ignored when collecting from the Day Care.
     pub slot: u8,
-    /// Where to stand and which way to face to talk to the gentleman, resolved from `actions()`.
+    /// The tile to face and the facing, resolved from `actions()`.
     pub stand: Point8,
     pub facing: PlayerFacingDirection,
     baseline: Baseline,
@@ -313,7 +295,6 @@ impl PartyScriptState {
         }
     }
 
-    /// Has the script done its work?
     fn done(&self, api: &PokemonApi<'_>) -> bool {
         match self.baseline {
             Baseline::PartyCount(before) => party_count(api) != before,
@@ -331,7 +312,6 @@ impl PartyScriptState {
     }
 }
 
-/// Is `species` still in the party?
 fn party_holds(api: &PokemonApi<'_>, species: PokemonSpecies) -> bool {
     let base = pokered_symbols::wPartySpecies.address;
     (0..party_count(api)).any(|i| api.mmu().read(base + i as u16) == species as u8)
@@ -347,9 +327,9 @@ fn nickname(api: &PokemonApi<'_>, slot: u8) -> [u8; NAME_LENGTH] {
     std::array::from_fn(|i| api.mmu().read(base + i as u16))
 }
 
-/// Resolve the walk to the script's NPC, the way F's `pick_sale` resolves a mart clerk.
+/// Resolve the walk to the script's NPC, as `game_corner::pick_sale` does a clerk.
 pub fn pick(state: &GameState, script: PartyScript, slot: u8) -> Option<FieldMove> {
-    // A trade knows *what* it wants, so it finds its own slot rather than trusting the caller's.
+    // A trade finds its own slot rather than trusting the caller's.
     let slot = match script {
         PartyScript::Trade { give, .. } => match state.pokemon.iter().position(|p| p.species == give) {
             Some(i) => i as u8,
@@ -386,7 +366,6 @@ pub fn pick(state: &GameState, script: PartyScript, slot: u8) -> Option<FieldMov
     Some(FieldMove::UsePartyScript { script, slot, npc: (face_tile, facing) })
 }
 
-/// One agent tick of a [`PartyScript`] conversation. Called from `agent.rs` via a delegating arm.
 pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PartyScriptState) -> Result<(), String> {
     let game_mode = api.game_mode().unwrap_or(GameMode::Overworld);
 
@@ -396,8 +375,6 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PartyScriptSt
         agent.set_state(AgentState::Idle);
     };
 
-    // ── Done: whatever this script was supposed to change has changed
-    // ───────────────────────────
     if s.entered_menu && s.done(api) {
         if game_mode != GameMode::Overworld {
             api.release_all_buttons();
@@ -420,8 +397,6 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PartyScriptSt
         return Ok(());
     }
 
-    // ── Still outside: walk up to the gentleman and press A
-    // ──────────────────────────────────────
     if game_mode == GameMode::Overworld && !s.entered_menu {
         let gs = agent.observe_state(api)?;
         match gs.map.route_to_face_dir(s.stand, Some(s.facing)).as_deref() {
@@ -440,8 +415,6 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PartyScriptSt
         return Ok(());
     }
 
-    // ── In the conversation
-    // ─────────────────────────────────────────────────────────────────────
     let s = PartyScriptState { entered_menu: true, ticks: s.ticks + 1, ..s };
     if !s.press {
         api.release_all_buttons();

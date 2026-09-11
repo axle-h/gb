@@ -1,33 +1,10 @@
-// The transport `/api/video` and `/api/audio` share: a chunked binary body carrying `u32`-LE
-// length-prefixed messages, read with `fetch` and reconnected for as long as anyone is watching.
-//
-// Extracted from `video.ts` when audio arrived rather than copied, because the ~90 lines below are
-// almost entirely the *subtle* parts — the abort chaining, the silence watchdog, and telling an
-// ordinary disconnect apart from a corrupt stream — and each of those carries a ⚠️ in `CLAUDE.md`
-// that was paid for once already.
-//
-// Deliberately DOM-free apart from `fetch` and the streams API: nothing here knows what a message
-// means.
+// The transport `/api/video` and `/api/audio` share: a chunked body of `u32`-LE length-prefixed
+// messages, read with `fetch` and reconnected while anyone is watching.
 
 import { STALE_MS, type Connection } from './api';
 
-/**
- * The connection *ended* rather than failed, and there is nothing wrong: what the inflater raised is
- * only the truncated deflate stream that closing a healthy one leaves behind.
- *
- * ⚠️ **An ordinary disconnect can only be told apart structurally, never from the exception.**
- * `VideoStream::frame` flushes the connection's encoder after every message and deliberately never
- * *finishes* it, since finishing the stream is the one thing that would end it — so a body that
- * stops carries no final block and no adler trailer, and `DecompressionStream` reports the missing
- * end as bad input rather than as EOF. It raises a bare `TypeError` (Firefox words it "Error in
- * input stream", node gives it no message at all) which is indistinguishable by inspection from a
- * genuinely corrupt stream, and ⚠️ **matching on that wording would be a guess about three
- * engines' private prose**. So the tell is not the failure, it is whether the *source* closed before
- * the inflater complained.
- *
- * ⚠️ **None of that applies to an uncompressed stream**, which is why `readFramedStream` raises this
- * directly there: with no inflater in the pipe, a server that closes simply ends the reader.
- */
+// The body closed rather than failed. An unfinished deflate stream reports its end as a bare error,
+// so a disconnect is recognised by the source closing first, never by the exception's wording.
 export class Disconnected extends Error {
   constructor(url: string) {
     super(`${url} closed mid-stream`);
@@ -35,33 +12,18 @@ export class Disconnected extends Error {
   }
 }
 
-/** Why a stream stopped for good, rather than for a moment. */
 export type Fatal = 'unavailable' | 'missing';
 
 export interface StreamOptions {
-  /** Whether the body is deflated across the connection. `/api/video` yes, `/api/audio` no. */
+  /** Whether the body is deflated across the connection: video yes, audio no. */
   inflate: boolean;
-  /** What to call it in the console. */
   label: string;
-  /** The server said this endpoint will never answer. The retry loop stops and the caller decides. */
+  /** The server said this endpoint will never answer; the retry loop stops. */
   onFatal?: (why: Fatal) => void;
 }
 
-/**
- * Turn a response body into the messages it carries.
- *
- * A zero-length message is the keep-alive and yields nothing — which is why `alive` is called with
- * every inflated *chunk* rather than beside the `yield`. ⚠️ **A watchdog fed from the messages this
- * yields would fire on a screen that simply is not moving**: the keep-alive exists precisely for the
- * case where there is no delta to send, and it is the only traffic a paused game produces. The audio
- * stream makes that sharper rather than softer — a run parked on a spent quota emits no packets at
- * all for hours, and the keep-alive is the entire connection.
- *
- * ⚠️ **The compression is part of the protocol, not a `Content-Encoding`.** A declared encoding
- * invites a proxy to decompress and recompress it, which buffers whole messages and shows up as
- * stutter only in production. `DecompressionStream` is native and does the same job here, where we
- * can see it.
- */
+// Turn a response body into its messages. `alive` is fed per chunk, not per message: the zero-length
+// keep-alive yields nothing and is the only traffic a paused game sends.
 export async function* readFramedStream(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal,
@@ -72,17 +34,9 @@ export async function* readFramedStream(
   let reader: ReadableStreamDefaultReader<Uint8Array>;
 
   if (options.inflate) {
-    // Both pipes carry the signal so an abort reaches the *source*: aborting the reader alone leaves
-    // the response body draining in the background until the server notices.
-    // The cast is the DOM types being stricter than the spec: `DecompressionStream` accepts any
-    // `BufferSource`, which `Uint8Array` is, but the two `WritableStream`s are not assignable.
+    // Both pipes carry the signal so an abort reaches the source. The tap's `flush` runs only when the
+    // body closes, which is how an ordinary disconnect is told from a corrupt stream.
     const inflating = new DecompressionStream('deflate');
-    // The identity tap is the whole of how an ordinary disconnect is recognised: `flush` runs when
-    // the *body* closes and never runs when the pipe is aborted or the transport fails, which
-    // separates "the connection ended" from "the stream was corrupt" without inspecting a single
-    // exception. It is ordered ahead of the failure it explains rather than racing it — closing this
-    // transform is what closes the inflater's writable, which is what makes zlib notice it never
-    // reached an end.
     const tap = new TransformStream<Uint8Array, Uint8Array>({
       flush() {
         ended = true;
@@ -97,17 +51,13 @@ export async function* readFramedStream(
     reader = body.getReader();
   }
 
-  // The tail of the last chunk that was not yet a whole message. A message spans chunk boundaries
-  // routinely — neither deflate's output nor TCP's has anything to do with our framing.
   let pending = new Uint8Array(0);
 
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) {
-        // With no inflater there is no truncated-stream exception to classify, so an orderly end of
-        // body *is* the disconnect and has to be raised as one — otherwise the generator simply
-        // returns and the caller reads it as "the stream finished", which this one never does.
+        // With no inflater, an orderly end of body is the disconnect.
         if (!options.inflate) throw new Disconnected(options.label);
         return;
       }
@@ -139,23 +89,8 @@ export async function* readFramedStream(
   }
 }
 
-/**
- * Keep a binary stream open for the length of the run, reconnecting for as long as anyone is
- * watching.
- *
- * `EventSource` used to do this part by itself; a `fetch` does not, so the retry is here. It is not
- * a regression in robustness — `EventSource` gives up permanently on some errors and
- * `useEventStream` already had to rebuild it — but it *is* the one thing binary framing costs.
- *
- * ⚠️ **A reconnect of `/api/video` is also the resync**, because every connection opens with a
- * keyframe, which is why `Screen` needs no resync path of its own. Audio has no equivalent and needs
- * none: an Opus packet decodes on its own, so a reconnect costs a listener the jitter buffer and
- * nothing else.
- *
- * ⚠️ **`catch` is only half the story: a body can stall for ever without throwing.** See `STALE_MS`.
- * A dropped network gives this loop nothing to catch, so the watchdog aborts the attempt itself and
- * lets the loop below treat it as any other failure.
- */
+// Keep a binary stream open, reconnecting while anyone watches; a video reconnect is also its resync,
+// as every connection opens with a keyframe. A stalled body throws nothing, so a watchdog aborts it.
 export function subscribeFramed(
   url: string,
   onMessage: (message: ArrayBuffer) => void,
@@ -168,9 +103,7 @@ export function subscribeFramed(
   (async () => {
     let first = true;
     while (!controller.signal.aborted) {
-      // ⚠️ **One controller per attempt, chained to the outer one.** The watchdog has to be able to
-      // abandon a connection *without* ending the loop, which aborting the caller's own signal would
-      // do — the checks below read it as "the component unmounted" and return.
+      // One controller per attempt, so the watchdog can abandon a connection without ending the loop.
       const attempt = new AbortController();
       const abandon = () => attempt.abort();
       controller.signal.addEventListener('abort', abandon, { once: true });
@@ -183,10 +116,7 @@ export function subscribeFramed(
       try {
         onConnection(first ? 'connecting' : 'reconnecting');
         const response = await fetch(url, { signal: attempt.signal, cache: 'no-store' });
-        // ⚠️ **Two answers mean "stop asking", and they are not the same answer.** A 503 is the
-        // feature turned off on a build that has it (`GB_AUDIO_BITRATE=0`); a 404 is a build older
-        // than the endpoint. Either way a retry every second for the length of the run is noise the
-        // server does not need, so the loop ends and the caller hides the control.
+        // 503 is the feature turned off and 404 a build without the endpoint: stop asking.
         if (response.status === 503 || response.status === 404) {
           options.onFatal?.(response.status === 503 ? 'unavailable' : 'missing');
           return;
@@ -200,12 +130,7 @@ export function subscribeFramed(
         }
       } catch (failure) {
         if (controller.signal.aborted) return;
-        // ⚠️ **A disconnect is normal behaviour and must not be logged as a fault.** The pill
-        // already says `reconnecting…`, the next connection repairs whatever it needs to, and
-        // nothing is lost — so it goes to a level the console hides by default, and everything else
-        // stays loud. A watchdog abort arrives here too, as an `AbortError`, and is one of the loud
-        // ones: 8 s of silence on a stream with a 2 s keep-alive is a fault whoever is watching
-        // should see.
+        // A disconnect is normal and logged quietly; a watchdog abort arrives as an `AbortError` and stays loud.
         if (failure instanceof Disconnected) console.debug(`${options.label} ended, reconnecting`);
         else console.error(`${options.label} dropped, reconnecting`, failure);
       } finally {

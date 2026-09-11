@@ -38,8 +38,7 @@ mod cinnabar;
 mod endgame;
 mod playthrough;
 mod stalls;
-// Gated as a module: without the feature the test does not exist, so it never shows up as
-// ignored.
+// Gated as a module, so without the feature it never shows up as ignored.
 #[cfg(feature = "slow-tests")]
 mod soak;
 mod postgame;

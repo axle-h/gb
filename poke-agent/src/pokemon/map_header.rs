@@ -224,7 +224,7 @@ pub struct MapConnection {
 /// How far a map's tile-map coordinates sit from its raw warp-table ones: one column if the map
 /// has a western connection strip, one row if it has a northern one
 /// (`MapDimensions::{west,north}_extra`). Read straight out of the ROM, so it can be asked about
-/// a map the player is *not* on — which is what a menu row needs to say where a warp comes out in
+/// a map the player is not on — which is what a menu row needs to say where a warp comes out in
 /// the coordinates the picture of that map uses.
 pub fn strip_offset(map: Map) -> (u8, u8) {
     let Some(pointer) = map.header_pointer() else { return (0, 0) };

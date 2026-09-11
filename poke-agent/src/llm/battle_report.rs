@@ -3,17 +3,13 @@
 use crate::pokemon::GameState;
 use crate::pokemon::battle::{BattleAction, BattleType};
 
-/// How much of one report the model is shown. A long trainer battle is elided in the middle
-/// rather than truncated at the end: the turns worth reading are the first few, where the
-/// script's plan is visible, and the last few, where it went wrong.
+/// Turns one report shows; a longer battle keeps its first and last and elides the middle.
 pub const MAX_TURNS_SHOWN: usize = 8;
 /// How much of one message box is quoted.
 const MAX_QUOTE: usize = 120;
 /// How much of [`MAX_QUOTE`] is spent on the end of the box rather than the beginning.
 const QUOTE_TAIL: usize = 44;
-/// How many battles may queue up before the model is next asked anything. Deliberately small:
-/// past this the reports are describing a stretch of play the model can do nothing about, and the
-/// count says more than the detail.
+/// Battles that may queue before the model is next asked; past this the count says enough.
 pub const MAX_QUEUED: usize = 3;
 
 /// One side of the battle at the moment a decision was taken.
@@ -30,8 +26,7 @@ impl Side {
         if self.hp == then.hp && self.max == then.max {
             return None;
         }
-        // A changed maximum is a level-up, and reporting only the current HP makes it read as
-        // healing.
+        // A changed maximum is a level-up, which the current HP alone would show as healing.
         if self.max != then.max {
             return Some(format!("{} {}/{} → {}/{}", self.name, then.hp, then.max, self.hp, self.max));
         }
@@ -60,14 +55,11 @@ pub struct BattleReport {
     opener: String,
     closed: Vec<(Turn, Option<String>, Option<String>)>,
     open: Option<Turn>,
-    /// Turns the script handed back with `battle.ask()`, which cost a request and are worth
-    /// counting separately from the ones that did not.
+    /// Turns handed back with `battle.ask()`, counted apart because the model paid for them.
     asked: u32,
-    /// How many closed turns the model has already been shown, so a hand-back can account for the
-    /// ones it has not.
+    /// Closed turns the model has been shown, so a hand-back reports only the rest.
     told: usize,
-    /// Which party slot was out when the battle opened, so the closing line can find our Pokémon
-    /// in the party once `wBattleMon` is gone.
+    /// The party slot out at the start, to find our Pokémon once `wBattleMon` is gone.
     my_slot: usize,
     /// Both sides as they last stood, for the closing line.
     ending: Option<(Side, Option<Side>)>,
@@ -113,9 +105,8 @@ impl BattleReport {
         });
     }
 
-    /// The script handed this turn back — `battle.ask()`, a failure, or a battle the model has
-    /// taken over. The model is about to be asked, so the turn itself needs no line here; only
-    /// the count does.
+    /// The script handed this turn back; answers the turns it took since the model last chose,
+    /// without which the model sees its own last decision silently replaced.
     #[must_use]
     pub fn handed_back(&mut self, state: &GameState) -> Option<String> {
         self.close_in_battle(state);
@@ -134,14 +125,13 @@ impl BattleReport {
         ))
     }
 
-    /// Something the game said. Attributed to the turn that is open, or to the last one closed
-    /// when the battle is ending.
+    /// Something the game said, for the open turn or, as the battle ends, the last closed one.
     pub fn said(&mut self, message: &str) {
         let message = message.trim();
         if message.is_empty() {
             return;
         }
-        // Tested before the truncation, not after.
+        // Tested before the truncation, which could cut the words.
         self.blacked_out |= is_blackout(message);
         let quoted = truncated(message, MAX_QUOTE);
         match self.open.as_mut() {
@@ -153,14 +143,11 @@ impl BattleReport {
         }
     }
 
-    /// The battle is over. `state` is the last one seen, which is where the closing HP comes
-    /// from.
+    /// The battle is over; `state` is the last one seen, for the closing HP.
     pub fn finish(mut self, state: Option<&GameState>) -> String {
         match state {
-            // First, above the in-battle arm, because a state that still holds a battle after a
-            // blackout is a *different* battle — the trainer waiting on the other side of the
-            // Centre, or a wild encounter on the walk back — and its HP bars are nothing to do
-            // with this one.
+            // Above the in-battle arm: a battle in `state` after a blackout is a different one,
+            // whose HP has nothing to do with this.
             _ if self.blacked_out => self.close(None, None),
             Some(state) if state.battle.is_some() => {
                 self.close_in_battle(state);
@@ -180,7 +167,7 @@ impl BattleReport {
         self.render()
     }
 
-    /// How many decisions this battle took, which is the figure the whole feature is about.
+    /// How many decisions this battle took.
     pub fn decisions(&self) -> usize {
         self.closed.len() + usize::from(self.open.is_some()) + self.asked as usize
     }
@@ -235,7 +222,7 @@ impl BattleReport {
     fn render(&self) -> String {
         let mut out = String::with_capacity(512);
         out.push_str("### Battle report\n\n");
-        // Facts, in the order they happened, and no sentence about how little it cost.
+        // Facts, in order, and no sentence about how little it cost.
         out.push_str(&format!(
             "{} battle. {}.\n",
             match self.kind {
@@ -257,7 +244,6 @@ impl BattleReport {
 
         out.push_str(&self.turns_from(0));
 
-        // How it stood at the end.
         if let Some((me, foe)) = self.ending.as_ref() {
             match foe {
                 Some(foe) => out.push_str(&format!("\nEnded with {} and {}.\n", standing(foe), standing(me))),
@@ -265,7 +251,7 @@ impl BattleReport {
                 None => out.push_str(&format!("\nEnded with {}.\n", standing(me))),
             }
         }
-        // This is not the verdict the on `ending` refuses to guess.
+        // The one verdict stated: the HP read afterwards is a healed party.
         if self.blacked_out {
             out.push_str(
                 "\n**You lost. Your last Pokémon fainted, so you blacked out.** The game has taken \
@@ -307,8 +293,7 @@ fn standing(side: &Side) -> String {
     }
 }
 
-/// Our active Pokémon read out of the party, which is where its HP still is once the battle has
-/// gone and taken `wBattleMon` with it.
+/// Our active Pokémon read out of the party, where its HP is once `wBattleMon` has gone.
 fn party_side(state: &GameState, slot: usize) -> Option<Side> {
     let mon = state.pokemon.get(slot)?;
     Some(Side { name: mon.nickname.to_default_string(), hp: mon.current_hp, max: mon.stats.hp })
@@ -354,16 +339,14 @@ fn truncated(text: &str, limit: usize) -> String {
         .into_iter()
         .rev()
         .collect();
-    // Overlapping ends mean the whole thing fits after all, which the length test above already
-    // ruled out — but a `limit` smaller than `QUOTE_TAIL` would reach here, so say it rather than
-    // printing the same words twice.
+    // Only a `limit` below `QUOTE_TAIL` gets here with overlapping ends.
     match head.len() + tail.len() >= text.len() {
         true => text.to_string(),
         false => format!("{head}…{tail}"),
     }
 }
 
-/// The cartridge saying the player has just blacked out.
+/// The cartridge's own sentence, because `wBattleResult` is zeroed before anything here runs.
 pub fn is_blackout(message: &str) -> bool {
     message.contains("blacked out")
 }
@@ -393,7 +376,6 @@ mod tests {
         }
     }
 
-    /// The whole shape: an intent, the damage it did, and what the game said, in one line each.
     #[test]
     fn a_report_says_what_happened_and_what_it_cost() {
         let start = state();
@@ -412,13 +394,11 @@ mod tests {
         assert!(rendered.contains(&format!("{my_hp} → {}", my_hp - 5)), "and ours: {rendered}");
         assert!(rendered.contains("ENEMY RATTATA used TACKLE!"), "the cartridge's own words: {rendered}");
         assert!(rendered.contains("going for the burn"), "and the script's: {rendered}");
-        // Facts only: the count, not a sentence about how little the turn cost.
         assert!(rendered.contains("1 turn."), "the turn count is stated plainly: {rendered}");
         assert!(!rendered.contains("did not have to"), "and nothing congratulates itself: {rendered}");
         assert!(rendered.contains("Ended with"), "and it says how it stood at the end: {rendered}");
     }
 
-    /// A turn where nothing moved says nothing about HP.
     #[test]
     fn a_turn_that_changed_no_hp_prints_no_numbers() {
         let start = state();
@@ -464,7 +444,6 @@ mod tests {
         assert!(rendered.contains(&format!("{foe_hp} → {}", foe_hp - 9)), "{rendered}");
     }
 
-    /// A battle ends and the enemy is gone with it.
     #[test]
     fn a_report_closed_after_the_battle_reads_our_side_out_of_the_party() {
         let start = state();
@@ -485,7 +464,6 @@ mod tests {
         assert!(!rendered.contains("Rattata on"), "the enemy is not reported at all: {rendered}");
     }
 
-    /// A changed maximum is a level-up, not healing.
     #[test]
     fn a_level_up_is_not_reported_as_healing() {
         let start = state();
@@ -510,8 +488,6 @@ mod tests {
         );
     }
 
-    /// A long trainer battle is elided in the middle, not cut off at the end: the turns that
-    /// matter are the opening plan and whatever it ran into.
     #[test]
     fn a_long_battle_is_elided_rather_than_truncated() {
         let start = state();
@@ -528,7 +504,6 @@ mod tests {
         assert!(rendered.len() < 2_000, "and it stays affordable at {} bytes", rendered.len());
     }
 
-    /// The closing line reports HP, never a result.
     #[test]
     fn the_ending_states_the_hp_rather_than_claiming_a_result() {
         let start = state();
@@ -545,7 +520,7 @@ mod tests {
         }
         assert!(rendered.contains("was caught"), "what happened is the cartridge's line: {rendered}");
 
-        // And a faint is said as a faint, because that one *is* visible in the HP.
+        // And a faint is said as a faint, because that one is visible in the HP.
         let mut beaten = BattleReport::open(&start, 0).unwrap();
         beaten.decided(&start, &ember(), Vec::new());
         assert!(beaten.finish(Some(&hurt(state(), 20, 0))).contains("fainted"));
@@ -586,7 +561,6 @@ mod tests {
         );
     }
 
-    /// The head-only truncation cut the answer off every box that had one.
     #[test]
     fn a_long_quote_keeps_the_sentence_that_ends_the_battle() {
         let start = state();
@@ -602,7 +576,6 @@ mod tests {
         assert!(rendered.contains('…'), "with the middle elided: {rendered}");
     }
 
-    /// The failure this exists for, in one test.
     #[test]
     fn a_hand_back_says_what_the_script_did_since_the_model_last_chose() {
         let start = state();
@@ -624,8 +597,6 @@ mod tests {
         assert_eq!(report.handed_back(&start), None, "already shown, so nothing is repeated");
     }
 
-    /// The mid-battle account and the finished report are the same sentences, which is why one
-    /// renderer draws both.
     #[test]
     fn the_account_and_the_report_describe_a_turn_the_same_way() {
         let start = state();
@@ -639,8 +610,6 @@ mod tests {
         );
     }
 
-    /// `battle.ask()` and a disarm both land here, and both are worth counting apart: they are
-    /// the turns the model *did* pay for.
     #[test]
     fn the_turns_the_model_answered_are_counted_separately() {
         let start = state();
@@ -652,8 +621,7 @@ mod tests {
         assert!(rendered.contains("3 turns, 1 of them answered by you"), "{rendered}");
     }
 
-    /// The end of a battle is the one moment the model most wants quoted — the exp, the money,
-    /// the faint — and by then no turn is open to attach it to.
+    /// By the end of a battle no turn is open to attach the exp and money to.
     #[test]
     fn what_the_game_says_after_the_last_turn_is_still_reported() {
         let start = state();

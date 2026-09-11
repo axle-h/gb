@@ -9,8 +9,8 @@ const ESCAPE_BUDGET: Duration = Duration::from_secs(120);
 /// The longest silence a case may show before it counts as still stuck.
 const QUIET_LIMIT: Duration = Duration::from_secs(90);
 
-/// Replay `state` against a fresh agent and return the longest it went without reaching a
-/// decision point, plus where it ended up.
+/// Replay `state` against a fresh agent; return the longest silence before a decision point, and
+/// where it ended.
 fn longest_silence(state: &[u8], seed: u64) -> (Duration, String, String) {
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
     gb.load_state(state).expect("a committed stall fixture should load");
@@ -42,9 +42,9 @@ fn longest_silence(state: &[u8], seed: u64) -> (Duration, String, String) {
     (worst, worst_state, where_it_is)
 }
 
-/// Assert a fixture is no longer a stall, reporting what it did if it still is.
+/// Assert a fixture escapes its stall, reporting what it did if it does not.
 fn assert_escapes(name: &str, state: &[u8]) {
-    // Three seeds, because escaping must not depend on what the policy picks once it is free.
+    // Escaping must not depend on what the policy picks once free.
     for seed in [1, 2, 3] {
         let (worst, worst_state, where_it_is) = longest_silence(state, seed);
         assert!(
@@ -56,19 +56,19 @@ fn assert_escapes(name: &str, state: &[u8]) {
     }
 }
 
-/// `soak` seed 1, 3600 s in — a Bulbasaur out of PP against a Weedle in Viridian Forest.
+/// A Bulbasaur out of PP against a Viridian Forest Weedle, found by `soak`.
 #[test]
 fn a_move_with_no_pp_left_does_not_trap_the_battle() {
     assert_escapes("no-pp-move", include_bytes!("../data/stall-no-pp-move.bin"));
 }
 
-/// `soak` seed 1, `at-vermilion`, 372 s in — the S.S.
+/// A key item used in battle on the S.S. Anne, found by `soak`.
 #[test]
 fn a_key_item_used_in_battle_does_not_trap_the_bag() {
     assert_escapes("battle-key-item", include_bytes!("../data/stall-battle-key-item.bin"));
 }
 
-/// `can_get_rainbow_badge`, Erika's Vileplume — a party with no PP anywhere.
+/// Erika's Vileplume against a party with no PP anywhere, from `can_get_rainbow_badge`.
 #[test]
 fn a_party_with_no_pp_anywhere_still_gets_an_answer() {
     use crate::pokemon::policy::DeterministicPolicy;
@@ -76,11 +76,10 @@ fn a_party_with_no_pp_anywhere_still_gets_an_answer() {
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
     gb.load_state(state).expect("a committed stall fixture should load");
     let mut cache = MapMetadataCache::default();
-    // An empty queue: `pick_battle_action` does not read it, and what is under test is the answer
-    // it gives when the active mon has nothing left, not the route it is on.
+    // An empty queue: `pick_battle_action` does not read it.
     let mut agent = PokemonAgent::new(Box::new(DeterministicPolicy::new(1, [])));
 
-    // Count *actions*, not silence, because the watchdog cannot see this one.
+    // Count actions, not silence; the watchdog cannot see this one.
     let budget = MachineCycles::from_duration(ESCAPE_BUDGET);
     let mut emulated = MachineCycles::ZERO;
     let mut actions = 0usize;
@@ -99,55 +98,55 @@ fn a_party_with_no_pp_anywhere_still_gets_an_answer() {
     println!("[stall] no-pp-trainer-battle: {actions} battle actions taken");
 }
 
-/// `soak` seed 1, `postgame-pc-box`, 554 s in — the Lift Key against a Bug Catcher's Weedle.
+/// The Lift Key against a Bug Catcher's Weedle, found by `soak` from `postgame-pc-box`.
 #[test]
 fn a_key_item_used_against_a_trainer_does_not_trap_the_bag() {
     assert_escapes("battle-key-item-trainer", include_bytes!("../data/stall-battle-key-item-trainer.bin"));
 }
 
-/// `soak` seed 1, `at-vermilion`, 1681 s in — the man in the Cerulean badge house.
+/// The man in the Cerulean badge house, found by `soak` from `at-vermilion`.
 #[test]
 fn a_list_that_only_b_leaves_does_not_trap_a_conversation() {
     assert_escapes("badge-house-list", include_bytes!("../data/stall-badge-house-list.bin"));
 }
 
-/// `soak` seed 1, `at-cinnabar`, 2258 s in — SURF chosen in Saffron City.
+/// SURF chosen in Saffron City, found by `soak` from `at-cinnabar`.
 #[test]
 fn a_field_move_the_game_refuses_does_not_trap_the_party_menu() {
     assert_escapes("field-move-refused", include_bytes!("../data/stall-field-move-refused.bin"));
 }
 
-/// `soak` seeds 28/38/50/62, 1801 s in — a fainted Pokémon chosen from the battle party menu.
+/// A fainted Pokémon chosen from the battle party menu, found by `soak`.
 #[test]
 fn a_fainted_pokemon_chosen_in_battle_does_not_trap_the_party_menu() {
     assert_escapes("fainted-switch", include_bytes!("../data/stall-fainted-switch.bin"));
 }
 
-/// `soak` seeds 8/30/36/44, 1082 s in — a Card Key door on Silph Co 2F, with no Card Key.
+/// A Card Key door on Silph Co 2F with no Card Key, found by `soak`.
 #[test]
 fn a_card_key_door_that_will_not_open_is_only_tried_once() {
     assert_escapes("card-key-door", include_bytes!("../data/stall-card-key-door.bin"));
 }
 
-/// `soak` seed 119, `postgame-aides`, 223 s in — a Ditto on Route 15, one frame, for ever.
+/// A Ditto on Route 15 frozen on one frame, found by `soak` from `postgame-aides`.
 #[test]
 fn a_battle_message_over_the_party_list_is_cleared_first() {
     assert_escapes("battle-message-over-party", include_bytes!("../data/stall-battle-message-over-party.bin"));
 }
 
-/// `soak` seed 11, `at-cinnabar`, 2301 s in — the water current on Seafoam Islands B4F.
+/// The water current on Seafoam Islands B4F, found by `soak` from `at-cinnabar`.
 #[test]
 fn a_walk_the_current_keeps_interrupting_gives_up() {
     assert_escapes("seafoam-current", include_bytes!("../data/stall-seafoam-current.bin"));
 }
 
-/// `soak` seeds 76…120, eleven of them — Bill's own PC, in his house on Route 25.
+/// Bill's own PC in his house on Route 25, found by `soak`.
 #[test]
 fn a_menu_offering_cancel_does_not_trap_a_conversation() {
     assert_escapes("bills-pc-list", include_bytes!("../data/stall-bills-pc-list.bin"));
 }
 
-/// `soak` seed 70, 1500 s in — BAIT thrown at the same Rhyhorn for ever.
+/// BAIT thrown at the same Rhyhorn for ever, found by `soak`.
 #[test]
 fn a_safari_menu_cursor_left_on_bait_does_not_repeat_itself() {
     assert_escapes("safari-menu", include_bytes!("../data/stall-safari-menu.bin"));
@@ -160,8 +159,7 @@ fn a_ghost_battle_is_left_rather_than_fought_for_ever() {
     let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
     gb.load_state(state).expect("a committed stall fixture should load");
     let mut cache = MapMetadataCache::default();
-    // An empty queue, as in the no-PP case: what is under test is the answer `pick_battle_action`
-    // gives to a fight that cannot be won, not the route it happens to be on.
+    // An empty queue, as in the no-PP case.
     let mut agent = PokemonAgent::new(Box::new(DeterministicPolicy::new(1, [])));
 
     let budget = MachineCycles::from_duration(ESCAPE_BUDGET);
@@ -188,7 +186,7 @@ fn a_ghost_battle_is_left_rather_than_fought_for_ever() {
     println!("[stall] ghost-battle: out in {left_at:?} after {turns} battle actions");
 }
 
-/// The Route 8 gate doorstep, and it is a stall rather than a wasted turn.
+/// The Route 8 gate can be re-entered from its own doorstep without stalling.
 #[test]
 fn the_route_8_gate_can_be_re_entered_from_its_own_doorstep() {
     let mut fixture = TestFixture::new(
@@ -206,8 +204,7 @@ fn the_route_8_gate_can_be_re_entered_from_its_own_doorstep() {
     let out = fixture.try_run_until(|state| state.map.map == Map::Route8 && matches!(
         (state.map.player_position.x, state.map.player_position.y), (2 | 9, 9 | 10)))
         .expect("out of the gate again");
-    // And assert *which* door, or the test passes on a run that left by the west one and never
-    // stood on the square this is about.
+    // Assert which door, or a run that left by the west one passes.
     assert_eq!(out.map.player_position.x, 9,
                "the east door puts the player on the entry the cartridge will not open");
 
@@ -215,9 +212,7 @@ fn the_route_8_gate_can_be_re_entered_from_its_own_doorstep() {
         .expect("and straight back in from the doorstep, which is what never used to happen");
 }
 
-/// Route 14's north-east pocket, walled in by a trainer, whose only way out is back over the
-/// Route 13 border. From where that crossing lands, the nearest way into Route 14 is the pocket's
-/// own, and a route on to Route 15 has to take another one.
+/// A route out of Route 14's walled-in north-east pocket does not walk back into it.
 #[test]
 fn a_route_out_of_a_pocket_does_not_walk_back_into_it() {
     // Raw landings on Route 14, and the pocket's in the tile map's own coordinates.
@@ -288,7 +283,7 @@ fn a_water_route_does_not_climb_out_onto_route_21s_islands() {
              the islands at y = 25/26 are what the search's mount price is for");
 }
 
-/// The other half of the Route 21 crossing: a mount must not end the walk it is part of.
+/// A Surf mount on the Route 21 crossing hands the walk back to itself, not to the policy.
 #[test]
 fn a_surf_mount_hands_the_walk_back_to_itself_rather_than_to_the_policy() {
     let mut fixture = TestFixture::new(
@@ -317,7 +312,7 @@ fn a_surf_mount_hands_the_walk_back_to_itself_rather_than_to_the_policy() {
              the identical question put back to the policy, which is a paid request. {seen:?}");
 }
 
-/// Cinnabar Island's gym doorstep, and the general rule it is the test case for.
+/// A square the game walks you back off, Cinnabar's gym doorstep, is learned and routed around.
 #[test]
 fn a_square_the_game_walks_you_back_off_is_learned_and_routed_around() {
     let mut fixture = TestFixture::new(
@@ -327,8 +322,7 @@ fn a_square_the_game_walks_you_back_off_is_learned_and_routed_around() {
              PolicyStep::enter(Map::CinnabarIsland),
              PolicyStep::enter(Map::PokemonMansion1F)],
     );
-    // The fixture is before the Mansion, so the key cannot be in the bag — if it ever is, the gym
-    // doorstep is ordinary floor and this test is about nothing.
+    // Before the Mansion, so the key cannot be in the bag and the doorstep is not ordinary floor.
     assert!(!fixture.game_state().bag.iter()
                 .any(|i| i.id == crate::pokemon::item::ItemId::SecretKey),
             "the Secret Key is inside the Mansion, so a fixture standing outside it must not hold one");
@@ -343,22 +337,19 @@ fn a_square_the_game_walks_you_back_off_is_learned_and_routed_around() {
     assert_eq!(fixture.try_game_state().map(|g| g.map.map), Ok(Map::PokemonMansion1F),
                "the walk to the Mansion has to arrive; over the doorstep it is stopped by \
                 \"The door is locked...\" and re-planned identically for ever");
-    // Arrival alone would also pass if the router simply never chose that square — which is a
-    // tie-break away from being true again.
+    // Arrival alone would pass if the router never chose that square.
     assert!(learned.iter().any(|e| e.contains("(18, 5)")),
             "the doorstep has to be recognised from the shove rather than avoided by luck: {learned:?}");
 }
 
-/// The mount must not be handed to `RunningScript`, and whether it *is* depends on the map's
-/// NPCs.
+/// The Surf mount is not handed to `RunningScript`, which depends on the map's NPCs.
 #[test]
 fn a_surf_mount_is_not_taken_over_by_the_script_handler() {
     let mut fixture = TestFixture::new(
         include_bytes!("../data/at-cinnabar.bin"),
         Duration::from_secs(300),
-        // Cinnabar's east shore *is* the seam into Route 20, so the mount's own step crosses it —
-        // there is no walk left to resume, which is the other half of why this is a separate
-        // case.
+        // Cinnabar's east shore is the seam into Route 20, so the mount's own step crosses it and
+        // no walk is left to resume.
         vec![PolicyStep::enter(Map::Route20)],
     );
     assert_eq!(fixture.game_state().map.map, Map::CinnabarIsland);

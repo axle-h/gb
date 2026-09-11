@@ -1,4 +1,3 @@
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +12,7 @@ use crate::pokemon::integration_tests::TestFixture;
 /// Pallet Town, standing outside.
 const FIXTURE: &[u8] = include_bytes!("../data/pallet-town-state.bin");
 
-/// How long a default-tier test will wait on the wall clock for something to happen.
+/// How long a default-tier test waits on the wall clock.
 const PATIENCE: Duration = Duration::from_secs(30);
 
 /// The stand-in model.
@@ -23,7 +22,7 @@ fn plays_the_menu(request: &TurnRequest) -> Reply {
         return Reply::Content("I am in Pallet Town and I am trying to leave it.".to_string());
     }
     if request.is_stuck() {
-        // `why` is required of the model and read back out of the record it lands in — see
+        // `why` is required and read back out of its record by
         // `the_watchdog_asks_the_model_for_a_nudge_and_delivers_it`.
         return Reply::call(
             "press_buttons",
@@ -32,15 +31,14 @@ fn plays_the_menu(request: &TurnRequest) -> Reply {
     }
     let ids = request.menu_ids();
     if request.is_battle() {
-        // Nothing should start a battle here, but a wild encounter is never impossible and a
-        // brain that only knew how to run would hang the test in a trainer fight.
+        // A wild encounter is never impossible, and a brain that only ran would hang in a trainer
+        // fight.
         let id = ids.iter().find(|id| id.starts_with("fight:")).cloned().unwrap_or_else(|| "run".into());
         return Reply::call("choose_battle_action", serde_json::json!({ "id": id }));
     }
     if request.seen == 0 {
-        // Both in one assistant message: the read goes to the emulator thread and the screenshot
-        // is answered by the worker, so this is the one request that exercises both paths at
-        // once.
+        // Both in one message: the read goes to the emulator thread and the screenshot to the
+        // worker.
         return Reply::Calls(vec![
             Call::new("read_map", serde_json::json!({})),
             Call::new("screenshot", serde_json::json!({})),
@@ -67,7 +65,7 @@ fn the_llm_plays_from_a_fixture() {
     let left = run.tick_until(PATIENCE, |run| run.map() != Map::PalletTown);
     assert!(left, "the player never left Pallet Town — still at {}", run.fixture().game_state().map.player_position);
 
-    // …and it got there having actually used a tool.
+    // Having used a tool on the way.
     let read = run
         .endpoint
         .requests()
@@ -78,13 +76,12 @@ fn the_llm_plays_from_a_fixture() {
         .expect("`read_map` was never answered — the tool round trip did not complete");
     assert!(read.contains("\"PalletTown\""), "read_map answered from the wrong state: {read:.200}");
     assert!(read.contains("\"is_dark\""), "read_map lost its shape: {read:.200}");
-    // The grid and its legend were *replaced* by the picture, not supplemented — a model given
-    // both would be reading the same map twice, in two coordinate systems, for twice the tokens.
+    // The picture replaces the grid and legend, so the map is not read twice in two coordinate
+    // systems.
     assert!(!read.contains("\"grid\"") && !read.contains("\"legend\""),
             "read_map is still shipping the ASCII grid: {read:.200}");
 
-    // And both pictures from that assistant message came back too, encoded by the worker and
-    // carried to the endpoint in the multi-part content form.
+    // Both pictures came back, encoded by the worker in the multi-part content form.
     use image::GenericImageView;
     let mut pictures: Vec<(String, String)> =
         run.endpoint.requests().iter().flat_map(TurnRequest::images).collect();
@@ -107,7 +104,7 @@ fn the_llm_plays_from_a_fixture() {
     assert!(decoded.iter().any(|(size, detail)| *size == screen && detail == "low"),
             "no `detail: low` screenshot at {screen:?} among {decoded:?}");
 
-    // The map of Pallet Town, at one pixel per game pixel plus the coordinate ruler.
+    // Pallet Town at one pixel per game pixel, plus the ruler.
     let map = (
         (map_image::RULER_LEFT + 10 * 2 * map_image::CELL_PX) as u32,
         (map_image::RULER_TOP + (9 * 2 + 2) * map_image::CELL_PX) as u32,
@@ -125,13 +122,11 @@ fn a_restart_resumes_the_conversation_as_well_as_the_game() {
     let before = run.saved_history();
     let stored = before["messages"].as_array().expect("history.json holds messages").len();
     assert!(stored > 0, "a turn completed and nothing was written down: {before}");
-    // The system prompt is never stored — it is re-minted from the build that is running — so a
-    // deployment that edits it gets the edit rather than a copy pinned to the last process.
+    // The system prompt is never stored but re-minted from the running build.
     assert!(
         !before["messages"].as_array().unwrap().iter().any(|m| m["role"] == "system"),
         "message 0 must not be stored: {before}",
     );
-    // Only the two the conversation owns.
     assert!(run.run_dir.join(crate::run::files::CONVERSATION).exists(), "no conversation log");
 
     let directory = run.run_dir.clone();
@@ -146,8 +141,8 @@ fn a_restart_resumes_the_conversation_as_well_as_the_game() {
         .last()
         .cloned()
         .expect("a request after the restart");
-    // The conversation came back: the first request of the second process carries the messages
-    // the first one wrote, plus the note that says the game may be a little behind them.
+    // The second process's first request carries the first's messages, plus a note that the game
+    // may be behind them.
     assert!(
         resumed.messages.len() > stored,
         "the restarted process started from {} messages, not the {stored} it had written",
@@ -212,16 +207,14 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
 
     assert_eq!(terminals, vec!["press_buttons".to_string(), "wait".to_string()]);
 
-    // And the turn says what is wrong in terms the model can act on — the agent's own state, and
-    // that this is the agent's fault rather than a puzzle in the game.
+    // The turn names the agent's own state and says the fault is the agent's, not a puzzle.
     assert!(situation.contains("## Decision: the game is stuck"), "{situation:.300}");
     assert!(situation.contains("bug in the agent"), "{situation:.600}");
 
     assert!(reported, "a firing has to be reported — §14: every one of them is a bug report");
     assert!(delivered, "the model's press never reached the joypad");
 
-    // And the press left a record: the reason the model gave, the screen at the time, and the
-    // conversation that led to it.
+    // The press left a record: the model's reason, the screen and the conversation.
     let records = run.run_dir.join(crate::run::files::PRESS_BUTTONS);
     let record = std::fs::read_dir(&records)
         .unwrap_or_else(|e| panic!("no records in {records:?}: {e}"))
@@ -257,8 +250,7 @@ fn an_undated_hard_failure_does_not_ratchet_the_history() {
         served.load(std::sync::atomic::Ordering::SeqCst),
     );
 
-    // A 402 is not retryable, so one request is one attempt: what follows is a picture of the
-    // conversation across `FAILURES` consecutive failed turns and parks.
+    // A 402 is not retryable, so each request is one failed turn.
     let sizes: Vec<usize> = run.endpoint.requests().iter().map(|r| r.messages.len()).collect();
     let plans: Vec<usize> = run
         .endpoint
@@ -267,19 +259,18 @@ fn an_undated_hard_failure_does_not_ratchet_the_history() {
         .map(|r| r.messages.iter().filter(|m| m.text.starts_with("## Your plan")).count())
         .collect();
 
-    // (d) — one line, and it is the whole defect.
+    // A failed turn leaves the history the size it found it.
     assert_eq!(
         sizes.iter().max(), sizes.iter().min(),
         "the history grew across {FAILURES} consecutive failures: {sizes:?}",
     );
-    // (a) and (b), said in the terms the deployed file was wrong in.
+    // And leaves at most one plan message.
     assert!(
         plans.iter().all(|count| *count <= 1),
         "a failed turn left its plan message behind: {plans:?}",
     );
 
-    // And the run is still playing rather than wedged: the failures resolve to a wait, the
-    // operator is told, and the turn after the last one decides something.
+    // The failures resolve to waits, the operator is told, and the next turn decides.
     assert!(run.said("the turn could not be completed"), "a failing endpoint has to be visible");
     let before = run.decisions().len();
     assert!(
@@ -288,9 +279,7 @@ fn an_undated_hard_failure_does_not_ratchet_the_history() {
     );
 }
 
-/// An endpoint that refuses outright and never says when to come back is parked too, once the
-/// refusals are a streak rather than one bad request: the game stops rather than being asked about
-/// every two seconds of it.
+/// A streak of undated refusals parks the run and stops the cartridge clock.
 #[test]
 fn a_streak_of_undated_hard_failures_parks_the_run_and_stops_the_cartridge_clock() {
     use crate::llm::worker::RefusalPark;
@@ -310,13 +299,13 @@ fn a_streak_of_undated_hard_failures_parks_the_run_and_stops_the_cartridge_clock
         "a streak of refusals did not park the run; status is {:?}",
         run.published.run_status(),
     );
-    // Parked on the streak's last refusal, and not before it: the ones before are failed turns.
+    // Parked on the streak's last refusal, not before; the earlier ones are failed turns.
     assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), park.after as usize);
     let failed_turns = run.notices().iter().filter(|(_, m)| m.contains("the turn could not be completed")).count();
     assert_eq!(failed_turns, park.after as usize - 1, "{:?}", run.notices());
     assert!(run.said("the endpoint refused 3 requests in a row"), "a park has to say why: {:?}", run.notices());
     let stopped_at = run.playtime_seconds();
-    // The failed turns before the park resolved to waits, and those are decisions too.
+    // The failed turns before the park resolved to waits, which are decisions too.
     let decided = run.decisions().len();
 
     let parked_until = std::time::Instant::now() + Duration::from_millis(1500);
@@ -330,15 +319,14 @@ fn a_streak_of_undated_hard_failures_parks_the_run_and_stops_the_cartridge_clock
         "the run never resumed after the park",
     );
     assert!(run.said("the pause is over"), "{:?}", run.notices());
-    // The same question, because the world it was about did not move.
+    // The same question, because the world did not move.
     let requests = run.endpoint.requests();
     let (refused, answered) = (&requests[park.after as usize - 1], &requests[park.after as usize]);
     assert_eq!(refused.messages.len(), answered.messages.len(), "the parked turn was not re-asked as it stood");
     assert!(refused.messages.iter().zip(&answered.messages).all(|(a, b)| a.text == b.text));
 }
 
-/// A dated 429 parks the run: the emulator stops, the cartridge's own clock stops with it, and
-/// the same question is put again when the window reopens.
+/// A dated 429 parks the run, stops the cartridge clock, and asks again when the window reopens.
 #[test]
 fn a_dated_rate_limit_parks_the_run_and_stops_the_cartridge_clock() {
     use crate::published::RunStatus;
@@ -353,7 +341,7 @@ fn a_dated_rate_limit_parks_the_run_and_stops_the_cartridge_clock() {
     );
     let mut run = LlmRun::builder(FIXTURE).named("park-429").start(Box::new(brain));
 
-    // Wait for the park to be entered, and read the clock at that moment.
+    // Read the clock as the park is entered.
     assert!(
         run.tick_until(PATIENCE, |run| matches!(run.published.run_status(), RunStatus::Throttled { .. })),
         "a dated rate limit did not park the run; status is {:?}",
@@ -362,21 +350,20 @@ fn a_dated_rate_limit_parks_the_run_and_stops_the_cartridge_clock() {
     assert!(run.said("the endpoint's quota is spent"), "a park has to say so: {:?}", run.notices());
     let stopped_at = run.playtime_seconds();
 
-    // Through the park: the driver honours `throttled_until` exactly as `host.rs` does.
+    // The driver honours `throttled_until` as `host.rs` does.
     let parked_until = std::time::Instant::now() + Duration::from_millis(1500);
     while std::time::Instant::now() < parked_until {
         run.tick();
     }
     assert_eq!(run.playtime_seconds(), stopped_at, "the cartridge clock ran while the run was parked");
 
-    // And it comes back on its own, with the same question.
+    // It comes back on its own with the same question.
     assert!(
         run.tick_until(PATIENCE, |run| !run.decisions().is_empty()),
         "the run never resumed after the quota window reopened",
     );
     assert!(run.said("the quota window reopened"), "{:?}", run.notices());
-    // The cartridge clock counts whole seconds, so "it is moving again" needs more than one of
-    // them — a resumed run that had ticked twice would read as still parked.
+    // The cartridge clock counts whole seconds, so moving again needs more than one.
     assert!(
         run.tick_until(PATIENCE, |run| run.playtime_seconds() > stopped_at + 1),
         "the game never restarted: still {stopped_at}s on the cartridge clock",
@@ -400,7 +387,6 @@ fn an_undated_rate_limit_is_backed_off_from_rather_than_parked() {
     );
     assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2, "both limits were served");
     assert!(run.said("retrying in"), "a retry has to be visible: {:?}", run.notices());
-    // The park is what must *not* have happened.
     assert!(!run.said("the endpoint's quota is spent"), "an undated 429 parked the run: {:?}", run.notices());
     assert!(run.published.throttled_until().is_none(), "an undated 429 stopped the emulator");
 }
@@ -440,7 +426,7 @@ fn malformed_tool_arguments_do_not_stop_the_turn_ending() {
     );
 }
 
-/// A body that stops part-way through a `data:` frame.
+/// A body that stops part-way through a `data:` frame fails the turn and the run carries on.
 #[test]
 fn a_truncated_stream_fails_the_turn_and_the_run_carries_on() {
     let brain = FaultThen::new(Fault::TruncatedStream, 1, Reply::Calls(vec![Call::wait(1)]));
@@ -473,7 +459,7 @@ fn a_completion_with_nothing_in_it_is_nudged_then_forced() {
         "the forced fallback is a wait: {:?}",
         run.decisions(),
     );
-    // The nudge went out before the rule was enforced, and it quoted the contract.
+    // The nudge went out before the rule was enforced, quoting the contract.
     let nudged = run
         .endpoint
         .requests()
@@ -484,8 +470,7 @@ fn a_completion_with_nothing_in_it_is_nudged_then_forced() {
 
 #[test]
 fn a_compaction_with_no_turn_to_drop_says_so() {
-    /// A brain that plays normally until the history is being summarised, and then refuses — the
-    /// shape of an endpoint whose credit has run out mid-run.
+    /// Plays normally until asked to summarise, then refuses, as an endpoint out of credit does.
     struct RefusesToSummarise;
 
     impl Brain for RefusesToSummarise {
@@ -500,8 +485,8 @@ fn a_compaction_with_no_turn_to_drop_says_so() {
         }
     }
 
-    // Small enough that the system prompt and two turns overrun it, so a compaction is due almost
-    // immediately and every one of them has to fall through to the last resort.
+    // Small enough that the prompt and two turns overrun it, so every compaction falls to the last
+    // resort.
     let mut run = LlmRun::builder(FIXTURE)
         .named("dead-compaction")
         .context_limit(4_000)
@@ -519,7 +504,7 @@ fn a_compaction_with_no_turn_to_drop_says_so() {
         run.notices(),
     );
 
-    // The point: every compaction either reclaimed something or said out loud that it could not.
+    // Every compaction reclaimed something or said it could not.
     for (before, after, summarised) in run.compactions() {
         if after < before || summarised {
             continue;
@@ -532,8 +517,7 @@ fn a_compaction_with_no_turn_to_drop_says_so() {
     }
 }
 
-// ── The bundled strategy, against real battles
-// ───────────────────────────────────────────────────
+// ── The bundled strategy, against real battles ──
 
 /// What the other Pokémon did reaches the model.
 #[test]
@@ -587,7 +571,7 @@ fn what_the_enemy_did_is_reported_rather_than_only_what_we_did() {
     );
     assert!(said.iter().any(|line| line.contains("used")), "no move was named in the game's own words: {all}");
 
-    // And the move list must not bleed into it.
+    // The move list must not bleed into it.
     for line in said.iter() {
         let listed = ["TACKLE", "TAIL WHIP", "BUBBLE", "WATER GUN"]
             .iter().filter(|name| line.contains(**name)).count();

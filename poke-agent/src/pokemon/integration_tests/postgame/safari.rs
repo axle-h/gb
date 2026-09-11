@@ -1,23 +1,19 @@
-
 use super::super::*;
 
 use crate::pokemon::postgame::safari;
 
 const FLASH: &[u8] = include_bytes!("../../data/postgame-flash.bin");
 
-/// Slowpoke, the party's Dig holder — the way out of Rock Tunnel and therefore of the fixture.
+/// Slowpoke, the party's Dig holder and the way out of Rock Tunnel.
 const DIG_SLOT: u8 = 4;
 
-/// The two cheapest new species in the centre's table, and — with the party at 5 — one catch
-/// either side of the party/box boundary.
+/// The centre's two cheapest new species, one catch either side of the party/box boundary.
 const CHEAP_PAIR: &[PokemonSpecies] = &[PokemonSpecies::Rhyhorn, PokemonSpecies::Exeggcute];
 
-/// Kangaskhan is in the East and West tables and *not* the centre's
-/// (`data/wild/maps/SafariZoneCenter.asm`), so a centre hunt for it can only ever run the budget
-/// out — which is precisely what the ejection half of E4 needs to observe.
+/// Not in the centre's table (`SafariZoneCenter.asm`), so a centre hunt runs the budget out.
 const KANGASKHAN: &[PokemonSpecies] = &[PokemonSpecies::Kangaskhan];
 
-/// Scratch: the Safari Zone's west area, entered by the *eastern* of its two warp pairs.
+/// Cuts the Safari Zone's west area, entered by the eastern of its two warp pairs.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn cut_safari_west_shelf_fixture() {
@@ -51,8 +47,7 @@ fn the_safari_wests_rest_house_is_a_row_from_the_shelf_it_is_on() {
     assert_eq!(door.id(), "SafariZoneWest:11,11:Warp");
 }
 
-/// Tasks E2 + E3 + E4 (walking out) — throw Safari Balls instead of running, catch a species the
-/// Safari Zone is the only source of, and leave through the gate under our own steam.
+/// Safari Balls instead of running, a Safari-exclusive catch, and a walk out through the gate.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_catch_a_safari_exclusive() {
@@ -69,8 +64,7 @@ fn can_catch_a_safari_exclusive() {
     assert!(before.safari.is_none(), "not in the Safari Zone yet");
     let money_before = before.money;
 
-    // Paying is observable in three places at once, and all three matter: the fee leaves the
-    // wallet, the game hands over its two budgets, and `EVENT_IN_SAFARI_ZONE` goes up.
+    // Paying shows three ways: the fee, the two budgets, and `EVENT_IN_SAFARI_ZONE`.
     let paid = fixture.run_until(|s| s.safari.is_some());
     let trip = paid.safari.unwrap();
     println!("in the zone: {} steps, {} balls, ¥{}", trip.steps_left, trip.balls_left, paid.money);
@@ -85,31 +79,26 @@ fn can_catch_a_safari_exclusive() {
         caught.pokemon.len(), caught.boxed_pokemon.len());
     assert!(after.balls_left < 30, "balls were thrown, not run from");
 
-    // E4, the walk-out: the hunt pops itself, then the two `enter` steps take us back through the
-    // gate.
+    // The hunt pops itself, then two `enter` steps walk back through the gate.
     let out = fixture.run_leg(|s| s.map.map == Map::FuchsiaCity && s.safari.is_none());
     assert!(out.safari.is_none(), "the trip should be over once we are back in Fuchsia");
     for species in CHEAP_PAIR {
         assert!(out.pokedex_owned.contains(species), "{species} should be owned");
     }
-    // The party filled, so exactly one of the two went to the box — the wedged path, driven to
-    // the end.
+    // The party filled, so exactly one of the two went to the box.
     assert_eq!(out.pokemon.len(), 6, "the first catch fills the party");
     assert_eq!(out.boxed_pokemon.len(), boxed_before + 1, "the second is transferred to BILL's PC");
     println!("out of the zone at {} · dex owned {} · ¥{}",
         out.map.map, out.pokedex_owned.species().len(), out.money);
-    // Deliberately no fixture: this leg proves the mechanism, `can_sweep_the_safari_zone`
-    // produces the state, and an uncommitted-but-written fixture nothing reads is just drift
-    // waiting to happen.
+    // No fixture: `can_sweep_the_safari_zone` produces the state.
 }
 
-/// Task E3, at full size — sweep all four areas for every species the Safari Zone adds.
+/// All four areas swept for every species the Safari Zone adds.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "very slow (381 s, 6× the leg tier's next \
     slowest) — run with --features slow-tests")]
 fn can_sweep_the_safari_zone() {
-    /// Per area, not for the sweep — and the binding one is the centre's, where Scyther took ten
-    /// (4.3 % of encounters, 21 % per encounter).
+    /// Per area; the centre's Scyther is the binding one.
     const MAX_TRIPS: u32 = 15;
 
     let mut steps = vec![PolicyStep::Dig { target: crate::pokemon::policy::PartyRef::Slot(DIG_SLOT) }];
@@ -135,7 +124,7 @@ fn can_sweep_the_safari_zone() {
     fixture.save_state_named("src/pokemon/data/postgame-safari.bin").unwrap();
 }
 
-/// Tasks E1 + E4 (ejection) — the 500-step budget, watched all the way to zero and out.
+/// The step budget runs down to zero and the player is ejected.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn runs_the_step_budget_down_and_is_ejected() {
@@ -145,21 +134,18 @@ fn runs_the_step_budget_down_and_is_ejected() {
 
     let start = fixture.run_until(|s| s.safari.is_some());
     let opening = start.safari.unwrap();
-    // The gate writes `HIGH(502)/LOW(502)` — the counter is 502, not the 500 the signs claim —
-    // but the first tick that can observe it is already inside, because paying ends with a
-    // scripted three-tile auto-walk north and those tiles are charged like any others.
+    // The gate writes 502, not the 500 the signs claim, and the paid auto-walk north is charged.
     assert!((495..=502).contains(&opening.steps_left),
         "the budget starts at 502 less the entrance auto-walk, got {}", opening.steps_left);
     assert!(!opening.game_over);
 
-    // It falls, and it falls because of *walking*: pacing grass for encounters is what spends it.
+    // It falls because of walking: pacing grass is what spends it.
     let halfway = fixture.run_until(|s| s.safari.is_some_and(|z| z.steps_left < 250));
     println!("halfway: {} steps, {} balls left", halfway.safari.unwrap().steps_left,
         halfway.safari.unwrap().balls_left);
 
-    // `EVENT_SAFARI_GAME_OVER` goes up the instant the counter hits zero, a few ticks before the
-    // gate script clears `EVENT_IN_SAFARI_ZONE` — so this is the one state where `safari` is
-    // `Some` and the trip is already over.
+    // `EVENT_SAFARI_GAME_OVER` is set a few ticks before `EVENT_IN_SAFARI_ZONE` clears, so `safari`
+    // is `Some` and over.
     let over = fixture.run_until(|s| s.safari.is_some_and(|z| z.game_over));
     println!("game over at {} steps on {}", over.safari.unwrap().steps_left, over.map.map);
     assert_eq!(over.safari.unwrap().steps_left, 0, "the trip ends when the counter reaches 0");

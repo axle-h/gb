@@ -32,7 +32,7 @@ pub(super) const COMBINATION_PER_CHECKSUM: [u8; 94] = [
 ];
 
 /// `(obj0, obj1, bg)` as byte offsets into [`PALETTES`]. Most are palette-aligned; a few (22, 34,
-/// 35, 36) deliberately start mid-palette and read across the boundary, which is why this is a
+/// 35, 36) start mid-palette and read across the boundary, which is why this is a
 /// flat colour array rather than a 2-D one.
 pub(super) const COMBINATIONS: [[u8; 3]; 51] = [
     [ 32,  32, 232], // 0

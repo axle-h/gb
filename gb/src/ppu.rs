@@ -126,10 +126,10 @@ pub struct PpuSection {
     pub window_state: WindowRenderState,
 }
 
-/// Bumped to 2 by B2, which appended VRAM bank 1. The first field keeps its v1 shape — bank 0 —
-/// so every fixture written before CGB support still decodes without conversion.
+/// Version 2 appended VRAM bank 1. The first field keeps its v1 shape, bank 0, so every DMG-only
+/// fixture still decodes without conversion.
 pub const PPU_SECTION_VERSION: u16 = 2;
-/// Bumped to 2 by A7: incremental transfer, source page instead of address, `FF46` read-back.
+/// Version 2: incremental transfer, source page instead of address, `FF46` read-back.
 pub const DMA_SECTION_VERSION: u16 = 2;
 pub const CGB_SECTION_VERSION: u16 = 1;
 
@@ -190,7 +190,7 @@ impl PPU {
         Ok(())
     }
 
-    /// The `dma` section's shape changed in version 2 (A7: incremental transfer, page instead of
+    /// The `dma` section's shape changed in version 2 (incremental transfer, page instead of
     /// address, `FF46` read-back).
     fn read_dma_section(&mut self, reader: &SectionReader) -> Result<(), String> {
         let Some(mut fields) = reader.section(labels::DMA)? else {
@@ -290,7 +290,7 @@ impl PPU {
     }
 
     /// VRAM bank 0. The Pokémon layer reads tile data through this and a DMG has no other bank,
-    /// so it deliberately does not follow `VBK`.
+    /// so it does not follow `VBK`.
     pub fn vram(&self) -> &[u8] {
         &self.vram[..VRAM_BANK_SIZE]
     }
@@ -511,8 +511,7 @@ impl PPU {
                 }
             }
             LcdMode::HBlank => {
-                // TODO vary the length of the HBlank period based on the length of the Drawing
-                // phase
+                // TODO vary the HBlank length with the length of the Drawing phase
                 let hblank_ticks = SCANLINE_TICKS - OAM_TICKS - INITIAL_FIFO_LOAD_TICKS - LCD_WIDTH;
                 if self.current_ticks >= hblank_ticks {
                     // Hblank finished, go to next scanline
@@ -695,7 +694,7 @@ impl PPU {
         let bg_drawn = cgb || self.lcd_control.background_enabled();
         let bg_has_priority = self.lcd_control.background_enabled();
 
-        // Everything from here to the loop is hoisted out of it, and that is the whole point.
+        // Everything from here to the loop is hoisted out of it.
         let bg_map = self.lcd_control.background_tile_map();
         let window_map = self.lcd_control.window_tile_map();
         let data_mode = self.lcd_control.tile_data_mode();
@@ -974,8 +973,8 @@ impl TileRow {
         colors: [LcdColor::WHITE; 4],
     };
 
-    /// The 2-bit colour index at `pixel_x` (0..8) across the row, honouring the CGB X flip —
-    /// which is a choice of bit, exactly as flipping the coordinate before indexing was.
+    /// The 2-bit colour index at `pixel_x` (0..8) across the row, honouring the CGB X flip, which
+    /// is a choice of bit.
     #[inline]
     fn pixel(&self, pixel_x: usize) -> u8 {
         let bit = if self.attributes.flip_x() { pixel_x } else { TILE_PIXELS - 1 - pixel_x };
@@ -1215,7 +1214,6 @@ mod tests {
             assert_eq!(scanline(&mut ppu), expected(PALETTE, [0, 1, 2, 3]));
         }
 
-        /// B6.
         #[test]
         fn bg_attributes_select_the_palette_and_flip_the_tile() {
             let mut ppu = ppu_with_tile(ColorMode::Cgb);

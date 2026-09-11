@@ -23,14 +23,10 @@ pub const DOCS: &str = include_str!("battle_script/DOCS.md");
 /// The deterministic policy's battle strategy, written as a battle script.
 pub const DETERMINISTIC: &str = include_str!("battle_script/DETERMINISTIC.rhai");
 
-/// The script every run starts with, and the one a `set_battle_script` with no `script` goes back
-/// to. It calls `battle.ask()` and nothing else, so it decides no turns and the run behaves
-/// exactly as it did when the answer to "is there a script" was "no".
+/// The script every run starts with and an unset returns to: it only calls `battle.ask()`.
 pub const DEFAULT: &str = include_str!("battle_script/DEFAULT.rhai");
 
-/// How long a script may be. Generous — it is written once and re-read only when the model asks
-/// for it — but bounded, because it is sent back whole by `read_battle_script` and quoted in full
-/// in every validation failure.
+/// Bounded because `read_battle_script` and every validation failure quote the source whole.
 pub const MAX_SOURCE: usize = 6_000;
 
 /// How long a script's stated purpose may be.
@@ -39,15 +35,13 @@ pub const MAX_PURPOSE: usize = 200;
 /// How much of a disarm reason rides on the overworld turn.
 pub const MAX_FAILURE: usize = 240;
 
-/// The fuel. Rhai counts operations and terminates when this is reached, which is the guard
-/// `catch_unwind` cannot provide: a panic can be caught, a loop cannot.
+/// The fuel: rhai stops at this many operations, the guard `catch_unwind` cannot give on a loop.
 pub const MAX_OPERATIONS: u64 = 20_000;
 
 /// The wall-clock abort, checked from rhai's progress hook.
 pub const MAX_RUNTIME: Duration = Duration::from_millis(50);
 
-/// How many `print` lines are carried back to the model, and how long each may be. A script that
-/// prints in a loop is debugging itself at the model's expense.
+/// How many `print` lines are carried back to the model.
 pub const MAX_PRINTS: usize = 12;
 /// How long one `print` line may be before it is truncated.
 pub const MAX_PRINT_LEN: usize = 160;
@@ -62,8 +56,7 @@ const NO_ACTION: &str = "the script ran to the end without calling an action. Ev
 pub enum Outcome {
     /// A legal action, already resolved against `battle_options`.
     Action(BattleAction),
-    /// `battle.ask()` — the script wants the model to answer this particular turn, and stays
-    /// armed.
+    /// `battle.ask()`: the model answers this turn, and the script stays armed.
     Ask,
     /// The script did not produce an action.
     Failed(String),
@@ -99,8 +92,7 @@ enum Ref {
 }
 
 impl Ref {
-    /// Read a reference out of whatever the script passed: one of our own objects (which carries
-    /// its `slot`), a bare integer, or a name.
+    /// A reference from what the script passed: one of our objects, an integer, or a name.
     fn of(value: &Dynamic) -> Result<Self, String> {
         if let Some(map) = value.read_lock::<Map>() {
             if let Some(slot) = map.get("slot").and_then(|slot| slot.as_int().ok()) {
@@ -140,8 +132,7 @@ impl Ref {
 /// Names are compared with the punctuation and the case taken out.
 fn normalised(name: &str) -> String {
     name.chars()
-        // `é` is alphanumeric, so filtering on that alone keeps it and `POKÉBALL` never equals
-        // `POKEBALL`.
+        // `é` is alphanumeric, so it is mapped here or `POKÉBALL` never equals `POKEBALL`.
         .map(|c| match c {
             'é' | 'É' | 'è' | 'È' => 'E',
             other => other,
@@ -176,7 +167,7 @@ impl Battle {
         match Ref::of(&value) {
             Ok(reference) => self.commit(kind(reference)),
             Err(why) => Err(EvalAltResult::ErrorRuntime(Dynamic::from(why), Position::NONE).into()),
-            // (the message stands alone: `describe` prefixes nothing, so `why` says which value)
+            // `describe` prefixes nothing, so `why` names the value itself.
         }
     }
 }
@@ -191,8 +182,7 @@ fn engine(deadline: Instant, prints: Rc<RefCell<Vec<String>>>) -> Engine {
     engine.set_max_string_size(8 * 1024);
     engine.set_max_array_size(512);
     engine.set_max_map_size(512);
-    // Nested `eval` of a string built at run time is a second parser invocation the limits above
-    // are not accounted against, and nothing a battle script needs.
+    // A nested `eval` is a second parser that the limits above do not account for.
     engine.disable_symbol("eval");
 
     engine.on_progress(move |_| match Instant::now() >= deadline {
@@ -229,7 +219,7 @@ fn engine(deadline: Instant, prints: Rc<RefCell<Vec<String>>>) -> Engine {
         .register_get("best_move", |battle: &mut Battle| battle.get("best_move"))
         .register_get("can_run", |battle: &mut Battle| battle.get("can_run"))
         .register_fn("fight", |battle: &mut Battle, value: Dynamic| battle.action(Choice::Fight, value))
-        // `switch_to`, and it wanted to be `switch`.
+        // `switch_to`, because `switch` is a reserved word in rhai.
         .register_fn("switch_to", |battle: &mut Battle, value: Dynamic| battle.action(Choice::Switch, value))
         .register_fn("use_item", |battle: &mut Battle, value: Dynamic| {
             match value.clone().into_string() {
@@ -253,7 +243,7 @@ fn move_map(slot: usize, battle_move: &crate::pokemon::move_name::PokemonMove, m
     let mut map = Map::new();
     map.insert("slot".into(), Dynamic::from(slot as i64));
     map.insert("name".into(), Dynamic::from(battle_move.name.to_string()));
-    // `move_type`, and it wanted to be `type`.
+    // `move_type`, because `type` is a reserved word in rhai.
     map.insert("move_type".into(), Dynamic::from(metadata.move_type.to_string()));
     map.insert("power".into(), Dynamic::from(metadata.power.unwrap_or(0) as i64));
     map.insert("accuracy".into(), Dynamic::from(metadata.accuracy as i64));
@@ -377,8 +367,7 @@ fn facts(state: &GameState, turn: u32, options: &[BattleAction]) -> Option<Map> 
     let me_map = pokemon_map(active, &my_name, me, against_foe, Some(&fight_slots));
     let my_moves = me_map.get("moves").cloned().unwrap_or(Dynamic::UNIT);
     map.insert("me".into(), Dynamic::from(me_map));
-    // The foe is scored against *itself* for `damage`, which is meaningless — but the field has
-    // to exist or `battle.foe.moves[0].damage` is a hard error rather than a number to ignore.
+    // The foe's `damage` is scored against itself and meaningless, but must exist to be ignored.
     map.insert("foe".into(), Dynamic::from(pokemon_map(usize::MAX, &foe.species.to_string(), foe, Turn { foe: me, ghost }, None)));
     map.insert("moves".into(), my_moves);
 
@@ -406,8 +395,7 @@ fn facts(state: &GameState, turn: u32, options: &[BattleAction]) -> Option<Map> 
         .collect();
     map.insert("bag".into(), Dynamic::from(bag));
 
-    // The highest-damage usable move, which is what most scripts want and none should have to
-    // write twice.
+    // The highest-damage usable move, which most scripts want.
     let best = me
         .moves
         .iter()
@@ -548,8 +536,7 @@ pub fn run(source: &str, state: &GameState, turn: u32) -> Evaluation {
     match evaluated {
         Ok(Ok(())) => Evaluation::failed(NO_ACTION, prints),
         Ok(Err(failure)) => Evaluation::failed(describe(&failure), prints),
-        // The audio encoder's rule, one thread over: a panic here would unwind the emulator and
-        // take the run's checkpoint with it, so it is caught and reported as an ordinary failure.
+        // A panic would unwind the emulator thread and lose the checkpoint, so it is a failure.
         Err(_) => Evaluation::failed("the script made the sandbox panic", prints),
     }
 }
@@ -565,8 +552,7 @@ fn describe(failure: &EvalAltResult) -> String {
             "the script ran for longer than {} ms and was stopped.",
             MAX_RUNTIME.as_millis(),
         ),
-        // Our own refusals come back through here, and rhai's `Display` prefixes them with
-        // "Runtime error:".
+        // Our own refusals come back here, which rhai's `Display` prefixes with "Runtime error:".
         EvalAltResult::ErrorRuntime(message, position) => match message.clone().into_string() {
             Ok(sentence) => format!("{sentence} (at {position})"),
             Err(_) => failure.to_string(),
@@ -605,8 +591,7 @@ struct Saved {
     armed: bool,
     #[serde(default)]
     last_failure: Option<String>,
-    /// The model's own one-line answer to "what did you write this for", taken by
-    /// `set_battle_script` and said back to it on every overworld turn.
+    /// The model's one line on what it wrote this for, said back on every overworld turn.
     #[serde(default)]
     purpose: Option<String>,
     #[serde(default)]
@@ -626,17 +611,15 @@ impl Default for Saved {
     }
 }
 
-/// The script on disk, and the tool calls against it. Answered on the worker thread: validation
-/// runs the script seven times and none of it needs the emulator.
+/// The script on disk and the tool calls against it, answered on the worker thread.
 pub struct BattleScript {
-    /// `None` for a run with no directory — the tests, and the in-process worker in `LlmPolicy`.
+    /// `None` for a run with no directory.
     path: Option<PathBuf>,
     saved: Saved,
 }
 
 impl BattleScript {
-    /// Open the script in a run directory. Never fails: an unreadable file starts on [`DEFAULT`],
-    /// on `TodoList::open`'s argument that refusing to play is worse than losing the thing.
+    /// Never fails: an unreadable file starts on [`DEFAULT`].
     pub fn open(run_dir: Option<&Path>) -> Self {
         let Some(run_dir) = run_dir else {
             return Self { path: None, saved: Saved::default() };
@@ -661,8 +644,7 @@ impl BattleScript {
         self.saved.armed && self.saved.source.is_some() && !self.is_default()
     }
 
-    /// Whether what is installed is [`DEFAULT`], untouched. Trimmed on both sides, because
-    /// [`Self::set`] trims what it stores and a trailing newline is not an edit.
+    /// Whether [`DEFAULT`] is installed, compared trimmed as [`Self::set`] stores it.
     pub fn is_default(&self) -> bool {
         self.saved.source.as_deref().map(str::trim) == Some(DEFAULT.trim())
     }
@@ -671,37 +653,31 @@ impl BattleScript {
         self.saved.last_failure.as_deref()
     }
 
-    /// What the model said it wrote this script for, how many battle turns it has decided since,
-    /// and — if it has stopped — why. Empty for the default, which decides nothing and was
-    /// written by nobody.
+    /// The purpose, the turns decided, and why it stopped if it has; empty for the default.
     pub fn standing(&self) -> ScriptStanding {
         ScriptStanding {
             purpose: self.saved.purpose.clone(),
             decided: self.saved.decided,
-            // Only while it is the *current* state.
+            // Only while it is the current state.
             failure: (!self.armed()).then(|| self.saved.last_failure.as_deref().map(standing_failure)).flatten(),
         }
     }
 
-    /// Write back the running count the policy has been keeping. The policy cannot persist it
-    /// itself — one writer per run directory — so it counts in [`Live`] and the worker drains it
-    /// here at the top of a turn, exactly as it drains a failure.
+    /// Persist the count the policy keeps in [`Live`], drained at the top of a turn: one writer
+    /// per run directory.
     pub fn record_decided(&mut self, decided: u32) {
         if self.saved.decided == decided { return }
         self.saved.decided = decided;
         self.persist();
     }
 
-    /// What [`Live`] should hold: the source only while the script is armed, since the policy
-    /// runs whatever it is given.
+    /// What [`Live`] should hold: the source only while armed, since the policy runs what it gets.
     pub fn live_source(&self) -> Option<String> {
         self.armed().then(|| self.saved.source.clone()).flatten()
     }
 
-    /// The one line a battle turn says about the script. Three states rather than two, because
-    /// "yours is still the one we gave you" and "yours broke" want opposite sentences and the
-    /// difference is invisible from the source alone: [`Live::failed`] drops the source the
-    /// moment it fails, and the default never reaches [`Live`] at all.
+    /// Three states, because "still the default" and "broke" want opposite sentences and neither
+    /// reaches [`Live`] with a source.
     pub fn state(&self) -> ScriptState {
         match (self.armed(), self.is_default()) {
             (true, _) => ScriptState::Armed,
@@ -782,8 +758,7 @@ impl BattleScript {
         format!("{state}\n\n```rhai\n{source}\n```")
     }
 
-    /// The policy hit a failure. The script is kept — it is the thing the model has to edit — but
-    /// it stops deciding turns until the model arms it again.
+    /// Keeps the script for the model to edit, deciding nothing until it is armed again.
     pub fn disarm(&mut self, why: &str) {
         if !self.saved.armed && self.saved.last_failure.as_deref() == Some(why) {
             return;
@@ -805,11 +780,10 @@ impl BattleScript {
 /// Whether a script is deciding battle turns, as the battle turn reports it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ScriptState {
-    /// [`DEFAULT`] is installed, untouched: a script exists but decides nothing, so battle turns
-    /// cost what they always did.
+    /// [`DEFAULT`] is installed, untouched, and decides nothing.
     #[default]
     Unedited,
-    /// Armed and deciding battle turns — so a turn carrying this is one it did not decide.
+    /// Armed, so a battle turn carrying this is one it did not decide.
     Armed,
     /// One was written and has stopped deciding turns.
     Disarmed,
@@ -817,18 +791,15 @@ pub enum ScriptState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScriptStanding {
-    /// The model's own words, from `set_battle_script`. `None` for the default and for any script
-    /// armed before this field existed.
+    /// The model's own words from `set_battle_script`; `None` for the default.
     pub purpose: Option<String>,
     /// Battle turns decided since this script was armed.
     pub decided: u32,
-    /// Why the script stopped deciding turns, capped at [`MAX_FAILURE`]. `Some` exactly while
-    /// [`ScriptState::Disarmed`] holds, and cleared by [`BattleScript::set`] along with the rest.
+    /// Why it stopped, capped at [`MAX_FAILURE`]; `Some` exactly while [`ScriptState::Disarmed`].
     pub failure: Option<String>,
 }
 
-/// The armed script, shared between the worker thread that writes it and the emulator thread that
-/// runs it.
+/// The armed script, written by the worker thread and run by the emulator thread.
 #[derive(Debug, Default)]
 pub struct Live {
     inner: std::sync::Mutex<LiveInner>,
@@ -843,8 +814,7 @@ struct LiveInner {
 }
 
 impl Live {
-    /// Point the policy at a script, or at none. Called by the worker after a successful
-    /// `set_battle_script` and on a restart.
+    /// Point the policy at a script or none, after a successful `set_battle_script` or a restart.
     pub fn arm(&self, source: Option<String>, state: ScriptState, standing: ScriptStanding) {
         let mut inner = self.locked();
         inner.source = source;
@@ -858,9 +828,7 @@ impl Live {
         self.locked().source.clone()
     }
 
-    /// What the battle turn should say about it. Survives [`Self::take_failure`], which the
-    /// worker calls to persist the reason — the *reason* is spent by being reported once, and the
-    /// fact that there is a broken script to go and fix is not.
+    /// Survives [`Self::take_failure`]: the reason is reported once, the broken script stays.
     pub fn state(&self) -> ScriptState {
         self.locked().state
     }
@@ -876,9 +844,8 @@ impl Live {
         inner.standing.decided = inner.standing.decided.saturating_add(1);
     }
 
-    /// The policy found the script wanting. It stops deciding turns immediately — the source is
-    /// dropped here rather than flagged, so nothing can consult it again before the worker has
-    /// caught up — and `why` is left for the worker to persist.
+    /// Drops the source at once, so nothing consults it before the worker persists `why`; the
+    /// policy never writes the file.
     pub fn failed(&self, why: &str) {
         let mut inner = self.locked();
         inner.source = None;
@@ -892,9 +859,7 @@ impl Live {
         self.locked().failure.take()
     }
 
-    /// A poisoned lock is recovered rather than propagated: everything held across it is a clone
-    /// of a `String`, so there is no half-updated state to protect, and panicking here would stop
-    /// the run over a script.
+    /// A poisoned lock is recovered: everything held across it is a cloned `String`.
     fn locked(&self) -> std::sync::MutexGuard<'_, LiveInner> {
         self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -918,8 +883,7 @@ fn validate(source: &str) -> Result<String, String> {
         let state = scenario();
         let evaluation = run(source, &state, 1);
         let what = match &evaluation.outcome {
-            // The report's verb phrase, not `BattleAction`'s `Display` — see
-            // `battle_report::intent`, which says both why and what the alternative put here.
+            // The report's verb phrase, not `BattleAction`'s `Display`.
             Outcome::Action(action) => crate::llm::battle_report::intent(action),
             Outcome::Ask => "hands the turn to you".to_string(),
             Outcome::Failed(why) => {
@@ -939,16 +903,13 @@ fn indented(lines: &[String]) -> String {
     lines.iter().map(|line| format!("  {line}\n")).collect()
 }
 
-/// One of [`SCENARIOS`]' states, for the tests in [`crate::llm::battle_report`] and for
-/// `prompt::probe_turn_requests` — a healthy lead in a wild battle. Here rather than duplicated
-/// there, so the modules that describe a battle cannot drift about what one looks like.
+/// A healthy lead in a wild battle, shared so the modules describing a battle cannot drift.
 #[cfg(any(test))]
 pub fn test_scenario() -> GameState {
     scenarios::healthy_wild()
 }
 
-/// The seven turns [`SCENARIOS`] puts a script through, hand-built so validation needs no
-/// emulator and can run on the worker thread while a turn is in flight.
+/// The seven turns [`SCENARIOS`] puts a script through, hand-built so validation needs no emulator.
 pub(crate) mod scenarios {
     use crate::pokemon::GameState;
     use crate::pokemon::bag::{Bag, BagItem};
@@ -1034,18 +995,15 @@ pub(crate) mod scenarios {
         state(vec![at(starter(14), 0.08)], vec![], BattleType::Trainer, 0, rattata(13))
     }
 
-    /// Every move out of PP. `battle_options` offers every move here, because choosing any of
-    /// them is Struggle, but none is `usable` and `best_move` is `()` — the case a script written
-    /// around `best_move` will walk into and has to survive.
+    /// Every move out of PP: all offered, as Struggle, but none `usable` and `best_move` is `()`.
     pub fn out_of_pp() -> GameState {
         let mut lead = starter(14);
         lead.moves = lead.moves.map(|slot| slot.map(|battle_move| PokemonMove { pp: 0, ..battle_move }));
         state(vec![lead, bench(12)], vec![BagItem::new(ItemId::Potion, 1)], BattleType::Wild, 0, rattata(9))
     }
 
-    /// A wild encounter in Pokémon Tower without the Silph Scope. `battle_options` offers `Run`
-    /// and nothing else — no move executes and no ball or switch does anything — so every move is
-    /// `usable: false` with `damage` 0 and `best_move` is `()`, whatever the level gap says.
+    /// A ghost without the Silph Scope: only `Run` is offered, every move is `usable: false` with
+    /// `damage` 0, and `best_move` is `()`.
     pub fn ghost() -> GameState {
         let gastly = mon(
             PokemonSpecies::Gastly,
@@ -1084,12 +1042,10 @@ mod tests {
         scenarios::healthy_wild()
     }
 
-    /// The shortest script that reaches an action on every scenario, which is what arming
-    /// requires.
+    /// The shortest script that decides every scenario, as arming requires.
     const ALWAYS_DECIDES: &str = "if battle.can_run { battle.run(); }\nbattle.ask();";
 
-    /// `switch` is a statement keyword in rhai and reserved even in method position, which is why
-    /// the action is `switch_to`.
+    /// `switch` is reserved in rhai even in method position.
     #[test]
     fn switching_parses_under_the_name_the_keyword_forced() {
         let outcome = decide("battle.switch_to(battle.party[1]);", &wild());
@@ -1103,8 +1059,6 @@ mod tests {
         );
     }
 
-    /// The whole feature in one assertion: a script chooses a real battle action, and the action
-    /// is one the game would have offered.
     #[test]
     fn a_script_decides_a_battle_turn() {
         let outcome = decide("battle.fight(battle.best_move);", &wild());
@@ -1116,8 +1070,7 @@ mod tests {
         assert!(matches!(action, BattleAction::Fight { .. }), "got {action}");
     }
 
-    /// The example in `DOCS.md` is the one piece of this the model copies verbatim, so it is
-    /// checked rather than proof-read.
+    /// The model copies `DOCS.md`'s example verbatim.
     #[test]
     fn the_worked_example_in_the_docs_runs_on_every_scenario() {
         let example = DOCS
@@ -1135,8 +1088,7 @@ mod tests {
         }
     }
 
-    /// The rule the docs state, and the one Alex's original sketch depends on: `run()` followed
-    /// by more code must not fall through into it.
+    /// `run()` followed by more code must not fall through into it.
     #[test]
     fn an_action_ends_the_script() {
         // If `run` did not terminate, `fight` below would overwrite the choice.
@@ -1144,7 +1096,7 @@ mod tests {
         assert_eq!(outcome, Outcome::Action(BattleAction::Run));
     }
 
-    /// Rhai has `try`/`catch`, so the abort *can* be swallowed.
+    /// Rhai has `try`/`catch`, so the abort can be swallowed.
     #[test]
     fn the_first_action_wins_even_when_the_abort_is_caught() {
         let outcome = decide(
@@ -1154,9 +1106,7 @@ mod tests {
         assert_eq!(outcome, Outcome::Action(BattleAction::Run), "the caught abort still committed");
     }
 
-    /// Two of this API's names were parse errors before they were anything else — `mv.type` and
-    /// `battle.switch(...)`, both reserved words in rhai, both found by a test rather than by
-    /// reading the grammar.
+    /// `mv.type` and `battle.switch(...)` are reserved-word parse errors in rhai.
     #[test]
     fn every_name_the_docs_use_is_one_the_parser_accepts() {
         let fields = ["kind", "turn", "can_run", "ghost", "trapped", "catch_rate", "me", "foe", "party", "moves", "best_move", "bag"];
@@ -1165,7 +1115,7 @@ mod tests {
             assert_eq!(outcome, Outcome::Ask, "`battle.{field}` does not parse or does not exist");
             assert!(DOCS.contains(&format!("battle.{field}")), "`battle.{field}` exists and is undocumented");
         }
-        // Documented *in its own section*, not merely mentioned somewhere.
+        // Documented in its own section, not merely mentioned somewhere.
         let section = |heading: &str| -> String {
             let from = DOCS.split(heading).nth(1).unwrap_or_else(|| panic!("no `{heading}` section"));
             from.split("\n### ").next().unwrap_or(from).to_string()
@@ -1189,8 +1139,7 @@ mod tests {
         }
     }
 
-    /// A hang is the failure `catch_unwind` cannot catch, so the fuel limit is the guard that
-    /// matters most.
+    /// A hang is the failure `catch_unwind` cannot catch.
     #[test]
     fn a_runaway_script_is_stopped_rather_than_hanging() {
         let started = Instant::now();
@@ -1204,15 +1153,13 @@ mod tests {
         );
     }
 
-    /// The other half of the same guard: recursion, which the operation count reaches more slowly
-    /// than the call-depth limit does.
+    /// Recursion, which the call-depth limit reaches before the operation count.
     #[test]
     fn unbounded_recursion_is_stopped() {
         let outcome = decide("fn down(n) { down(n + 1) } down(0); battle.run();", &wild());
         assert!(matches!(outcome, Outcome::Failed(_)), "got {outcome:?}");
     }
 
-    /// A script that decides nothing is a failure with a sentence, never a silently skipped turn.
     #[test]
     fn choosing_nothing_is_a_failure_that_says_so() {
         let Outcome::Failed(why) = decide("let x = 1 + 1;", &wild()) else { panic!("expected a failure") };
@@ -1230,8 +1177,7 @@ mod tests {
         assert!(why.contains("Ember"), "the reason lists what is actually usable: {why}");
     }
 
-    /// Running from a trainer is the case a model will get wrong, and the message has to point at
-    /// `can_run` rather than at the tool.
+    /// Running from a trainer: the message points at `can_run` rather than at the tool.
     #[test]
     fn running_from_a_trainer_is_refused_with_the_reason() {
         let Outcome::Failed(why) = decide("battle.run();", &scenarios::hurt_trainer()) else {
@@ -1285,9 +1231,7 @@ mod tests {
         assert_eq!(outcome, Outcome::Action(BattleAction::Run));
     }
 
-    /// A bench member's moves are scored against the foe that is out, which is the whole basis of
-    /// a coverage switch. Squirtle's Water Gun beats Charmander's Scratch against nothing in
-    /// particular here — what is asserted is that the numbers are *there* and differ.
+    /// A bench member's moves are scored against the foe that is out; the numbers exist and differ.
     #[test]
     fn a_bench_members_moves_are_scored_against_the_current_foe() {
         let outcome = decide(
@@ -1306,8 +1250,6 @@ mod tests {
         assert_eq!(outcome, Outcome::Action(BattleAction::Run), "some move in the party does damage");
     }
 
-    /// `best_move` is `()` when nothing can hurt the foe, and a script written around it has to
-    /// survive that.
     #[test]
     fn no_usable_damaging_move_leaves_best_move_unset() {
         let outcome = decide(
@@ -1317,8 +1259,7 @@ mod tests {
         assert_eq!(outcome, Outcome::Action(BattleAction::Run));
     }
 
-    /// A ghost has to read as "nothing can be done" from every field, not only from the options
-    /// list `resolve` checks.
+    /// A ghost reads as hopeless from every field, not only from the options `resolve` checks.
     #[test]
     fn a_ghost_leaves_best_move_unset_and_every_move_unusable() {
         let state = scenarios::ghost();
@@ -1332,8 +1273,7 @@ mod tests {
                            battle.ask();";
         assert_eq!(decide(every_field, &state), Outcome::Action(BattleAction::Run), "no field may make a ghost look attackable");
 
-        // And the same starter against an ordinary wild Pokémon still has a `best_move` and
-        // `usable` moves, or the fix is "nothing is ever usable".
+        // An ordinary wild battle still has `usable` moves and a `best_move`.
         assert!(matches!(decide("battle.fight(battle.best_move);", &wild()), Outcome::Action(BattleAction::Fight { .. })));
         assert_eq!(decide("if battle.ghost { battle.run(); } battle.ask();", &wild()), Outcome::Ask);
     }
@@ -1362,8 +1302,7 @@ mod tests {
         }
     }
 
-    /// The table is the feedback loop: it shows the model what its own rules do on seven turns it
-    /// never has to describe.
+    /// The table shows the model what its own rules do on seven turns.
     #[test]
     fn validation_arms_a_good_script_and_shows_what_it_chose() {
         let mut script = BattleScript::open(None);
@@ -1376,8 +1315,7 @@ mod tests {
         for (name, _) in SCENARIOS {
             assert!(answer.contains(name), "the table is missing `{name}`:\n{answer}");
         }
-        // The table's rows are the report's verb phrases, not `BattleAction`'s menu rows: see
-        // `battle_report::intent`, and `probe_battle_script_answers` for what it reads like.
+        // The rows are the report's verb phrases, not `BattleAction`'s menu rows.
         assert!(answer.contains("tried to run"), "the low-hp wild scenario should have fled:\n{answer}");
     }
 
@@ -1414,8 +1352,7 @@ mod tests {
         assert!(script.read().contains("does not know"), "and why: {}", script.read());
     }
 
-    /// The run directory round trip, and the one thing that makes it worth persisting at all: a
-    /// process that restarts fights the next battle the way the model told it to.
+    /// A restarted process fights the next battle the way the model said.
     #[test]
     fn a_script_survives_the_process_that_wrote_it() {
         let scratch = Scratch::new("battle-script");
@@ -1433,8 +1370,7 @@ mod tests {
         assert_eq!(reopened.source(), Some(source), "byte for byte");
         assert!(reopened.armed(), "and still deciding turns");
 
-        // The standing has to make the trip too, and it is the half a restart would silently
-        // lose.
+        // The standing makes the trip too.
         assert_eq!(
             reopened.standing(),
             ScriptStanding { purpose: Some("a test".into()), decided: 340, failure: None },
@@ -1449,8 +1385,7 @@ mod tests {
         // A disarm keeps them.
         assert_eq!(reopened.standing().purpose.as_deref(), Some("a test"));
         assert_eq!(reopened.standing().decided, 340);
-        // And the reason comes back with them, because it rides on the overworld turn for as long
-        // as the script stays broken.
+        // And the reason, which rides on every overworld turn while the script is broken.
         assert_eq!(reopened.standing().failure.as_deref(), Some("it ran out of operations"));
     }
 
@@ -1498,8 +1433,7 @@ mod tests {
         assert!(cut.ends_with('…'), "and says that it was cut: {cut}");
     }
 
-    /// Unsetting goes back to [`DEFAULT`] rather than to nothing, which is the whole of what "a
-    /// run always has a script" means at the tool boundary.
+    /// Unsetting goes back to [`DEFAULT`], not to nothing.
     #[test]
     fn unsetting_goes_back_to_the_default() {
         let scratch = Scratch::new("battle-script");
@@ -1525,7 +1459,7 @@ mod tests {
         assert!(script.armed());
     }
 
-    /// An unreadable file is the default script, not a refusal to play — `TodoList::open`'s rule.
+    /// An unreadable file is the default script, not a refusal to play.
     #[test]
     fn a_corrupt_file_starts_on_the_default_rather_than_failing() {
         let scratch = Scratch::new("battle-script");
@@ -1552,8 +1486,7 @@ mod tests {
         assert_eq!(broken.last_failure(), Some("it fled"));
     }
 
-    /// The default has to compile and has to ask — it ships as a `const` and is never run in
-    /// anger (`live_source` withholds it), so nothing else would ever find out that it did not.
+    /// `live_source` withholds the default, so only this test runs it.
     #[test]
     fn the_default_script_compiles_and_hands_every_turn_back() {
         let table = validate(DEFAULT).expect("the default script must validate");
@@ -1567,7 +1500,7 @@ mod tests {
         );
     }
 
-    /// The default never reaches the emulator thread, and that is what keeps this change free.
+    /// The default never reaches the emulator thread.
     #[test]
     fn the_default_is_never_handed_to_the_policy() {
         let script = BattleScript::open(None);
@@ -1576,7 +1509,7 @@ mod tests {
         assert!(!script.armed(), "and nothing tells the model or the page that battles are free");
         assert_eq!(script.state(), ScriptState::Unedited);
 
-        // Whereas a script the model actually wrote is handed over, which is the contrast.
+        // A script the model wrote is handed over.
         let mut script = BattleScript::open(None);
         script.set(Some(ALWAYS_DECIDES), Some("a test"));
         assert!(script.armed());
@@ -1584,9 +1517,7 @@ mod tests {
         assert_eq!(script.state(), ScriptState::Armed);
     }
 
-    /// `read_battle_script` can no longer spend a round trip saying "there is nothing", which is
-    /// the reason the default exists at all: the model is asked to edit a file, not to invent
-    /// one.
+    /// `read_battle_script` always has a file to show: the model edits rather than invents.
     #[test]
     fn reading_a_fresh_runs_script_answers_with_the_default_source() {
         let answer = BattleScript::open(None).read();
@@ -1595,9 +1526,7 @@ mod tests {
         assert!(answer.contains("set_battle_script"), "and what to do about it: {answer}");
     }
 
-    /// The bundled strategy is checked the way the docs' example is, and for a stronger reason:
-    /// it is the deterministic policy's own logic, so a change here that silently stops it arming
-    /// has broken the one script known to finish this game.
+    /// The deterministic policy's strategy, the one script known to finish the game, must arm.
     #[test]
     fn the_deterministic_strategy_still_arms_and_still_plays() {
         let mut script = BattleScript::open(None);
@@ -1617,13 +1546,11 @@ mod tests {
             assert!(row.contains(expected), "`{scenario}` should have {expected}: {row}");
         }
 
-        // It is longer than the docs' example and must still fit, or the one strategy that is
-        // known to work is the one the size cap refuses.
+        // The known-good strategy has to fit under the size cap.
         assert!(DETERMINISTIC.len() < MAX_SOURCE, "it is {} bytes against {MAX_SOURCE}", DETERMINISTIC.len());
     }
 
-    /// The docs are carried in the context once the model reads them, so they are bounded the way
-    /// a guide chapter is.
+    /// The docs stay in the context once read, so they are bounded like a guide chapter.
     #[test]
     fn the_docs_stay_within_what_they_cost_to_carry() {
         assert!(DOCS.len() < 9_500, "the docs are {} bytes", DOCS.len());
@@ -1634,7 +1561,7 @@ mod tests {
         assert!(DOCS.contains("effectiveness"), "the reason no type chart is needed is undocumented");
     }
 
-    /// The docs make claims about the *language*, and a wrong one costs a round trip.
+    /// The docs make claims about the language, and a wrong one costs a round trip.
     #[test]
     fn the_language_the_docs_promise_is_the_language_the_engine_runs() {
         let state = wild();
@@ -1665,8 +1592,7 @@ mod tests {
         assert!(why.contains("battle"), "and the reason has to name it: {why}");
     }
 
-    /// Every field the docs tabulate has to exist, and every field that exists has to be
-    /// tabulated.
+    /// Every field the docs tabulate exists, and every field is tabulated.
     #[test]
     fn the_docs_tabulate_every_field_an_object_actually_has() {
         let state = scenarios::catchable_wild();
@@ -1678,16 +1604,13 @@ mod tests {
             );
             assert!(DOCS.contains(&format!("`{field}`")), "`{field}` on an Item is undocumented");
         }
-        // The bag is documented as a table of Item, and the item names in it have to be the ones
-        // the game actually uses — `use_item` normalises, but a script comparing `item.name` does
-        // not, and the docs tell it to do exactly that.
+        // The game's own names: `use_item` normalises, but a script comparing `item.name` does not.
         for name in ["Potion", "SuperPotion", "PokeBall"] {
             assert!(DOCS.contains(name), "the docs name no `{name}` for a script to compare against");
         }
         assert!(DOCS.contains("battle.bag"), "the bag is undocumented");
     }
-    /// A new script starts its tally at zero, or it inherits the credibility of the one it
-    /// replaced.
+    /// A new script's tally starts at zero.
     #[test]
     fn a_new_script_is_for_something_and_has_decided_nothing_yet() {
         let mut script = BattleScript { path: None, saved: Saved::default() };
@@ -1695,8 +1618,7 @@ mod tests {
         assert!(answer.starts_with("ok, armed"), "{answer}");
 
         let standing = script.standing();
-        // Trimmed, and stored as the model wrote it otherwise — the whole value is recognising
-        // it.
+        // Trimmed, and otherwise stored as written.
         assert_eq!(standing.purpose.as_deref(), Some("Misty's Staryu"));
         assert_eq!(standing.decided, 0, "a script that has not run has decided nothing");
 
@@ -1714,8 +1636,7 @@ mod tests {
         assert_eq!(script.standing(), ScriptStanding::default());
     }
 
-    /// Capped, because unlike the source this is re-sent on every overworld turn for as long as
-    /// the script is armed.
+    /// Capped: it is re-sent on every overworld turn while the script is armed.
     #[test]
     fn a_purpose_that_runs_long_is_cut_rather_than_refused() {
         let mut script = BattleScript { path: None, saved: Saved::default() };

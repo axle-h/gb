@@ -28,7 +28,6 @@ pub trait Policy {
     /// What this decider is called: `"llm"`, `"random"`, `"console"` or `"scripted"`.
     fn name(&self) -> &'static str;
 
-    /// Choose the next overworld action.
     fn pick_overworld_action(&mut self, state: &GameState, world_graph: &WorldGraph) -> Option<OverworldAction>;
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction>;
 
@@ -47,8 +46,7 @@ pub trait Policy {
         Some(None) // default: open the mart but buy nothing
     }
 
-    /// Another purchase for the same mart visit, asked once the previous one has gone through and
-    /// the Buy/Sell/Quit menu is back on screen.
+    /// Another purchase for the same mart visit, asked once the Buy/Sell/Quit menu is back.
     fn next_mart_purchase(&mut self) -> Option<BagItem> {
         None
     }
@@ -73,8 +71,7 @@ pub trait Policy {
     /// Called at the top of every policy poll, before any `pick_*` for that decision point.
     fn service_tools(&mut self, _state: &GameState, _api: &mut PokemonApi<'_>, _graph: &WorldGraph) {}
 
-    /// How much emulated time may pass with the agent asking this policy nothing at all before it
-    /// wants waking anyway.
+    /// How much emulated time may pass without a policy poll before the watchdog wakes this one.
     fn stuck_timeout(&self) -> Option<std::time::Duration> {
         None
     }
@@ -84,15 +81,12 @@ pub trait Policy {
 
     fn restart(&mut self, _run_dir: Option<&std::path::Path>) {}
 
-    /// `POST /api/clear` — the game carries on, but throw away whatever this policy remembers
-    /// *about* it: for `LlmPolicy`, the conversation and the model's plan.
+    /// `POST /api/clear`: forget what this policy remembers about the game, keep the game.
     fn clear_conversation(&mut self, _run_dir: Option<&std::path::Path>) -> Result<(), String> {
         Err("this run is not being played by a model, so there is no conversation to clear".to_string())
     }
 
-    /// Raw button presses the policy wants delivered, collected by the agent at the top of its
-    /// next tick and handed to
-    /// [`queue_manual_input`](crate::pokemon::agent::PokemonAgent::queue_manual_input).
+    /// Raw button presses for the agent to deliver at the top of its next tick.
     fn take_manual_input(&mut self) -> Vec<gb::joypad::JoypadButton> {
         Vec::new()
     }
@@ -106,8 +100,7 @@ pub trait Policy {
         None
     }
 
-    /// Returns true if the current step is expected to run for a long time without advancing the
-    /// queue (e.g. grinding levels or catching a Pokémon).
+    /// Whether the current step may run long without advancing the queue (a grind, a catch).
     fn current_step_is_long_running(&self) -> bool {
         false
     }
@@ -116,8 +109,7 @@ pub trait Policy {
 /// What the watchdog knows about the jam it is waking the policy for.
 #[derive(Debug, Clone, Copy)]
 pub struct Jam<'a> {
-    /// What the agent thinks it is doing —
-    /// [`PokemonAgent::state_debug`](crate::pokemon::agent::PokemonAgent::state_debug).
+    /// What the agent thinks it is doing (`PokemonAgent::state_debug`).
     pub agent_state: &'a str,
     /// Emulated time since the agent last asked the policy anything.
     pub stuck_for: std::time::Duration,
@@ -125,19 +117,14 @@ pub struct Jam<'a> {
 
 // ── Random (always-ready) ─────────────────────────────────────────────────────
 
-/// Picks uniformly from whatever the agent offers. `gb serve --policy random` plays the
-/// deployment with it, and `integration_tests::soak` uses it as a fuzzer for the agent's state
-/// machine.
+/// Picks uniformly from whatever the agent offers; `integration_tests::soak` fuzzes with it.
 #[derive(Default)]
 pub struct RandomPolicy {
-    /// `None` — the default, and what `gb serve` uses — draws from the thread RNG, so no two runs
-    /// are alike.
+    /// `None` draws from the thread RNG, so no two runs are alike.
     rng: Option<StdRng>,
-    /// The seed, kept beside the stream it built.
     seed: Option<u64>,
     /// The ids of the last [`EXPLORE_MEMORY`] overworld actions taken, oldest first.
     recent: VecDeque<String>,
-    /// Whether [`Self::recent`] is kept and consulted.
     explore: bool,
 }
 
@@ -170,7 +157,6 @@ impl RandomPolicy {
         EXPLORE_DECAY.powi(seen as i32)
     }
 
-    /// Draw one of `actions` with probability proportional to `weights`.
     fn choose_weighted(rng: &mut StdRng, actions: Vec<OverworldAction>, weights: &[f64])
         -> Option<OverworldAction> {
         let total: f64 = weights.iter().sum();
@@ -184,12 +170,10 @@ impl RandomPolicy {
                 return Some(action);
             }
         }
-        // Floating-point slack only: the loop above consumes the whole total in all but the last
-        // ulp.
+        // Floating-point slack only.
         None
     }
 
-    /// Record what was chosen, evicting the oldest once the window is full.
     fn remember(&mut self, action: &OverworldAction) {
         self.recent.push_back(Self::action_key(action));
         while self.recent.len() > EXPLORE_MEMORY {
@@ -209,8 +193,7 @@ impl Policy for RandomPolicy {
 
     /// Off `self.rng` when there is one, so a seeded run stays a seeded run.
     fn player_name(&self) -> Option<String> {
-        // `pick_*` take `&mut self`; this does not, so the seeded stream is advanced by neither —
-        // the seed picks the name directly and the sequence the run plays from is untouched.
+        // The seed picks the name directly, so the stream the run plays from is not advanced.
         let index = match &self.rng {
             Some(_) => self.seed.unwrap_or(0) as usize % RANDOM_NAMES.len(),
             None => rand::random::<u64>() as usize % RANDOM_NAMES.len(),
@@ -218,8 +201,7 @@ impl Policy for RandomPolicy {
         Some(RANDOM_NAMES[index].to_string())
     }
 
-    /// Uniform over whatever the map offers — unless [`RandomPolicy::exploring`] built this, in
-    /// which case the draw is weighted away from the actions most recently taken.
+    /// Uniform, unless built by [`RandomPolicy::exploring`], which weights recent choices down.
     fn pick_overworld_action(&mut self, state: &GameState, _world_graph: &WorldGraph) -> Option<OverworldAction> {
         let actions = state.map.actions();
         // Weighed before `self.rng` is borrowed mutably, because `novelty_weight` reads `self`.
@@ -249,8 +231,7 @@ impl Policy for RandomPolicy {
 
 // ── Console (human-driven, non-blocking) ─────────────────────────────────────
 
-/// Displays a numbered menu, then reads the user's choice from stdin on a background thread so
-/// the game loop is never blocked.
+/// Reads the choice from stdin on a background thread so the game loop never blocks.
 pub struct ConsolePolicy {
     overworld_rx:   Option<Receiver<usize>>,
     battle_rx:      Option<Receiver<usize>>,
@@ -411,7 +392,7 @@ fn needs_a_centre(state: &GameState, grinding: bool) -> bool {
     let Some(lead) = state.pokemon.get(0) else { return false };
     if lead.current_hp == 0 { return true; }
 
-    // A grind goes home on empty, not on low, and the difference is nineteen minutes.
+    // A grind goes home on empty PP, not on low.
     let (pp, max) = lead.moves.iter().flatten()
         .filter(|m| is_damaging_move(m.name))
         .fold((0u32, 0u32), |(have, cap), m| (have + m.pp as u32, cap + m.name.metadata().pp as u32));
@@ -450,16 +431,14 @@ pub(crate) fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
         ]);
     }
 
-    // A ghost battle offers `Run` and nothing else, because that is the only thing the cartridge
-    // will actually do.
+    // A ghost battle offers only `Run`, the one thing the cartridge will do.
     if is_ghost_battle(state.map.map, &state.bag, battle_state.battle_type) {
         return Some(vec![BattleAction::Run]);
     }
 
     let mut opts = battle_state.player.available_battle_moves();
 
-    // Every move at zero PP is Struggle, not "no move", and reading it as no move stops the run
-    // dead in silence.
+    // Every move at zero PP is Struggle; reading that as no move stops the run in silence.
     if opts.is_empty() {
         opts.extend(battle_state.player.moves.iter().enumerate()
             .filter_map(|(i, m)| m.map(|battle_move| BattleAction::Fight { slot: i as u8, battle_move })));
@@ -482,8 +461,7 @@ pub(crate) fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
     Some(opts)
 }
 
-/// Returns `true` total PP remaining across all damaging moves dips below ≤20% of its maximum PP
-/// remaining.
+/// Whether the PP left across damaging moves is under 20% of their maximum.
 fn all_damaging_moves_low_pp(actions: &[BattleAction]) -> bool {
     const MIN_PP_PCT: f32 = 0.2;
 
@@ -500,7 +478,6 @@ fn all_damaging_moves_low_pp(actions: &[BattleAction]) -> bool {
     }
 
     if total_max_pp == 0 {
-        // No damaging moves, so we can't say they're all low on PP.
         return false;
     }
 
@@ -519,8 +496,7 @@ pub enum PartyRef {
 }
 
 impl PartyRef {
-    /// The party index this reference currently points at, or `None` if the party holds no such
-    /// mon.
+    /// The party index this reference points at now, or `None`.
     pub fn resolve(&self, state: &GameState) -> Option<u8> {
         match *self {
             Self::Slot(slot) => (usize::from(slot) < state.pokemon.len()).then_some(slot),
@@ -537,176 +513,139 @@ impl PartyRef {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PolicyStep {
     Goto { map: Map, strict: bool },
-    /// Take exactly one explicit map transition: walk to and use the warp/connection on the
-    /// current map that leads to `to_map` (matching the raw landing `to_position` when given, to
-    /// disambiguate maps with several warps to the same target — e.g. Mt Moon).
+    /// Take one transition to `to_map`; `to_position` picks among several landings (Mt Moon).
     EnterMap { to_map: Map, to_position: Option<Point8> },
     /// Walk to and interact with a visible sprite by name.
     Interact(MapSprite),
-    /// Like `Interact`, but if the sprite can't be reached (walled off — e.g. a Silph trainer
-    /// behind the teleport-pad maze) the step gives up and pops instead of waiting forever.
+    /// Like `Interact`, but pops after a bounded wait if the sprite is walled off.
     InteractIfReachable(MapSprite),
     /// Walk to the map's PC tile, face it, and press A (e.g. Bill's cell-separator PC).
     UsePc { map: Map },
 
     Fly { to: Map },
     UseFlash { slot: u8 },
-    /// G — run a one-NPC script that opens the party menu, acting on `slot`: the Route 5 Day
-    /// Care, or the Lavender Name Rater.
+    /// A one-NPC script that opens the party menu on `slot`: the Day Care or the Name Rater.
     PartyScript { script: crate::pokemon::postgame::gifts::PartyScript, slot: u8 },
-    /// I — use bag `item` from the overworld on `target` (nothing, a party member, or one of its
-    /// moves).
+    /// Use bag `item` from the overworld on nothing, a party member, or one of its moves.
     UseBagItem { item: ItemId, target: crate::pokemon::postgame::items::UseTarget },
-    /// L — like [`Self::EnterMap`], but it gives up instead of stalling: if the transition to
-    /// `to_map` is not reachable from where the agent is standing, the step pops with a printed
-    /// reason after a bounded wait.
+    /// Like [`Self::EnterMap`], but pops with a printed reason after a bounded wait.
     EnterMapIfReachable { to_map: Map },
-    /// I3/I4 — pace `on_map`'s grass into a wild battle and use each of `items` once, in order.
+    /// Pace `on_map`'s grass into a wild battle and use each of `items` once, in order.
     UseItemsInBattle { on_map: Map, items: &'static [ItemId] },
-    // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// Move `qty` of `item` between the bag and PC item storage, at the PC on `map` (Phase 0
-    /// tasks 0.5/0.6).
+    /// Move `qty` of `item` between the bag and PC item storage, at the PC on `map`.
     UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp, item: ItemId, qty: u8, map: Map },
-    /// A — deposit / withdraw / release / change box at the PC on `map`, via `BILL's PC`.
+    /// Deposit, withdraw, release or change box at the PC on `map`, via `BILL's PC`.
     UsePcBox { op: crate::pokemon::postgame::pc_box::PcBoxOp, map: Map },
-    /// C — a fishing session on `map` with `rod`, running until `goal` is met.
+    /// A fishing session on `map` with `rod`, running until `goal` is met.
     Fish {
         rod: crate::pokemon::postgame::fishing::Rod,
         map: Map,
         goal: crate::pokemon::postgame::fishing::FishGoal,
     },
-    /// E — hunt `targets` in the Safari Zone on `map`, for at most `max_trips` paid entries.
+    /// Hunt `targets` in the Safari Zone on `map`, for at most `max_trips` paid entries.
     SafariHunt { targets: &'static [PokemonSpecies], map: Map, max_trips: u32 },
-    /// E — walk out of the Safari Zone to the gate mat, from whichever area a hunt ended in.
+    /// Walk out of the Safari Zone to the gate mat, from whichever area a hunt ended in.
     SafariExit,
-    /// F — buy Game Corner coins at the counter until at least `target` are held, ¥1000 → 50 a
-    /// time.
+    /// Buy Game Corner coins at the counter until at least `target` are held.
     BuyGameCoins { target: u16 },
-    /// F — sell `item` to the mart clerk on `map`.
+    /// Sell `item` to the mart clerk on `map`.
     SellToMart { map: Map, item: BagItem },
-    /// F — buy `prize` from a Game Corner prize vendor.
+    /// Buy `prize` from a Game Corner prize vendor.
     RedeemPrize { prize: crate::pokemon::postgame::game_corner::Prize },
-    /// Walk to and pick up an item sprite (a Poké Ball on the ground), staying on this step until
-    /// the sprite is gone.
+    /// Pick up an item sprite, staying on this step until the sprite is gone.
     CollectItem(MapSprite),
     DefeatGymLeader { leader: MapSprite, badge: Badge },
-    /// Battle a fixed trainer (e.g. an Elite Four member) by walking into its line of sight, then
-    /// advance once it's beaten.
+    /// Battle a fixed trainer (an Elite Four member) by walking into its line of sight.
     BattleTrainer { trainer: MapSprite },
     /// Walk in grass and throw Pokéballs until a Pokémon is caught.
     CatchPokemon { species: PokemonSpecies, on_map: Map, ball: Option<ItemId> },
-    /// H5 — walk `on_map`'s grass throwing balls at anything the dex does not have, until every
-    /// species whose encounter share is at least `min_share` percent is owned.
+    /// Catch every unowned species whose share of `on_map`'s encounters is at least `min_share`%.
     SweepDex { on_map: Map, min_share: u8, ball: Option<ItemId> },
-    /// Reorder the party so the member in `slot` becomes the lead (slot 0), written straight to
-    /// RAM (no menu navigation).
+    /// Make `target` the lead, written straight to RAM with no menus.
     MovePokemonToFront { target: PartyRef },
-    /// Walk in grass until the party member in `slot` reaches at least `target_level`.
+    /// Walk in grass until `target` reaches at least `target_level`.
     GrindUntilLevel { target_level: u8, on_map: Map, target: PartyRef },
     /// Buy item from the currently open Pokémart (must follow an Interact with the clerk).
     BuyFromMart { map: Map, item: BagItem },
-    /// Teach an HM/TM `item` (e.g. HM01 Cut) to the party member `target` names, from the
-    /// overworld.
+    /// Teach HM/TM `item` to `target` from the overworld.
     TeachMove { item: ItemId, target: PartyRef },
-    /// Use an evolution `stone` (e.g. Water Stone) from the bag on the party member `target`
-    /// names, to evolve it (e.g. Eevee → Vaporeon).
+    /// Use evolution `stone` from the bag on `target`.
     EvolveWithStone { stone: ItemId, target: PartyRef },
-    /// Use a Rare Candy from the bag on the party member in `slot` (levels it up and, crucially,
-    /// frees a bag slot).
+    /// Use a Rare Candy from the bag on the party member in `slot`.
     UseRareCandy { slot: u8 },
     /// Toss `item` from the bag to free a slot.
     TossItem { item: ItemId },
-    /// Use the DIG field move (TM28) from the party menu with the mon in `slot` — Gen 1's
-    /// reusable Escape Rope.
+    /// Use Dig (TM28) from the party menu with `target`: Gen 1's reusable Escape Rope.
     Dig { target: PartyRef },
     /// Cut down a tree blocking the way on `map` (requires Cut + the Cascade Badge).
     CutTree { map: Map },
     /// Activate Strength using the party mon `target` names (an HM-slave that knows it).
     UseStrength { target: PartyRef },
-    /// Push a boulder onto the Strength switch at `switch` (a cave floor coordinate), solving the
-    /// current floor's boulder puzzle.
+    /// Push a boulder onto the Strength switch at `switch`, solving the floor's puzzle.
     SolveBoulders { switch: gb::geometry::Point8, boulder: Option<gb::geometry::Point8> },
-    /// Push a boulder onto a floor `hole` (Victory Road 3F) so it falls to the floor below —
-    /// revealing a hidden boulder there (VR2F's second-switch boulder).
+    /// Push a boulder into floor `hole` so it falls to the floor below (Victory Road 3F).
     DropBoulderInHole { hole: gb::geometry::Point8, boulder: Option<gb::geometry::Point8> },
-    /// Solve the Vermilion Gym trash-can switch puzzle: check the first switch can, then the
-    /// second, unlocking the door to Lt.
+    /// Check the Vermilion Gym's two switch cans in turn, unlocking the door to Lt. Surge.
     SolveTrashCans,
-    /// Walk to face the hidden switch/poster BG-event tile at `at` on `map` and press A, until
-    /// doing so reveals a passage — a reachable warp/connection to `reveals` appears (e.g. the
-    /// Celadon Game Corner poster flips a switch that opens the staircase down to the Rocket
-    /// Hideout).
+    /// Face the hidden switch at `at` on `map` and press A until a reachable warp to `reveals`
+    /// appears (the Game Corner poster).
     FlipSwitch { map: Map, at: Point8, reveals: Map },
     /// Inside an elevator room, use the floor panel to travel to the floor at menu index `floor`.
     UseElevator { panel: Point8, floor: u8 },
-    /// Face the sprite `target`, then use the bag item `item` on it from the field (START → ITEM
-    /// → select → USE).
+    /// Face sprite `target` and use bag `item` on it from the field.
     UseFieldItem { item: ItemId, target: MapSprite },
-    /// Face the vending-machine bg-event at `at` and press A to buy `drink` (the machine's menu
-    /// opens with the cheapest drink at the cursor, so A-mashing selects it).
+    /// Buy `drink` at the machine at `at`: its menu opens on the cheapest drink, so A buys it.
     UseVendingMachine { at: Point8, drink: ItemId },
 }
 
-/// A non-walking overworld action the agent performs directly (opening menus / using field
-/// moves), requested by the policy when the corresponding queue step is at the front.
+/// A non-walking action the agent performs itself (menus, field moves) for the front step.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum FieldMove {
     /// Reorder the party so `slot` becomes the lead (RAM write, no menus).
     ReorderParty { slot: u8 },
     /// Teach `item` (an HM/TM) to the party member in `target_slot` via the bag.
     TeachMove { item: ItemId, target_slot: u8 },
-    /// Use evolution `stone` on the party member in `target_slot` (bag → stone → USE → pick the
-    /// mon), evolving it.
+    /// Use evolution `stone` on the party member in `target_slot`.
     EvolveWithStone { stone: ItemId, target_slot: u8, evolve_from: PokemonSpecies },
     /// Use the Cut field move on the tree the player is currently facing.
     CutTree,
     /// Walk to the tile at `target` and press A.
     CheckTrashCan { target: gb::geometry::Point8, facing: Option<crate::pokemon::map_metadata::PlayerFacingDirection> },
-    /// Drive the elevator floor menu (panel at `panel`) to select menu index `floor`, then ride
-    /// the redirected warp out.
+    /// Drive the elevator menu at `panel` to index `floor`, then ride the redirected warp out.
     UseElevator { panel: gb::geometry::Point8, floor: u8 },
     /// Face the sprite at `target`, then use bag `item` on it (START → ITEM → select → USE).
     UseFieldItem { item: ItemId, target: gb::geometry::Point8 },
-    /// G — a party-menu script: walk to `npc` (a *(tile to face, direction)* pair, resolved from
-    /// `actions()` because `route_to_face_dir` cannot reach a sprite behind a counter), then
-    /// drive the party menu to `slot`.
+    /// A party-menu script: walk to `npc`, a (tile, facing) pair from `actions()` because
+    /// `route_to_face_dir` cannot reach behind a counter, then pick `slot`.
     UsePartyScript {
         script: crate::pokemon::postgame::gifts::PartyScript,
         slot: u8,
         npc: (gb::geometry::Point8, crate::pokemon::map_metadata::PlayerFacingDirection),
     },
-    /// Use a field move from the party menu: START → POKéMON → the mon at `slot` → the field-move
-    /// entry at `move_index`.
+    /// A field move from the party menu: the mon at `slot`, the entry at `move_index`.
     UseFieldMove { slot: u8, move_index: u8 },
     /// Toss `item` from the bag (START → ITEM → the item → TOSS → quantity → YES) to free a slot.
     TossItem { item: ItemId },
-    /// Walk to the PC at `pc`, open it, and move `qty` of `item` between the bag and PC item
-    /// storage.
+    /// Move `qty` of `item` between the bag and PC item storage at the PC at `pc`.
     UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp, item: ItemId, qty: u8, pc: gb::geometry::Point8 },
-    /// Workstream A — walk to the PC at `pc` and drive Bill's PC box menus.
+    /// Walk to the PC at `pc` and drive Bill's PC box menus.
     UsePcBox { op: crate::pokemon::postgame::pc_box::PcBoxOp, pc: gb::geometry::Point8 },
 
-    // ── Reserved postgame seams (task 0.8)
-    // ────────────────────────────────────────────────────── The entry points for the reserved
-    // `AgentState`s.
     Fly { to: Map },
-    /// C — cast `rod` once at the water tile `at`.
+    /// Cast `rod` once at the water tile `at`.
     Fish { rod: crate::pokemon::postgame::fishing::Rod, at: gb::geometry::Point8 },
-    /// F — walk to the mart clerk at `clerk` and sell `item` to them.
+    /// Walk to the clerk at `clerk` and sell `item`.
     SellToMart { item: BagItem, clerk: (gb::geometry::Point8, crate::pokemon::map_metadata::PlayerFacingDirection) },
-    /// F — walk to the prize vendor's bg-event tile and buy `prize` with coins.
+    /// Walk to the prize vendor and buy `prize` with coins.
     RedeemPrize { prize: crate::pokemon::postgame::game_corner::Prize },
-    /// I — use bag `item` on `target` from the overworld.
+    /// Use bag `item` on `target` from the overworld.
     UseBagItem { item: ItemId, target: crate::pokemon::postgame::items::UseTarget },
-    // ────────────────────────────────────────────────────────────────────────────────────────────
-    // Primitive Strength push: shove the boulder at `boulder` one tile in `dir` (Strength must be
-    // armed).
+    /// Shove the boulder at `boulder` one tile in `dir`; Strength must be armed.
     PushBoulder { boulder: gb::geometry::Point8, dir: gb::joypad::JoypadButton },
 }
 
-/// True for the four Pokémon Mansion floors, whose statue switches only trigger when faced from
-/// below.
+/// The Pokémon Mansion floors, whose statue switches trigger only when faced from below.
 fn is_mansion_floor(map: Map) -> bool {
     matches!(map, Map::PokemonMansion1F | Map::PokemonMansion2F | Map::PokemonMansion3F | Map::PokemonMansionB1F)
 }
@@ -724,17 +663,15 @@ pub fn hm_move(item: ItemId) -> Option<PokemonMoveName> {
     }
 }
 
-/// The moves that get their own entry in the party menu's field-move list, from pokered
-/// `FieldMoveDisplayData`.
+/// Moves with their own party-menu field entry, from pokered `FieldMoveDisplayData`.
 fn is_field_move(name: PokemonMoveName) -> bool {
     matches!(name, PokemonMoveName::Cut | PokemonMoveName::Fly | PokemonMoveName::Surf
         | PokemonMoveName::Strength | PokemonMoveName::Flash | PokemonMoveName::Dig
         | PokemonMoveName::Teleport | PokemonMoveName::Softboiled)
 }
 
-/// Where `want` sits in the field-move menu for the party member in `slot`: the count of field
-/// moves it knows in earlier move slots. Defaults to 0 if the mon or the move is missing, which
-/// is what a lone-field-move HM slave would use anyway.
+/// Where `want` sits in `slot`'s field-move menu; 0 when the mon or move is missing, which a
+/// lone HM carrier would use anyway.
 pub(crate) fn field_move_index(state: &GameState, slot: u8, want: PokemonMoveName) -> u8 {
     state.pokemon.get(slot as usize).map_or(0, |mon| field_move_index_of(mon, want))
 }
@@ -749,8 +686,7 @@ pub(crate) fn field_move_carrier(
         .map(|(i, p)| (i as u8, field_move_index_of(p, want)))
 }
 
-/// `want`'s row in `mon`'s field-move box, for callers that hold the mon but not a whole
-/// `GameState`.
+/// `want`'s row in `mon`'s field-move box.
 pub(crate) fn field_move_index_of(mon: &crate::pokemon::pokemon::Pokemon, want: PokemonMoveName) -> u8 {
     mon.moves.iter().flatten().map(|m| m.name).filter(|&n| is_field_move(n))
         .position(|n| n == want).unwrap_or(0) as u8
@@ -771,8 +707,8 @@ impl PolicyStep {
         Self::EnterMap { to_map: map, to_position: None }
     }
 
-    /// Bank `qty` of `item` in PC item storage, freeing bag slots. `map` must have a PC — any
-    /// Pokémon Center will do (see `MetaTileMap::pc_locations`).
+    /// Bank `qty` of `item` in PC item storage; `map` must have a PC. A partial deposit frees no
+    /// bag slot, so pass `u8::MAX` for all of it.
     pub const fn deposit_item(item: ItemId, qty: u8, map: Map) -> Self {
         Self::UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp::Deposit, item, qty, map }
     }
@@ -782,13 +718,13 @@ impl PolicyStep {
         Self::UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp::Withdraw, item, qty, map }
     }
 
-    /// Explicit forward transition to `map`, disambiguated by the raw landing `to_position`.
+    /// A transition to `map` landing at raw `(x, y)`. A preference: an unreachable landing falls
+    /// through to any crossing.
     pub const fn enter_at(map: Map, x: u8, y: u8) -> Self {
         Self::EnterMap { to_map: map, to_position: Some(Point8 { x, y }) }
     }
 
-    /// The explicit Mt Moon crossing (1F west entrance → Route 4 east exit), including the fossil
-    /// chokepoint. Requires standing in Mt Moon 1F.
+    /// Mt Moon 1F → B2F for the Helix Fossil → Route 4 → Cerulean; starts in Mt Moon 1F.
     pub fn mt_moon_traversal() -> Vec<Self> { vec![
         Self::enter_at(Map::MtMoonB1F, 5, 5),
         Self::enter_at(Map::MtMoonB2F, 21, 17),
@@ -798,13 +734,8 @@ impl PolicyStep {
         Self::enter(Map::CeruleanCity),
     ] }
 
-    /// The Bill's-House SS-Ticket sub-sequence (pokered `scripts/BillsHouse.asm`), assuming the
-    /// agent is already inside `BillsHouse`: talk to Bill's Pokémon (A-mash picks the default YES
-    /// → it walks into the cell separator) → use the PC (runs the Cell Separation System, Bill
-    /// exits the machine) → talk to Bill for the SS Ticket. Bill's exit is a ~1-2s scripted walk,
-    /// so an `Interact` issued mid-script aborts (reason `Script`); retry a few times so one
-    /// lands after he settles (extra talks after the ticket is received are harmless — same text,
-    /// no re-give).
+    /// Bill's House for the SS Ticket, from inside: his Pokémon, the PC, then Bill. His exit
+    /// aborts an early `Interact`, so the talk repeats; extra talks are harmless.
     pub fn bill_ss_ticket_steps() -> Vec<Self> {
         let mut steps = vec![
             Self::Interact(MapSprite::BILLSHOUSE_BILL_POKEMON),
@@ -823,9 +754,7 @@ impl PolicyStep {
         ]
     }
 
-    /// Board the S.S. Anne (from Vermilion City, SS Ticket in the bag), defeat every trainer in
-    /// the ship's cabins to level the party, beat the rival guarding the captain's door, and
-    /// receive HM01 Cut from the captain.
+    /// Board the S.S. Anne, beat every cabin trainer and the rival, and take HM01 from the captain.
     pub fn ss_anne_steps() -> Vec<Self> {
         let mut s = vec![];
 
@@ -862,7 +791,6 @@ impl PolicyStep {
             Self::enter_at(Map::SSAnne2FRooms, 2, 15), Self::Interact(MapSprite::SSANNE2FROOMS_GENTLEMAN2),
                                                        Self::Interact(MapSprite::SSANNE2FROOMS_COOLTRAINER_F), Self::enter(Map::SSAnne2F),
         ]);
-        // Bow: SSAnne2F → SSAnne3F → SSAnneBow (one open room, two sailors).
         s.extend([
             Self::enter(Map::SSAnne3F), Self::enter(Map::SSAnneBow),
             Self::Interact(MapSprite::SSANNEBOW_SAILOR2), Self::Interact(MapSprite::SSANNEBOW_SAILOR3),
@@ -870,13 +798,12 @@ impl PolicyStep {
         ]);
         s.extend([Self::enter(Map::SSAnne1F), Self::enter(Map::VermilionDock), Self::enter(Map::VermilionCity), Self::enter(Map::VermilionPokecenter), Self::Interact(MapSprite::VERMILIONPOKECENTER_NURSE), Self::enter(Map::VermilionCity), ]); // disembark + heal
 
-        // ── Rival + Captain (HM01) ── (heal first — the rival is 6 Pokémon in one battle)
+        // ── Rival + Captain (HM01) ──
         s.extend(Self::heal_at_vermilion());
         s.extend([Self::enter(Map::VermilionDock), Self::enter(Map::SSAnne1F), Self::enter(Map::SSAnne2F)]);
         s.push(Self::enter(Map::SSAnneCaptainsRoom)); // rival battle triggers on approach to the (36,4) warp
         s.extend(std::iter::repeat(Self::Interact(MapSprite::SSANNECAPTAINSROOM_CAPTAIN)).take(4));
-        // ── Disembark back to Vermilion (after HM01 the ship departs on the way out of the dock)
-        // ──
+        // ── Disembark: the ship leaves once HM01 is taken ──
         s.extend([
             Self::enter(Map::SSAnne2F), Self::enter(Map::SSAnne1F),
             Self::enter(Map::VermilionDock), Self::enter(Map::VermilionCity),
@@ -885,20 +812,15 @@ impl PolicyStep {
         s
     }
 
-    /// From Cerulean City (no badge needed): cross the Nugget Bridge, fetch the SS Ticket from
-    /// Bill, come back and beat Misty, then cross to Vermilion City via the trashed-house terrace
-    /// bridge + Underground Path (Route 5 → 6), catching the Cut carrier on the way. The trashed
-    /// house is the only way between Cerulean's split terraces: its back door lands in the
-    /// Route-5 terrace (`enter_at(CeruleanCity, 27, 9)` — front door ~27,11 does not reach it).
+    /// Cerulean → Nugget Bridge → Bill → Misty → Vermilion by Route 5–6, catching the Cut carrier.
+    /// The trashed house's back door is the only way into Cerulean's Route 5 terrace.
     pub fn cerulean_to_vermilion_steps() -> Vec<Self> {
         let mut steps = vec![
             Self::enter(Map::CeruleanCity),
-            // Poké Balls for the two catches this route now depends on: the Cut carrier on Route
-            // 25 below, and the Drowzee on Route 11 in `saffron_to_cinnabar_steps`.
+            // Poké Balls for the Cut carrier on Route 25.
             Self::enter(Map::CeruleanMart),
             Self::BuyFromMart { item: BagItem::new(ItemId::PokeBall, 6), map: Map::CeruleanMart },
-            // Top the Potions back up before the nine trainers on the bridge — the same argument
-            // as the Pewter stop, at the last counter before them.
+            // Potions before the nine bridge trainers, at the last counter before them.
             Self::BuyFromMart { item: BagItem::new(ItemId::Potion, 10), map: Map::CeruleanMart },
             Self::enter(Map::CeruleanCity),
             Self::enter(Map::Route24),
@@ -920,15 +842,13 @@ impl PolicyStep {
             Self::CatchPokemon { species: PokemonSpecies::Oddish, on_map: Map::Route25,
                                  ball: Some(ItemId::PokeBall) },
             Self::enter(Map::Route24),
-            // Misty is fought *after* the bridge, and the reorder is the whole of how this route
-            // affords Bite.
+            // Misty comes after the bridge and this grind.
             Self::GrindUntilLevel { target_level: 24, on_map: Map::Route24, target: Self::STARTER_LINE },
             Self::enter(Map::CeruleanCity),
             Self::enter(Map::CeruleanPokecenter),
             Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
             Self::enter(Map::CeruleanCity),
             Self::DefeatGymLeader { leader: MapSprite::CERULEANGYM_MISTY, badge: Badge::CascadeBadge },
-            // Exit the gym to the city (a single warp) before entering the Pokécenter.
             Self::enter(Map::CeruleanCity),
             Self::enter(Map::CeruleanPokecenter),
             Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
@@ -945,15 +865,12 @@ impl PolicyStep {
         steps
     }
 
-    /// Thunder Badge (from Vermilion City after the S.S. Anne, with HM01 Cut in the bag): teach
-    /// Cut to the starter, cut the tree sealing the gym enclosure, solve the two-switch trash-can
-    /// puzzle (which unlocks the door), then beat Lt.
+    /// Thunder Badge: teach Cut and Dig, cut the gym tree, solve the trash cans, beat Lt. Surge.
     pub fn thunder_badge_steps() -> Vec<Self> {
         let mut s = Self::heal_at_vermilion();
         s.extend([
             // The carrier, not the lead.
             Self::TeachMove { item: ItemId::Hm01Cut, target: Self::CUT_SLAVE },
-            // Dig goes on before Lt.
             Self::TeachMove { item: ItemId::Tm28Dig, target: Self::STARTER_LINE },
             Self::CutTree { map: Map::VermilionCity },
             Self::enter(Map::VermilionGym),
@@ -963,9 +880,7 @@ impl PolicyStep {
         s
     }
 
-    /// Head back from Vermilion (just after the Thunder Badge, standing inside the gym) to
-    /// Cerulean City, reusing the Underground Path in reverse. Saffron's south gate (Route 6) is
-    /// guard-blocked, so the Underground Path (Route 5 ↔ Route 6) is the only legal way north.
+    /// Back to Cerulean by the Underground Path, the only way north while Saffron is shut.
     pub fn back_to_cerulean_steps() -> Vec<Self> {
         let mut s = vec![
             Self::enter(Map::VermilionCity), // exit the gym into the Cut-tree enclosure
@@ -974,7 +889,6 @@ impl PolicyStep {
         s.extend(Self::heal_at_vermilion());
         s.extend(Self::heal_at_vermilion());
         s.extend([
-            // Stock healing items before leaving Vermilion.
             Self::enter(Map::VermilionMart),
             Self::BuyFromMart { item: BagItem::new(ItemId::SuperPotion, 10), map: Map::VermilionMart },
             Self::enter(Map::VermilionCity),
@@ -991,11 +905,8 @@ impl PolicyStep {
         s
     }
 
-    /// The Rock Tunnel warp-maze crossing (Route 10 north entrance → Route 10 south exit),
-    /// discovered offline by `discover_rock_tunnel_path` (ExplorerPolicy). Assumes the agent
-    /// stands on Route 10 having just come from Route 9.
+    /// Rock Tunnel's warp maze, Route 10 north to south; starts on Route 10 from Route 9.
     pub fn rock_tunnel_traversal() -> Vec<Self> { vec![
-        // North entrance → a 4-hop 1F↔B1F chain → south exit.
         Self::enter_at(Map::RockTunnel1F, 15, 3),   // Route 10 north entrance
         Self::enter_at(Map::RockTunnelB1F, 33, 25),
         Self::enter_at(Map::RockTunnel1F, 5, 3),
@@ -1012,10 +923,7 @@ impl PolicyStep {
             Self::enter(Map::Route9),
             Self::CutTree { map: Map::Route9 },        // cut the (5,8) tree boxing the west pocket
             Self::enter(Map::Route10),
-            // Heal at the Rock Tunnel Pokémon Center (Route 10, at the tunnel mouth) before
-            // diving in: the encounter-dense maze must be crossed in one uninterrupted push (a
-            // mid-tunnel flee-to-heal or blackout can't resume the scripted warp chain), so enter
-            // at full HP/PP.
+            // Heal at the mouth: a black-out mid-tunnel cannot resume the warp chain.
             Self::enter(Map::RockTunnelPokecenter),
             Self::Interact(MapSprite::ROCKTUNNELPOKECENTER_NURSE),
             Self::enter(Map::Route10),
@@ -1030,11 +938,7 @@ impl PolicyStep {
         s
     }
 
-    /// Lavender Town → Celadon City via the Route 7–8 Underground Path (all four Saffron gates
-    /// demand a drink only sold in Celadon — a chicken/egg — so Saffron is bypassed). Linear
-    /// tunnel, same building-tunnel-building shape as the Route 5–6 path already used: Lavender →
-    /// Route 8 → `UndergroundPathRoute8` → `UndergroundPathWestEast` → `UndergroundPathRoute7` →
-    /// Route 7 → Celadon City, then heal at the Celadon Center.
+    /// Lavender → Celadon under Route 7–8: every Saffron gate wants a drink sold only in Celadon.
     pub fn lavender_to_celadon_steps() -> Vec<Self> {
         vec![
             Self::enter(Map::Route8),
@@ -1049,34 +953,24 @@ impl PolicyStep {
         ]
     }
 
-    /// Rainbow Badge (from Celadon City): the gym entrance is sealed by a row of trees, so cut
-    /// them, enter, and beat Erika. `DefeatGymLeader` persists until the badge is won (self-heals
-    /// on a blackout and re-routes through the grass-maze junior trainers).
+    /// Rainbow Badge: cut the trees sealing the gym and beat Erika.
     pub fn celadon_rainbow_steps() -> Vec<Self> {
         vec![
-            // Heal on the way in, because the gym is the last chance.
             Self::enter(Map::CeladonPokecenter),
             Self::Interact(MapSprite::CELADONPOKECENTER_NURSE),
             Self::enter(Map::CeladonCity),
             Self::CutTree { map: Map::CeladonCity },   // cut the trees sealing the gym entrance
             Self::enter(Map::CeladonGym),
-            // The gym is a garden maze whose paths are blocked by real cuttable trees (GYM
-            // tileset tile $50 — pokered `cut.asm`).
+            // The garden paths are blocked by cuttable trees (GYM tile $50, pokered `cut.asm`).
             Self::CutTree { map: Map::CeladonGym },
             Self::DefeatGymLeader { leader: MapSprite::CELADONGYM_ERIKA, badge: Badge::RainbowBadge },
         ]
     }
 
-    /// From Celadon City (post-Erika, inside the gym) to inside the Rocket Hideout (B1F). Exit
-    /// the gym — its entrance trees regrew on re-entry, so re-cut them — heal, walk to the Game
-    /// Corner, beat the Rocket guarding the poster (he vanishes on defeat), flip the poster
-    /// switch to open the hidden staircase, and descend.
+    /// Erika's gym → Rocket Hideout B1F: re-cut the regrown trees, beat the poster's Rocket.
     pub fn rocket_hideout_entrance_steps() -> Vec<Self> {
         let mut s = vec![
-            // Beating Erika reloaded the map, so the gym's internal garden trees regrew and now
-            // wall the player in — re-cut them to reach the gym exit warp before leaving (the
-            // junior trainers are already beaten, so re-crossing the garden starts no new
-            // battles).
+            // Beating Erika reloads the map, which regrows the garden trees around the player.
             Self::CutTree { map: Map::CeladonGym },
             Self::enter(Map::CeladonCity),          // exit the gym into the (regrown) tree enclosure
             Self::CutTree { map: Map::CeladonCity }, // re-cut to reach the rest of the city
@@ -1085,9 +979,7 @@ impl PolicyStep {
             Self::enter(Map::CeladonCity),
             Self::enter(Map::GameCorner),
         ];
-        // The Rocket stands on (9,5) blocking the poster at (9,4) — beat him (he vanishes on
-        // defeat, freeing (9,5)), then flip the poster switch to open the hidden staircase and
-        // descend.
+        // The Rocket on (9,5) guards the poster at (9,4) and vanishes when beaten.
         s.extend([
             Self::Interact(MapSprite::GAMECORNER_ROCKET),
             Self::FlipSwitch { map: Map::GameCorner, at: Point8 { x: 9, y: 4 }, reveals: Map::RocketHideoutB1F },
@@ -1096,9 +988,7 @@ impl PolicyStep {
         s
     }
 
-    /// From inside the Rocket Hideout (B1F), descend the spinner floors B2F/B3F to B4F and get
-    /// the Lift Key. B2F/B3F are spinner-tile floors (arrow tiles force a fixed slide, modelled
-    /// in the BFS via `MetaTileMap::spinners`).
+    /// Down the spinner floors B2F/B3F to B4F for the Lift Key (`MetaTileMap::spinners`).
     pub fn lift_key_steps() -> Vec<Self> {
         let mut s = vec![
             Self::enter(Map::RocketHideoutB2F),
@@ -1110,44 +1000,33 @@ impl PolicyStep {
         s
     }
 
-    /// From inside the Rocket Hideout (B1F), get the Silph Scope (needed to see the Pokémon Tower
-    /// ghosts → Poké Flute). First get the Lift Key (`lift_key_steps`), then take the elevator to
-    /// Giovanni's split-off B4F room.
+    /// The Lift Key, then the elevator to Giovanni's B4F room for the Silph Scope.
     pub fn silph_scope_steps() -> Vec<Self> {
         let mut s = Self::lift_key_steps();
         s.extend([
-            // Back up to B2F (spinner nav works both ways) and into the elevator (B2F's warp is
-            // not gated by the Rocket-5 door, unlike B1F's).
+            // B2F's elevator warp is not gated by the Rocket door, unlike B1F's.
             Self::enter(Map::RocketHideoutB3F),
             Self::enter(Map::RocketHideoutB2F),
             Self::enter(Map::RocketHideoutElevator),
             // Panel bg-event at (1,1); floors are B1F(0)/B2F(1)/B4F(2) — pick B4F.
             Self::UseElevator { panel: Point8 { x: 1, y: 1 }, floor: 2 },
-            // Beat both Rockets to open the door up to Giovanni (single Interact each — trainers
-            // stay put after defeat, so a lone talk suffices and the step pops once it issues the
-            // walk).
+            // Trainers stay put when beaten, so one talk each suffices.
             Self::Interact(MapSprite::ROCKETHIDEOUTB4F_ROCKET1),
             Self::Interact(MapSprite::ROCKETHIDEOUTB4F_ROCKET2),
-            // Beat Giovanni (single Interact — he vanishes on defeat, revealing the Scope), then
-            // collect.
+            // Giovanni vanishes when beaten, revealing the Scope.
             Self::Interact(MapSprite::ROCKETHIDEOUTB4F_GIOVANNI),
             Self::CollectItem(MapSprite::ROCKETHIDEOUTB4F_SILPH_SCOPE),
         ]);
         s
     }
 
-    /// From inside the Rocket Hideout (post-Giovanni, holding the Silph Scope), get the Poké
-    /// Flute: leave the hideout, travel to Lavender Town, climb Pokémon Tower to 7F, and rescue
-    /// Mr. Fuji.
+    /// Silph Scope in hand: out of the hideout to Lavender, up Pokémon Tower to rescue Mr. Fuji.
     pub fn poke_flute_steps() -> Vec<Self> {
         let mut s = vec![
-            // Leave the hideout: elevator (from Giovanni's isolated B4F room) down to B2F, up to
-            // B1F, out to the Game Corner, into Celadon; then heal.
+            // Out: elevator to B2F, up to B1F, the Game Corner, Celadon; then heal.
             Self::enter(Map::RocketHideoutElevator),
             Self::UseElevator { panel: Point8 { x: 1, y: 1 }, floor: 1 }, // B2F = menu index 1
-            // B1F is two disconnected halves, split by the full-width wall at row 16, and B2F has
-            // a staircase into each: (21,22) → B1F (21,24) in the south half, (27,8) → B1F (23,2)
-            // in the north.
+            // B1F is two halves split by the wall at row 16; B2F (27,8) leads to the north one.
             Self::EnterMap { to_map: Map::RocketHideoutB1F, to_position: Some(Point8 { x: 23, y: 2 }) },
             Self::enter(Map::GameCorner),
             Self::enter(Map::CeladonCity),
@@ -1163,15 +1042,10 @@ impl PolicyStep {
             Self::enter(Map::UndergroundPathRoute8),
             Self::enter(Map::Route8),
             Self::enter(Map::LavenderTown),
-            // Heal at Lavender before diving into the tower: it's a long, trainer-heavy climb (7
-            // floors of Channelers + the ghost Marowak + three 7F Rockets) with NO Pokémon Center
-            // inside, so a worn-down lone starter can black out mid-climb — and a tower black-out
-            // can't resume the scripted deep-interior Mr. Fuji rescue (the Interact steps pop "no
-            // path" from the far-away respawn), skipping it.
+            // Heal: no Centre in the tower, and a black-out cannot resume the Mr. Fuji rescue.
             Self::enter(Map::LavenderPokecenter),
             Self::Interact(MapSprite::LAVENDERPOKECENTER_NURSE),
-            // Top the Super Potions back up at the Lavender mart before climbing — full HP at the
-            // door is not enough on its own.
+            // Super Potions too: full HP at the door is not enough.
             Self::enter(Map::LavenderMart),
             Self::BuyFromMart { item: BagItem::new(ItemId::SuperPotion, 10), map: Map::LavenderMart },
             Self::enter(Map::LavenderTown),
@@ -1186,14 +1060,11 @@ impl PolicyStep {
             Self::CollectItem(MapSprite::POKEMONTOWER4F_ELIXER),
             Self::enter(Map::PokemonTower5F),
             Self::enter(Map::PokemonTower6F),
-            // The Rare Candy ball at (6,8) blocks the *only* chokepoint into the 6F sub-region
-            // that holds the ghost-Marowak trigger and the 7F stairs — collect it to open the
-            // path.
+            // The Rare Candy ball at (6,8) is the only way to the Marowak trigger and 7F stairs.
             Self::CollectItem(MapSprite::POKEMONTOWER6F_RARE_CANDY),
             Self::enter(Map::PokemonTower7F),
         ]);
-        // 7F: beat the three Rockets (they leave on defeat), then talk to Mr. Fuji — his script
-        // warps the player to Mr. Fuji's house.
+        // 7F: beat the three Rockets, then Mr. Fuji, whose script warps the player home.
         s.extend([
             Self::Interact(MapSprite::POKEMONTOWER7F_ROCKET1),
             Self::Interact(MapSprite::POKEMONTOWER7F_ROCKET2),
@@ -1202,40 +1073,31 @@ impl PolicyStep {
             Self::goto(Map::PokemonTower7F),
             Self::Interact(MapSprite::POKEMONTOWER7F_MR_FUJI),
         ]);
-        // Talk to Mr Fuji at home more than once.
         for _ in 0..4 { s.push(Self::Interact(MapSprite::MRFUJISHOUSE_MR_FUJI)); }
         s
     }
 
-    /// With the Poké Flute, wake the Snorlax blocking Route 12 (south of Lavender), opening the
-    /// road toward Fuchsia. From Mr. Fuji's house: out to Lavender, south onto Route 12, then use
-    /// the Poké Flute while facing the Snorlax — that starts a lv30 wild battle the party fights
-    /// normally; the sprite is gone once it faints, which pops the `UseFieldItem` step.
+    /// Wake Route 12's Snorlax with the Poké Flute; the step pops when its sprite goes.
     pub fn snorlax_steps() -> Vec<Self> {
         vec![
             Self::enter(Map::LavenderTown), // leave Mr. Fuji's house
-            // Heal at Lavender: the party has fought all through the tower with no rest, and the
-            // long Route 12–15 trainer gauntlet ahead will black it out otherwise.
+            // Heal: the tower wore the party down and the Route 12–15 trainers are next.
             Self::enter(Map::LavenderPokecenter),
             Self::Interact(MapSprite::LAVENDERPOKECENTER_NURSE),
             Self::enter(Map::LavenderTown),
             Self::enter(Map::Route12),      // south connection off Lavender (lands at the north tip)
-            // The Route-12 Gate building blocks the road; pass through it (north warp → gate →
-            // south warp).
+            // The Route 12 gate blocks the road: in by the north door, out by the south.
             Self::enter(Map::Route12Gate1F),
             Self::EnterMap { to_map: Map::Route12, to_position: Some(Point8 { x: 10, y: 21 }) },
             Self::UseFieldItem { item: ItemId::PokeFlute, target: MapSprite::ROUTE12_SNORLAX },
         ]
     }
 
-    /// Soul Badge (Koga, Fuchsia). With the Snorlax cleared, continue Route 12 south → 13 → 14 →
-    /// 15 → Fuchsia City (all map connections; the Cool-Trainers/Bikers/Beauties on 13–15 engage
-    /// by line of sight and are fought normally).
+    /// Soul Badge: Route 12 → 15 → Fuchsia, fighting line-of-sight trainers on the way, then Koga.
     pub fn soul_badge_steps() -> Vec<Self> {
         vec![
             Self::enter(Map::Route13),
-            // Cross into Route 14 at the OPEN row-8 landing (19,8): the nearest crossing lands at
-            // (19,6), a dead-end pocket sealed by a south-facing Bird Keeper.
+            // (19,8): the nearest crossing lands at (19,6), a pocket a Bird Keeper seals.
             Self::EnterMap { to_map: Map::Route14, to_position: Some(Point8 { x: 19, y: 8 }) },
             Self::enter(Map::Route15),
             // Route 15 also has a gate building walling off the Fuchsia (west) connection.
@@ -1255,33 +1117,24 @@ impl PolicyStep {
             Self::enter(Map::FuchsiaCity),       // out of Koga's gym
             Self::enter(Map::SafariZoneGate),
             Self::enter(Map::SafariZoneCenter),  // pays 500 via the join prompt, auto-walks in
-            // The Center's West warp is across the central water; the item-bearing West area is
-            // reached the long way round: Center → East → North → West (the only land route).
+            // West is reached Center → East → North → West, the only land route round the water.
             Self::enter(Map::SafariZoneEast),
             Self::enter(Map::SafariZoneNorth),
-            // North→West has two warp pairs: the eastern one (lands (27,0)) drops onto a lower
-            // shelf that one-way ledges wall off from the Gold Teeth / Secret House plateau.
+            // The eastern North→West pair lands on a shelf ledged off from the Gold Teeth.
             Self::enter_at(Map::SafariZoneWest, 21, 0),
             Self::CollectItem(MapSprite::SAFARIZONEWEST_GOLD_TEETH),
             Self::enter(Map::SafariZoneSecretHouse),
             Self::Interact(MapSprite::SAFARIZONESECRETHOUSE_FISHING_GURU), // hands over HM03 Surf
-            // Straight onto the starter, which is what retired the Eevee → Vaporeon leg:
-            // Blastoise learns Surf and Strength itself
-            // (`data/pokemon/base_stats/blastoise.asm`), so the only thing that leg was still
-            // buying was a second body to hang the HMs on.
+            // Surf goes on the starter: Blastoise learns Surf and Strength itself.
             Self::TeachMove { item: ItemId::Hm03Surf, target: Self::STARTER_LINE },
         ]
     }
 
-    /// After the Surf run (holding the Gold Teeth): leave the Safari Zone and give the Gold Teeth
-    /// to the Warden (Warden's House, Fuchsia) for HM04 Strength. Exiting navigates back to the
-    /// gate; if the 500-step timer runs out first the game warps the player to the gate anyway,
-    /// so either way the `enter(SafariZoneGate)` step resolves.
+    /// The Gold Teeth to the Warden for HM04; a trip that times out lands at the gate all the same.
     pub fn safari_zone_strength_steps() -> Vec<Self> {
         vec![
             Self::enter(Map::SafariZoneWest),    // out of the secret house
-            // Center is split by water: the North entrance lands in a top pocket, walled off from
-            // the gate.
+            // Center is split by water: the North entrance lands in a pocket cut off from the gate.
             Self::enter(Map::SafariZoneNorth),
             Self::enter(Map::SafariZoneEast),
             Self::enter(Map::SafariZoneCenter),
@@ -1293,33 +1146,24 @@ impl PolicyStep {
         ]
     }
 
-    /// Enter Saffron (for Silph Co / the Marsh Badge): trek Fuchsia → Celadon, buy a Fresh Water
-    /// from the Celadon Mart roof vending machine, then pass the Route-7 gate guard (who takes
-    /// the drink and opens all four Saffron gates). Reverse of the soul-badge trek back to
-    /// Lavender, then the Route 7–8 underground path to Celadon.
+    /// Into Saffron: Fresh Water from Celadon's roof machine for the Route 7 gate guard.
     pub fn saffron_entry_steps() -> Vec<Self> {
         let mut s = vec![
             Self::enter(Map::FuchsiaCity), // out of the Warden's house
-            // Fuchsia → Lavender (reverse of the soul-badge routes; Snorlax already cleared).
             Self::enter(Map::Route15),      // from Fuchsia: lands on the west side of the Route-15 gate
-            // Reverse the Route-15 gate: west door → east exit (lands Route 15 (14,8), east of
-            // the wall).
+            // Through the Route 15 gate west to east.
             Self::enter(Map::Route15Gate1F),
             Self::EnterMap { to_map: Map::Route15, to_position: Some(Point8 { x: 14, y: 8 }) },
             Self::enter(Map::Route14),
             Self::enter(Map::Route13),
             Self::enter(Map::Route12),      // from Route 13: lands south of the Route-12 gate
-            // Reverse the Route-12 gate: south door → north exit (lands Route 12 (10,15), north
-            // of it).
+            // Through the Route 12 gate south to north.
             Self::enter(Map::Route12Gate1F),
             Self::EnterMap { to_map: Map::Route12, to_position: Some(Point8 { x: 10, y: 15 }) },
             Self::enter(Map::LavenderTown),
-            // The nearest Lavender→Route8 crossing (0,11) jams; take the (0,9) one (lands Route8
-            // (59,8)).
+            // Lavender's nearest Route 8 crossing (0,11) jams; take (0,9).
             Self::EnterMap { to_map: Map::Route8, to_position: Some(Point8 { x: 59, y: 8 }) },
         ];
-        // Lavender → Celadon via the Route 7–8 underground path (existing helper: heals at
-        // Celadon too).
         s.extend(Self::lavender_to_celadon_steps());
         // Into the Mart, up to the roof, buy a Fresh Water from the vending machine.
         s.extend([
@@ -1329,7 +1173,7 @@ impl PolicyStep {
             Self::enter(Map::CeladonMart4F),
             Self::enter(Map::CeladonMart5F),
             Self::enter(Map::CeladonMartRoof),
-            // A slot first, and this is where the bag first binds.
+            // The bag first binds here, so the toss goes here.
             Self::TossItem { item: ItemId::Tm24Thunderbolt },
             Self::UseVendingMachine { at: Point8 { x: 10, y: 1 }, drink: ItemId::FreshWater },
             // Back down and out to Celadon, then east through the Route-7 gate into Saffron.
@@ -1338,33 +1182,26 @@ impl PolicyStep {
             Self::enter(Map::CeladonCity),
             Self::enter(Map::Route7),
             Self::enter(Map::Route7Gate),        // west door
-            // Walk east through the gate to the east door (Route 7 (18,10), Saffron side).
             Self::EnterMap { to_map: Map::Route7, to_position: Some(Point8 { x: 18, y: 10 }) },
             Self::enter(Map::SaffronCity),
         ]);
         s
     }
 
-    /// Silph Co, part 1: from Saffron, enter Silph Co and ride the elevator to 5F for the Card
-    /// Key (which opens the locked doors throughout the building). The elevator works like the
-    /// Rocket Hideout's (panel bg-event at (3,0), 11-floor menu: 1F=0 … 5F=4 … 11F=10, redirected
-    /// exit warp).
+    /// Silph Co: the elevator to 5F for the Card Key. Panel at (3,0), menu 1F=0 … 11F=10.
     pub fn silph_co_card_key_steps() -> Vec<Self> {
         vec![
-            // Heal first, because Silph Co is the longest Pokémon-Centre-less stretch in the game
-            // and what runs out in it is PP.
+            // Heal: Silph Co has no Centre and what runs out in it is PP.
             Self::enter(Map::SaffronPokecenter),
             Self::Interact(MapSprite::SAFFRONPOKECENTER_NURSE),
             Self::enter(Map::SaffronCity),
-            // Stock up on HYPER Potions at the Saffron Mart before entering Silph.
             Self::enter(Map::SaffronMart),
             Self::BuyFromMart { item: BagItem::new(ItemId::HyperPotion, 15), map: Map::SaffronMart },
             Self::enter(Map::SaffronCity),
             Self::enter(Map::SilphCo1F),
             Self::enter(Map::SilphCoElevator),                          // step onto the (20,0) $58 warp tile
             Self::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 4 }, // 5F = menu index 4
-            // The Card Key sits in a walled 5F pocket (row 16) reachable only by *arriving* on
-            // the 5F (9,15) teleport pad and stepping down.
+            // The Card Key pocket is reached only by arriving on 5F's (9,15) pad.
             Self::enter(Map::SilphCo9F),                                // via 5F (9,15) → 9F (17,15)
             Self::enter(Map::SilphCo5F),                                // via 9F (17,15) → arrive at 5F (9,15)
             // Free two bag slots before reaching for the Card Key.
@@ -1374,28 +1211,18 @@ impl PolicyStep {
         ]
     }
 
-    /// From the 5F Card-Key pocket: thread the teleport-pad maze up to Giovanni on 11F, beat him
-    /// (his after-battle script liberates Saffron), talk to the freed Silph President for the
-    /// Master Ball, then thread the pads back down and out to Saffron and heal. Pad chain:
-    /// 5F(9,15)→9F(17,15); 9F→elevator→3F; 3F(11,11)→7F(5,3) rival pocket; 7F(5,7)→11F(3,2).
+    /// From the Card Key: pads up to Giovanni on 11F, the President's Master Ball, and out. Pads:
+    /// 5F(9,15)→9F(17,15); 9F→elevator→3F; 3F(11,11)→7F(5,3); 7F(5,7)→11F(3,2).
     pub fn silph_giovanni_steps() -> Vec<Self> {
         use crate::pokemon::map::MapSprite as MS;
         let mut s = vec![
-            // Lead with the bulky Venusaur (already slot 0): with Hyper Potions it out-heals the
-            // rival's Alakazam (Psychic) and Pidgeot and mows the Ground/Rock/Grass-weak mons,
-            // while the fresh Vaporeon stays in RESERVE — it comes in when Venusaur finally falls
-            // to the Fire ace (Charizard) and one-shots it with Surf (4×).
             Self::enter(Map::SilphCo9F),                                 // 5F(9,15) pad → 9F(17,15)
             Self::enter(Map::SilphCoElevator),
             Self::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 2 }, // 3F = menu index 2
             Self::EnterMap { to_map: Map::SilphCo7F, to_position: Some(Point8 { x: 5, y: 3 }) },   // 3F(11,11) pad
-            // Fight the 7F rival EXPLICITLY (walk into his front, battle, end standing there) —
-            // routing straight for the 11F pad instead trips his line-of-sight mid-walk at a
-            // stray tile and the subsequent 11F warp resolves off a desynced position.
+            // Fight the 7F rival head-on: routing past trips his sight and desyncs the 11F warp.
             Self::Interact(MS::SILPHCO7F_RIVAL),
-            // ── Out, heal, and back in before Giovanni ────────────────────────────────────────
-            // Silph Co has no Pokémon Centre and its two hardest fights are back to back: the
-            // rival's six mons, then Giovanni one pad away.
+            // ── Out, heal and back in: no Centre, and the rival and Giovanni are one pad apart ──
             Self::EnterMapIfReachable { to_map: Map::SilphCo3F },       // 7F(5,3) pad, back the way we came
             Self::EnterMapIfReachable { to_map: Map::SilphCoElevator },
             Self::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 0 }, // 1F
@@ -1410,17 +1237,13 @@ impl PolicyStep {
             Self::EnterMap { to_map: Map::SilphCo11F, to_position: Some(Point8 { x: 3, y: 2 }) },  // 7F(5,7) pad
             Self::InteractIfReachable(MS::SILPHCO11F_ROCKET1),
         ];
-        // Use InteractIfReachable (not Interact): reachable → walk in (crossing his (6,13)
-        // trigger fires the scripted battle whose after-script liberates Saffron); once he's
-        // beaten and unreachable it pops after a bounded wait instead of hanging forever (plain
-        // Interact never gives up).
+        // Once Giovanni is beaten and gone, `InteractIfReachable` pops where `Interact` would hang.
         for _ in 0..14 { s.push(Self::InteractIfReachable(MS::SILPHCO11F_GIOVANNI)); }
         s.extend([
             // Free a bag slot before the President reaches into his pocket.
             Self::TossItem { item: ItemId::Tm11Bubblebeam },
             Self::Interact(MS::SILPHCO11F_SILPH_PRESIDENT),             // Master Ball + Rockets leave Saffron
-            // The way *out* gives up rather than stalling, because a black-out has already taken
-            // it.
+            // The way out gives up rather than stalling, because a black-out has already taken it.
             Self::EnterMapIfReachable { to_map: Map::SilphCo7F },   // 11F(3,2) pad
             Self::EnterMapIfReachable { to_map: Map::SilphCo3F },   // 7F(5,3) pad
             Self::EnterMapIfReachable { to_map: Map::SilphCoElevator },
@@ -1433,10 +1256,7 @@ impl PolicyStep {
         s
     }
 
-    /// Marsh Badge: Saffron Gym is a teleport-pad maze; `DefeatGymLeader` routes through the
-    /// intra-map teleporters and beats each gym trainer via line of sight to reach Sabrina.
-    /// Requires Saffron to have been liberated (see `silph_giovanni_steps`) so the gym door
-    /// isn't Rocket-blocked.
+    /// Marsh Badge: `DefeatGymLeader` threads Saffron Gym's pads to Sabrina; needs Saffron freed.
     pub fn marsh_badge_steps() -> Vec<Self> {
         use crate::pokemon::map::MapSprite as MS;
         vec![
@@ -1445,13 +1265,9 @@ impl PolicyStep {
         ]
     }
 
-    /// Saffron → Cinnabar Island (needs Surf on Vaporeon + Cut on Venusaur). Route 6 → Vermilion
-    /// → Diglett's Cave → Route 2 (Cut two trees) → Viridian → Route 1 → Pallet → Surf across
-    /// Route 21 to Cinnabar.
+    /// Saffron → Cinnabar: Diglett's Cave, Route 2's two trees, Pallet, then Surf down Route 21.
     pub fn saffron_to_cinnabar_steps() -> Vec<Self> {
         vec![
-            // Venusaur leads here (slot 0), which is what the Cut field-move executor needs — it
-            // always uses the lead and only Venusaur knows Cut.
             Self::enter(Map::SaffronCity),
             Self::enter(Map::Route6),
             Self::enter(Map::Route6Gate),
@@ -1474,15 +1290,11 @@ impl PolicyStep {
         ]
     }
 
-    /// Pokémon Mansion → Secret Key (unlocks the Cinnabar Gym). The mansion is a switch-gate
-    /// maze: one global switch (`EVENT_MANSION_SWITCH_ON`) toggles every floor's sliding doors,
-    /// and the only way to the B1F Secret Key is to *fall through a 3F hole* to 1F's right side
-    /// (the hole warp-down is modelled in `apply_mansion_holes`).
+    /// Pokémon Mansion → Secret Key: one global switch toggles every floor's doors, and B1F is
+    /// reached by falling through a 3F hole (`apply_mansion_holes`).
     pub fn mansion_secret_key_steps() -> Vec<Self> {
         vec![
-            // Heal to full HP/PP first — the mansion is a long battle-heavy crossing with no
-            // Pokémon Center inside, so the party must enter with full move PP (else it Struggles
-            // itself out).
+            // Heal to full PP first: no Centre inside, and an empty mon Struggles itself out.
             Self::enter(Map::CinnabarPokecenter),
             Self::Interact(MapSprite::CINNABARPOKECENTER_NURSE),
             Self::enter(Map::CinnabarIsland),
@@ -1495,17 +1307,14 @@ impl PolicyStep {
             Self::enter(Map::PokemonMansionB1F),  // (21,23) staircase down
             Self::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 18, y: 25 }, reveals: Map::PokemonMansion1F },
             Self::CollectItem(MapSprite::POKEMONMANSIONB1F_TM_BLIZZARD),
-            // Taught here rather than after the Secret Key, because a TM is consumed on use and
-            // the bag has no room for both.
+            // Taught here: a TM is consumed on use and the bag has no room for both.
             Self::TeachMove { item: ItemId::Tm14Blizzard, target: Self::STARTER_LINE },
             Self::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 20, y: 3 }, reveals: Map::PokemonMansion1F },
             Self::CollectItem(MapSprite::POKEMONMANSIONB1F_SECRET_KEY),
         ]
     }
 
-    /// Volcano Badge: from the B1F Secret-Key pocket, exit the mansion, heal, and clear the
-    /// Cinnabar Gym. Exiting reverses the two B1F switch flips (reopening the (23,22) staircase
-    /// up), then out to Cinnabar.
+    /// Volcano Badge: undo the two B1F flips to reopen the stairs, heal, and beat Blaine.
     pub fn volcano_badge_steps() -> Vec<Self> {
         vec![
             Self::FlipSwitch { map: Map::PokemonMansionB1F, at: Point8 { x: 20, y: 3 }, reveals: Map::PokemonMansion1F },
@@ -1521,26 +1330,16 @@ impl PolicyStep {
         ]
     }
 
-    /// Articuno (Seafoam Islands B4F) — the Ice sweeper the Elite Four's Lance needs. A
-    /// there-and-back detour off Cinnabar Island: Surf east onto Route 20, dive into the Seafoam
-    /// east entrance, solve both boulder puzzles on the way down, and throw the Master Ball
-    /// (guaranteed catch) at the static lv50 bird on B4F.
+    /// Articuno in Seafoam B4F: Surf down Route 20, solve both boulder floors, Master Ball it.
     pub fn seafoam_articuno_steps() -> Vec<Self> {
-        // Strength is armed per floor: `BIT_STRENGTH_ACTIVE` is cleared on every map change, and
-        // the route leaves and re-enters each boulder floor.
+        // Strength is armed per floor: `BIT_STRENGTH_ACTIVE` clears on every map change.
         vec![
-            // Heal and stock balls first: Route 20's swimmer gauntlet is fought on the way over,
-            // and there is no Pokémon Center inside Seafoam (its wilds are fled —
-            // `in_center_less_dungeon`).
+            // Heal and stock balls: no Centre inside Seafoam, whose wilds are fled.
             Self::enter(Map::CinnabarIsland),
             Self::enter(Map::CinnabarPokecenter),
             Self::Interact(MapSprite::CINNABARPOKECENTER_NURSE),
             Self::enter(Map::CinnabarIsland),
-            // The bag is at Gen 1's 20-item cap by now, and a full bag makes the purchase below
-            // fail silently — the clerk refuses and `BuyFromMart` just gives up, which then
-            // spends the Master Ball on the HM-slave and leaves nothing for Articuno. The Nugget
-            // is pure sell-fodder this run never sells, and it is not a key item, so it is the
-            // slot to free.
+            // A full bag refuses the purchase in silence, so the unsold Nugget goes first.
             Self::TossItem { item: ItemId::Nugget },
             Self::BuyFromMart { item: BagItem::new(ItemId::GreatBall, 10), map: Map::CinnabarMart },
             // Top the Hyper Potions back up while at the last mart on the route that sells them.
@@ -1549,8 +1348,7 @@ impl PolicyStep {
             // Surf east across Route 20 to the east Seafoam entrance.
             Self::enter(Map::Route20),
             Self::enter_at(Map::SeafoamIslands1F, 26, 17),
-            // This leg catches its own Strength slave again, because the route no longer carries
-            // one past Cinnabar.
+            // This leg catches its own Strength carrier.
             Self::CatchPokemon { species: PokemonSpecies::Slowpoke, on_map: Map::SeafoamIslands1F,
                                  ball: Some(ItemId::PokeBall) },
             Self::TeachMove { item: ItemId::Hm04Strength, target: PartyRef::Species(PokemonSpecies::Slowpoke) },
@@ -1567,34 +1365,26 @@ impl PolicyStep {
                                       boulder: Some(Point8 { x: 3, y: 15 }) },
             Self::DropBoulderInHole { hole: Point8 { x: 6, y: 16 },
                                       boulder: Some(Point8 { x: 8, y: 14 }) },
-            // Fall through the (6,16) hole into the west lake, already surfing, and Master-Ball
-            // the bird.
+            // Fall through (6,16) into the west lake, already surfing.
             Self::enter_at(Map::SeafoamIslandsB4F, 5, 14),
             Self::CatchPokemon { species: PokemonSpecies::Articuno, on_map: Map::SeafoamIslandsB4F,
                                  ball: Some(ItemId::MasterBall) },
             // The bird arrives with Peck and Ice Beam — 10 PP of Ice for five Elite Four rooms.
             Self::TeachMove { item: ItemId::Tm14Blizzard, target: PartyRef::Species(PokemonSpecies::Articuno) },
-            // Out with DIG: there is no walkable way back east (see the doc above), and it lands
-            // on Cinnabar Island because that is where the Pokémon Center at the top of this list
-            // set `wLastBlackoutMap`.
+            // Dig out: no walk back east, and Cinnabar's Centre above set `wLastBlackoutMap`.
             Self::Dig { target: PartyRef::Species(PokemonSpecies::Slowpoke) },
             Self::enter(Map::CinnabarIsland),
         ]
     }
 
-    /// Earth Badge (8th): Giovanni's Viridian Gym, which reopens once Team Rocket is beaten at
-    /// Silph Co (done). From Cinnabar, Surf back across Route 21 to Pallet and up to Viridian,
-    /// heal at the Center, then clear the gym's spinner-tile maze (see the `ViridianGym` arrow
-    /// table in `tile_map.rs`) to Giovanni.
+    /// Earth Badge: Surf back to Pallet, up to Viridian, heal, cross the spinner gym to Giovanni.
     pub fn earth_badge_steps() -> Vec<Self> {
         vec![
             Self::enter(Map::CinnabarIsland),   // out of Blaine's gym
-            // Cinnabar → Viridian: Surf across Route 21 to Pallet, then up Route 1.
             Self::enter(Map::Route21),
             Self::enter(Map::PalletTown),
             Self::enter(Map::Route1),
             Self::enter(Map::ViridianCity),
-            // Heal before the toughest gym.
             Self::enter(Map::ViridianPokecenter),
             Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
             Self::enter(Map::ViridianCity),
@@ -1603,31 +1393,24 @@ impl PolicyStep {
         ]
     }
 
-    /// After all 8 badges: reach Victory Road 1F, catch a Machop HM-slave + teach it Strength,
-    /// then solve the 1F boulder puzzle (push a boulder onto the (17,13) switch) and climb the
-    /// now-open (1,1) ladder to VR2F. Reliable from a fresh run; folded into
-    /// `complete_game_steps`.
+    /// The level the lone fighter is ground to before the Elite Four.
     pub const GAUNTLET_LEVEL: u8 = 85;
 
-    /// Which starter this route plays, as one pair of constants rather than a species name
-    /// scattered through six legs.
+    /// The starter this route plays, named once rather than in six legs.
     const STARTER_BALL: MapSprite = MapSprite::OAKSLAB_SQUIRTLE_POKE_BALL;
     /// The starter, named as its whole line.
     const STARTER_LINE: PartyRef = PartyRef::Line(&[
         PokemonSpecies::Squirtle, PokemonSpecies::Wartortle, PokemonSpecies::Blastoise]);
 
-    /// The Cut carrier, and the reason the party is not just a starter any more.
+    /// The Cut carrier.
     const CUT_SLAVE: PartyRef = PartyRef::Species(PokemonSpecies::Oddish);
 
     const MACHOP: PartyRef = PartyRef::Species(PokemonSpecies::Machop);
 
-    /// Viridian → the Route-22 rival → Route 23 → VR1F, ending with a Machop caught and taught
-    /// Strength. Everything up to the point where the party is standing on the floor it grinds
-    /// on.
+    /// Viridian → the Route 22 rival → Route 23 → VR1F, ending with a Machop taught Strength.
     pub fn victory_road_1f_approach_steps() -> Vec<Self> {
         vec![
             Self::enter(Map::ViridianCity),          // out of the gym
-            // The Route-22 rival is a Silph-rival redux (Alakazam + Charizard).
             Self::enter(Map::ViridianPokecenter),
             Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
             Self::enter(Map::ViridianCity),
@@ -1640,8 +1423,7 @@ impl PolicyStep {
             // The boulder slave, caught two tiles from the boulder it is for.
             Self::CatchPokemon { species: PokemonSpecies::Machop, on_map: Map::VictoryRoad1F, ball: None },
             Self::TeachMove { item: ItemId::Hm04Strength, target: Self::MACHOP },
-            // The catch leaves the Machop leading, and the nine VR trainers below are not its
-            // fight.
+            // The catch leaves the Machop leading, and the VR trainers are not its fight.
             Self::MovePokemonToFront { target: Self::STARTER_LINE },
         ]
     }
@@ -1649,7 +1431,6 @@ impl PolicyStep {
     /// The boulder onto (17, 13) and the climb to VR2F.
     pub fn victory_road_1f_climb_steps() -> Vec<Self> {
         vec![
-            // VR1F: push a boulder onto (17,13), climb to VR2F.
             Self::UseStrength { target: Self::MACHOP },
             Self::SolveBoulders { switch: Point8 { x: 17, y: 13 }, boulder: None },
             // `goto`, not `enter`, because a black-out on this last walk is otherwise terminal.
@@ -1657,28 +1438,24 @@ impl PolicyStep {
         ]
     }
 
-    /// The VR2F/VR3F half of Victory Road (from standing on VR2F to the Indigo Plateau lobby):
-    /// the interconnected hole-drop puzzle. Validated end-to-end by
-    /// `can_solve_victory_road_2f_3f` (from a VR3F fixture).
+    /// VR2F and VR3F's hole-drop puzzle, up to the Indigo Plateau lobby.
     pub fn victory_road_2f_3f_steps() -> Vec<Self> {
         vec![
             // VR2F: switch1 (1,16) → up the (23,7) stairs to VR3F.
             Self::UseStrength { target: Self::MACHOP },
             Self::SolveBoulders { switch: Point8 { x: 1, y: 16 }, boulder: None },
             Self::enter(Map::VictoryRoad3F),
-            // VR3F: switch (3,5) opens the hole barrier; drop a boulder into the hole (23,15) to
-            // reveal 2F's hidden boulder, then fall through the hole to VR2F's east side.
+            // VR3F: switch (3,5) opens the hole; a boulder into (23,15) reveals 2F's hidden one.
             Self::UseStrength { target: Self::MACHOP },
             Self::SolveBoulders { switch: Point8 { x: 3, y: 5 }, boulder: None },
             Self::DropBoulderInHole { hole: Point8 { x: 23, y: 15 }, boulder: None },
             Self::enter_at(Map::VictoryRoad2F, 22, 16),
-            // VR2F east: push the revealed boulder onto switch2 (9,16); this leaves the player in
-            // the west.
+            // VR2F east: the revealed boulder onto (9,16), which leaves the player in the west.
             Self::UseStrength { target: Self::MACHOP },
             Self::SolveBoulders { switch: Point8 { x: 9, y: 16 }, boulder: None },
             // Return trip: climb back to VR3F and come down on the exit side.
             Self::enter(Map::VictoryRoad3F),
-            // (27,7), not the (22,16) the trip in uses, and the difference is the whole exit.
+            // (27,7), not (22,16): only this landing reaches the exit.
             Self::enter_at(Map::VictoryRoad2F, 27, 7),
             // Out the exit beside it → Route 23 → Indigo Plateau → the Elite Four lobby.
             Self::enter(Map::Route23),
@@ -1687,25 +1464,20 @@ impl PolicyStep {
         ]
     }
 
-    /// The Elite Four gauntlet, from the Indigo Plateau lobby to the Champion: stock up, heal,
-    /// then Lorelei → Bruno → Agatha → Lance → the rival. Validated by `can_beat_elite_four`.
+    /// The grind before the Elite Four: heal, stock up, and level the fighter in the Mansion.
     pub fn gauntlet_grind_steps() -> Vec<Self> {
-        // What the two leads are taken to before the gauntlet.
 
         vec![
-            // The heal is not a courtesy, it is what makes the grind survivable.
             Self::enter(Map::CinnabarIsland),
             Self::enter(Map::CinnabarPokecenter),
             Self::Interact(MapSprite::CINNABARPOKECENTER_NURSE),
             Self::enter(Map::CinnabarIsland),
-            // The run arrives at its longest grind with ¥37,655 and not one healing item, and
-            // that — not the site — is what all the walking back to the Centre was.
+            // Healing items, so the grind is not a string of walks back to the Centre.
             Self::BuyFromMart { item: BagItem::new(ItemId::FullHeal, 40), map: Map::CinnabarMart },
             Self::BuyFromMart { item: BagItem::new(ItemId::HyperPotion, 10), map: Map::CinnabarMart },
             Self::enter(Map::CinnabarIsland),
             Self::enter(Map::PokemonMansion1F),
-            // One fighter, taken further, and it is *cheaper* than three at seventy-five —
-            // experience is cubic, so the top of one curve costs less than the middle of three.
+            // One fighter: experience is cubic, so one at lv85 costs less than three at lv75.
             Self::GrindUntilLevel { target_level: Self::GAUNTLET_LEVEL, on_map: Map::PokemonMansion1F,
                 target: Self::STARTER_LINE },
             Self::enter(Map::CinnabarIsland),
@@ -1714,9 +1486,7 @@ impl PolicyStep {
 
     pub fn elite_four_steps() -> Vec<Self> {
         vec![
-            // ¥3000 and ¥1500 each — 12 + 4 is ¥42,000, which is inside what the grinded
-            // `at-indigo-articuno` fixture arrives with (~¥50k) and well outside what the
-            // mainline does (¥9,710 at Victory Road 2F, plus whatever VR2F/VR3F's trainers pay).
+            // ¥42,000 of Full Restores and Revives, affordable only after the gauntlet grind.
             Self::TossItem { item: ItemId::Tm21MegaDrain },
             Self::BuyFromMart { item: BagItem::new(ItemId::FullRestore, 12), map: Map::IndigoPlateauLobby },
             Self::BuyFromMart { item: BagItem::new(ItemId::Revive, 4), map: Map::IndigoPlateauLobby },
@@ -1729,31 +1499,26 @@ impl PolicyStep {
             Self::BattleTrainer { trainer: MapSprite::BRUNOSROOM_BRUNO },
             Self::enter(Map::AgathasRoom),
             Self::BattleTrainer { trainer: MapSprite::AGATHASROOM_AGATHA },
-            // (No swap for Lance.
             Self::enter(Map::LancesRoom),
             Self::BattleTrainer { trainer: MapSprite::LANCESROOM_LANCE },
-            // The gauntlet is 26 Pokémon against 35 PP, and this is the whole of the margin.
+            // 26 Pokémon against 35 PP: the Elixer is the margin.
             Self::use_pp_restore(ItemId::Elixer, 0, 0),
             Self::enter(Map::ChampionsRoom),
             Self::BattleTrainer { trainer: MapSprite::CHAMPIONSROOM_RIVAL },
         ]
     }
 
-    /// The full deterministic playthrough. Every forward map transition is an explicit
-    /// `EnterMap`; on-map tasks (`Interact`/`Buy`/`Grind`/`Catch`) self-route over the
-    /// incrementally-observed graph.
+    /// The whole scripted playthrough, every map transition an explicit `EnterMap`.
     pub fn complete_game_steps() -> Vec<Self> {
         Self::game_steps(true)
     }
 
-    /// The same route stopped at the eighth badge and Victory Road 2F, with no gauntlet grind and
-    /// no Elite Four.
+    /// The same route stopped at Victory Road 2F: no gauntlet grind, no Elite Four.
     pub fn eight_badge_steps() -> Vec<Self> {
         Self::game_steps(false)
     }
 
-    /// Pallet Town, the starter, Brock, the Route 3 grind and into Mt Moon — everything the route
-    /// does before [`Self::mt_moon_traversal`] puts it in Cerulean.
+    /// Pallet to Mt Moon 1F: the starter, Brock and the Route 3 grind.
     pub fn pallet_to_cerulean_steps() -> Vec<Self> {
         vec![
             // ── Pallet Town: fetch a starter ──
@@ -1789,12 +1554,9 @@ impl PolicyStep {
             Self::Interact(MapSprite::VIRIDIANPOKECENTER_NURSE),
             Self::enter(Map::ViridianCity),
 
-            // ── LONE STARTER (no caught second mon).
-
             // ── Grind the starter on Route 1 ──
             Self::enter(Map::Route1),
-            // Twelve rather than thirteen, and the level is bounded by what there is to fight
-            // *with*.
+            // Twelve: the level is bounded by what there is to fight.
             Self::GrindUntilLevel { target_level: 12, on_map: Map::Route1, target: PartyRef::Slot(0) },
             Self::enter(Map::ViridianCity),
             Self::enter(Map::ViridianPokecenter),
@@ -1814,22 +1576,19 @@ impl PolicyStep {
 
             // ── Defeat Brock (Boulder Badge) ──
             Self::DefeatGymLeader { leader: MapSprite::PEWTERGYM_BROCK, badge: Badge::BoulderBadge },
-            // Exit the gym to the city first (a single warp): every forward `enter` must be one
-            // direct transition.
+            // Every forward `enter` must be one direct transition, so out of the gym first.
             Self::enter(Map::PewterCity),
             Self::enter(Map::PewterPokecenter),
             Self::Interact(MapSprite::PEWTERPOKECENTER_NURSE),
             Self::enter(Map::PewterCity),
-            // The first medicine the route can buy, and for a long time it bought none until
-            // Vermilion.
+            // The first medicine the route can buy.
             Self::enter(Map::PewterMart),
             Self::BuyFromMart { item: BagItem::new(ItemId::Potion, 10), map: Map::PewterMart },
             Self::enter(Map::PewterCity),
 
             // ── Route 3 grind → heal at the Mt Moon Pokécenter ──
             Self::enter(Map::Route3),
-            // Twenty-two, and the four extra levels are bought here because the next fight after
-            // Mt Moon is the rival.
+            // Twenty-two, because the next fight after Mt Moon is the rival.
             Self::GrindUntilLevel { target_level: 22, on_map: Map::Route3, target: PartyRef::Slot(0) },
             Self::enter(Map::Route4),
             Self::enter(Map::MtMoonPokecenter),
@@ -1841,68 +1600,43 @@ impl PolicyStep {
 
     /// `finish` adds the gauntlet grind and everything past the eighth badge.
     fn game_steps(finish: bool) -> Vec<Self> {
-        // ── Pallet Town → the starter → Brock → the Route 3 grind → into Mt Moon ──
         let mut steps = Self::pallet_to_cerulean_steps();
-        // ── Cross Mt Moon → Cerulean City ──
         steps.extend(Self::mt_moon_traversal());
 
         steps.extend([
-            // ── Heal in Cerulean ──
             Self::enter(Map::CeruleanPokecenter),
             Self::Interact(MapSprite::CERULEANPOKECENTER_NURSE),
         ]);
 
-        // ── Nugget Bridge → Bill (SS Ticket) → Misty → trashed-house bridge → Vermilion City ──
         steps.extend(Self::cerulean_to_vermilion_steps());
-        // ── S.S.
         steps.extend(Self::ss_anne_steps());
-        // ── Thunder Badge: teach Cut → cut the gym tree → trash-can puzzle → Lt.
         steps.extend(Self::thunder_badge_steps());
-        // ── Back to Cerulean (Underground Path in reverse) → Rock Tunnel → Lavender ──
         steps.extend(Self::back_to_cerulean_steps());
         steps.extend(Self::cerulean_to_lavender_steps());
-        // ── Lavender → Celadon (Route 7–8 Underground Path) → Rainbow Badge (Erika) ──
         steps.extend(Self::lavender_to_celadon_steps());
         steps.extend(Self::celadon_rainbow_steps());
-        // ── Celadon Game Corner → Rocket Hideout → Silph Scope (Giovanni) ──
         steps.extend(Self::rocket_hideout_entrance_steps());
         steps.extend(Self::silph_scope_steps());
-        // ── Pokémon Tower (Silph Scope) → Poké Flute from Mr. Fuji ──
         steps.extend(Self::poke_flute_steps());
-        // ── Route 12: wake the Snorlax blocking the road south with the Poké Flute ──
         steps.extend(Self::snorlax_steps());
-        // ── Route 12–15 → Fuchsia → Soul Badge (Koga) ──
         steps.extend(Self::soul_badge_steps());
-        // ── Safari Zone: HM03 Surf + Gold Teeth → HM04 Strength (Warden) ──
         steps.extend(Self::safari_zone_surf_steps());
         steps.extend(Self::safari_zone_strength_steps());
-        // ── Fuchsia → Celadon (buy Super Potions) → Saffron ──
         steps.extend(Self::saffron_entry_steps());
-        // (No Eevee leg.
         steps.extend(Self::silph_co_card_key_steps());
         steps.extend(Self::silph_giovanni_steps());
-        // ── Saffron Gym → Marsh Badge (Sabrina) ──
         steps.extend(Self::marsh_badge_steps());
-        // ── Surf across Route 21 to Cinnabar Island ──
         steps.extend(Self::saffron_to_cinnabar_steps());
-        // ── Pokémon Mansion → Secret Key → Cinnabar Gym → Volcano Badge (Blaine) ──
         steps.extend(Self::mansion_secret_key_steps());
         steps.extend(Self::volcano_badge_steps());
-        // (No Seafoam detour.
         if finish {
             steps.extend(Self::gauntlet_grind_steps());
         }
-        // ── Cinnabar → Viridian Gym → Earth Badge (Giovanni), the 8th and final gym badge ──
         steps.extend(Self::earth_badge_steps());
-        // ── Victory Road 1F: catch a Strength HM-slave, solve the boulder puzzle, climb to VR2F
-        // ──
         steps.extend(Self::victory_road_1f_approach_steps());
         steps.extend(Self::victory_road_1f_climb_steps());
         if finish {
-            // ── VR2F/VR3F: the interconnected Strength puzzle, out to the Indigo Plateau lobby
-            // ──
             steps.extend(Self::victory_road_2f_3f_steps());
-            // ── Lorelei → Bruno → Agatha → Lance → the rival → the Hall of Fame ──
             steps.extend(Self::elite_four_steps());
         }
 
@@ -1928,8 +1662,7 @@ mod scripted_progress {
         hash
     }
 
-    /// `(completed, total, route)`, or `None` for a run that has never written one — which is
-    /// what a brand-new run looks like, and is correctly read as "start at the beginning".
+    /// `(completed, total, route)`, or `None` for a run that never wrote one: a new run.
     pub fn load(dir: &Path) -> Option<(usize, usize, u64)> {
         let text = std::fs::read_to_string(dir.join(FILE)).ok()?;
         let value: serde_json::Value = serde_json::from_str(&text).ok()?;
@@ -1941,9 +1674,7 @@ mod scripted_progress {
         let body = serde_json::json!({ "completed": completed, "total": total, "route": route });
         if let Err(failure) = crate::run::write_atomically(
             &dir.join(FILE), body.to_string().as_bytes()) {
-            // A cursor that cannot be written is a run that will restart badly later, not one
-            // that should stop now — so it is loud and not fatal, exactly like a failed
-            // checkpoint.
+            // Loud but not fatal, like a failed checkpoint.
             println!("[policy] could not record scripted progress: {failure}");
         }
     }
@@ -1958,8 +1689,7 @@ struct ScriptedCursor {
     dir: std::path::PathBuf,
     /// The route entire, so `restart` can put it back.
     full_route: Vec<PolicyStep>,
-    /// The length of the route this cursor is counted against — half of what makes it safe to
-    /// trust.
+    /// The route length the cursor counts against; with `route`, what makes it safe to trust.
     total: usize,
     route: u64,
     written: usize,
@@ -1967,8 +1697,7 @@ struct ScriptedCursor {
 
 pub struct DeterministicPolicy {
     rng: StdRng,
-    /// The seed both `rng` and `name_picker` were built from, kept so [`Policy::restart`] can
-    /// rebuild this policy exactly as a fresh process would build it.
+    /// What `rng` and `name_picker` were seeded from, so [`Policy::restart`] rebuilds exactly.
     seed: u64,
     queue: VecDeque<PolicyStep>,
     /// Where to record how far along the route this run is, and what it last recorded.
@@ -1976,82 +1705,59 @@ pub struct DeterministicPolicy {
     name_picker: PokemonNamePicker,
     /// The last Pokémon Center where the player was healed.
     pub last_pokemon_center: Option<Map>,
-    /// Set to `Some(pokecenter)` when the active Pokémon's damaging moves are all at ≤10% PP and
-    /// the policy decided to flee the current wild battle.
+    /// The Centre a heal detour is walking to.
     heal_return: Option<Map>,
-    /// Number of times the current `BuyFromMart` step has re-opened the shop without the purchase
-    /// registering in the bag.
+    /// Shop visits this `BuyFromMart` step has made without the purchase landing.
     mart_attempts: u32,
     /// `(money, quantity held)` as the last `BuyFromMart` shop visit was opened.
     mart_baseline: Option<(u32, u8)>,
-    /// Consecutive ticks the heal-return detour has been unable to move: no route to the Pokémon
-    /// Centre it is aiming at, or no Nurse in sight after arriving.
+    /// Consecutive polls a heal detour has been unable to move.
     heal_route_stuck: u32,
-    /// Set once a heal detour has given up because the Centre could not be routed to, and cleared
-    /// by the next actual heal.
+    /// Set when a heal detour gives up on routing; cleared by the next heal.
     heal_unreachable: bool,
     /// Where a heal detour set off from, so it can put the run back.
     heal_came_from: Option<Map>,
     /// Consecutive polls spent waiting for a nurse to finish.
     heal_waits: u32,
-    /// Consecutive ticks the current `DefeatGymLeader` step has failed to find a route to its
-    /// gym.
+    /// Consecutive polls a `DefeatGymLeader` step has found no route to its gym.
     gym_route_stuck: u32,
-    /// The map a `Dig` step was issued from, so the step can pop when Dig has actually warped the
-    /// player somewhere else (rather than on the first tick, before the menus have even opened).
+    /// The map a `Dig` was issued from, so the step pops once Dig has actually warped away.
     dig_from_map: Option<Map>,
-    /// True once the current `CollectItem` step's item sprite has been observed present (not
-    /// hidden).
+    /// Whether the current `CollectItem` or `UseFieldItem` sprite has been seen present.
     collect_item_seen: bool,
-    /// Polls the current `CollectItem` has spent on an item that has not been picked up, so a
-    /// pickup the game silently refuses gives up with a reason instead of spinning.
+    /// Polls a `CollectItem` has waited, so a refused pickup gives up with a reason.
     collect_item_waits: u32,
-    /// Consecutive ticks a `CatchPokemon` step has found no encounter source (no
-    /// grass/cave-object/water).
+    /// Consecutive polls a catch has found no encounter source.
     catch_wander_stuck: u32,
-    /// Species a `CatchPokemon` step gave up on — it popped without the catch (the balls ran out,
-    /// the static sprite was unreachable, there was nowhere to trigger an encounter, there was no
-    /// route to the map at all).
+    /// Species a `CatchPokemon` step gave up on, so steps waiting for them stop.
     catch_abandoned: Vec<PokemonSpecies>,
-    /// The chosen ball's bag quantity when the current catch battle began, so a throw that
-    /// *missed* can be told from one that has not happened yet.
+    /// The ball's quantity when this catch battle began, telling a missed throw from none yet.
     catch_ball_baseline: Option<u8>,
-    /// When `Some(slot)`, switch that party slot in at the start of every battle (wild *and*
-    /// trainer) so it — not the lead — earns the XP.
+    /// A slot switched in at the start of every battle so it earns the XP.
     train_slot: Option<u8>,
-    /// During a `GrindUntilLevel` grind: set once the trainee has been switched into / handed off
-    /// from the CURRENT battle (reset each overworld tick).
+    /// Set once the grind trainee has taken part in the current battle.
     trainee_participated: bool,
-    /// Consecutive policy ticks the current `InteractIfReachable` step has waited without the
-    /// sprite becoming reachable.
+    /// Polls an `InteractIfReachable` has waited for its sprite.
     interact_skip_waits: u32,
-    /// The value of `mansion_switch_on` captured when the current Pokémon Mansion `FlipSwitch`
-    /// step began.
+    /// `mansion_switch_on` when the current Mansion `FlipSwitch` began.
     mansion_flip_baseline: Option<bool>,
     /// Visible-boulder count captured when the current `DropBoulderInHole` step began.
     boulder_drop_baseline: Option<usize>,
-    /// The `EvolveWithStone` target the baseline below belongs to, so a later step aimed at a
-    /// different mon starts its own baseline rather than inheriting this one.
+    /// Which target the evolve baseline belongs to, so a step at another mon starts afresh.
     evolve_baseline: Option<(PartyRef, PokemonSpecies)>,
-    /// Positions of gym trainers already beaten during the current `DefeatGymLeader` step
-    /// (Cinnabar's quiz-gate maze): a defeated trainer stays on the map as a sprite, so once we
-    /// detect we're standing in its line of sight with no battle starting, we record it here to
-    /// avoid re-targeting.
+    /// Trainers beaten this `DefeatGymLeader` step: a beaten trainer keeps its sprite, so
+    /// standing in its sight with no battle marks it here.
     gym_beaten: HashSet<Point8>,
-    /// Casts the current `Fish` step has issued (workstream C).
+    /// Casts the current `Fish` step has issued.
     fish_casts: u32,
-    /// Trip bookkeeping for the current `SafariHunt` step (workstream E): how many ¥500 entries
-    /// have been paid, and whether we were inside the zone last tick — an ejection at 0 steps is
-    /// an *edge*, and `EVENT_IN_SAFARI_ZONE` is only a level.
+    /// Safari trips paid, and whether the last tick was inside: an ejection is an edge and
+    /// `EVENT_IN_SAFARI_ZONE` only a level.
     safari: crate::pokemon::postgame::safari::HuntProgress,
-    /// `(trainer position, player position, consecutive stuck ticks)` for the gym-trainer
-    /// engagement.
+    /// `(trainer, player position, stuck ticks)` for a trainer approach.
     gym_engage: Option<(Point8, Point8, u32)>,
-    /// Ticks an `EnterMapIfReachable` step has waited for a route (workstream L).
+    /// Polls an `EnterMapIfReachable` has waited.
     enter_stuck: u32,
-    /// Bag quantity of the current `UseBagItem` step's item when the step began (workstream I),
-    /// so completion is "one of them left the bag" and a stack of four Revives spends exactly
-    /// one.
+    /// The bag count of a `UseBagItem`'s item at the start, so exactly one is spent.
     item_use_baseline: Option<u8>,
     /// How many times the current `UseBagItem` step has been handed to the driver.
     item_use_attempts: u32,
@@ -2064,8 +1770,7 @@ pub struct DeterministicPolicy {
     heal_hops: u32,
     /// Round trips a `GrindUntilLevel` has made to a Pokémon Centre because its trainee fainted.
     grind_heal_trips: u32,
-    /// The map the last battle was fought on, which is the one a black-out has to be reported
-    /// against.
+    /// The map of the last battle, which a black-out is reported against.
     last_battle_map: Option<Map>,
 }
 
@@ -2085,8 +1790,7 @@ impl DeterministicPolicy {
         }
     }
 
-    /// Give up on catching `species`, saying why, and record it in [`Self::catch_abandoned`] so
-    /// the steps that were going to use it stop waiting for something that is never arriving.
+    /// Give up on `species` and record it, so steps waiting for it stop.
     fn abandon_catch(&mut self, species: PokemonSpecies, why: &str) {
         println!("[policy] giving up on catching {species}: {why}");
         if !self.catch_abandoned.contains(&species) {
@@ -2094,28 +1798,25 @@ impl DeterministicPolicy {
         }
     }
 
-    /// Whether `target` names a species a `CatchPokemon` step already gave up on, so a step
-    /// waiting for it to appear in the party is waiting for ever.
+    /// Whether `target` names a species a catch gave up on.
     fn target_was_abandoned(&self, target: PartyRef) -> bool {
         match target {
             PartyRef::Species(species) => self.catch_abandoned.contains(&species),
             PartyRef::Line(line) => line.iter().any(|s| self.catch_abandoned.contains(s)),
-            // A slot is a position rather than a promise about a species: nothing about a failed
-            // catch says the mon at that index is not coming.
+            // A slot is a position, not a promise about a species.
             PartyRef::Slot(_) => false,
         }
     }
 
-    /// How many times to re-open the shop for one `BuyFromMart` step before giving up.
+    /// Polls a `DefeatGymLeader` waits for a route to its gym, e.g. just after a black-out.
     const MAX_GYM_ROUTE_WAIT: u32 = 400;
-    /// Ticks the heal-return detour waits before concluding it cannot get to the Pokémon Centre
-    /// and handing back to the main queue.
+    /// Polls a heal detour waits for a route before handing back to the queue.
     const MAX_HEAL_ROUTE_WAIT: u32 = 400;
     /// Hops the heal-return detour may take before it concludes it is going round in circles.
     const MAX_HEAL_HOPS: u32 = 60;
+    /// Shop visits one `BuyFromMart` makes before giving up.
     const MAX_MART_ATTEMPTS: u32 = 4;
-    /// How many times to hand one `UseBagItem` step to the driver before giving up (workstream
-    /// I).
+    /// Times one `UseBagItem` is handed to the driver before giving up.
     const MAX_ITEM_USE_ATTEMPTS: u32 = 4;
 
     /// How many polls a `CollectItem` may spend on an item that will not be picked up.
@@ -2225,17 +1926,13 @@ impl DeterministicPolicy {
     /// Route one hop toward `target` over the incremental world graph.
     pub(crate) fn route_toward(world_graph: &WorldGraph, map: &MetaTileMap, actions: &[OverworldAction],
                                target: Map) -> Option<OverworldAction> {
-        // A transition to the target on *this* map is the shortest path, and asking the graph
-        // first could miss it.
+        // A transition on this map is the shortest path, and the graph could miss it.
         Self::enter_map_action(actions, target, None)
             .or_else(|| world_graph.pick_shortest_path_action(&Self::with_every_crossing(map, actions), target))
     }
 
-    /// `actions` and, after them, every other reachable crossing into a neighbour it crosses to.
-    /// `actions()` offers only the nearest crossing per neighbour, and a border cut up by ledges or
-    /// a standing trainer lands each run in a different section: coming back out of a pocket, the
-    /// nearest crossing is the pocket's own, so the planner has to be able to score the others.
-    /// The offered rows stay first so a tie keeps them.
+    /// `actions`, then every other reachable crossing into the same neighbours: out of a pocket the
+    /// nearest crossing is the pocket's own. Offered rows stay first so a tie keeps them.
     fn with_every_crossing(map: &MetaTileMap, actions: &[OverworldAction]) -> Vec<OverworldAction> {
         let mut candidates = actions.to_vec();
         let mut neighbours: Vec<Map> = vec![];
@@ -2259,12 +1956,10 @@ impl DeterministicPolicy {
         candidates
     }
 
-    /// The menu row that puts a boulder on `target` — a Strength switch or a floor hole — or
-    /// `None` while the floor offers none.
+    /// The row that puts a boulder on switch or hole `target`, or `None` while there is none.
     fn boulder_goal_action(state: &GameState, actions: &[OverworldAction], target: Point8,
                            boulder: Option<Point8>, hole: bool) -> Option<OverworldAction> {
         match boulder {
-            // A named boulder is asked for directly.
             Some(which) => state.map.boulder_goal_action(which, target, hole),
             None => actions.iter()
                 .find(|action| matches!(action.tile, MetaTile::BoulderGoal { at, .. } if at == target))
@@ -2272,17 +1967,14 @@ impl DeterministicPolicy {
         }
     }
 
-    /// The action that takes the warp/connection to `to_map` (matching raw `to_position` when
-    /// given) from the current map, or `None` if no such transition is reachable here.
+    /// The nearest action taking a transition to `to_map` (at raw `to_position` if given).
     fn enter_map_action(actions: &[OverworldAction], to_map: Map, to_position: Option<Point8>) -> Option<OverworldAction> {
-        // Prefer the *nearest* matching warp/connection.
         actions.iter().filter(|a| match a.tile {
             MetaTile::Warp { to_map: m, to_position: p }
             | MetaTile::Connection { to_map: m, to_position: p } => {
                 m == to_map && to_position.map_or(true, |want| want == p)
             }
-            // Water connection (a surfable map edge): matched by destination map only — it
-            // carries no landing `to_position`.
+            // A water edge carries no landing, so it matches on the map alone.
             MetaTile::ConnectionWater(m) => m == to_map,
             _ => false,
         }).min_by_key(|a| a.route.len()).cloned()
@@ -2306,11 +1998,9 @@ impl Policy for DeterministicPolicy {
     fn pick_overworld_action(&mut self, state: &GameState, world_graph: &WorldGraph) -> Option<OverworldAction> {
         // The cursor is written here rather than at every `pop_front`.
         self.record_progress();
-        // Back in the overworld = the previous battle is over; clear the per-battle grind
-        // participation flag.
+        // Back in the overworld, so the last battle is over.
         self.trainee_participated = false;
-        // Same scope, same reason: the next catch battle is a fresh target at full HP and its own
-        // catch roll, so what the last one spent says nothing about it.
+        // The next catch battle is a fresh target, so the last one's spend says nothing.
         self.catch_ball_baseline = None;
         if self.blackout_pending {
             self.blackout_pending = false;
@@ -2329,8 +2019,7 @@ impl Policy for DeterministicPolicy {
 
         let actions = state.map.actions();
 
-        // ── Go and heal before the next fight, not after it ─────────────────── See
-        // `needs_a_centre`.
+        // ── Heal before the next fight, not after it (`needs_a_centre`) ──
         if self.heal_return.is_none()
             && !self.heal_unreachable
             && (state.map.map.is_overworld() || self.queue.front().is_some_and(step_finds_its_own_way_back))
@@ -2345,9 +2034,7 @@ impl Policy for DeterministicPolicy {
             self.heal_hops = 0;
         }
 
-        // ── Heal-return detour ──────────────────────────────────────────────── When the active
-        // Pokémon ran low on PP in a wild battle we fled and stored the target Pokémon Center in
-        // `heal_return`.
+        // ── Heal detour ──
         if let Some(pokecenter) = self.heal_return {
             if state.map.map == pokecenter {
                 // Arrived — find and interact with the Nurse.
@@ -2356,9 +2043,7 @@ impl Policy for DeterministicPolicy {
                     self.heal_route_stuck = 0;
                     return Some(action.clone());
                 }
-                // (falls through to the give-up below) Pokecenter map but Nurse tile not visible
-                // yet — wait, but not for ever: the sprite is a tile or two away on a map that
-                // always has one, so this is the arrival settling rather than a state to sit in.
+                // No Nurse yet: the arrival settling, bounded.
                 self.heal_route_stuck += 1;
                 if self.heal_route_stuck < Self::MAX_HEAL_ROUTE_WAIT {
                     return None;
@@ -2373,26 +2058,19 @@ impl Policy for DeterministicPolicy {
                 self.heal_return = None;
                 self.heal_route_stuck = 0;
                 self.heal_hops = 0;
-                // Latched for the reason the arm below latches it: the low-PP check would re-arm
-                // the detour on the very next wild encounter and walk the same circle again.
+                // Latched, or the low-PP check re-arms the same circle on the next encounter.
                 self.heal_unreachable = true;
             } else if let Some(action) = Self::route_toward(world_graph, &state.map, &actions, pokecenter)
-                // Then the town it stands in, which is a strictly easier question and the one
-                // that actually gets a hurt party home: towns are joined by walkable connections,
-                // so every hop of that walk is a transition the current map's own `actions()`
-                // offers, and the door is in the town's.
+                // Failing that, the Centre's town: towns join by walkable connections.
                 .or_else(|| pokecenter.pokemon_center_town()
                     .filter(|&town| town != state.map.map)
                     .and_then(|town| Self::route_toward(world_graph, &state.map, &actions, town)))
             {
-                // Still travelling — take the next step toward the pokecenter.
                 self.heal_route_stuck = 0;
                 self.heal_hops += 1;
                 return Some(action);
             } else {
-                // Right after a black-out warp the map and its actions are briefly unsettled, so
-                // wait rather than abandoning on the first miss — the same reason
-                // `gym_route_stuck` waits.
+                // Right after a black-out the map is briefly unsettled, so wait before giving up.
                 self.heal_route_stuck += 1;
                 if self.heal_route_stuck < Self::MAX_HEAL_ROUTE_WAIT {
                     return None;
@@ -2406,8 +2084,7 @@ impl Policy for DeterministicPolicy {
             }
         }
 
-        // ── Walk back to where the detour set off from ──────────────────────── A heal detour
-        // that does not *return* strands the step it interrupted.
+        // ── Walk back: a detour that does not return strands the step it interrupted ──
         if let Some(from) = self.heal_came_from {
             let front_reroutes = self.queue.front().is_some_and(step_finds_its_own_way_back);
             if self.heal_return.is_some() || from == state.map.map || front_reroutes {
@@ -2434,13 +2111,10 @@ impl Policy for DeterministicPolicy {
                         self.queue.pop_front();
                         continue;
                     }
-                    // Explicit single map transition: take exactly this warp/connection.
                     if let Some(action) = Self::enter_map_action(&actions, to_map, to_position) {
                         return Some(action);
                     }
-                    // A specific connection landing that isn't the nearest crossing (which is all
-                    // `actions()` emits) — build it directly (e.g. Route 13→14 open row, not the
-                    // pocket).
+                    // A landing `actions()` does not offer, as it offers only the nearest.
                     if let Some(pos) = to_position {
                         if let Some(action) = state.map.connection_action(to_map, pos) {
                             return Some(action);
@@ -2454,15 +2128,12 @@ impl Policy for DeterministicPolicy {
                     Self::route_toward(world_graph, &state.map, &actions, to_map)
                 },
                 PolicyStep::EnterMapIfReachable { to_map } => {
-                    // Workstream L.
                     if state.map.map == to_map {
                         self.enter_stuck = 0;
                         self.queue.pop_front();
                         continue;
                     }
-                    // The counter runs on every poll, not only when there is no action to take —
-                    // because the failure this step exists to survive is not always "nowhere to
-                    // go".
+                    // Counted on every poll: the failure this survives is not always nowhere to go.
                     self.enter_stuck += 1;
                     if self.enter_stuck >= Self::MAX_ENTER_WAIT {
                         println!("[policy] TOUR: gave up entering {to_map} from {} after {} ticks",
@@ -2504,9 +2175,7 @@ impl Policy for DeterministicPolicy {
                         self.queue.pop_front();
                         continue;
                     } else if on_map.sprites().iter().any(|s| sprite_is_species(s.name, species)) {
-                        // STATIC encounter: the legendaries (Articuno on Seafoam B4F, …) are not
-                        // wild spawns at all — they are ordinary map sprites named after the
-                        // species, and the battle starts by walking into one and pressing A.
+                        // A static encounter (a legendary) is a map sprite named after its species.
                         match actions.iter().find(|a| matches!(a.tile, MetaTile::Sprite(n) if sprite_is_species(n, species))) {
                             Some(action) => {
                                 println!("[policy] static encounter: routing to {species} at {} ({} steps)",
@@ -2515,7 +2184,6 @@ impl Policy for DeterministicPolicy {
                                 Some(action.clone())
                             }
                             None => {
-                                // Not actionable yet.
                                 self.catch_wander_stuck += 1;
                                 let spent = state.map.sprites.iter()
                                     .any(|s| s.hidden && sprite_is_species(s.name, species));
@@ -2535,18 +2203,14 @@ impl Policy for DeterministicPolicy {
                     } else if let Some(action) = actions.iter()
                         .filter(|a| matches!(a.tile, MetaTile::Sprite(_)))
                         .max_by_key(|a| a.route.len()) {
-                        // No grass (a cave): walk to the farthest reachable object (e.g. a
-                        // boulder).
+                        // No grass (a cave): walk to the farthest reachable object.
                         self.catch_wander_stuck = 0;
                         Some(action.clone())
                     } else if let Some(action) = state.map.wander_action() {
-                        // No grass and no reachable cave object (a pocket, or a water map like
-                        // Seafoam): pace to the farthest reachable walkable tile —
-                        // walking/Surfing fires per-step encounters just the same.
+                        // Pace to the farthest walkable tile; Surfing rolls too.
                         self.catch_wander_stuck = 0;
                         Some(action)
                     } else {
-                        // No encounter source THIS tick.
                         self.catch_wander_stuck += 1;
                         if self.catch_wander_stuck < 400 {
                             None // wait
@@ -2559,7 +2223,6 @@ impl Policy for DeterministicPolicy {
                     }
                 },
                 PolicyStep::SweepDex { on_map, min_share, .. } => {
-                    // Workstream H (H5).
                     use crate::pokemon::postgame::aides;
                     if state.map.map != on_map {
                         let action = Self::route_toward(world_graph, &state.map, &actions, on_map);
@@ -2587,8 +2250,7 @@ impl Policy for DeterministicPolicy {
                     } else if let Some(action) = actions.iter()
                         .filter(|a| matches!(a.tile, MetaTile::Sprite(_)))
                         .max_by_key(|a| a.route.len()) {
-                        // A cave: pace between the farthest objects, which fires per-step
-                        // encounters.
+                        // A cave: pace between the farthest objects.
                         self.catch_wander_stuck = 0;
                         Some(action.clone())
                     } else if let Some(action) = state.map.wander_action() {
@@ -2617,10 +2279,8 @@ impl Policy for DeterministicPolicy {
                             self.queue.pop_front();
                             continue;
                         }
-                        // The grind mon fainted.
                         if pokemon.current_hp == 0 {
-                            // The detour's give-up has to be honoured *here*, or the give-up is
-                            // not one.
+                            // Honour the detour's give-up here, or it is not one.
                             if self.heal_unreachable {
                                 println!("[policy] grind mon (slot {slot}) is fainted and no Pokémon \
                                     Centre can be routed to from {} — giving up on the grind",
@@ -2630,9 +2290,7 @@ impl Policy for DeterministicPolicy {
                                 continue;
                             }
                             if let Some(center) = self.last_pokemon_center {
-                                // Counted, because the round trip is the grind's *other* cost and
-                                // the only way to price a site against another one is to know how
-                                // often it sends the trainee home.
+                                // Counted: the round trip is the grind's other cost.
                                 self.grind_heal_trips += 1;
                                 println!("[policy] grind mon (slot {slot}) fainted — routing to {center} to heal (trip #{})",
                                     self.grind_heal_trips);
@@ -2657,14 +2315,11 @@ impl Policy for DeterministicPolicy {
                         .filter(|a| a.tile == MetaTile::Grass)
                         .min_by_key(|a| a.route.len())
                     {
-                        // Walk in the NEAREST grass to trigger encounters — ping-pong locally
-                        // rather than marching across the map.
+                        // The nearest grass, so the grind ping-pongs locally.
                         Some(action.clone())
                     } else if !state.map.has_grass_tiles() && let Some(action) = actions.iter()
                         .filter(|a| match a.tile {
-                            // Pace to the farthest reachable object so wild encounters (which
-                            // fire on EVERY step in a cave/building) keep coming as the trainee
-                            // ping-pongs across the map.
+                            // Every cave step rolls: pace between non-ball, non-boulder objects.
                             MetaTile::Sprite(name) => !state.map.sprites.iter().any(|s| s.name == name
                                 && matches!(s.picture_id, crate::pokemon::sprite::PictureId::PokeBall
                                                         | crate::pokemon::sprite::PictureId::Boulder)),
@@ -2677,8 +2332,7 @@ impl Policy for DeterministicPolicy {
                     {
                         Some(action)
                     } else {
-                        // The pacing branch above is for a *cave*, and letting a route into it is
-                        // an infinite loop that generates nothing.
+                        // Pacing is only for a grassless map; elsewhere it loops.
                         println!(
                             "[policy] cannot level up a Pokemon on {}: {}",
                             state.map.map,
@@ -2699,8 +2353,7 @@ impl Policy for DeterministicPolicy {
                         self.queue.pop_front();
                         continue;
                     } else if state.map.map != leader.map() {
-                        // Losing to the leader blacks the player out to the last Pokémon Center —
-                        // which is the whole reason this step never pops itself on a defeat.
+                        // A loss blacks out to a Centre, so this never pops on a defeat.
                         match Self::route_toward(world_graph, &state.map, &actions, leader.map()) {
                             Some(action) => { self.gym_route_stuck = 0; Some(action) }
                             None if actions.iter().any(|a| matches!(a.tile, MetaTile::Cut { .. })) => {
@@ -2711,10 +2364,7 @@ impl Policy for DeterministicPolicy {
                                 continue;
                             }
                             None => {
-                                // Right after the black-out warp the map and its actions are
-                                // briefly unsettled, so wait rather than giving up on the first
-                                // miss; past the bound the gym really is unreachable (wrong
-                                // order, a gate still shut) and the run moves on.
+                                // Just after a black-out the map is unsettled: wait, bounded.
                                 self.gym_route_stuck += 1;
                                 if self.gym_route_stuck < Self::MAX_GYM_ROUTE_WAIT {
                                     None
@@ -2737,9 +2387,7 @@ impl Policy for DeterministicPolicy {
                         self.queue.push_front(PolicyStep::CutTree { map: state.map.map });
                         continue;
                     } else {
-                        // The leader isn't reachable yet — in a gated gym (Cinnabar's quiz-gate
-                        // snake maze) the path opens only by beating the junior trainers, each of
-                        // whom unlocks the gate ahead.
+                        // In a gated gym (Cinnabar) each junior trainer beaten opens a gate.
                         use crate::pokemon::map_metadata::PlayerFacingDirection;
                         let mut cands: Vec<_> = state.map.sprites.iter()
                             .filter(|s| !s.hidden && s.name != leader.name && !s.name.contains("Guide")
@@ -2752,14 +2400,11 @@ impl Policy for DeterministicPolicy {
                         let mut chosen = None;
                         for (pos, name, route) in cands {
                             if route.is_empty() {
-                                // Standing in this trainer's LOS but not in battle → it's already
-                                // beaten.
+                                // In its sight with no battle: already beaten.
                                 self.gym_beaten.insert(pos);
                                 continue;
                             }
-                            // Stuck detection: re-targeting the same trainer from the same spot
-                            // for many ticks (its after-battle text keeps aborting the approach)
-                            // → it's beaten.
+                            // Re-targeted from one spot 40 times: after-battle text, so beaten.
                             match self.gym_engage {
                                 Some((t, p, w)) if t == pos && p == cur => {
                                     if w + 1 > 40 {
@@ -2781,16 +2426,13 @@ impl Policy for DeterministicPolicy {
                 PolicyStep::BattleTrainer { trainer } => {
                     use crate::pokemon::map_metadata::PlayerFacingDirection;
                     if state.map.map != trainer.map() {
-                        // Not in the trainer's room yet (a preceding `enter` normally places us
-                        // here).
                         let action = Self::route_toward(world_graph, &state.map, &actions, trainer.map());
                         if action.is_none() { self.queue.pop_front(); continue; }
                         action
                     } else if let Some(sprite) = state.map.sprites.iter().find(|s| !s.hidden && s.name == trainer.name) {
                         let pos = sprite.position;
                         let cur = state.map.player_position;
-                        // Approach the side the trainer is actually looking at, not always from
-                        // below.
+                        // Approach from the side the trainer faces.
                         let approach = match sprite.facing {
                             crate::pokemon::sprite::SpriteFacing::Down => PlayerFacingDirection::Up,
                             crate::pokemon::sprite::SpriteFacing::Up => PlayerFacingDirection::Down,
@@ -2805,8 +2447,7 @@ impl Policy for DeterministicPolicy {
                                 continue;
                             }
                             Some(route) => {
-                                // Stuck detection: re-targeting from the same frozen spot (its
-                                // after-battle text keeps aborting the approach) → beaten.
+                                // The same frozen-spot test as the gym arm.
                                 match self.gym_engage {
                                     Some((t, p, w)) if t == pos && p == cur => {
                                         if w + 1 > 40 { self.gym_engage = None; self.queue.pop_front(); continue; }
@@ -2829,8 +2470,7 @@ impl Policy for DeterministicPolicy {
                 PolicyStep::Interact(sprite) => {
                     // Prefer the sprite visible on the CURRENT map.
                     if let Some(action) = actions.iter().find(|a| a.tile == MetaTile::Sprite(sprite.name)) {
-                        // A heal is finished when the party is full, not when the conversation
-                        // lands — and this step popped on the latter.
+                        // A heal ends when the party is full, not when the talk lands.
                         if sprite.name == "Nurse" && !party_is_fresh(state)
                             && self.heal_waits < Self::MAX_HEAL_WAITS {
                             self.heal_waits += 1;
@@ -2846,8 +2486,7 @@ impl Policy for DeterministicPolicy {
                     }
                     let map = sprite.map();
                     if state.map.map == map {
-                        // On the sprite's map but it isn't actionable yet (e.g. still walking on,
-                        // or the sprite is briefly hidden by a script) — wait for it.
+                        // Not actionable yet (walking on, or hidden by a script): wait.
                         None
                     } else {
                         let action = Self::route_toward(world_graph, &state.map, &actions, map);
@@ -2868,8 +2507,7 @@ impl Policy for DeterministicPolicy {
                     }
                     let map = sprite.map();
                     if state.map.map == map {
-                        // On the sprite's map but it isn't in the reachable set — either still
-                        // loading, or walled off by the maze.
+                        // Loading, or walled off by the maze.
                         self.interact_skip_waits += 1;
                         if self.interact_skip_waits > 250 {
                             println!("[policy] {} unreachable after waiting — skipping", sprite);
@@ -2898,21 +2536,16 @@ impl Policy for DeterministicPolicy {
                         }
                         action
                     } else if let Some(action) = actions.iter().find(|a| a.tile == MetaTile::Pc) {
-                        // On the PC's map and the PC is reachable — face it and press A, then
-                        // advance.
                         self.queue.pop_front();
                         return Some(action.clone());
                     } else {
-                        // On the map but the PC isn't reachable yet (e.g. a script is still
-                        // running) — wait for it to become actionable.
+                        // A script may still be running: wait.
                         None
                     }
                 }
-                // Reserved seams (task 0.8) — inert until their workstream implements them.
                 PolicyStep::UseFlash { .. } => None, // on the map — `pick_field_move` drives the menu
                 PolicyStep::Fish { map, .. } => {
-                    // Routing only, like `UseItemPc` below: once we are standing on `map`,
-                    // `pick_field_move` picks the water tile and hands each cast to the driver.
+                    // Routing only; `pick_field_move` hands each cast to the driver.
                     if state.map.map != map {
                         let action = Self::route_toward(world_graph, &state.map, &actions, map);
                         if action.is_none() {
@@ -2927,7 +2560,6 @@ impl Policy for DeterministicPolicy {
                     }
                 }
                 PolicyStep::SafariHunt { targets, map, max_trips } => {
-                    // Workstream E.
                     use crate::pokemon::postgame::safari::Hunt;
                     match crate::pokemon::postgame::safari::pick(
                         &mut self.safari, state, world_graph, &actions, targets, map, max_trips)
@@ -2960,9 +2592,8 @@ impl Policy for DeterministicPolicy {
                 }
                 PolicyStep::RedeemPrize { .. } => None, // on the map — handed to `pick_field_move`
                 PolicyStep::PartyScript { .. } => None, // already routed by a preceding `enter` step
-                PolicyStep::UseBagItem { .. } => None,  // **I** — `pick_field_move` owns the menus
+                PolicyStep::UseBagItem { .. } => None,  // `pick_field_move` owns the menus
                 PolicyStep::UseItemsInBattle { on_map, items } => {
-                    // I3/I4.
                     if state.map.map != on_map {
                         let action = Self::route_toward(world_graph, &state.map, &actions, on_map);
                         if action.is_none() {
@@ -3041,15 +2672,13 @@ impl Policy for DeterministicPolicy {
                         let present = state.map.sprites.iter().any(|s| !s.hidden && s.name == sprite.name);
                         if present { self.collect_item_seen = true; }
                         if !present && self.collect_item_seen {
-                            // The item was here and is now gone — picked up (or removed by a
-                            // script).
+                            // Seen and now gone: picked up, or removed by a script.
                             self.collect_item_seen = false;
                             self.collect_item_waits = 0;
                             self.queue.pop_front();
                             continue;
                         }
-                        // Bounded, because the completion test is "the sprite went away" and a
-                        // refused pickup never satisfies it.
+                        // Bounded: a refused pickup never makes the sprite go.
                         self.collect_item_waits += 1;
                         if self.collect_item_waits >= Self::MAX_COLLECT_ITEM_WAITS {
                             println!("[policy] gave up collecting {sprite} on {map} after {} polls{}",
@@ -3065,13 +2694,10 @@ impl Policy for DeterministicPolicy {
                             continue;
                         }
                         if !present {
-                            // Not yet revealed (an item ball hidden until its guard is beaten) —
-                            // wait.
+                            // Not yet revealed (a ball hidden until its guard is beaten).
                             None
                         } else {
-                            // Keep walking to and pressing A on the item until it disappears; do
-                            // NOT pop on issue, so a battle/script interruption (Mt Moon Super
-                            // Nerd) mid-walk doesn't abandon the pickup.
+                            // Stay until the sprite goes, so a battle mid-walk drops nothing.
                             actions.iter()
                                 .find(|a| a.tile == MetaTile::Sprite(sprite.name))
                                 .cloned()
@@ -3098,8 +2724,7 @@ impl Policy for DeterministicPolicy {
                         && state.money == money
                         && held == state.bag.iter().find(|i| i.id == item.id).map_or(0, |i| i.quantity)
                     {
-                        // A visit that moved neither the money nor the bag is the wallet talking,
-                        // not a dropped confirm.
+                        // Neither money nor bag moved: the wallet, not a dropped confirm.
                         let bag_full = state.bag.len() >= crate::pokemon::bag::Bag::MAX_ITEMS
                             && !state.bag.iter().any(|i| i.id == item.id);
                         println!(
@@ -3114,15 +2739,13 @@ impl Policy for DeterministicPolicy {
                         self.queue.pop_front();
                         continue;
                     } else if self.mart_attempts >= Self::MAX_MART_ATTEMPTS {
-                        // The shop re-opened this many times without the item appearing.
                         println!("[policy] gave up buying {} from {} after {} attempts", item, map, self.mart_attempts);
                         self.mart_attempts = 0;
                         self.mart_baseline = None;
                         self.queue.pop_front();
                         continue;
                     } else {
-                        // If triggered in the overworld, talk to the "Clerk" sprite to (re)open
-                        // the pokemart menu.
+                        // Talk to the clerk to (re)open the mart.
                         let action = actions.iter()
                             .find(|a| matches!(a.tile, MetaTile::Sprite(sprite) if sprite == "Clerk" || sprite == "Clerk 1"));
 
@@ -3149,17 +2772,14 @@ impl Policy for DeterministicPolicy {
                     None
                 }
                 PolicyStep::MovePokemonToFront { .. } | PolicyStep::Fly { .. } => {
-                    // Handled by `pick_field_move` (a direct RAM reorder; the Fly menu chain and
-                    // town map, workstream B); wait without advancing.
+                    // Handled by `pick_field_move`.
                     None
                 }
                 PolicyStep::UseStrength { .. } => {
-                    // Handled by `pick_field_move` (party-menu field-move chain); wait without
-                    // advancing.
+                    // Handled by `pick_field_move`.
                     None
                 }
-                // One goal row carries the whole puzzle, for the scripted route exactly as for a
-                // model.
+                // One goal row carries the whole puzzle, as it does for a model.
                 PolicyStep::SolveBoulders { switch, boulder } =>
                     Self::boulder_goal_action(state, &actions, switch, boulder, false),
                 PolicyStep::DropBoulderInHole { hole, boulder } =>
@@ -3177,8 +2797,7 @@ impl Policy for DeterministicPolicy {
                         // Facing a tree — `pick_field_move` performs the cut; just wait.
                         None
                     } else {
-                        // Route to face a reachable tree; once none remain, the trees are cut —
-                        // done.
+                        // Face a reachable tree; when none remain, done.
                         match actions.iter().find(|a| matches!(a.tile, MetaTile::Cut { .. })).cloned() {
                             Some(action) => Some(action),
                             None => { self.queue.pop_front(); continue; }
@@ -3214,8 +2833,7 @@ impl Policy for DeterministicPolicy {
                     }
                 }
                 PolicyStep::UseElevator { .. } => {
-                    // Handled by `pick_field_move` once on the elevator map (an
-                    // `enter(...Elevator)` step precedes this one).
+                    // Handled by `pick_field_move`; an `enter` put the agent here.
                     let in_elevator = matches!(state.map.map,
                         Map::RocketHideoutElevator | Map::SilphCoElevator | Map::CeladonMartElevator);
                     if !in_elevator {
@@ -3226,9 +2844,7 @@ impl Policy for DeterministicPolicy {
                     None
                 }
                 PolicyStep::UseFieldItem { .. } => {
-                    // Facing the target and driving the bag menus is handled by `pick_field_move`
-                    // / `UsingFieldItem` once the target sprite is observed on the current map (a
-                    // preceding EnterMap places the agent on its map).
+                    // Handled by `pick_field_move` once the target sprite is on this map.
                     None
                 }
                 PolicyStep::UseVendingMachine { .. } => None, // driven by `pick_field_move`
@@ -3242,22 +2858,17 @@ impl Policy for DeterministicPolicy {
         // Where a black-out will be reported against — see `last_battle_map`.
         self.last_battle_map = Some(state.map.map);
 
-        // Inside Victory Road the low-PP / low-HP "flee to a Pokémon Center" detours must be
-        // SUPPRESSED — fleeing out of the multi-floor puzzle to walk all the way back to Viridian
-        // abandons the solve and stalls.
+        // No Centre detours in a Centre-less dungeon: fleeing the puzzle abandons it.
         let in_center_less_dungeon = matches!(state.map.map,
             Map::VictoryRoad2F | Map::VictoryRoad3F
             | Map::SeafoamIslands1F | Map::SeafoamIslandsB1F | Map::SeafoamIslandsB2F
             | Map::SeafoamIslandsB3F | Map::SeafoamIslandsB4F);
 
-        // A ghost battle answers itself: `battle_options` has already narrowed the list to `Run`
-        // alone (see `battle::is_ghost_battle`), and this says so out loud rather than trusting
-        // the arms below to arrive at it.
+        // A ghost battle offers only `Run` (`battle::is_ghost_battle`).
         if is_ghost_battle(state.map.map, &state.bag, battle_state.battle_type) {
             return Some(BattleAction::Run);
         }
 
-        // Safari Zone.
         if battle_state.battle_type == BattleType::Safari {
             if let Some(&PolicyStep::SafariHunt { targets, .. }) = self.queue.front() {
                 if let Some(action) = crate::pokemon::postgame::safari::pick_battle_action(state, targets, &actions) {
@@ -3267,14 +2878,12 @@ impl Policy for DeterministicPolicy {
             return Some(BattleAction::Run);
         }
 
-        // Workstream C.
         if let Some(&PolicyStep::Fish { goal, .. }) = self.queue.front() {
             if let Some(action) = crate::pokemon::postgame::fishing::pick_battle_action(state, goal, &actions) {
                 return Some(action);
             }
         }
 
-        // Workstream I3/I4.
         if let Some(&PolicyStep::UseItemsInBattle { items, .. }) = self.queue.front() {
             use crate::pokemon::postgame::items;
             if battle_state.battle_type == BattleType::Wild {
@@ -3305,9 +2914,7 @@ impl Policy for DeterministicPolicy {
             return Some(BattleAction::Run);
         }
 
-        // ── Low-PP flee ────────────────────────────────────────────────────── If every damaging
-        // move the active Pokémon has is at ≤10% of its max PP, run from wild battles and queue a
-        // detour to the last visited Pokémon Center.
+        // ── Low-PP flee: run from wild battles and detour to the last Centre ──
         if battle_state.battle_type == BattleType::Wild
             && self.heal_return.is_none()
             && !self.heal_unreachable
@@ -3323,8 +2930,7 @@ impl Policy for DeterministicPolicy {
             }
         }
 
-        // If the active Pokémon is fainted (forced switch screen), send the healthiest available
-        // party member.
+        // Fainted: send the healthiest member.
         if battle_state.player.current_hp == 0 {
             return actions.iter()
                 .filter(|a| matches!(a, BattleAction::SwitchPokemon { .. }))
@@ -3335,20 +2941,14 @@ impl Policy for DeterministicPolicy {
                 .cloned();
         }
 
-        // ── Flee obstacle wilds during Victory Road boulder tasks / the HM-slave catch ───────
-        // Cave wilds here are pure obstacles: fighting each one drains the lead's damaging-move
-        // PP over the long multi-floor traversal (the 27-push 3F solve alone triggers dozens)
-        // until it Struggles itself — and its team — into a black-out that boots the run to
-        // Viridian.
+        // ── Flee obstacle wilds: in a Centre-less dungeon each one drains PP toward a black-out ──
         if battle_state.battle_type == BattleType::Wild
             && actions.iter().any(|a| matches!(a, BattleAction::Run))
         {
             let flee = match self.queue.front() {
                 Some(PolicyStep::CatchPokemon { .. }) | Some(PolicyStep::SweepDex { .. }) =>
                     self.catch_target(state, battle_state.enemy.species).is_none(),
-                // A grind is the one step whose whole purpose is the encounter, so the obstacle
-                // reasoning above is exactly inverted for it — the same way `CatchPokemon` is
-                // exempt one line up.
+                // A grind is for the encounter, so the obstacle rule is inverted for it.
                 Some(PolicyStep::GrindUntilLevel { .. }) => false,
                 _ => in_center_less_dungeon,
             };
@@ -3365,20 +2965,14 @@ impl Policy for DeterministicPolicy {
             _ => self.train_slot,
         };
         if let Some(slot) = train_slot {
-            // ── Grind hand-off (prevents the trainee EVER fainting) ────────────────────────────
-            // A weak, underlevelled trainee on high-XP wilds (a lv34 Vaporeon vs Route 23's lv40+
-            // wilds) gets out-sped and one-shot before a "heal/switch when low" reaction can fire
-            // — and a faint deep in ledge-strewn Route 23 strands the faint-recovery trek and
-            // stalls the run.
+            // ── Grind hand-off: an underlevelled trainee is one-shot before a low-HP reaction,
+            // and a faint far from a Centre stalls the run ──
             let enemy_threatens = battle_state.enemy.level + 6 >= battle_state.player.level;
             if is_grinding && battle_state.active_party_slot == slot && !self.trainee_participated
                 && enemy_threatens
             {
                 if let Some(sw) = actions.iter()
-                    // Tank must out-level the trainee and be above the 25% heal threshold, so it
-                    // stays a valid hand-off target between battles (it tops itself up via
-                    // heal-at-25% + the free Viridian heal on the low-PP flee) rather than
-                    // dropping out and re-exposing the trainee.
+                    // The tank out-levels the trainee and has over 25% HP, so it stays a hand-off.
                     .filter(|a| matches!(a, BattleAction::SwitchPokemon { pokemon, .. }
                         if pokemon.current_hp as u32 * 4 > pokemon.stats.hp as u32 && pokemon.level > battle_state.player.level))
                     .max_by_key(|a| match a { BattleAction::SwitchPokemon { pokemon, .. } => pokemon.level, _ => 0 })
@@ -3400,7 +2994,7 @@ impl Policy for DeterministicPolicy {
             }
         }
 
-        // This sits ABOVE the catch-throw block, and that ordering is the whole of it.
+        // Above the catch throw, or unreachable for a whole hunt: a throw is a turn not defending.
         if battle_state.player.remaining_hp() < 0.25 {
             let potion_rank = |id: ItemId| match id {
                 ItemId::FullRestore => 4, ItemId::MaxPotion => 3, ItemId::HyperPotion => 2,
@@ -3418,10 +3012,8 @@ impl Policy for DeterministicPolicy {
         // When catching, throw a Pokéball immediately if one is available.
         if let Some(ball) = self.catch_target(state, battle_state.enemy.species) {
             let species = &battle_state.enemy.species;
-            // Wild only.
             if battle_state.battle_type == BattleType::Wild {
-                // A step may pin its ball so an incidental catch doesn't spend the Master Ball;
-                // fall back to the best in the bag if that ball has run out.
+                // A step may pin its ball so an incidental catch spares the Master Ball.
                 let chosen = ball
                     .and_then(|id| state.bag.iter().find(|i| i.id == id && i.quantity > 0))
                     .or_else(|| state.bag.best_pokeball());
@@ -3429,16 +3021,13 @@ impl Policy for DeterministicPolicy {
                     if let Some(use_pokeball_action) = actions.iter()
                         .find(|a| matches!(a, BattleAction::UseItem { item, .. } if item.id == best_pokeball.id )) {
 
-                        // Catch-rate-3 targets (the legendaries) are paralysed and then only
-                        // thrown at — never weakened.
+                        // Catch-rate-3 targets (legendaries) are paralysed, then only thrown at.
                         if let Some(action) = crate::pokemon::postgame::legendaries::pre_catch_action(state, *species, &actions, Some(use_pokeball_action)) {
                             return Some(action);
                         }
 
-                        // Weaken before throwing when the target is above half HP — the move that
-                        // does the most damage without knocking it out — but never for a Master
-                        // Ball (a 100% catch), and never on the first throw at a target our
-                        // attacker heavily out-levels.
+                        // Weaken above half HP without knocking out, except for a Master Ball or a
+                        // first throw at a much weaker target.
                         let thrown = self.catch_ball_baseline.get_or_insert(best_pokeball.quantity)
                             .saturating_sub(best_pokeball.quantity);
                         if battle_state.enemy.remaining_hp() > 0.5
@@ -3472,8 +3061,7 @@ impl Policy for DeterministicPolicy {
                 })
             {
                 if let BattleAction::SwitchPokemon { pokemon, .. } = switch {
-                    // Only switch to a member that is a *genuine* alternative: meaningfully
-                    // healthy (>50% of its own max HP) AND at least the active mon's level.
+                    // Only a real alternative: over half its HP and at least the active level.
                     let healthy_enough = pokemon.stats.hp > 0
                         && pokemon.current_hp as u32 * 2 > pokemon.stats.hp as u32;
                     let strong_enough = pokemon.level >= battle_state.player.level;
@@ -3486,10 +3074,7 @@ impl Policy for DeterministicPolicy {
             }
         }
 
-        // Critically low HP with no way to recover in-battle — the <25% heal block above found no
-        // usable potion and the <15% switch block above found no healthy team-mate to swap in —
-        // so flee the wild battle and heal at a Pokémon Center instead of fighting on until the
-        // mon faints.
+        // No potion and no healthy team-mate: flee and heal rather than fight to a faint.
         let flee_below = match state.bag.iter().any(|i| matches!(i.id,
             ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion | ItemId::MaxPotion
             | ItemId::FullRestore) && i.quantity > 0) {
@@ -3512,20 +3097,16 @@ impl Policy for DeterministicPolicy {
             return Some(BattleAction::Run);
         }
 
-        // Elite-Four tactic: if the active mon can no longer hit the enemy hard (its best
-        // available move does < 1/3 of the enemy's max HP — e.g. a Blizzard/Surf-dry Vaporeon
-        // left with weak Bite against one of Lance's bulky dragons) but a healthy benched
-        // team-mate has a MUCH stronger move vs this enemy, switch to it.
+        // Elite Four: when the active mon's best move does under a third of the enemy's HP and a
+        // healthy bench mon hits much harder, switch.
         if battle_state.battle_type == BattleType::Trainer {
-            // `pp > 0`, and leaving it out was a livelock rather than a mis-rank.
+            // `pp > 0`: a 0-PP move scored here livelocks the switch.
             let move_dmg = |mon: &crate::pokemon::pokemon::PokemonSummary| -> u32 { mon.moves.iter().flatten()
                 .filter(|m| m.pp > 0)
                 .filter_map(|m| expected_damage(mon, m.name, &battle_state.enemy).map(|d| d as u32))
                 .max().unwrap_or(0) };
             let active_best = move_dmg(&battle_state.player);
             if (active_best * 3) < battle_state.enemy.stats.hp as u32 {
-                // The level gate here was doing the damage gate's job badly, and it kept the one
-                // mon that could win out of the fight.
                 let best_switch = actions.iter()
                     .filter(|a| matches!(a, BattleAction::SwitchPokemon { pokemon, .. }
                         if pokemon.current_hp as u32 * 2 > pokemon.stats.hp as u32))
@@ -3543,7 +3124,6 @@ impl Policy for DeterministicPolicy {
             }
         }
 
-        // 1.
         let result = pick_best_move(&battle_state, &actions, false);
         if result.is_some() {
             return result;
@@ -3577,17 +3157,13 @@ impl Policy for DeterministicPolicy {
             return Some(a.clone());
         }
 
-        // Last resort: a Fight move (Struggle if truly out of PP), else any non-item action such
-        // as a switch to a team-mate or Run.
+        // Last resort: a Fight move (Struggle), else any non-item action.
         let last_resort = actions.iter().find(|a| matches!(a, BattleAction::Fight { .. }))
             .or_else(|| actions.iter().find(|a| !matches!(a, BattleAction::UseItem { .. })))
             .or_else(|| actions.iter().find(|a| matches!(a, BattleAction::Fight { .. })))
             .cloned();
         if last_resort.is_none() {
-            // A policy that answers `None` for ever is indistinguishable from one that is
-            // thinking, and that is exactly how it presents: the agent sits in
-            // `BattleState::AwaitingPolicy` showing the main battle menu, the emulator runs, the
-            // watchdog never fires (it *is* being polled) and nothing is printed.
+            // A `None` for ever looks like thinking and the watchdog never fires, so say so.
             println!("[policy] no battle action to take against {} — options {:?}",
                 battle_state.enemy.species, actions);
         }
@@ -3632,9 +3208,7 @@ impl Policy for DeterministicPolicy {
             // Wait until we are on the right map — `pick_overworld_action` is doing the routing.
             if state.map.map == map {
                 match crate::pokemon::tile_map::pc_locations_for(map).first() {
-                    // Popped on issue, like `MovePokemonToFront`: the driver owns the operation
-                    // from here to completion and `pick_field_move` is not polled again until it
-                    // is done, so leaving the step queued would only re-issue it forever.
+                    // Popped on issue: the driver owns it to completion.
                     Some(&pc) => {
                         self.queue.pop_front();
                         return Some(FieldMove::UseItemPc { op, item, qty, pc });
@@ -3648,8 +3222,7 @@ impl Policy for DeterministicPolicy {
             }
         }
         if let Some(&PolicyStep::UsePcBox { op, map }) = self.queue.front() {
-            // Same hand-over as `UseItemPc` above, for the same reason: the box driver owns the
-            // walk to the PC tile and the A press that opens it, and the step pops on issue.
+            // Popped on issue, as `UseItemPc`.
             if state.map.map == map {
                 self.queue.pop_front();
                 return match crate::pokemon::tile_map::pc_locations_for(map).first() {
@@ -3659,28 +3232,24 @@ impl Policy for DeterministicPolicy {
             }
         }
         if let Some(&PolicyStep::PartyScript { script, slot }) = self.queue.front() {
-            // Workstream G.
             if state.map.map == script.map() {
                 self.queue.pop_front();
                 return crate::pokemon::postgame::gifts::pick(state, script, slot);
             }
         }
         if let Some(&PolicyStep::SellToMart { map, item }) = self.queue.front() {
-            // Workstream F.
             if state.map.map == map {
                 self.queue.pop_front();
                 return crate::pokemon::postgame::game_corner::pick_sale(state, item);
             }
         }
         if let Some(&PolicyStep::RedeemPrize { prize }) = self.queue.front() {
-            // Workstream F.
             if state.map.map == Map::GameCornerPrizeRoom {
                 self.queue.pop_front();
                 return crate::pokemon::postgame::game_corner::pick_prize(state, prize);
             }
         }
         if let Some(&PolicyStep::Fish { rod, map, goal }) = self.queue.front() {
-            // Workstream C.
             if state.map.map == map {
                 use crate::pokemon::postgame::fishing;
                 if fishing::goal_met(state, goal, self.fish_casts) {
@@ -3701,7 +3270,6 @@ impl Policy for DeterministicPolicy {
             }
         }
         if let Some(&PolicyStep::UseBagItem { item, target }) = self.queue.front() {
-            // Workstream I.
             use crate::pokemon::postgame::items;
             let baseline = *self.item_use_baseline
                 .get_or_insert_with(|| items::baseline(state, item));
@@ -3728,7 +3296,6 @@ impl Policy for DeterministicPolicy {
             }
         }
         if let Some(&PolicyStep::Fly { to }) = self.queue.front() {
-            // Workstream B.
             self.queue.pop_front();
             return Some(FieldMove::Fly { to });
         }
@@ -3742,8 +3309,7 @@ impl Policy for DeterministicPolicy {
             return Some(FieldMove::ReorderParty { slot });
         }
         if let Some(&PolicyStep::GrindUntilLevel { on_map, target, .. }) = self.queue.front() {
-            // The trainee leads the grind rather than being switched into it, and that is worth
-            // two separate things.
+            // The trainee leads the grind, so it takes the whole battle and the whole XP.
             if state.map.map == on_map
                 && let Some(slot) = target.resolve(state)
                 && slot != 0
@@ -3762,8 +3328,7 @@ impl Policy for DeterministicPolicy {
                 // On sight, and *not* on a low-HP threshold — a Full Heal restores no HP.
                 && let Some(cure) = [ItemId::FullHeal, ItemId::Antidote].into_iter()
                     .find(|&id| state.bag.iter().any(|i| i.id == id && i.quantity > 0))
-                // An Antidote is the cheap cure and only answers poison; a Full Heal answers
-                // both.
+                // An Antidote answers only poison; a Full Heal both.
                 && (cure == ItemId::FullHeal
                     || mon.status == crate::pokemon::status::PokemonStatus::Poisoned)
             {
@@ -3774,7 +3339,6 @@ impl Policy for DeterministicPolicy {
             }
         }
         if let Some(&PolicyStep::UseFlash { slot }) = self.queue.front() {
-            // Workstream H.
             if !state.map_is_dark {
                 println!("[policy] UseFlash: {} is lit — done", state.map.map);
                 self.queue.pop_front();
@@ -3837,9 +3401,7 @@ impl Policy for DeterministicPolicy {
             return None;
         }
         if let Some(&PolicyStep::TeachMove { item, target }) = self.queue.front() {
-            // Resolve every tick, not once: a `Species` target may still be a Poké Ball on the
-            // floor when the step reaches the front of the queue (the Celadon gift Eevee is), and
-            // the party it indexes into is re-read here anyway.
+            // Resolved every tick: a `Species` target may still be a ball on the floor.
             let resolved = target.resolve(state);
             let already_knows = hm_move(item).map_or(false, |mv| {
                 resolved.and_then(|slot| state.pokemon.get(slot as usize))
@@ -3850,8 +3412,7 @@ impl Policy for DeterministicPolicy {
                 self.queue.pop_front();
                 return None;
             }
-            // A TM that was never picked up cannot be taught, and the menu driver would loop
-            // forever looking for it in the bag.
+            // A TM never picked up cannot be taught, and the driver would loop looking for it.
             if !state.bag.iter().any(|b| b.id == item) {
                 println!("[policy] TeachMove: {item:?} is not in the bag — skipping");
                 self.queue.pop_front();
@@ -3867,9 +3428,8 @@ impl Policy for DeterministicPolicy {
                 println!("[policy] TeachMove: {target:?} is not in the party — waiting");
                 return None;
             };
-            // A machine aimed at a Pokémon outside its learnset is refused by the cartridge back
-            // into the party menu with the cursor untouched, which the driver has no exit from —
-            // see the on `FieldMove::TeachMove` in `agent.rs`.
+            // The cartridge refuses a machine outside the learnset back into the party menu,
+            // which the driver cannot leave.
             if state.pokemon.get(target_slot as usize)
                 .is_some_and(|mon| !crate::pokemon::learnset::can_learn(mon.species, item)) {
                 println!("[policy] TeachMove: {target:?} cannot learn {item:?} — skipping");
@@ -3922,13 +3482,11 @@ impl Policy for DeterministicPolicy {
             return Some(FieldMove::UseFieldMove { slot, move_index });
         }
         if let Some(&PolicyStep::EvolveWithStone { stone, target }) = self.queue.front() {
-            // "Evolved" = the species we started against is no longer at the target.
+            // Evolved once the species at the target differs from the one the step started with.
             let current = target.resolve(state).and_then(|slot| state.pokemon.get(slot as usize))
                 .map(|p| p.species);
             let Some(current) = current else {
-                // A `Species` target that no longer resolves has itself evolved away; a `Slot`
-                // target that does not resolve is off the end of the party and nothing can be
-                // done with it.
+                // A `Species` target gone has evolved away; a `Slot` one is off the end.
                 println!("[policy] EvolveWithStone: {target:?} is not in the party — done");
                 self.evolve_baseline = None;
                 self.queue.pop_front();
@@ -3988,8 +3546,7 @@ impl Policy for DeterministicPolicy {
             }
         }
         if let Some(&PolicyStep::UseElevator { panel, floor }) = self.queue.front() {
-            // The step completes once we've ridden the elevator out to another floor — i.e. once
-            // we're no longer standing in an elevator room.
+            // Done once ridden out of the elevator room.
             let in_elevator = matches!(state.map.map,
                 Map::RocketHideoutElevator | Map::SilphCoElevator | Map::CeladonMartElevator);
             if !in_elevator {
@@ -4001,8 +3558,7 @@ impl Policy for DeterministicPolicy {
         if let Some(&PolicyStep::UseFieldItem { item, target }) = self.queue.front() {
             let present = state.map.sprites.iter().any(|s| !s.hidden && s.name == target.name);
             if present { self.collect_item_seen = true; }
-            // Done once the target has been seen and is now gone (the item's effect — e.g. waking
-            // then defeating the Snorlax — removed it).
+            // Seen and now gone: the item's effect removed it (the Snorlax).
             if !present && self.collect_item_seen {
                 self.collect_item_seen = false;
                 println!("[policy] UseFieldItem: {} gone — done", target.name);
@@ -4021,8 +3577,7 @@ impl Policy for DeterministicPolicy {
                 self.queue.pop_front();
                 return None;
             }
-            // Reuse the face-a-bg-event-and-press-A mechanism; the vending menu opens with the
-            // cheapest drink at the cursor, so A-mashing buys it.
+            // The vending menu opens on the cheapest drink, so A buys it.
             return Some(FieldMove::CheckTrashCan { target: at, facing: None });
         }
         None
@@ -4031,11 +3586,8 @@ impl Policy for DeterministicPolicy {
     fn pick_mart_purchase(&mut self, state: &GameState) -> Option<Option<BagItem>> {
         let result = match self.queue.front() {
             Some(PolicyStep::BuyFromMart { item, .. }) => {
-                // Count this shop-open as an attempt.
                 self.mart_attempts += 1;
-                // Snapshot what this visit starts with, so the arm in `pick_overworld_action` can
-                // tell a visit that bought nothing because the wallet is empty from one that
-                // bought nothing because the confirm was dropped.
+                // So `pick_overworld_action` can tell an empty wallet from a dropped confirm.
                 self.mart_baseline = Some((
                     state.money,
                     state.bag.iter().find(|entry| entry.id == item.id).map_or(0, |entry| entry.quantity),
@@ -4076,45 +3628,16 @@ impl Policy for DeterministicPolicy {
             self.queue.front(),
             Some(PolicyStep::GrindUntilLevel { .. })
                 | Some(PolicyStep::CatchPokemon { .. })
-                // H5's sweep is one step per map and stays on it for every species that map owes
-                // — dozens of encounters, most of them fled.
                 | Some(PolicyStep::SweepDex { .. })
-                // Collecting the Mt Moon fossil means crossing a battle-heavy floor: each wild
-                // encounter interrupts the walk, and with a real (non-pimped) party those battles
-                // are slow, so the single CollectItem step legitimately sits for a long while.
                 | Some(PolicyStep::CollectItem(_))
-                // A gym-leader fight sits on one step for the whole battle, and self-heals +
-                // re-routes on a blackout (queue unchanged the whole time) — legitimately
-                // long-running.
                 | Some(PolicyStep::DefeatGymLeader { .. })
-                // An Elite-Four fight is a long, multi-Pokémon battle with heavy Full-Restore
-                // healing (Lance's 6 dragons vs a 5-PP Blizzard can run many dozens of turns) —
-                // the single BattleTrainer step legitimately sits unchanged well past the
-                // 10-minute stall window.
                 | Some(PolicyStep::BattleTrainer { .. })
-                // Flipping a Pokémon Mansion switch means routing across a battle-heavy floor to
-                // reach the statue (wild encounters + LOS trainers interrupt the walk) — the
-                // single FlipSwitch step legitimately sits unchanged for a long while.
                 | Some(PolicyStep::FlipSwitch { .. })
-                // A fishing session is one step across many casts and the battles they start — a
-                // `Catch` goal against a two-species table routinely runs dozens of casts deep
-                // (workstream C).
                 | Some(PolicyStep::Fish { .. })
-                // A Safari hunt is one step across every encounter of every ¥500 trip, and a trip
-                // that spends its whole 502-step budget without meeting a target is an ordinary
-                // outcome (workstream E).
                 | Some(PolicyStep::SafariHunt { .. })
-                // Walking out of the west is four map transitions on one step, and an ejection
-                // part way through restarts it from the gate — legitimately longer than the stall
-                // window.
                 | Some(PolicyStep::SafariExit)
-                // I3/I4 — one step covers pacing for a wild encounter *and* the eight-turn battle
-                // it exists for, with the queue frozen throughout.
                 | Some(PolicyStep::UseItemsInBattle { .. })
-                // L — this step carries its own bound (`MAX_ENTER_WAIT` attempts), so the
-                // harness's 10-minute stall window is redundant and, on a route, wrong: walking
-                // out onto Route 12 and back is one poll and several minutes of game time, so a
-                // handful of legitimate attempts can outlast the window.
+                // Carries its own bound (`MAX_ENTER_WAIT`) that can outlast the stall window.
                 | Some(PolicyStep::EnterMapIfReachable { .. })
         )
     }
@@ -4131,8 +3654,7 @@ mod move_learn_tests {
     #[test]
     fn keeps_damaging_moves_when_learning_status() {
         let mut p = DeterministicPolicy::new(0, Vec::<PolicyStep>::new());
-        // Ivysaur: [Tackle(dmg), Growl(status), LeechSeed(status), VineWhip(dmg)] learning
-        // Poisonpowder.
+        // Ivysaur learning Poisonpowder.
         let moves = [mv(Tackle), mv(Growl), mv(LeechSeed), mv(VineWhip)];
         let slot = p.pick_move_to_forget(0, &moves, Poisonpowder).flatten().expect("should pick a slot");
         assert!(slot == 1 || slot == 2,
@@ -4143,8 +3665,6 @@ mod move_learn_tests {
     fn learns_strong_move_over_status() {
         let mut p = DeterministicPolicy::new(0, Vec::<PolicyStep>::new());
         let moves = [mv(Tackle), mv(Growl), mv(LeechSeed), mv(VineWhip)];
-        // Learning Razor Leaf (strong) should still forget a status slot, keeping both damaging
-        // moves.
         let slot = p.pick_move_to_forget(0, &moves, RazorLeaf).flatten().unwrap();
         assert!(slot == 1 || slot == 2, "should forget a status move to learn Razor Leaf");
     }
@@ -4162,9 +3682,8 @@ mod move_learn_tests {
 mod policy_helper_tests {
     use super::*;
 
-    /// Every name any policy can hand the game has to be one the game will actually take: never
-    /// empty (the cartridge's own name screen refuses one), never longer than
-    /// [`MAX_PLAYER_NAME`], and made only of characters the charmap has a glyph for.
+    /// Every name a policy can choose is one the game takes: non-empty, within
+    /// `MAX_PLAYER_NAME`, every character in the charmap.
     #[test]
     fn every_name_a_policy_can_choose_is_one_the_game_will_take() {
         let mut names: Vec<String> = RANDOM_NAMES.iter().map(|n| n.to_string()).collect();
@@ -4183,8 +3702,7 @@ mod policy_helper_tests {
         }
     }
 
-    /// The Power Plant numbers its disguised Poké Balls, and an exact name match finds none of
-    /// them — which presents as `CatchPokemon` pacing a map that has no wild encounters at all.
+    /// The Power Plant's numbered static-encounter sprites match their species.
     #[test]
     fn numbered_static_encounters_match_their_species() {
         assert!(sprite_is_species("Electrode 1", PokemonSpecies::Electrode));
@@ -4207,14 +3725,10 @@ mod heal_detour_tests {
         let mut fixture = TestFixture::new(
             include_bytes!("data/mt-moon.bin"), std::time::Duration::from_secs(1), vec![]);
         let state = fixture.game_state();
-        // Cinnabar, not the Mt Moon Centre this case was found on, and the change is a fix rather
-        // than a dodge.
         let centre = Map::CinnabarPokecenter;
         assert_ne!(state.map.map, centre, "the fixture must be somewhere the detour has to travel to");
 
-        // The step is `enter` the map the player is already on, which pops on sight — so the
-        // queue shrinking is proof the detour let go, whatever the fixture happens to be standing
-        // on.
+        // `enter` the current map pops on sight, so a shrinking queue proves the detour let go.
         let mut policy = DeterministicPolicy::new(42, vec![PolicyStep::enter(state.map.map)]);
         policy.last_pokemon_center = Some(centre);
         policy.heal_return = Some(centre);
@@ -4231,8 +3745,7 @@ mod heal_detour_tests {
         assert_eq!(policy.steps_remaining(), Some(0), "and the route is being played again");
     }
 
-    /// The bound must not fire on a detour that is working, or a heal several maps away is
-    /// abandoned part-way and the fix is worse than the bug.
+    /// The bound never fires on a detour that is moving.
     #[test]
     fn a_heal_detour_that_is_moving_is_never_abandoned() {
         let mut fixture = TestFixture::new(
@@ -4243,8 +3756,7 @@ mod heal_detour_tests {
 
         let mut policy = DeterministicPolicy::new(42, vec![PolicyStep::enter(state.map.map)]);
         policy.heal_return = Some(centre);
-        // A graph that can route: one observed node here, carrying the exits the agent can
-        // actually see from where it stands — the centre's door among them.
+        // One observed node here, carrying the exits in sight, the Centre's door among them.
         let mut graph = WorldGraph::new();
         graph.observe(state.map.map, state.map.player_position, &state.map);
 
@@ -4259,8 +3771,7 @@ mod heal_detour_tests {
         assert_eq!(policy.steps_remaining(), Some(1), "the main queue waits its turn");
     }
 
-    /// Just out of Route 14's pocket, the one Route 14 row on the menu is the pocket's own
-    /// crossing. The route on has to be scored across the other crossings too, or it walks back in.
+    /// Out of Route 14's pocket, the route on is scored across every crossing, not only the menu's.
     #[test]
     fn a_route_is_scored_across_every_crossing_and_not_only_the_nearest() {
         use crate::pokemon::world_graph::EdgeKind::Connection;
@@ -4312,14 +3823,12 @@ mod scripted_progress_tests {
         DeterministicPolicy::new(42, steps).resuming_in(dir, false)
     }
 
-    /// The whole point, in three lines.
     #[test]
     fn a_restarted_process_resumes_the_route_where_it_left_off() {
         let scratch = Scratch::new("scripted-progress");
 
         let mut first = policy_in(&scratch.0, route());
         assert_eq!(first.steps_remaining(), Some(5));
-        // Three steps land.
         first.queue.drain(..3);
         first.record_progress();
 
@@ -4328,8 +3837,7 @@ mod scripted_progress_tests {
         assert_eq!(second.queue.front(), Some(&PolicyStep::enter(Map::Route2)));
     }
 
-    /// A run that has never recorded a cursor is a new game, and must start at the beginning
-    /// rather than be treated as an error.
+    /// A run with no cursor is a new game and starts at the beginning.
     #[test]
     fn a_run_with_no_cursor_starts_at_the_beginning() {
         let scratch = Scratch::new("scripted-progress-fresh");
@@ -4414,15 +3922,14 @@ mod scripted_progress_tests {
         assert_eq!(policy.steps_remaining(), Some(5));
     }
 
-    /// Not `DefaultHasher`.
+    /// Stable across processes, which is why it is not `DefaultHasher`.
     #[test]
     fn the_route_fingerprint_is_about_the_route_and_nothing_else() {
         assert_eq!(scripted_progress::fingerprint(&route()), scripted_progress::fingerprint(&route()));
         let mut different = route();
         different[0] = PolicyStep::enter(Map::ViridianCity);
         assert_ne!(scripted_progress::fingerprint(&route()), scripted_progress::fingerprint(&different));
-        // The real one, so a fingerprint that silently collapsed to a constant would show up
-        // here.
+        // The real route, so a fingerprint collapsed to a constant shows here.
         assert_ne!(
             scripted_progress::fingerprint(&PolicyStep::complete_game_steps()),
             scripted_progress::fingerprint(&route()),
@@ -4445,8 +3952,7 @@ mod random_policy_tests {
         }
     }
 
-    /// Two warps at the same coordinates on different maps must not share a weight — the bug this
-    /// guards is a walker bouncing between Oak's lab and Pallet Town suppressing itself in both.
+    /// Warps at the same coordinates on different maps do not share a weight.
     #[test]
     fn the_key_of_an_action_names_its_map() {
         let a = warp(Map::PalletTown, Map::OaksLab, 5, 6);
@@ -4454,8 +3960,7 @@ mod random_policy_tests {
         assert_ne!(RandomPolicy::action_key(&a), RandomPolicy::action_key(&b));
     }
 
-    /// Each repeat inside the window multiplies the weight, and an action that was never taken
-    /// keeps its full one.
+    /// Each repeat in the window compounds; an untaken action keeps its full weight.
     #[test]
     fn each_repeat_compounds_the_penalty() {
         let taken = warp(Map::PalletTown, Map::OaksLab, 5, 6);
@@ -4483,7 +3988,7 @@ mod random_policy_tests {
         assert_eq!(policy.novelty_weight(&first), 1.0, "the first choice has aged out");
     }
 
-    /// The behaviour the whole thing is for, measured against the uniform draw it replaces.
+    /// The exploring walker takes all of a hub's exits sooner than the uniform draw.
     #[test]
     fn a_walker_covers_a_hub_faster_than_a_uniform_one() {
         let exits: Vec<OverworldAction> = [Map::ViridianCity, Map::PalletTown, Map::OaksLab, Map::Route2]
@@ -4522,8 +4027,7 @@ mod random_policy_tests {
                  the recency bias is not doing anything");
     }
 
-    /// An empty menu is `None` rather than a panic, and a menu whose every option has been worn
-    /// down to a weight the `f64` cannot represent still answers with one of them.
+    /// An empty menu is `None`, and an all-zero-weight menu still answers.
     #[test]
     fn a_degenerate_menu_still_answers() {
         let mut policy = RandomPolicy::exploring(1);
@@ -4570,8 +4074,7 @@ mod abandoned_catch_tests {
             "the step must skip a species the route already gave up catching");
     }
 
-    /// A slot is a position, not a promise about a species, so a failed catch says nothing about
-    /// it and must not make an unrelated step give up.
+    /// A failed catch does not make a step aimed at a slot or another species give up.
     #[test]
     fn giving_up_on_one_species_does_not_skip_steps_aimed_at_anything_else() {
         let mut policy = DeterministicPolicy::new(0, Vec::<PolicyStep>::new());

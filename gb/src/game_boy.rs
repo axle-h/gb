@@ -29,7 +29,7 @@ impl GameBoy {
         }
     }
 
-    /// D8. The fallible constructor.
+    /// The fallible constructor.
     pub fn try_new(cart: &[u8], model: Model) -> Result<Self, LoadError> {
         Ok(Self { core: Core::try_new(cart, model)? })
     }
@@ -137,7 +137,7 @@ mod tests {
     use crate::roms::roms::parse_png;
     use super::*;
 
-    /// A9: throughput of the emulator core alone.
+    /// Throughput of the emulator core alone.
     /// ```text
     /// cargo test --release --features slow-tests --lib -- \
     ///   game_boy::tests::bench_core_throughput --exact --nocapture
@@ -258,7 +258,6 @@ mod tests {
         }
     }
 
-    /// C5's correctness test.
     #[cfg(not(feature = "slow-tests"))]
     #[test]
     fn deadline_driving_the_channels_is_invisible_to_the_game() {
@@ -297,8 +296,7 @@ mod tests {
         }
     }
 
-    /// C6's correctness test, and the only thing standing between a batching APU and music that
-    /// is quietly wrong.
+    /// The only thing standing between a batching APU and music that is quietly wrong.
     #[cfg(not(feature = "slow-tests"))]
     #[test]
     fn batching_the_channels_under_a_listener_is_inaudible() {
@@ -443,7 +441,7 @@ mod tests {
         assert_eq!(a, GameBoy::dmg(crate::roms::acid::ROM));
     }
 
-    /// A1's guarantee has to hold for a CGB too — including re-applying the boot palette, which a
+    /// Reset matches construction on a CGB too, including re-applying the boot palette, which a
     /// fresh compatibility-mode machine has and a naively reset one would not.
     #[test]
     fn cgb_reset_matches_fresh_construction() {
@@ -746,8 +744,8 @@ mod tests {
             cgb_ppu_test("cgb-acid2", crate::roms::cgb_acid::ROM, crate::roms::cgb_acid::EXPECTED);
         }
 
-        /// B5, the headline deliverable: Pokémon Red is a DMG-only cartridge, so on a Game Boy
-        /// Color the boot ROM picks its palette from the title checksum.
+        /// Pokémon Red is a DMG-only cartridge, so on a Game Boy Color the boot ROM picks its
+        /// palette from the title checksum.
         #[test]
         fn pokemon_red_boots_in_colour_on_a_cgb() {
             use crate::lcd_palette::LcdColor;

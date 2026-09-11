@@ -1,12 +1,6 @@
-//! Workstream I — the rest of the item-use table.
-//! ```text
-//! Bicycle       START → ITEM → row → A                       no USE/TOSS menu (special-cased at
-//!                                                               :341) and it CLOSES the start menu
-//! Itemfinder    START → ITEM → row → A → USE → text          `UsableItems_CloseMenu` → overworld
-//! Repel         START → ITEM → row → A → USE → text          neither list → back to the BAG, B out
-//! Potion/Revive START → ITEM → row → A → USE → party → mon   `UsableItems_PartyMenu` → back to the BAG
-//! Ether/PP Up   …as above, then one more: a MOVE menu
-//! ```
+//! Bag items used from the START menu. The Bicycle skips USE/TOSS and closes the menus, an
+//! `UsableItems_CloseMenu` item returns to the overworld, and everything else drops back into the
+//! bag, after a party menu for `UsableItems_PartyMenu` and a move menu for the PP items.
 
 use gb::joypad::JoypadButton;
 use gb::mmu::MMU;
@@ -20,19 +14,15 @@ use crate::pokemon::status::PokemonStatus;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::{GameState, PokemonApi, PokemonApiTrait};
 
-/// What a bag item is used on — i.e. how many menus the chain has after `USE`.
+/// What a bag item is used on, which is how many menus follow `USE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UseTarget {
-    /// Nothing: the Repel family, the Bicycle, the Itemfinder.
     Nothing,
-    /// A party member — medicine and the vitamins.
     Party { slot: u8 },
-    /// A party member's move — the PP restores and PP Up.
     Move { slot: u8, move_index: u8 },
 }
 
 impl UseTarget {
-    /// The party slot this use lands on, if any — what the completion tests read.
     pub const fn slot(self) -> Option<u8> {
         match self {
             Self::Nothing => None,
@@ -44,16 +34,13 @@ impl UseTarget {
 /// Where an item's effect shows up, which is also where the menus leave you.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
-    /// The item is used up.
     Consumed,
-    /// The Bicycle: `ItemUseBicycle` toggles `wWalkBikeSurfState` between 0 and 1, so the
-    /// completion test is "it changed", not "it is 1".
+    /// `ItemUseBicycle` toggles, so completion is "it changed", not "it is 1".
     TogglesBicycle,
-    /// The Itemfinder: a text box and nothing else.
+    /// A text box and nothing else.
     OneShot,
 }
 
-/// [`Effect`] of `item`. The two exceptions are both key items; everything else is used up.
 pub const fn effect(item: ItemId) -> Effect {
     match item {
         ItemId::Bicycle => Effect::TogglesBicycle,
@@ -62,37 +49,29 @@ pub const fn effect(item: ItemId) -> Effect {
     }
 }
 
-/// `wRepelRemainingSteps` — I5's whole observable. Repel sets 100, Super Repel 200, Max Repel 250
-/// (`item_effects.asm:1532`, `:1622`, `:1626`), and the counter ticks down one per overworld
-/// step.
+/// `wRepelRemainingSteps`, which ticks down one per overworld step.
 pub fn repel_steps(mmu: &MMU) -> u8 {
     mmu.read_pointer(&pokered_symbols::wRepelRemainingSteps)
 }
 
-/// True while the player is on the Bicycle — I6's observable. `wWalkBikeSurfState` is 0 walking,
-/// 1 cycling, 2 surfing (`item_effects.asm:638-665`).
+/// `wWalkBikeSurfState` is 0 walking, 1 cycling, 2 surfing.
 pub fn on_bicycle(mmu: &MMU) -> bool {
     mmu.read_pointer(&pokered_symbols::wWalkBikeSurfState) == 1
 }
 
-/// `PokemonMove::pp` is the raw PP byte, not the PP. `encoding.rs` reads it unmasked, and the ROM
-/// packs the PP Up count into bits 6–7 (`PP_UP_MASK`) with the PP itself in bits 0–5.
+/// `PokemonMove::pp` is the raw byte: the PP Up count in bits 6–7, the PP in bits 0–5.
 pub const PP_MASK: u8 = 0b0011_1111;
 
-/// The move's actual PP, with the PP Up count masked off.
 pub fn move_pp(mv: &crate::pokemon::move_name::PokemonMove) -> u8 { mv.pp & PP_MASK }
 
-/// How many PP Ups have been spent on `mv` (0–3).
 pub fn pp_ups(mv: &crate::pokemon::move_name::PokemonMove) -> u8 { mv.pp >> 6 }
 
-/// `mv`'s maximum PP, including the bonus its PP Ups add. `AddBonusPP` gives `base / 5` per PP
-/// Up.
+/// `mv`'s maximum PP: `AddBonusPP` gives `base / 5` per PP Up.
 pub fn max_pp(mv: &crate::pokemon::move_name::PokemonMove) -> u8 {
     let base = mv.name.metadata().pp;
     base + (base / 5) * pp_ups(mv)
 }
 
-/// How many of `item` the bag holds. Zero when it is not in it.
 pub fn bag_quantity(state: &GameState, item: ItemId) -> u8 {
     state.bag.iter().find(|i| i.id == item).map_or(0, |i| i.quantity)
 }
@@ -105,8 +84,7 @@ pub fn baseline(state: &GameState, item: ItemId) -> u8 {
     }
 }
 
-/// Has the use landed? `baseline` comes from [`baseline`]; `attempts` is how many times the
-/// driver has been handed the job.
+/// Has the use landed? `attempts` is how many times the driver has been handed the job.
 pub fn goal_met(state: &GameState, item: ItemId, baseline: u8, attempts: u32) -> bool {
     match effect(item) {
         Effect::Consumed => bag_quantity(state, item) < baseline,
@@ -115,14 +93,14 @@ pub fn goal_met(state: &GameState, item: ItemId, baseline: u8, attempts: u32) ->
     }
 }
 
-/// Why the game would refuse this use, or `None` when it would take it.
+/// Why the game would refuse this use.
 pub fn blocked(state: &GameState, item: ItemId, target: UseTarget) -> Option<String> {
     if bag_quantity(state, item) == 0 {
         return Some(format!("{item:?} is not in the bag"));
     }
     let mon = target.slot().and_then(|s| state.pokemon.get(s as usize));
     match item {
-        // `.healHP` — a Revive wants a *fainted* target and a potion wants a live, damaged one.
+        // `.healHP`: a Revive wants a fainted target and a potion a live, damaged one.
         ItemId::Revive | ItemId::MaxRevive => match mon {
             Some(p) if p.current_hp > 0 => Some(format!("slot {:?} has not fainted", target.slot())),
             _ => None,
@@ -133,14 +111,13 @@ pub fn blocked(state: &GameState, item: ItemId, target: UseTarget) -> Option<Str
             Some(p) if p.current_hp >= p.stats.hp => Some("already at full HP".into()),
             _ => None,
         },
-        // `.cureStatusAilment` — the item's own status bit has to be set, and a Full Heal takes
-        // any.
+        // `.cureStatusAilment`: the item's own status must be set; a Full Heal takes any.
         ItemId::Antidote | ItemId::BurnHeal | ItemId::IceHeal | ItemId::Awakening
         | ItemId::ParlyzHeal | ItemId::FullHeal => match mon {
             Some(p) if !cures(item, p.status) => Some(format!("no {item:?}-curable status")),
             _ => None,
         },
-        // `.useEther` — the chosen move must actually be missing PP.
+        // `.useEther`: the chosen move must be missing PP.
         ItemId::Ether | ItemId::MaxEther => {
             let UseTarget::Move { move_index, .. } = target else {
                 return Some("a PP restore needs a move target".into());
@@ -152,8 +129,7 @@ pub fn blocked(state: &GameState, item: ItemId, target: UseTarget) -> Option<Str
                 _ => None,
             }
         }
-        // An Elixer's precondition is the *mon*, not the move, and applying Ether's here refused
-        // perfectly good uses.
+        // An Elixer's precondition is the mon, not one move.
         ItemId::Elixer | ItemId::MaxElixer => {
             let Some(mon) = mon else {
                 return Some("a PP restore needs a party target".into());
@@ -162,7 +138,7 @@ pub fn blocked(state: &GameState, item: ItemId, target: UseTarget) -> Option<Str
                 .then_some(())
                 .map_or(Some(format!("every move on slot {:?} is already at full PP", target.slot())), |()| None)
         }
-        // `.usePPUp` — three is the cap, and a fourth prints `PPMaxedOutText` and keeps the item.
+        // `.usePPUp`: three is the cap, and a fourth keeps the item.
         ItemId::PpUp => {
             let UseTarget::Move { move_index, .. } = target else {
                 return Some("a PP Up needs a move target".into());
@@ -173,18 +149,14 @@ pub fn blocked(state: &GameState, item: ItemId, target: UseTarget) -> Option<Str
                 _ => None,
             }
         }
-        // `IsBikeRidingAllowed` (`home/overworld.asm:842`) refuses everywhere but Route 23,
-        // Indigo Plateau and the five `BikeRidingTilesets`, and `ItemUseBicycle` refuses while
-        // surfing — both with `ItemUseNotTime`, which consumes nothing, so both are endless
-        // retries.
+        // A refusal consumes nothing, so an unchecked one is an endless retry.
         ItemId::Bicycle if !bike_riding_allowed(state) =>
             Some(format!("cycling is not allowed on {} (tileset {:?})", state.map.map, state.map.tileset)),
         _ => None,
     }
 }
 
-/// `IsBikeRidingAllowed`, decoded rather than transcribed: Route 23 and Indigo Plateau are named
-/// special cases, and everything else is a `BikeRidingTilesets` membership test.
+/// `IsBikeRidingAllowed`: Route 23 and Indigo Plateau, or a tileset in `BikeRidingTilesets`.
 pub fn bike_riding_allowed(state: &GameState) -> bool {
     if matches!(state.map.map, Map::Route23 | Map::IndigoPlateau) {
         return true;
@@ -200,7 +172,7 @@ fn rom_list(ptr: &crate::pokemon::symbols::DmgPointer) -> Vec<u8> {
     crate::pokemon::roms::POKERED[offset..].iter().copied().take_while(|&b| b != 0xFF).collect()
 }
 
-/// Which status an item's `.checkMonStatus` branch tests (`item_effects.asm:869-889`).
+/// Which status an item's `.checkMonStatus` branch tests.
 fn cures(item: ItemId, status: PokemonStatus) -> bool {
     match item {
         ItemId::Antidote => status == PokemonStatus::Poisoned,
@@ -213,27 +185,20 @@ fn cures(item: ItemId, status: PokemonStatus) -> bool {
     }
 }
 
-// ── The driver
-// ───────────────────────────────────────────────────────────────────────────────────
-
 /// A wedged use reports itself rather than mashing for the rest of the leg.
 const TICK_BUDGET: u32 = 1800;
 
-/// Live state of an in-progress bag-item use. Carried in `AgentState::UsingBagItem`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BagItemState {
     pub item: ItemId,
     pub target: UseTarget,
-    /// What completion is measured against — see [`baseline`]. A bag count for everything but the
-    /// Bicycle, whose baseline is its mount state.
+    /// What completion is measured against, from [`baseline`].
     pub baseline: u8,
     /// Press/release alternation, so every input is a fresh rising edge.
     pub press: bool,
     pub entered_menu: bool,
-    /// Consecutive stable-overworld ticks once the effect has landed — the same anti-flicker wait
-    /// `AgentState::TeachingMove` uses, and for the same reason: Gen 1 drops back into the bag
-    /// after a use, so finishing on a one-tick gap between closing menus hands a live menu to the
-    /// generic A-mash and uses a second one.
+    /// Stable-overworld ticks after the effect lands: finishing in a one-tick gap between closing
+    /// menus hands a live bag to the generic A-mash, which uses a second item.
     pub settle: u8,
     pub ticks: u32,
 }
@@ -250,20 +215,18 @@ impl BagItemState {
         }
     }
 
-    /// Has the effect landed?
     fn done(&self, api: &PokemonApi<'_>) -> bool {
         match effect(self.item) {
             Effect::Consumed => self.entered_menu && api.bag_item_quantity(self.item) < self.baseline,
             Effect::TogglesBicycle => on_bicycle(api.mmu()) as u8 != self.baseline,
-            // The menus close themselves (`UsableItems_CloseMenu`), so the return to the
-            // overworld *is* the effect having been printed.
+            // The menus close themselves, so the return to the overworld is the effect.
             Effect::OneShot =>
                 self.entered_menu && api.game_mode().unwrap_or(GameMode::Overworld) == GameMode::Overworld,
         }
     }
 }
 
-/// I — the policy's half: what to hand the driver, or why not to.
+/// The policy's half: what to hand the driver, or why not to.
 pub fn pick(state: &GameState, item: ItemId, target: UseTarget, baseline: u8, attempts: u32)
     -> Result<FieldMove, String> {
     if goal_met(state, item, baseline, attempts) {
@@ -275,13 +238,10 @@ pub fn pick(state: &GameState, item: ItemId, target: UseTarget, baseline: u8, at
     Ok(FieldMove::UseBagItem { item, target })
 }
 
-/// One agent tick of the bag-item chain. Called from `agent.rs` via a single delegating match
-/// arm.
 pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: BagItemState) -> Result<(), String> {
     let game_mode = api.game_mode().unwrap_or(GameMode::Overworld);
 
-    // ── Done: back out of whatever menu the use left open, then settle in the overworld
-    // ─────────
+    // Done: back out of whatever menu the use left open, then settle in the overworld.
     if s.done(api) {
         if game_mode != GameMode::Overworld {
             api.release_all_buttons();
@@ -300,7 +260,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: BagItemState)
         return Ok(());
     }
 
-    // ── Fizzled: back in the overworld with nothing to show.
+    // Fizzled: back in the overworld with nothing to show.
     if s.entered_menu && game_mode == GameMode::Overworld {
         api.release_all_buttons();
         agent.set_state(AgentState::Idle);
@@ -334,17 +294,15 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: BagItemState)
     let button = if game_mode == GameMode::Overworld {
         JoypadButton::Start
     } else if (top_x, top_y) == START_MENU_ORIGIN {
-        // The Pokédex is owned by construction here, but the index is asked for rather than
-        // assumed — see `start_menu_row`; a seventh copy of the literal is how this drifts.
+        // Asked of `start_menu_row` rather than assumed, though the Pokédex is owned here.
         nav(current, start_menu_row(api, StartMenuRow::Item))
     } else if text.to_ascii_uppercase().contains("TECHNIQUE") {
-        // `MoveSelectionMenu`'s relearn layout — the PP-restore move list.
+        // `MoveSelectionMenu`'s relearn layout, the PP-restore move list.
         match s.target {
             UseTarget::Move { move_index, .. } => nav(current, move_index + 1),
             _ => JoypadButton::B,
         }
     } else if tbid == Some(TextBoxId::ListMenuBox) {
-        // The bag.
         match api.bag_item_position(s.item) {
             Some(row) => nav(current + scroll, row),
             None => JoypadButton::B,
@@ -360,7 +318,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: BagItemState)
         JoypadButton::A // transitional text
     };
 
-    // A per-tick trace of every menu this chain walks through, off unless `ITEMS_TRACE` is set.
+    // A per-tick trace, off unless `ITEMS_TRACE` is set.
     static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *TRACE.get_or_init(|| std::env::var("ITEMS_TRACE").is_ok()) {
         println!("[items] t{} mode {game_mode:?} tbid {tbid:?} geom ({top_x},{top_y}) cur {current} \
@@ -372,26 +330,21 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: BagItemState)
     Ok(())
 }
 
-// ── I3 / I4: the in-battle items
-// ─────────────────────────────────────────────────────────────────
-
 /// The stat items, in the order [`PolicyStep::stat_item_steps`] spends them.
 pub const STAT_ITEMS: &[ItemId] = &[
     ItemId::XAttack, ItemId::XDefend, ItemId::XSpeed, ItemId::XSpecial,
     ItemId::XAccuracy, ItemId::GuardSpec, ItemId::DireHit,
 ];
 
-/// The four `ItemUseXStat` stat stages, read straight from RAM. 7 is the neutral value
-/// (`StatModifierUpEffect`), so a successful X Attack reads 8.
+/// The four `ItemUseXStat` stat stages, neutral at 7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatMods { pub attack: u8, pub defense: u8, pub speed: u8, pub special: u8 }
 
 impl StatMods {
-    /// What the ROM resets them to at the start of every battle.
     pub const NEUTRAL: Self = Self { attack: 7, defense: 7, speed: 7, special: 7 };
 }
 
-/// The player's live stat stages. Only meaningful inside a battle.
+/// Only meaningful inside a battle.
 pub fn stat_mods(mmu: &MMU) -> StatMods {
     StatMods {
         attack: mmu.read_pointer(&pokered_symbols::wPlayerMonAttackMod),
@@ -401,39 +354,33 @@ pub fn stat_mods(mmu: &MMU) -> StatMods {
     }
 }
 
-/// `wPlayerBattleStatus2`, whose three top bits are what X Accuracy, Guard Spec. and Dire Hit set
-/// (`USING_X_ACCURACY`, `PROTECTED_BY_MIST`, `GETTING_PUMPED`).
+/// `wPlayerBattleStatus2`, which X Accuracy, Guard Spec. and Dire Hit set bits of.
 pub fn player_battle_status2(mmu: &MMU) -> u8 {
     mmu.read_pointer(&pokered_symbols::wPlayerBattleStatus2)
 }
 
-/// Bit positions in `wPlayerBattleStatus2` (`constants/battle_constants.asm:90-99`).
+/// Bit positions in `wPlayerBattleStatus2`.
 pub mod battle_status2 {
     pub const USING_X_ACCURACY: u8 = 1 << 0;
     pub const PROTECTED_BY_MIST: u8 = 1 << 1;
     pub const GETTING_PUMPED: u8 = 1 << 2;
 }
 
-// ── Step lists
-// ───────────────────────────────────────────────────────────────────────────────────
-
 impl PolicyStep {
-    /// I1 — use a medicine on the party member in `slot`.
     pub const fn use_medicine(item: ItemId, slot: u8) -> Self {
         Self::UseBagItem { item, target: UseTarget::Party { slot } }
     }
 
-    /// I2 — restore PP to move `move_index` (0–3) of the party member in `slot`.
     pub const fn use_pp_restore(item: ItemId, slot: u8, move_index: u8) -> Self {
         Self::UseBagItem { item, target: UseTarget::Move { slot, move_index } }
     }
 
-    /// I5/I6/I7 — an item with no target: a Repel, the Bicycle, the Itemfinder.
+    /// An item with no target: a Repel, the Bicycle, the Itemfinder.
     pub const fn use_item(item: ItemId) -> Self {
         Self::UseBagItem { item, target: UseTarget::Nothing }
     }
 
-    /// I7 + I5 — press the Itemfinder where it can answer *yes*, and buy a Repel.
+    /// Press the Itemfinder where it can answer yes, buy a Repel, then press it where it cannot.
     pub fn press_the_itemfinder_steps(stand_near: Map) -> Vec<Self> {
         vec![
             Self::Fly { to: Map::VermilionCity },
@@ -444,15 +391,12 @@ impl PolicyStep {
             Self::BuyFromMart { item: crate::pokemon::bag::BagItem::new(ItemId::Repel, 1),
                                 map: Map::VermilionMart },
             Self::enter(Map::VermilionCity),
-            // …and the other branch. Fuchsia City has no hidden items at all, so the same item
-            // must print the *other* text there — without which "it printed something" is all
-            // this proves.
             Self::Fly { to: Map::FuchsiaCity },
             Self::use_item(ItemId::Itemfinder),
         ]
     }
 
-    /// I2 — the PP leg: an Ether onto a spent move, then the hidden PP Up Celadon is sitting on.
+    /// An Ether onto a spent move, then the hidden PP Up Celadon is sitting on.
     pub fn pp_restore_steps(ether: ItemId, slot: u8, ether_move: u8, pp_up_move: u8) -> Vec<Self> {
         vec![
             Self::use_pp_restore(ether, slot, ether_move),
@@ -461,17 +405,16 @@ impl PolicyStep {
         ]
     }
 
-    /// I5 — set a Repel counter running, then walk far enough to watch it tick down.
+    /// Set a Repel counter running, then walk far enough to watch it tick down.
     pub fn repel_steps(item: ItemId, walk_to: Map) -> Vec<Self> {
         vec![Self::use_item(item), Self::enter(walk_to)]
     }
 
-    /// I6 — mount the Bicycle, ride it somewhere, and get off again.
     pub fn ride_bicycle_steps(ride_to: Map) -> Vec<Self> {
         vec![Self::use_item(ItemId::Bicycle), Self::enter(ride_to), Self::use_item(ItemId::Bicycle)]
     }
 
-    /// I3/I4 — buy the stat items and a Poké Doll, then spend them in one wild battle.
+    /// Buy the stat items and a Poké Doll, then spend them in one wild battle.
     pub fn stat_item_steps(shed: &[ItemId], on_map: Map, items: &'static [ItemId]) -> Vec<Self> {
         let mut s = vec![Self::Fly { to: Map::CeladonCity }, Self::enter(Map::CeladonPokecenter)];
         s.extend(shed.iter().map(|&item| Self::deposit_item(item, u8::MAX, Map::CeladonPokecenter)));
@@ -485,8 +428,7 @@ impl PolicyStep {
                                 map: Map::CeladonMart4F },
             Self::enter(Map::CeladonMart5F),
         ]);
-        // Two clerks on 5F: `BuyFromMart` targets the sprite named "Clerk 1", which is the stat
-        // items (Clerk 2 sells vitamins).
+        // `BuyFromMart` targets 5F's Clerk 1, who sells the stat items.
         s.extend(STAT_ITEMS.iter().map(|&item| Self::BuyFromMart {
             item: crate::pokemon::bag::BagItem::new(item, 1), map: Map::CeladonMart5F }));
         s.extend([
@@ -508,8 +450,7 @@ impl PolicyStep {
 mod tests {
     use super::*;
 
-    /// Pin [`effect`] against the ROM's own two lists — the ones `StartMenu_Item` matches on, and
-    /// the reason the three menu shapes exist at all.
+    /// [`effect`]'s premises match `UsableItems_CloseMenu`, which the Bicycle is not in.
     #[test]
     fn close_menu_items_match_the_rom() {
         let names: Vec<ItemId> = rom_list(&pokered_symbols::UsableItems_CloseMenu)
@@ -518,13 +459,10 @@ mod tests {
                                ItemId::OldRod, ItemId::GoodRod, ItemId::SuperRod],
             "UsableItems_CloseMenu changed — `Effect::OneShot`'s premise is that the Itemfinder is \
              in it, i.e. that using it returns straight to the overworld");
-        // …and the Bicycle is deliberately *not* in it: `StartMenu_Item` special-cases it earlier
-        // (`:341`), which is why it skips the USE/TOSS menu that everything else shows.
         assert!(!names.contains(&ItemId::Bicycle));
     }
 
-    /// Every item in `UsableItems_PartyMenu` opens the party menu, so every one of them needs a
-    /// [`UseTarget`] with a slot.
+    /// Every item in `UsableItems_PartyMenu` needs a [`UseTarget`] with a slot.
     #[test]
     fn party_menu_items_need_a_slot() {
         let party_items: Vec<ItemId> = rom_list(&pokered_symbols::UsableItems_PartyMenu)
@@ -539,7 +477,7 @@ mod tests {
         }
     }
 
-    /// The Poké Doll has to be last in any in-battle list — it ends the battle.
+    /// The Poké Doll ends the battle, so it is never in `STAT_ITEMS`.
     #[test]
     fn no_stat_item_ends_the_battle() {
         assert!(!STAT_ITEMS.contains(&ItemId::PokeDoll),

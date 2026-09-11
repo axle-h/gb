@@ -1,4 +1,3 @@
-
 use super::super::*;
 
 const PHASE0: &[u8] = include_bytes!("../../data/postgame-phase0.bin");
@@ -6,14 +5,11 @@ const PHASE0: &[u8] = include_bytes!("../../data/postgame-phase0.bin");
 /// The PC every test here uses, and the map it is on.
 const PC_MAP: Map = Map::ViridianPokecenter;
 
-/// Slowpoke, the party's fourth member and its only non-essential one: Articuno/Venusaur/Vaporeon
-/// carry Surf, Strength, Cut and every usable attack between them, so Slowpoke is what gets
-/// banked.
+/// Slowpoke, the party's only non-essential member: the other three carry every HM and attack.
 const BANKED_SLOT: u8 = 3;
 const BANKED: PokemonSpecies = PokemonSpecies::Slowpoke;
 
-/// Screens the agent showed, deduplicated consecutively — the same "log every distinct screen"
-/// idiom task 0.4 used.
+/// Screens the agent showed, deduplicated consecutively.
 fn screens_while(fixture: &mut TestFixture, ticks: u32, done: impl Fn(&mut TestFixture) -> bool) -> Vec<String> {
     let mut seen: Vec<String> = Vec::new();
     for _ in 0..ticks {
@@ -40,9 +36,7 @@ fn current_box(fixture: &mut TestFixture) -> u8 {
     crate::pokemon::postgame::pc_box::current_box_num(fixture.api().mmu())
 }
 
-// Do not call `step_until_exhausted` in a test that checks intermediate states.
-
-/// Task A2 — reach the `BILL's PC` submenu *deliberately*.
+/// The `BILL's PC` submenu, reached deliberately.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_open_bills_pc() {
@@ -50,7 +44,7 @@ fn can_open_bills_pc() {
         PolicyStep::deposit_pokemon(BANKED_SLOT, PC_MAP),
     ]);
 
-    // The step pops the moment the driver takes over, so watch the screen, not the queue.
+    // The step pops when the driver takes over, so watch the screen.
     fixture.step_until_exhausted();
     let seen = screens_while(&mut fixture, 90 * 50, |f| box_count(f) > 0);
     for screen in &seen {
@@ -63,7 +57,7 @@ fn can_open_bills_pc() {
         .unwrap_or_else(|| panic!("Bill's PC submenu never appeared; screens: {seen:#?}"));
     assert!(parent < submenu, "the driver must select BILL's PC from the parent menu, not arrive first");
 
-    // The submenu, in full, as `BillsPCMenuText` (`engine/pokemon/bills_pc.asm:341`) spells it.
+    // The submenu in full, as `BillsPCMenuText` spells it.
     let full = seen.iter().filter(|t| t.contains("SEE YA!")).max_by_key(|t| t.len()).unwrap();
     println!("Bill's PC menu: {full}");
     for entry in ["WITHDRAW", "DEPOSIT", "RELEASE", "CHANGE BOX", "SEE YA!"] {
@@ -71,7 +65,7 @@ fn can_open_bills_pc() {
     }
 }
 
-/// Task A3 — deposit a party member into the box.
+/// A party member deposited into the box.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_deposit_a_pokemon() {
@@ -94,7 +88,7 @@ fn can_deposit_a_pokemon() {
         state.pokemon.len(), state.boxed_pokemon.len());
 }
 
-/// Task A4 — the same mon round-trips back into the party.
+/// The same mon comes back into the party.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn pokemon_round_trips_through_the_box() {
@@ -113,12 +107,12 @@ fn pokemon_round_trips_through_the_box() {
     let back = state.pokemon.get(3).expect("withdrawn mon should be appended to the party");
     assert_eq!(back.species, BANKED, "a different mon came back");
     assert_eq!(back.level, 30, "level should survive the round trip");
-    // Withdrawing recomputes the stats from the stored EVs/DVs, so the mon must come back usable.
+    // Withdrawing recomputes the stats from the stored EVs and DVs.
     assert!(back.stats.hp > 0 && back.current_hp > 0, "{back:?} came back with no HP");
     println!("withdrew: {:?} lv{} {}/{}hp", back.species, back.level, back.current_hp, back.stats.hp);
 }
 
-/// Task A5 — switch boxes.
+/// Switch boxes.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_change_box() {
@@ -132,21 +126,20 @@ fn can_change_box() {
 
     fixture.run_until(|s| s.boxed_pokemon.len() == 1);
 
-    // Box 2 is a different, empty box — and the deposit is no longer visible, because only the
-    // open box lives in WRAM.
+    // Box 2 is empty, and the deposit is not visible because only the open box lives in WRAM.
     let state = fixture.run_until(|s| s.current_box == 1);
     assert!(state.boxed_pokemon.is_empty(), "box 2 should be empty, holds {:?}", state.boxed_pokemon);
     println!("switched to box {} — empty", state.current_box + 1);
 
-    // Back to box 1, and the banked mon is still there: the change wrote it out to SRAM rather
-    // than losing it, and `EmptyAllSRAMBoxes` ran before that copy, not after.
+    // Back in box 1 the banked mon is still there: the change wrote it to SRAM before
+    // `EmptyAllSRAMBoxes` ran.
     let state = fixture.run_until(|s| s.current_box == 0 && !s.boxed_pokemon.is_empty());
     assert_eq!(state.boxed_pokemon.len(), 1);
     assert_eq!(state.boxed_pokemon[0].species, BANKED, "box 1's contents did not survive the switch");
     println!("switched back to box {} — {:?} still banked", state.current_box + 1, BANKED);
 }
 
-/// Task A6 — release a boxed Pokémon.
+/// Release a boxed Pokémon.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_release_a_pokemon() {
@@ -160,14 +153,13 @@ fn can_release_a_pokemon() {
 
     let state = fixture.run_until(|s| s.boxed_pokemon.is_empty());
     assert_eq!(box_count(&mut fixture), 0, "wBoxCount should have dropped");
-    // Released, not withdrawn: it must not have reappeared in the party either.
+    // Released, not withdrawn: not back in the party either.
     assert_eq!(state.pokemon.len(), 3, "release must not put the mon back in the party");
     assert!(state.pokemon.iter().all(|p| p.species != BANKED), "{BANKED:?} came back into the party");
     println!("released — party {}, box empty", state.pokemon.len());
 }
 
-/// Task A7 — the full chain in one run, checking the counts at every stage, and the workstream's
-/// output fixture.
+/// The whole chain in one run, counts checked at every stage, cutting the box fixture.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_round_trip_a_pokemon_through_two_boxes() {
@@ -205,7 +197,7 @@ fn can_round_trip_a_pokemon_through_two_boxes() {
     fixture.save_state_named("src/pokemon/data/postgame-pc-box.bin").unwrap();
 }
 
-/// Task A1 — the box reader decodes a `box_struct`, not just an empty box.
+/// The box reader decodes a `box_struct`, not just an empty box.
 #[test]
 fn reads_a_boxed_pokemon_out_of_wram() {
     use crate::pokemon::move_name::PokemonMoveName;
@@ -217,7 +209,7 @@ fn reads_a_boxed_pokemon_out_of_wram() {
         mmu.write(ptr.address + offset, value);
     };
 
-    // Two members: the count, the FF-terminated species list, then the two 33-byte structs.
+    // Two members: the count, the FF-terminated species list, then two 33-byte structs.
     write(&mut mmu, pokered_symbols::wBoxCount, 0, 2);
     write(&mut mmu, pokered_symbols::wBoxSpecies, 0, PokemonSpecies::Lapras as u8);
     write(&mut mmu, pokered_symbols::wBoxSpecies, 1, PokemonSpecies::Omanyte as u8);
@@ -257,16 +249,15 @@ fn reads_a_boxed_pokemon_out_of_wram() {
     assert_eq!(boxed[1].current_hp, 21);
     assert_eq!(boxed[1].moves[0].map(|m| m.name), Some(PokemonMoveName::WaterGun));
 
-    // `wBoxCount` is trusted only up to the box's capacity, so a corrupt count can't run off the
-    // end into `wBoxMonOT`.
+    // `wBoxCount` is trusted only up to capacity, so a corrupt count cannot run into `wBoxMonOT`.
     for slot in 2..BOX_CAPACITY as u16 {
         write(&mut mmu, pokered_symbols::wBoxMons, slot * MON, PokemonSpecies::Omanyte as u8);
     }
     write(&mut mmu, pokered_symbols::wBoxCount, 0, 200);
     assert_eq!(read_current_box(&mmu).len(), BOX_CAPACITY);
 
-    // And a blank slot inside the count ends the list rather than shifting the slots after it —
-    // the entry at index `i` must always be box slot `i`, because that is what the menus address.
+    // A blank slot inside the count ends the list: the entry at index `i` is always box slot `i`,
+    // as the menus address it.
     write(&mut mmu, pokered_symbols::wBoxMons, 5 * MON, 0x00);
     assert_eq!(read_current_box(&mmu).len(), 5, "read should stop at the undecodable slot");
 }

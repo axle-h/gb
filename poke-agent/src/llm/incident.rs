@@ -19,12 +19,9 @@ use crate::llm::tools::DecisionKind;
 use crate::run::{self, CurrentRun, files};
 use crate::published::{Published, UiEvent, now_ms};
 
-/// How many turns of conversation a record carries.
 const TURNS_KEPT: usize = 3;
 
-/// What is being filed. The directory differs and so do two fields of the JSON; everything else —
-/// the screen, the save state, the status heartbeat, the conversation slice — is identical,
-/// because the question a person opens either one to answer is the same question.
+/// What is being filed: the directory and two JSON fields differ, and the rest is the same.
 #[derive(Debug, Clone, Copy)]
 pub enum Report<'a> {
     /// A `report_issue` call: the model's own account of what the agent will not let it do.
@@ -34,7 +31,6 @@ pub enum Report<'a> {
 }
 
 impl Report<'_> {
-    /// Which directory under the run it lands in.
     fn directory(self) -> &'static str {
         match self {
             Self::Issue { .. } => files::ISSUES,
@@ -42,8 +38,6 @@ impl Report<'_> {
         }
     }
 
-    /// The one-word discriminant in the JSON, so a directory of both can be counted apart without
-    /// inferring it from which fields are null.
     fn label(self) -> &'static str {
         match self {
             Self::Issue { .. } => "issue",
@@ -55,14 +49,11 @@ impl Report<'_> {
 /// `incident.json`.
 #[derive(Debug, Serialize)]
 struct Incident<'a> {
-    /// Unix milliseconds, the same clock and for the same reason as [`UiEvent::at`]: a run
-    /// resumed nightly restarts every elapsed counter it has, so this is the only stamp that can
-    /// date a record against the transcript beside it.
+    /// Unix milliseconds, as [`UiEvent::at`]: the one stamp a resume does not restart.
     at: u64,
     run_id: String,
     turn: u64,
-    /// `"issue"` or `"press"` — which of the two this is, said outright rather than inferred from
-    /// which of the fields below are null.
+    /// `"issue"` or `"press"`, said outright rather than inferred from which fields are null.
     report: &'static str,
     /// The decision kind that asked.
     kind: &'static str,
@@ -83,7 +74,7 @@ struct Incident<'a> {
     conversation: Vec<Message>,
 }
 
-/// Write the record, and answer where it went.
+/// Write the record, and answer its directory.
 pub fn record(
     run: &CurrentRun,
     published: &Published,
@@ -96,8 +87,7 @@ pub fn record(
     let run = run.get();
     let parent = run.path().join(report.directory());
     std::fs::create_dir_all(&parent).map_err(|e| format!("could not create {parent:?}: {e}"))?;
-    // A turn id is the worker's cancellation generation and restarts with the process, so a run
-    // resumed twice in a day would otherwise overwrite the first record with the second.
+    // A turn id restarts with the process, so one run can see the same id twice.
     let dir = parent.join(run::unique_dir(&parent, &format!("turn-{turn}")));
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {dir:?}: {e}"))?;
 
@@ -117,8 +107,7 @@ pub fn record(
             Report::Issue { message } => Some(message),
             Report::Press { .. } => None,
         },
-        // Lower-cased so the record spells a button the way the model's own call did — the
-        // schema's enum is `"start"`, and a record grepped for what was sent should find it.
+        // Lower-cased, as the schema's enum spells them, so a grep for what was sent finds it.
         buttons: match report {
             Report::Press { buttons, .. } => {
                 Some(buttons.iter().map(|button| button.to_string().to_lowercase()).collect())
@@ -136,8 +125,7 @@ pub fn record(
     };
     let json = serde_json::to_vec_pretty(&incident)
         .map_err(|e| format!("could not serialise the record: {e}"))?;
-    // `write_atomically` stages at `with_extension("tmp")`, which *replaces* the extension — so
-    // these two stage as `incident.tmp` and `screen.tmp`.
+    // `write_atomically` replaces the extension, so these stage as `incident.tmp` and `screen.tmp`.
     run::write_atomically(&dir.join("incident.json"), &json)?;
 
     let frame = published.latest_frame();
@@ -186,8 +174,6 @@ mod tests {
         messages
     }
 
-    /// The whole of it: every file lands, the conversation is cut to the last three turns, and no
-    /// picture survives into the JSON.
     #[test]
     fn a_press_is_recorded_with_its_screen_and_a_picture_free_conversation() {
         let scratch = Scratch::new("incident");
@@ -226,8 +212,6 @@ mod tests {
         assert_eq!(conversation[0]["content"], "### Turn 1", "cut at a turn boundary");
     }
 
-    /// An issue lands in a directory of its own, carries its message and none of a press's
-    /// fields, and gets the same screen and conversation treatment.
     #[test]
     fn an_issue_is_filed_apart_from_a_press() {
         let scratch = Scratch::new("incident-issue");
@@ -256,8 +240,6 @@ mod tests {
         assert!(dir.join("screen.png").exists());
     }
 
-    /// A second press on the same turn id — a run resumed twice in a day is the real case — must
-    /// not overwrite the first record.
     #[test]
     fn two_records_of_one_turn_id_do_not_overwrite_each_other() {
         let scratch = Scratch::new("incident-collide");
@@ -275,8 +257,6 @@ mod tests {
         assert!(first.exists() && second.exists());
     }
 
-    /// A history shorter than [`TURNS_KEPT`] is the first minutes of every run, and an empty one
-    /// is what the second test above passes.
     #[test]
     fn a_short_history_is_carried_whole() {
         assert!(recent_turns(&[]).is_empty());
@@ -284,7 +264,6 @@ mod tests {
         assert_eq!(recent_turns(&messages).len(), 2, "nothing is dropped from below the window");
     }
 
-    /// A slice may never open on an assistant message or a tool result.
     #[test]
     fn the_slice_starts_at_a_user_message() {
         let slice = recent_turns(&history());

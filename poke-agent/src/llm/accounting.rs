@@ -35,13 +35,10 @@ impl Accounting {
         }
     }
 
-    /// The accounting for a run whose conversation has just been read back off disk
-    /// ([`crate::llm::history`]).
+    /// The accounting for a conversation just read back by [`crate::llm::history`].
     pub fn resumed(limit: u64, calibration: f64) -> Self {
         Self {
-            // A number that came off disk, so it is checked rather than trusted: `clamp`
-            // propagates a NaN instead of rejecting it, which would poison every occupancy
-            // reading silently.
+            // Off disk, so checked rather than trusted: `clamp` propagates a NaN.
             calibration: match calibration.is_finite() {
                 true => calibration.clamp(MIN_CALIBRATION, MAX_CALIBRATION),
                 false => 1.0,
@@ -50,14 +47,12 @@ impl Accounting {
         }
     }
 
-    /// What the endpoint counts, divided by what we estimate. Persisted across a restart by
-    /// [`crate::llm::history`]; see [`Self::resumed`].
+    /// What the endpoint counts over what we estimate, persisted by [`crate::llm::history`].
     pub fn calibration(&self) -> f64 {
         self.calibration
     }
 
-    /// Fold in one response. `sent` is the history as it went out — not as it stands now —
-    /// because that is what the reported `prompt_tokens` counted.
+    /// Fold in one response; `sent` is the history as it went out, which `prompt_tokens` counted.
     pub fn record(&mut self, usage: Usage, sent: &[Message]) {
         let ours: u64 = sent.iter().map(Message::approximate_tokens).sum();
         if !usage.estimated && usage.prompt_tokens > 0 && ours > 0 {
@@ -82,8 +77,7 @@ impl Accounting {
         self.tokens_in(messages) as f64 / self.limit as f64
     }
 
-    /// `true` once anything has been reported or estimated, which is what stops the UI showing a
-    /// context gauge reading 0 % before the first turn has finished.
+    /// Whether anything has been counted, so the UI shows no 0 % gauge before the first turn.
     pub fn has_figures(&self) -> bool {
         self.completions > 0
     }
@@ -116,8 +110,6 @@ mod tests {
         vec![Message::user("a".repeat(chars))]
     }
 
-    /// The totals are cumulative across the run and the context figure is not — one is a bill,
-    /// the other is a gauge.
     #[test]
     fn totals_accumulate_while_the_context_figure_is_the_latest_one() {
         let mut accounting = Accounting::new(100_000);
@@ -135,8 +127,6 @@ mod tests {
         assert!(accounting.has_figures());
     }
 
-    /// The module's whole reason for existing: a decision taken after the history has changed
-    /// must be on the endpoint's scale, not ours.
     #[test]
     fn the_estimator_is_calibrated_against_what_the_endpoint_reported() {
         let mut accounting = Accounting::new(30_000);
@@ -146,8 +136,7 @@ mod tests {
         assert_eq!(accounting.tokens_in(&sent), 30_000, "the estimate now agrees with the report");
         assert!((accounting.occupancy(&sent) - 1.0).abs() < 0.01);
 
-        // Halve the history — as an eviction would — and the occupancy halves *on the same
-        // scale*.
+        // Halving the history halves the occupancy on the same scale.
         assert!((accounting.occupancy(&history(18_500)) - 0.5).abs() < 0.01);
     }
 
@@ -164,8 +153,7 @@ mod tests {
         assert!(accounting.view().estimated, "and the UI is told the numbers are a guess");
     }
 
-    /// A wildly disagreeing endpoint is clamped rather than believed: the failure it would
-    /// otherwise cause is a compaction that never fires, or one that fires on every turn.
+    /// Believed, a wild ratio makes compaction never fire, or fire on every turn.
     #[test]
     fn an_absurd_ratio_is_clamped() {
         let mut accounting = Accounting::new(1_000);
@@ -180,8 +168,7 @@ mod tests {
 
     #[test]
     fn a_resumed_run_measures_its_restored_history_on_the_endpoints_scale_not_ours() {
-        // Sized so the two land either side of the default threshold rather than merely
-        // differing.
+        // Sized so the two land either side of the default threshold.
         let limit = 10_000;
         let sent: Vec<Message> = (0..12)
             .map(|_| Message::user("x".repeat(1_000)))
@@ -191,7 +178,6 @@ mod tests {
         let warm = Accounting::resumed(limit, 3.0);
         let threshold = crate::llm::config::DEFAULT_COMPACT_ABOVE;
 
-        // The precondition is that they disagree about compacting, not merely about the number.
         assert!(
             cold.occupancy(&sent) < threshold,
             "at 1.0 this history looks like it fits: {}",
@@ -204,7 +190,6 @@ mod tests {
         );
     }
 
-    /// The number came off a file, so it is checked rather than trusted.
     #[test]
     fn a_calibration_read_off_disk_is_checked_rather_than_trusted() {
         assert_eq!(Accounting::resumed(1_000, 3.0).calibration(), 3.0, "an ordinary value is kept");
@@ -213,8 +198,8 @@ mod tests {
         assert_eq!(Accounting::resumed(1_000, f64::NAN).calibration(), 1.0);
         assert_eq!(Accounting::resumed(1_000, f64::INFINITY).calibration(), 1.0);
 
-        // The totals deliberately do not come back: `RunProgress` rebases them onto `meta.json`,
-        // so a restored total would be counted twice at the next checkpoint.
+        // Totals do not come back: `RunProgress` rebases them onto `meta.json`, so they would
+        // count twice.
         let resumed = Accounting::resumed(1_000, 3.0);
         assert!(!resumed.has_figures(), "a resumed run has spent nothing yet");
         assert_eq!(resumed.view().prompt_tokens, 0);

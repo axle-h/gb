@@ -1,4 +1,3 @@
-
 use super::super::*;
 
 const TANGELA: &[u8] = include_bytes!("../../data/postgame-tangela.bin");
@@ -6,11 +5,10 @@ const TANGELA: &[u8] = include_bytes!("../../data/postgame-tangela.bin");
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_hm05_and_light_rock_tunnel() {
-    /// Slowpoke, banked by G-trades — box slot 4, and one of two Flash learners this save has.
+    /// Slowpoke, box slot 4, one of two Flash learners this save has.
     const SLOWPOKE_BOX_SLOT: u8 = 4;
-    /// It lands at the end of a four-mon party.
     const FLASH_SLOT: u8 = 4;
-    /// The bag is 20/20; an Escape Rope is the least useful thing in it (Slowpoke knows Dig).
+    /// The bag is 20/20; Slowpoke knows Dig, so the Escape Rope goes.
     const SHED: ItemId = ItemId::EscapeRope;
 
     let mut fixture = TestFixture::new(TANGELA, Duration::from_mins(90),
@@ -30,8 +28,7 @@ fn can_get_hm05_and_light_rock_tunnel() {
     assert_eq!(taught.pokemon[FLASH_SLOT as usize].species, PokemonSpecies::Slowpoke);
     println!("Flash taught to slot {FLASH_SLOT}");
 
-    // Entering Rock Tunnel is what makes the map dark in the first place; assert that, or "lit"
-    // proves nothing.
+    // Entering Rock Tunnel makes the map dark; assert that, or "lit" proves nothing.
     let dark = fixture.run_until(|s| s.map.map == Map::RockTunnel1F && s.map_is_dark);
     assert!(dark.map_is_dark, "Rock Tunnel 1F should be dark on arrival (wMapPalOffset = 6)");
 
@@ -44,11 +41,11 @@ fn can_get_hm05_and_light_rock_tunnel() {
 
 const SAFARI: &[u8] = include_bytes!("../../data/postgame-safari.bin");
 
-/// Task H3 — the Itemfinder from the `Route11Gate2F` aide, at a dex gate of 30 owned.
+/// The Itemfinder from the `Route11Gate2F` aide, at a dex gate of 30 owned.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_the_itemfinder() {
-    /// Two vitamins: the least useful things in a 20/20 bag whose party is already at level 71+.
+    /// The least useful things in a full bag whose party is past level 71.
     const SHED: &[ItemId] = &[ItemId::Calcium, ItemId::Carbos];
 
     let mut fixture = TestFixture::new(SAFARI, Duration::from_mins(60),
@@ -69,21 +66,18 @@ fn can_get_the_itemfinder() {
     fixture.save_state_named("src/pokemon/data/postgame-itemfinder.bin").unwrap();
 }
 
-/// H3's output: Route 11 at (50,8), just outside the gate's west door, Itemfinder in the bag and
-/// one free bag slot.
+/// `can_get_the_itemfinder`'s output: Route 11 by the gate, Itemfinder in the bag, a slot free.
 const ITEMFINDER: &[u8] = include_bytes!("../../data/postgame-itemfinder.bin");
 
-/// The share floor every H5 leg sweeps at: chase a map's fat slots, take anything rarer that
-/// happens to turn up, and move on.
+/// The share floor every sweep uses: chase a map's fat slots, take anything rarer, move on.
 const MIN_SHARE: u8 = 20;
 
-/// Task H5a — the sweep's outfitting, then the two grounds either side of Route 11.
+/// The sweep's outfitting, then the two grounds either side of Route 11.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_sweep_the_vermilion_grounds() {
-    /// One bag slot for the balls.
     const SHED: &[ItemId] = &[ItemId::RareCandy];
-    /// Box 1 already holds 18 of E's Safari catches; box 2 is empty.
+    /// Box 1 holds the Safari catches; box 2 is empty.
     const BOX: u8 = 1;
 
     let mut steps = PolicyStep::dex_sweep_outfit_steps(SHED, 99, BOX);
@@ -111,10 +105,10 @@ fn can_sweep_the_vermilion_grounds() {
     fixture.save_state_named("src/pokemon/data/postgame-sweep-vermilion.bin").unwrap();
 }
 
-/// H5a's output: Route 11, box 2 open with the leg's catches in it, Poké Balls in the bag.
+/// `can_sweep_the_vermilion_grounds`'s output: Route 11, box 2 open with its catches.
 const SWEEP_VERMILION: &[u8] = include_bytes!("../../data/postgame-sweep-vermilion.bin");
 
-/// Task H5b — Route 1 and Viridian Forest: the cheapest seven species in the game.
+/// Route 1 and Viridian Forest: the cheapest seven species in the game.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_sweep_the_viridian_grounds() {
@@ -134,10 +128,10 @@ fn can_sweep_the_viridian_grounds() {
     fixture.save_state_named("src/pokemon/data/postgame-sweep-viridian.bin").unwrap();
 }
 
-/// H5b's output.
+/// `can_sweep_the_viridian_grounds`'s output.
 const SWEEP_VIRIDIAN: &[u8] = include_bytes!("../../data/postgame-sweep-viridian.bin");
 
-/// Task H5c — the three Lavender grounds: Route 8, Pokémon Tower 7F, and Rock Tunnel.
+/// The three Lavender grounds: Route 8, Pokémon Tower 7F, and Rock Tunnel.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_sweep_the_lavender_grounds() {
@@ -157,14 +151,14 @@ fn can_sweep_the_lavender_grounds() {
     fixture.save_state_named("src/pokemon/data/postgame-sweep-lavender.bin").unwrap();
 }
 
-/// H5c's output.
+/// `can_sweep_the_lavender_grounds`'s output.
 const SWEEP_LAVENDER: &[u8] = include_bytes!("../../data/postgame-sweep-lavender.bin");
 
-/// Task H5d/H5e — Route 7's Oddish and the Pokémon Mansion, then the Exp.All aide.
+/// Route 7's Oddish and the Pokémon Mansion, then the Exp.All aide.
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow — run with --features slow-tests")]
 fn can_get_the_exp_all() {
-    /// Box 2 is carrying the first three legs' catches; the Mansion's would overflow it.
+    /// Box 2 carries the earlier sweeps' catches; the Mansion's would overflow it.
     const BOX: u8 = 2;
     /// Free bag slots, or the aide refuses.
     const SHED: &[ItemId] = &[ItemId::MaxRevive, ItemId::SilphScope];

@@ -1,4 +1,3 @@
-
 use serde_json::{Value, json};
 
 use gb::geometry::Point8;
@@ -6,7 +5,7 @@ use gb::joypad::JoypadButton;
 use crate::llm::prompt::ApiSnapshot;
 use crate::llm::battle_script::MAX_SOURCE as MAX_BATTLE_SCRIPT;
 
-/// How many *extra* kinds one `buy_item` may order in a single mart visit.
+/// How many extra kinds one `buy_item` may order in a single mart visit.
 const MAX_CHAINED_PURCHASES: usize = 3;
 use crate::llm::todo::{MAX_ITEMS as MAX_TODO_ITEMS, MAX_TEXT as MAX_TODO_TEXT, TodoCall};
 use crate::llm::protocol::{ToolCall, ToolSpec};
@@ -36,9 +35,7 @@ pub enum DecisionKind {
     /// A mart's Buy/Sell/Quit menu just opened.
     MartPurchase,
     ForgetMove,
-    /// The sixth kind, and the only one that is not a poll site: the agent has reached *no*
-    /// decision point for `GB_STUCK_TIMEOUT_SECS` of emulated time and the watchdog is asking on
-    /// its behalf.
+    /// Not a poll site: no decision point for `GB_STUCK_TIMEOUT_SECS`, so the watchdog asks.
     Stuck,
 }
 
@@ -54,31 +51,28 @@ impl DecisionKind {
         }
     }
 
-    /// Whether the `GameState` cannot tell that this is the question being asked, so the only
-    /// evidence is which poll site ran last — see `LlmPolicy::observed_kind`.
+    /// Whether only the last poll site, not the `GameState`, says this is the question; see
+    /// `LlmPolicy::observed_kind`.
     pub fn is_inferred_from_the_site(self) -> bool {
         matches!(self, Self::Nickname | Self::MartPurchase | Self::ForgetMove | Self::Stuck)
     }
 }
 
-/// A terminal tool call, parsed. Resolving it against the live game is [`resolve_overworld`],
-/// [`resolve_battle`] and [`resolve_field_move`] — done at the poll, not here, because the world
-/// may have moved since.
+/// A terminal tool call, parsed; resolved against the live game at the poll, since the world may
+/// have moved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Terminal {
-    /// One overworld action, and — since the whole point of the agent is that a decision is
-    /// bigger than a button — optionally the next few after it.
+    /// One overworld action, and optionally the next few after it.
     ChooseAction {
         id: String,
         /// Further ids from the same turn's menu, in the order they are to be taken.
         then: Vec<String>,
-        /// A battle interrupting this action does not end it: once the battle is over the same
-        /// action is taken again rather than the decision being handed back.
+        /// Opt-in: once an interrupting battle is over the action is taken again, not handed back.
         resume_after_battle: bool,
     },
     /// One battle action, and whether the rest of this battle belongs to the model.
     ChooseBattleAction { id: String, take_over: bool },
-    /// Something the agent does *without* walking: cut a tree, teach an HM, push a boulder.
+    /// Something the agent does without walking: teach an HM, use an item, ride a lift.
     UseFieldMove(FieldMoveRequest),
     PressButtons { buttons: Vec<JoypadButton> },
     SetNickname { name: Option<String> },
@@ -95,8 +89,7 @@ pub enum Terminal {
 /// How many overworld actions one `choose_action` may carry, `id` included.
 pub const MAX_CHAINED_ACTIONS: usize = 4;
 
-/// A cap, because `wait { ticks: 100000 }` is a model stalling its own run and there is no
-/// legitimate reason to sit out more than a few seconds of game time in one decision.
+/// A longer `wait` is a model stalling its own run.
 pub const MAX_WAIT_TICKS: u16 = 150;
 
 /// The longest nickname the naming screen's buffer holds.
@@ -116,21 +109,18 @@ pub enum CallKind {
     BattleScript(BattleScriptCall),
     /// The turn is over.
     Terminal(Terminal),
-    /// Nothing this turn can use — an unknown name, a terminal tool belonging to the other
-    /// decision kind, or arguments that would not parse.
+    /// An unknown name, a terminal tool of another decision kind, or unparseable arguments.
     Rejected(String),
 }
 
 impl CallKind {
-    /// The discriminant, for the page. Not `strum`'s derive: `Todo(TodoCall)` and
-    /// `Terminal(Terminal)` would drag their payloads' names into a string the client matches on,
-    /// and these four words are a wire contract with `api.ts`.
+    /// The discriminant, for the page: these words are a wire contract with `api.ts`.
     pub fn label(&self) -> &'static str {
         match self {
             Self::Read | Self::Screenshot => "read",
             Self::Todo(_) => "todo",
             Self::Issue(_) => "issue",
-            // Deliberately not a fifth word.
+            // Not a fifth word: `api.ts` matches on these.
             Self::BattleScript(_) => "todo",
             Self::Terminal(_) => "terminal",
             Self::Rejected(_) => "rejected",
@@ -138,12 +128,9 @@ impl CallKind {
     }
 }
 
-// ── Field moves
-// ──────────────────────────────────────────────────────────────────────────────────
+// ── Field moves ──────────────────────────────────────────────────────────────────────────────────
 
-/// A `use_field_move` call, parsed but not yet resolved. [`resolve_field_move`] turns one of
-/// these into a [`FieldMove`] against the live state, because two of them need the party to do
-/// it.
+/// A `use_field_move` call, parsed; [`resolve_field_move`] resolves it against the live state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldMoveRequest {
     PartyMove { name: PokemonMoveName, slot: Option<u8> },
@@ -152,14 +139,13 @@ pub enum FieldMoveRequest {
     Teach { item: ItemId, slot: u8 },
     /// Use an evolution stone from the bag on a party member.
     Evolve { stone: ItemId, slot: u8 },
-    /// Use a bag item: on `target` if there is one — the Poké Flute on a sleeping Snorlax, the
-    /// Card Key on a door — and otherwise on the player, or on the party member in `slot`.
+    /// Use a bag item on `target` if given (the Poké Flute on Snorlax), else the player or `slot`.
     UseItem { item: ItemId, target: Option<Point8>, slot: Option<u8> },
     /// Throw an item away to free one of the bag's 20 slots.
     TossItem { item: ItemId },
     /// Rearrange the party so `slot` leads.
     ReorderParty { slot: u8 },
-    // There was an `Interact { target, facing }` here: face any tile and press A.
+    /// Deposit, withdraw or change box at the PC.
     UsePcBox { op: crate::pokemon::postgame::pc_box::PcBoxOp },
     /// Move items between the bag and PC item storage.
     UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp, item: ItemId, qty: u8 },
@@ -167,10 +153,8 @@ pub enum FieldMoveRequest {
     UseElevator { to: Map },
 }
 
-/// The five HM field moves and the badge each one needs before the game will let it be used
-/// outside battle, transcribed from `.outOfBattleMovePointers` in
-/// `engine/menus/start_sub_menus.asm`: every arm opens `bit BIT_<something>BADGE, a` / `jp z,
-/// .newBadgeRequired`.
+/// The badge each HM needs outside battle, from `.outOfBattleMovePointers` in
+/// `engine/menus/start_sub_menus.asm`.
 const HM_BADGES: &[(PokemonMoveName, crate::pokemon::badge::Badge)] = &[
     (PokemonMoveName::Flash, crate::pokemon::badge::Badge::BoulderBadge),
     (PokemonMoveName::Cut, crate::pokemon::badge::Badge::CascadeBadge),
@@ -205,8 +189,7 @@ fn hm_available(state: &GameState, name: PokemonMoveName) -> Result<(), String> 
     }
 }
 
-/// Turn a request into the [`FieldMove`] the agent executes, or into the sentence the model is
-/// told instead.
+/// The PC on this map, or why there is none.
 fn the_pc_here(state: &GameState) -> Result<Point8, String> {
     crate::pokemon::tile_map::pc_locations_for(state.map.map).first().copied().ok_or_else(|| {
         format!(
@@ -216,6 +199,7 @@ fn the_pc_here(state: &GameState) -> Result<Point8, String> {
     })
 }
 
+/// Turn a request into the [`FieldMove`] the agent executes, or the sentence the model is told.
 pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Result<FieldMove, String> {
     let party_slot = |slot: u8| -> Result<u8, String> {
         match (slot as usize) < state.pokemon.len() {
@@ -250,8 +234,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
                     None => return Err(format!("No Pokémon in the party knows {name}.")),
                 },
             };
-            // The party menu lists a mon's field moves in its own move-slot order, so the index
-            // depends on what else that mon knows.
+            // The party menu lists field moves in move-slot order, so the index depends on the set.
             FieldMove::UseFieldMove { slot, move_index: field_move_index(state, slot, *name) }
         }
         FieldMoveRequest::Fly { to } => {
@@ -261,8 +244,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
         FieldMoveRequest::Teach { item, slot } => {
             let item = held(*item)?;
             let slot = party_slot(*slot)?;
-            // A machine the game will refuse is the `CutTree` gate again, and it wedges the same
-            // way.
+            // A machine the game refuses wedges the agent, so it is refused here first.
             if state.pokemon.get(slot as usize)
                 .is_some_and(|mon| !crate::pokemon::learnset::can_learn(mon.species, item)) {
                 return Err(crate::pokemon::learnset::teach_refusal(state, item, slot));
@@ -271,8 +253,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
         }
         FieldMoveRequest::Evolve { stone, slot } => {
             let slot = party_slot(*slot)?;
-            // Completion is "this slot's species changed", so the driver needs the species it
-            // started from — which the model has no way to supply and no business supplying.
+            // Completion is "this slot's species changed", so the driver needs the starting one.
             let evolve_from = state
                 .pokemon
                 .get(slot as usize)
@@ -291,26 +272,22 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
                 },
                 None => crate::pokemon::postgame::items::UseTarget::Nothing,
             };
-            // The game's own refusals, asked before a button is pressed, exactly as the PC menus
-            // below do it.
+            // Asked up front: `ItemUseNotTime` consumes nothing and prints a box like success.
             if let Some(refusal) = crate::pokemon::postgame::items::blocked(state, item, target) {
                 return Err(format!("The game will not do that: {refusal}."));
             }
             FieldMove::UseBagItem { item, target }
         }
-        // A `slot` alongside a `target` is ignored rather than refused: the target is the more
-        // specific of the two and the items that take one take no party member at all, so there
-        // is nothing for a slot to mean here.
+        // A `slot` beside a `target` is ignored: an item that takes a target takes no party member.
         FieldMoveRequest::UseItem { item, target: Some(target), slot: _ } => {
-            // `CutTree`'s gate and `Teach`'s, for an item the game will not use at all.
+            // As `Teach`'s gate, for an item the game will not use at all.
             let item = held(*item)?;
             if let Some(refusal) = crate::pokemon::item_use::field_use_refusal(item) {
                 return Err(refusal);
             }
             let at = *target;
             let nothing_there = |noun: &str| -> String {
-                // The recovery `read_map` handed the run, without the round trip: whatever *is*
-                // beside the square it aimed at.
+                // Whatever is beside the square it aimed at, saving a `read_map`.
                 let beside = [
                     at.y.checked_sub(1).map(|y| Point8 { x: at.x, y }),
                     at.y.checked_add(1).map(|y| Point8 { x: at.x, y }),
@@ -344,8 +321,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
                 Some(MetaTile::Water) => return Err(nothing_there("water")),
                 Some(_) => {}
             }
-            // Facing it is the precondition the cartridge checks: every one of these items reads
-            // the tile in front of the player.
+            // Every one of these items reads the tile in front of the player.
             if state.map.route_to_face(at).is_none() {
                 return Err(format!(
                     "The player cannot get next to ({}, {}) to face it, and every one of these items \
@@ -376,8 +352,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             if *qty == 0 {
                 return Err("A quantity of 0 moves nothing.".to_string());
             }
-            // Withdrawing reads PC storage rather than the bag, so `held` is the wrong question
-            // for half of this and would refuse every withdrawal of something not also carried.
+            // A withdrawal reads PC storage, not the bag, so only a deposit asks `held`.
             if matches!(op, PcItemOp::Deposit) { held(*item)?; }
             FieldMove::UseItemPc { op: *op, item: *item, qty: *qty, pc }
         }
@@ -395,9 +370,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
                     floors.iter().map(|floor| floor.to_string()).collect::<Vec<_>>().join(", "),
                 ));
             };
-            // The Rocket Hideout's lift is the one that needs a key, and it is the one that
-            // matters: `RocketHideoutElevatorText` opens `ld b, LIFT_KEY`, and B4F — Giovanni, so
-            // the Silph Scope — is only reachable through it.
+            // Only the Rocket Hideout's lift needs a key, per `RocketHideoutElevatorText`.
             if state.map.map == Map::RocketHideoutElevator {
                 held(ItemId::LiftKey).map_err(|_| {
                     "This lift needs the LIFT_KEY, which is somewhere in the hideout. Without it \
@@ -423,8 +396,7 @@ fn knows(state: &GameState, slot: u8, name: PokemonMoveName) -> bool {
         .is_some_and(|mon| mon.moves.iter().flatten().any(|m| m.name == name))
 }
 
-/// The moves `use_field_move` accepts under [`FieldMoveRequest::PartyMove`], with what each one
-/// is for.
+/// The moves `use_field_move` accepts under [`FieldMoveRequest::PartyMove`], and what each is for.
 const PARTY_MOVES: &[(&str, PokemonMoveName, &str)] = &[
     ("flash", PokemonMoveName::Flash, "light a dark map (Rock Tunnel)"),
     ("dig", PokemonMoveName::Dig, "warp straight out of a cave or dungeon"),
@@ -432,13 +404,12 @@ const PARTY_MOVES: &[(&str, PokemonMoveName, &str)] = &[
     ("softboiled", PokemonMoveName::Softboiled, "heal another party member from Chansey's HP"),
 ];
 
-// ── The catalogue
-// ────────────────────────────────────────────────────────────────────────────────
+// ── The catalogue ────────────────────────────────────────────────────────────────────────────────
 
 pub struct ReadTool {
     pub name: &'static str,
     pub description: &'static str,
-    /// Which turns this read is offered in, and it is not "all of them".
+    /// Which turns this read is offered in.
     pub kinds: &'static [DecisionKind],
     /// `None` for the reads that take no arguments, which is all of them but [`READ_ROUTE`].
     pub parameters: Option<fn() -> Value>,
@@ -482,8 +453,7 @@ pub const READ_TOOLS: &[ReadTool] = &[
         name: "read_bag",
         description: "Every item in the bag with its quantity and shop price, plus money and how \
                       many of the bag's 20 slots are used.",
-        // The one read the situation genuinely cannot supply: the bag is nowhere in a turn
-        // request, and `use_field_move` needs an item named exactly as the bag names it.
+        // The bag is nowhere in a turn request, and `use_field_move` needs its exact names.
         kinds: &[DecisionKind::Overworld, DecisionKind::Battle, DecisionKind::MartPurchase],
         parameters: None,
     },
@@ -513,8 +483,7 @@ pub const READ_TOOLS: &[ReadTool] = &[
                       from your badges and it does not change until you win the next one, so there \
                       is no reason to ask twice. Place names in it are spelled exactly as the \
                       action menu and `read_route` spell them.",
-        // Overworld and Stuck only: it answers "where am I supposed to be going", which is not a
-        // question a battle, a nickname, a mart or a move to forget can raise.
+        // It answers "where am I going", which no battle, name, mart or forgotten move raises.
         kinds: &[DecisionKind::Overworld, DecisionKind::Stuck],
         parameters: None,
     },
@@ -525,27 +494,19 @@ pub const READ_TOOLS: &[ReadTool] = &[
                       precise as one of the other reads; ask for this when you want to see \
                       something they do not model, such as an unfamiliar menu or an animation you \
                       are not sure has finished.",
-        // Every kind: it is the only tool that can answer "what on earth is on screen", which is
-        // exactly the question a nickname prompt, a mart menu or a wedged agent raises.
+        // Every kind: only the screen explains an unfamiliar menu or a wedged agent.
         kinds: &ALL_KINDS,
         parameters: None,
     },
 ];
 
-/// Answered by the worker rather than at the policy poll, because PNG encoding does not belong on
-/// the emulator thread. See [`CallKind::Screenshot`].
+/// Answered by the worker, since PNG encoding does not belong on the emulator thread.
 pub const SCREENSHOT: &str = "screenshot";
 
-/// The world graph, asked the question a model actually has. It replaced `read_world_graph`,
-/// which serialised every visited `(map, entry)` node with all of its edges — unbounded by
-/// construction, and by the late game large enough to be a meaningful fraction of the window in a
-/// single call.
+/// The world graph, asked the question a model has, and never serialised whole.
 pub const READ_ROUTE: &str = "read_route";
 
-/// The walkthrough, cut to where the player actually is. Everything a run needs to know about the
-/// order of this game is in [`crate::llm::guide`], and the chapter is picked from the badges the
-/// turn is already reading — so the tool takes no arguments and cannot be asked the wrong
-/// question.
+/// The [`crate::llm::guide`] chapter the badges pick, so the tool takes no arguments.
 pub const READ_GUIDE: &str = "read_guide";
 
 fn read_route_arguments() -> Value {
@@ -562,8 +523,7 @@ fn read_route_arguments() -> Value {
     })
 }
 
-/// Every [`DecisionKind`], for the reads that are offered in all of them — and, in the tests, so
-/// a loop that meant "all of them" cannot quietly stop meaning it when a seventh is added.
+/// Every [`DecisionKind`], so a loop over all of them keeps meaning it when one is added.
 pub const ALL_KINDS: [DecisionKind; 6] = [
     DecisionKind::Overworld,
     DecisionKind::Battle,
@@ -581,11 +541,10 @@ fn reads_for(kind: DecisionKind) -> impl Iterator<Item = &'static ReadTool> {
     READ_TOOLS.iter().filter(move |tool| tool.kinds.contains(&kind))
 }
 
-/// The three TODO tools, by name. Non-terminal like the reads, and named in the turn contract for
-/// the same reason: a model that thinks `todo_set` ended its turn stops playing.
+/// Named in the turn contract as non-terminal: a model that thinks `todo_set` ended its turn stops.
 pub const TODO_TOOL_NAMES: &[&str] = &["todo_set", "todo_complete", "todo_delete"];
 
-/// Their specs. A function rather than a const because a JSON Schema is not a `const` expression.
+/// Their specs; a JSON Schema is not a `const` expression.
 pub fn todo_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec::new(
@@ -635,11 +594,9 @@ pub fn todo_tools() -> Vec<ToolSpec> {
     ]
 }
 
-// ── The battle script
-// ────────────────────────────────────────────────────────────────────────────
+// ── The battle script ────────────────────────────────────────────────────────────────────────────
 
-/// One tool call against the model's battle script, parsed. Answered on the worker thread —
-/// validation runs the script over seven hand-built states and none of it needs the emulator.
+/// One tool call against the model's battle script, parsed and answered on the worker thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BattleScriptCall {
     /// `get_battle_script_docs`: the API reference, verbatim.
@@ -654,12 +611,12 @@ pub enum BattleScriptCall {
 pub const BATTLE_SCRIPT_TOOL_NAMES: &[&str] =
     &["get_battle_script_docs", "read_battle_script", "set_battle_script"];
 
-/// Offered on `Overworld` and nowhere else, which is a scoping decision rather than an oversight.
+/// Offered on `Overworld` and nowhere else.
 fn offers_battle_script(kind: DecisionKind) -> bool {
     kind == DecisionKind::Overworld
 }
 
-/// Their specs. A function for the reason [`todo_tools`] is one.
+/// Their specs, a function for the reason [`todo_tools`] is one.
 pub fn battle_script_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec::new(
@@ -898,15 +855,10 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
     tools
 }
 
-/// How long a turn summary may be. Long enough for the intent *and* the reason — "heading to
-/// Viridian for Poké Balls, I have none and the grass north of here is where I can catch a second
-/// mon" — and short enough that carrying one per turn for the length of a run is not what fills
-/// the context window.
+/// Long enough for the intent and the reason, short enough to carry one per turn for a whole run.
 pub const MAX_SUMMARY: usize = 300;
 
-/// How long `press_buttons`' `why` may be. Shorter than a summary on purpose: it answers one
-/// narrow question — which action was looked for and not found — and a model given room to write
-/// an essay there writes one instead of reconsidering.
+/// `press_buttons`' `why` answers one narrow question, so it is shorter than a summary.
 pub const MAX_REASON: usize = 200;
 
 /// Bolt a required `summary` onto a terminal tool's schema.
@@ -945,9 +897,7 @@ pub fn call_reason(call: &ToolCall) -> Option<String> {
     call_string(call, "why", MAX_REASON)
 }
 
-/// One free-text argument, trimmed and length-capped rather than trusted: `maxLength` in a schema
-/// is a request, not a guarantee, and these strings go to the page, the transcript, the record on
-/// disk and every later request.
+/// One free-text argument, trimmed and capped: a schema's `maxLength` is only a request.
 fn call_string(call: &ToolCall, field: &str, cap: usize) -> Option<String> {
     let value = call.arguments().ok()?.get(field)?.as_str()?.trim().to_string();
     if value.is_empty() {
@@ -959,15 +909,12 @@ fn call_string(call: &ToolCall, field: &str, cap: usize) -> Option<String> {
     })
 }
 
-/// A zero-parameter tool still needs a schema, and an empty object is what every endpoint
-/// accepts.
+/// A zero-parameter tool still needs a schema, and every endpoint accepts an empty object.
 fn no_arguments() -> Value {
     json!({ "type": "object", "properties": {}, "additionalProperties": false })
 }
 
-/// One tool for every non-walking field action, discriminated by `move`, because a dozen separate
-/// tools would be a dozen entries in every request's `tools` array for the sake of one call a
-/// hundred turns.
+/// One tool for every non-walking field action, discriminated by `move`, to keep `tools` short.
 fn use_field_move_spec() -> ToolSpec {
     let party_moves: Vec<String> =
         PARTY_MOVES.iter().map(|(name, _, why)| format!("`{name}` — {why}")).collect();
@@ -1046,18 +993,13 @@ fn field_move_names() -> Vec<&'static str> {
     names
 }
 
-/// The last resort, and it is offered as one. Raw presses pre-empt the whole state machine and
-/// reset it to idle afterwards, so a model that reaches for this instead of the action menu will
-/// walk the player into a wall.
 pub const REPORT_ISSUE: &str = "report_issue";
 
-/// How long an issue report may be. Longer than [`MAX_REASON`] and longer than [`MAX_SUMMARY`],
-/// because unlike either of those it is not carried in the history or re-read every turn: it is
-/// written to disk once and read by a person, so the only thing length costs is the completion
-/// that wrote it.
+/// Longer than a summary: an issue is written to disk once and read by a person.
 pub const MAX_ISSUE: usize = 1_000;
 
-/// `report_issue`: what the model says when it believes the *agent* is wrong.
+/// `report_issue`: the model believes the agent is wrong. It does not end the turn, and its
+/// answer must not read like a fix.
 fn report_issue_spec() -> ToolSpec {
     ToolSpec::new(
         REPORT_ISSUE,
@@ -1085,13 +1027,12 @@ fn report_issue_spec() -> ToolSpec {
     )
 }
 
-/// A `report_issue` call's message, trimmed and capped. Unlike [`call_summary`] and
-/// [`call_reason`] this has no "absent" case to be tolerant of: [`classify`] rejects a call
-/// without one, so by the time anything reads it there is a message.
+/// A `report_issue` call's message, trimmed and capped; [`classify`] rejects a call without one.
 pub fn issue_message(call: &ToolCall) -> Option<String> {
     call_string(call, "message", MAX_ISSUE)
 }
 
+/// The last resort, on the watchdog's turn only: raw presses pre-empt the state machine.
 fn press_buttons_spec() -> ToolSpec {
     ToolSpec::new(
         "press_buttons",
@@ -1151,18 +1092,14 @@ pub fn terminal_names(kind: DecisionKind) -> &'static [&'static str] {
     }
 }
 
-// ── Classification
-// ───────────────────────────────────────────────────────────────────────────────
+// ── Classification ───────────────────────────────────────────────────────────────────────────────
 
-/// The complaint to make when the model chose an id this turn never offered, or `None` when it
-/// did.
+/// The complaint when the model chose an id this turn never offered, or `None` when it did.
 fn not_on_the_menu(id: &str, menu: &[String]) -> Option<String> {
     if menu.is_empty() || menu.iter().any(|offered| offered == id) {
         return None;
     }
-    // Every overworld id starts `{map}:`, so the menu already names the map the player is on and
-    // nothing has to carry it here separately — which is also what stops the complaint and the
-    // situation disagreeing about where the player is.
+    // Tested against `Map::iter()`: a battle id such as `item:Potion` also has a colon.
     let a_map = |name: &str| {
         use strum::IntoEnumIterator;
         Map::iter().any(|map| map.to_string() == name)
@@ -1213,8 +1150,7 @@ pub fn classify(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKin
 
 fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKind {
     let name = call.function.name.as_str();
-    // A read that exists but is not offered in *this* kind is answered like a terminal tool from
-    // the wrong kind: named, with the reason.
+    // A read not offered in this kind is answered like a terminal tool from the wrong kind.
     if let Some(tool) = read_tool(name) {
         if !tool.kinds.contains(&kind) {
             return CallKind::Rejected(format!(
@@ -1298,9 +1234,7 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
         "press_buttons" if kind == DecisionKind::Stuck => match button_arguments(&arguments) {
             Ok(buttons) => match call_reason(call) {
                 Some(_) => CallKind::Terminal(Terminal::PressButtons { buttons }),
-                // Enforced here and nowhere else in the catalogue's history: this is the one turn
-                // that offers the hatch, so this is the one place the record can still be made
-                // worth reading.
+                // Enforced here, as the `why` is the headline of the press record.
                 None => CallKind::Rejected(
                     "`press_buttons` needs a `why`: what you think is on the screen, and what \
                      these presses are meant to do about it. Every press is filed and read."
@@ -1310,17 +1244,14 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
             Err(complaint) => CallKind::Rejected(complaint),
         },
         "set_nickname" if kind == DecisionKind::Nickname => {
-            // An absent `name` is the answer "keep the default", and so is an empty string — the
-            // naming screen treats an empty buffer as a decline, so agreeing with it here means
-            // the two cannot disagree.
+            // Absent or empty is "keep the default", as the naming screen reads an empty buffer.
             let name = arguments
                 .get("name")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|name| !name.is_empty())
                 .map(|name| name.chars().take(MAX_NICKNAME).collect::<String>());
-            // The name is written straight into the naming screen's buffer, so nothing else
-            // checks it.
+            // Written straight into the naming screen's buffer, so nothing else checks it.
             match name.as_deref().and_then(unencodable) {
                 Some(bad) => CallKind::Rejected(format!(
                     "`{bad}` is not a character this game can write. A nickname may use letters, \
@@ -1339,8 +1270,7 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
                 Ok(item) => item,
                 Err(failure) => return CallKind::Rejected(failure),
             };
-            // Every chained order is parsed here, before any of them happens — the same rule
-            // `chosen_actions` follows for `then`.
+            // Every chained order is parsed before any is placed, as `chosen_actions` does.
             let mut then = Vec::new();
             if let Some(more) = arguments.get("then") {
                 let Some(list) = more.as_array() else {
@@ -1421,8 +1351,7 @@ fn string_argument(arguments: &Value, key: &str) -> Result<String, String> {
     }
 }
 
-// ── Parsing the awkward arguments
-// ────────────────────────────────────────────────────────────────
+// ── Parsing the awkward arguments ────────────────────────────────────────────────────────────────
 
 /// A `choose_action` call: the id, whatever is chained behind it, and whether a battle ends it.
 fn chosen_actions(arguments: &Value, menu: &[String]) -> Result<Terminal, String> {
@@ -1606,9 +1535,7 @@ fn button_arguments(arguments: &Value) -> Result<Vec<JoypadButton>, String> {
         .collect()
 }
 
-/// Compare two names the way a model spells them against the way the code spells them: `"HM01
-/// Cut"`, `"hm01_cut"` and `"Hm01Cut"` are all the same item, and none of the three is worth a
-/// rejection.
+/// Compare names ignoring case and punctuation: `"HM01 Cut"`, `"hm01_cut"` and `"Hm01Cut"` match.
 #[cfg(test)]
 fn facing_by_name(name: &str) -> Option<PlayerFacingDirection> {
     [
@@ -1628,9 +1555,7 @@ fn same_name(a: &str, b: &str) -> bool {
     normalise(a) == normalise(b)
 }
 
-/// `ItemId` has no `FromStr`, and giving it one would mean a `strum` derive on an enum three
-/// hundred other lines already index by discriminant. Scanning 255 discriminants once per tool
-/// call is free by comparison, and it cannot go stale.
+/// An item by name, scanning every discriminant, since `ItemId` has no `FromStr`.
 pub fn item_by_name(name: &str) -> Option<ItemId> {
     (0..=u8::MAX).filter_map(ItemId::from_repr).find(|item| same_name(name, &item.to_string()))
 }
@@ -1645,8 +1570,7 @@ fn button_by_name(name: &str) -> Option<JoypadButton> {
     JoypadButton::iter().find(|button| same_name(name, &button.to_string()))
 }
 
-// ── Servicing a read
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Servicing a read ─────────────────────────────────────────────────────────────────────────────
 
 /// Answer one read tool from the triple the policy holds at a poll.
 pub fn service_read(
@@ -1655,7 +1579,7 @@ pub fn service_read(
     api: &PokemonApi<'_>,
     graph: &WorldGraph,
 ) -> ToolAnswer {
-    // The picture is not drawn here.
+    // A `MetaTileMap`, never pixels: the picture is drawn on the worker thread.
     let map = match call.function.name.as_str() {
         "read_map" => Some(Box::new(state.map.clone())),
         _ => None,
@@ -1675,14 +1599,14 @@ pub fn service_read(
     };
     match value.and_then(|value| serde_json::to_string(&value)) {
         Ok(json) => ToolAnswer { json, map, is_dark: state.map_is_dark },
-        // Serialising a view cannot fail in practice, but a tool result is a string and the
-        // alternative to this line is an `unwrap` on the worker's critical path.
+        // Cannot fail in practice, and this is on the worker's critical path.
         Err(failure) => ToolAnswer::text(
             format!("{{\"error\": \"could not encode the result: {failure}\"}}")),
     }
 }
 
-/// [`READ_ROUTE`], answered.
+/// [`READ_ROUTE`], answered from the map-header graph: `None` means not walked yet, never
+/// unreachable.
 fn route_answer(call: &ToolCall, state: &GameState, graph: &WorldGraph) -> Value {
     let requested = call
         .arguments()
@@ -1709,8 +1633,7 @@ fn route_answer(call: &ToolCall, state: &GameState, graph: &WorldGraph) -> Value
         Some(hops) => {
             let mut answer = json!({
                 "from": format!("{}", state.map.map), "to": format!("{to}"), "route": hops });
-            // The route is right and the first step of it may still be unwalkable, and saying so
-            // is the whole of this.
+            // The graph knows which maps touch, not which parts of a map do, so say so.
             if let Some(unreachable) = hops.get(1).filter(|hop| hop.reachable_from_here == Some(false)) {
                 let blockers = state.map.boundary_blockers();
                 answer["warning"] = json!(format!(
@@ -1744,8 +1667,7 @@ fn route_answer(call: &ToolCall, state: &GameState, graph: &WorldGraph) -> Value
     }
 }
 
-// ── Menus and ids
-// ────────────────────────────────────────────────────────────────────────────────
+// ── Menus and ids ────────────────────────────────────────────────────────────────────────────────
 
 /// One row of the menu the turn request renders, and the only place an id is minted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1759,7 +1681,7 @@ pub fn overworld_id(_state: &GameState, action: &OverworldAction) -> String {
     action.id()
 }
 
-/// What one menu row says *beyond* its id: the action, in words.
+/// What one menu row says beyond its id: the action, in words.
 fn overworld_description(state: &GameState, action: &OverworldAction) -> String {
     use crate::pokemon::sprite::PictureId;
     use crate::pokemon::tile::{HiddenObject, MetaTile};
@@ -1768,12 +1690,11 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
             let (dx, dy) = crate::pokemon::map_header::strip_offset(to_map);
             format!("take the warp to {to_map}, arriving at ({}, {})", to_position.x + dx, to_position.y + dy)
         }
-        // The row says how many other ways in there are, because the menu holds one.
+        // The menu holds one row per neighbour, so it says how many ways in there are.
         MetaTile::Connection { to_map, .. } => {
             let others: Vec<String> = state.map.crossings(to_map).into_iter()
                 .filter(|crossing| crossing.reachable && crossing.at != action.destination)
-                // Minted through `overworld_id` rather than formatted here, so an id in a row's
-                // prose and an id the resolver accepts cannot drift apart.
+                // Minted by `overworld_id`, so prose ids and resolvable ids cannot drift apart.
                 .map(|crossing| overworld_id(state, &OverworldAction {
                     map: state.map.map,
                     origin: state.map.player_position,
@@ -1812,16 +1733,14 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
                 None => verb.to_string(),
             }
         }
-        // The verb is the whole action, because the row is.
+        // The verb is the whole action.
         MetaTile::Cut { at } => format!("cut down the tree at ({}, {})", at.x, at.y),
-        // The row only exists when a rod is in the bag and this map has water to cast at, so what
-        // it needs to say is what fishing is *for* rather than that it is possible: a wild battle
-        // with something that lives in the water, without walking anywhere.
+        // The row exists only with a rod and water, so it says what fishing is for.
         MetaTile::Fish { rod } => format!(
             "fish at the water's edge with the {} to find wild water Pokemon", rod.name()),
         MetaTile::Sprite(name) => {
             let sprite = state.map.sprites.iter().find(|s| s.name == name);
-            // Both coordinates, for the rows whose target is asked of the model.
+            // Both squares: the id's is where the player stands, `target` is where the thing is.
             let stand_and_target = |verb: &str| match sprite {
                 Some(sprite) => format!(
                     "{verb} (you stand at ({}, {}); it is at ({}, {}), which is the `target`)",
@@ -1840,9 +1759,8 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
     }
 }
 
-/// Everything reachable from where the player is standing. Sorted, so two reads of an unchanged
-/// map produce the same menu — `actions()` walks a `HashSet` and would otherwise reshuffle, which
-/// reads to a model as the world having moved.
+/// Everything reachable, sorted: `actions()` walks a `HashSet`, and a reshuffled menu reads as
+/// the world having moved.
 pub fn overworld_menu(state: &GameState, arrival: Option<crate::pokemon::world_graph::Arrival>) -> Vec<MenuItem> {
     use crate::pokemon::tile::MetaTile;
     let arrival = arrival.filter(|a| a.map == state.map.map);
@@ -1859,10 +1777,9 @@ pub fn overworld_menu(state: &GameState, arrival: Option<crate::pokemon::world_g
     actions.retain(|action| !matches!(action.tile, MetaTile::Sprite(name)
         if state.map.sprites.iter().any(|s| s.name == name
             && s.picture_id == crate::pokemon::sprite::PictureId::Boulder)));
-    // `id_kind`, not `kind`: two people can share the tile an action approaches them from, and
-    // "Sprite" == "Sprite" leaves that pair to `sort_by_key`'s stability over a `HashSet` walk.
+    // `id_kind`, not `kind`: two people can share the tile an action approaches them from.
     actions.sort_by_key(|action| (action.destination.y, action.destination.x, action.tile.id_kind()));
-    // Two doors of one building are two different places and the rows did not say so.
+    // Two doors of one building are two places, so the rows say which side.
     let mut repeated: std::collections::HashMap<crate::pokemon::map::Map, usize> =
         std::collections::HashMap::new();
     for action in &actions {
@@ -1899,14 +1816,12 @@ fn door_side(map: &crate::pokemon::tile_map::MetaTileMap, at: Point8) -> Option<
         true if dx > 0.0 => Some("east"),
         false if dy < 0.0 => Some("north"),
         false if dy > 0.0 => Some("south"),
-        // Dead centre on the deciding axis: there is no side to name, and inventing one would be
-        // worse than the repetition this is fixing.
+        // Dead centre on the deciding axis: there is no side to name.
         _ => None,
     }
 }
 
-/// Match an id against a freshly recomputed action list. `None` means the action is gone, which
-/// is a thing the model is told rather than a thing that crashes.
+/// Match an id against a fresh action list; `None` means the action is gone.
 pub fn resolve_overworld(state: &GameState, id: &str) -> Option<OverworldAction> {
     use crate::pokemon::tile::MetaTile;
     if let Some(action) = state.map.actions().into_iter().find(|action| overworld_id(state, action) == id) {
@@ -1916,17 +1831,14 @@ pub fn resolve_overworld(state: &GameState, id: &str) -> Option<OverworldAction>
     map.meta_tiles.iter().enumerate().find_map(|(index, tile)| {
         let MetaTile::Connection { to_map, to_position } = *tile else { return None };
         let at = Point8 { x: (index % map.width) as u8, y: (index / map.width) as u8 };
-        // Minted exactly as the menu would have minted it, through a throwaway action whose route
-        // is not the one that will be walked — `connection_action` computes that.
+        // Minted as the menu would; the route is a throwaway that `connection_action` replaces.
         let candidate = OverworldAction {
             map: map.map, origin: map.player_position, destination: at, tile: *tile, route: vec![] };
         (overworld_id(state, &candidate) == id).then(|| map.connection_action(to_map, to_position))?
     })
 }
 
-/// The id of one battle action. Keyed on what the action *is* rather than where it sat: a bag
-/// slot shifts the moment an item runs out, and a move's PP — which is in `BattleAction`'s
-/// `Display` — changes the moment it is used.
+/// Keyed on what the action is: a bag slot shifts when an item runs out, and PP changes on use.
 pub fn battle_id(action: &BattleAction) -> String {
     match action {
         BattleAction::Fight { battle_move, .. } => format!("fight:{}", battle_move.name),
@@ -1955,35 +1867,30 @@ pub fn battle_menu(state: &GameState) -> Vec<MenuItem> {
         .collect()
 }
 
-/// What a `fight:` row says beyond its name and PP: roughly what it would take off, and the
-/// cartridge's own words for the multiplier when there is one to report.
+/// Roughly what a `fight:` row would take off, and the cartridge's words for the multiplier.
 fn fight_row_note(
     name: crate::pokemon::move_name::PokemonMoveName,
     me: &crate::pokemon::pokemon::PokemonSummary,
     foe: &crate::pokemon::pokemon::PokemonSummary,
 ) -> String {
     use crate::pokemon::damage::{effectiveness_phrase, expected_damage, is_damaging_move, type_multiplier};
-    // The multiplier is only reported for a move that deals damage, and this gate is the whole of
-    // that.
+    // The multiplier is only reported for a move that deals damage.
     if !is_damaging_move(name) {
         return String::new();
     }
     match (expected_damage(me, name, foe), effectiveness_phrase(type_multiplier(name, foe))) {
-        // The immune case has no damage *and* a phrase, and it is the one row where the phrase is
-        // the entire decision — so it must not fall through to the arm below.
+        // Immune: no damage, and the phrase is the whole decision.
         (_, Some(phrase @ "no effect")) => format!(" — {phrase}"),
         (Some(damage), Some(phrase)) => format!(
             " — ~{damage} damage ({}% of its HP), {phrase}", percent_of(damage, foe.stats.hp)),
         (Some(damage), None) => format!(
             " — ~{damage} damage ({}% of its HP)", percent_of(damage, foe.stats.hp)),
-        // A damaging move the estimator declines to price (it has the immunity arm above
-        // covered).
+        // A damaging move the estimator declines to price.
         (None, _) => String::new(),
     }
 }
 
-/// Damage as a share of the defender's *maximum* HP, which is the figure that says "this is a
-/// two-hit kill" without the model doing the division.
+/// Damage as a share of the defender's maximum HP, so a two-hit kill reads as one.
 fn percent_of(damage: u16, max_hp: u16) -> u16 {
     match max_hp {
         0 => 0,
@@ -1995,8 +1902,7 @@ pub fn resolve_battle(state: &GameState, id: &str) -> Option<BattleAction> {
     battle_options(state)?.into_iter().find(|action| battle_id(action) == id)
 }
 
-/// What the mart in front of the player sells, read from its own ROM list at the poll (see
-/// [`ApiSnapshot`]). The id is the item's name, because that is what `buy_item` takes.
+/// What the mart sells (see [`ApiSnapshot`]); the id is the item's name, as `buy_item` takes.
 pub fn mart_menu(snapshot: &ApiSnapshot, state: &GameState) -> Vec<MenuItem> {
     snapshot
         .mart_stock
@@ -2008,9 +1914,7 @@ pub fn mart_menu(snapshot: &ApiSnapshot, state: &GameState) -> Vec<MenuItem> {
                 description: format!(
                     "{} — you have {held}",
                     match price {
-                        // Every mart item has a price; a missing one means the ROM's table did
-                        // not have it, which is worth showing rather than hiding behind a
-                        // plausible number.
+                        // A missing price is shown as missing, not as a plausible number.
                         Some(price) => format!("¥{price}"),
                         None => "price unknown".to_string(),
                     },
@@ -2020,9 +1924,7 @@ pub fn mart_menu(snapshot: &ApiSnapshot, state: &GameState) -> Vec<MenuItem> {
         .collect()
 }
 
-/// The four moves the forget prompt is choosing between. The id is the slot, which is what
-/// `forget_move` takes — there is no reordering hazard here, because the prompt itself is indexed
-/// by slot and lives for as long as the question does.
+/// The four moves the forget prompt chooses between, keyed on slot as `forget_move` takes.
 pub fn forget_menu(current: &[PokemonMove]) -> Vec<MenuItem> {
     current
         .iter()
@@ -2056,8 +1958,7 @@ mod tests {
     use super::*;
     use crate::llm::protocol::FunctionCall;
 
-    /// A call with a `summary` filled in, since [`classify`] now refuses a terminal call without
-    /// one and almost every fixture here is about some *other* argument.
+    /// A call with a `summary` filled in, since [`classify`] refuses a terminal call without one.
     fn call(name: &str, arguments: &str) -> ToolCall {
         let arguments = match serde_json::from_str::<Value>(arguments) {
             Ok(Value::Object(mut object)) => {
@@ -2082,8 +1983,7 @@ mod tests {
         for_kind(kind).into_iter().map(|tool| tool.function.name).collect()
     }
 
-    /// Oak's lab just after the starter is taken: a party of one, an ordinary bag, and a map with
-    /// no trees on it — which between them exercise every check [`resolve_field_move`] makes.
+    /// Oak's lab after the starter: a party of one, an ordinary bag, and no trees.
     fn fixture_state() -> GameState {
         let mut gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
         gb.load_state(include_bytes!("../pokemon/data/oaks-lab-just-got-squirtle.bin"))
@@ -2098,15 +1998,14 @@ mod tests {
             .expect("the fixture has a readable state")
     }
 
-    /// `read_route` must not name a tile the player cannot reach, and if it does it has to say
-    /// so.
+    /// A route whose first step cannot be walked from here says so.
     #[test]
     fn a_route_off_a_terrace_the_player_is_not_on_says_it_cannot_be_started() {
         let state = state_from(include_bytes!("../pokemon/data/split-cerulean.bin"));
         assert_eq!(state.map.map, Map::CeruleanCity);
 
         let mut graph = WorldGraph::new();
-        // The lower terrace, as the run saw it several hundred turns earlier.
+        // The lower terrace, seen earlier.
         let mut lower = state.map.clone();
         lower.player_position = Point8 { x: 17, y: 36 };
         graph.observe(Map::CeruleanCity, lower.player_position, &lower);
@@ -2121,8 +2020,7 @@ mod tests {
         assert_eq!(hops[1]["reachable_from_here"], json!(false), "{answer}");
         let warning = answer["warning"].as_str().expect("a warning beside it");
         assert!(warning.contains("cannot start it from where you are standing"), "{warning}");
-        // The half that was missing every single time: the way between two parts of one map is a
-        // door.
+        // The way between two parts of one map is a door.
         assert!(warning.contains("door"), "it has to name the way round: {warning}");
         assert!(warning.contains("map headers"), "and why the route disagrees with the menu: {warning}");
 
@@ -2131,8 +2029,7 @@ mod tests {
         assert!(route4.get("warning").is_none(), "Route 4 is walkable from here: {route4}");
     }
 
-    /// The same property from the other end, on all three maps: whatever the route graph says, a
-    /// destination with no reachable crossing is one the action menu offers no row for.
+    /// A destination with no reachable crossing has no row in the action menu.
     #[test]
     fn a_fenced_in_map_names_the_neighbours_it_cannot_reach() {
         use crate::pokemon::tile::MetaTile;
@@ -2153,10 +2050,7 @@ mod tests {
                 MetaTile::Connection { to_map, .. } => Some(to_map),
                 _ => None,
             }).collect();
-            // A neighbour joined only by a water seam is not fenced off, it is the Surf gate,
-            // which is true of every coastline in Kanto — and it is excluded here by construction
-            // rather than by a special case, because `crossings` matches `MetaTile::Connection`
-            // and a water edge is `ConnectionWater`.
+            // A water seam is the Surf gate, excluded because `crossings` skips `ConnectionWater`.
             let mut missing: Vec<Map> = state.map.connection_targets.iter().copied()
                 .filter(|to| !offered.contains(to) && !state.map.crossings(*to).is_empty())
                 .collect();
@@ -2200,7 +2094,7 @@ mod tests {
                 tile: MetaTile::Connection { to_map: Map::Route13, to_position: crossing.to_position },
                 route: vec![],
             });
-            // Named in the row unless it *is* the row, and choosable either way.
+            // Named in the row unless it is the row, and choosable either way.
             if id != offered[0].id {
                 assert!(offered[0].description.contains(&id), "{} omits {id}", offered[0].description);
             }
@@ -2220,8 +2114,7 @@ mod tests {
         assert!(resolve_overworld(&state, &id).is_none(), "{id} cannot be walked to");
     }
 
-    /// Every one of these is refused inside the turn, which is the whole point of resolving here
-    /// rather than letting the policy find out.
+    /// Refused inside the turn, rather than left for the policy to find out.
     #[test]
     fn a_pc_or_a_lift_that_is_not_here_is_refused_inside_the_turn() {
         use crate::pokemon::postgame::item_storage::PcItemOp;
@@ -2243,9 +2136,7 @@ mod tests {
         assert!(no_lift.contains("Silph"), "names where the three lifts are: {no_lift}");
     }
 
-    /// A floor the lift does not stop at is a different refusal from a lift that is not here, and
-    /// it has to list the floors — the model cannot see the panel, and guessing again is the
-    /// retry loop the whole catalogue is arranged to avoid.
+    /// A floor the lift does not stop at lists the floors: the model cannot see the panel.
     #[test]
     fn a_lift_says_which_floors_it_serves() {
         let mut state = fixture_state();
@@ -2255,15 +2146,12 @@ mod tests {
         assert!(wrong_floor.contains("does not stop at"), "{wrong_floor}");
         assert!(wrong_floor.contains("RocketHideoutB4F"), "lists the floors: {wrong_floor}");
 
-        // The hideout's lift is the one that needs the key, and B4F behind it is Giovanni — so
-        // the Silph Scope, the Poké Flute and both Snorlax.
+        // The hideout's lift needs the key.
         let no_key = resolve_field_move(&state, &FieldMoveRequest::UseElevator { to: Map::RocketHideoutB4F })
             .expect_err("no Lift Key in Oak's lab");
         assert!(no_key.contains("LIFT_KEY"), "names the key: {no_key}");
     }
 
-    /// `read_pc` is the one read added since the "nothing may duplicate the situation" rule was
-    /// written that had to argue against it.
     #[test]
     fn read_pc_is_offered_on_the_only_turn_that_can_use_it() {
         assert!(names(DecisionKind::Overworld).contains(&"read_pc"));
@@ -2284,8 +2172,7 @@ mod tests {
                    FieldMoveRequest::UsePcBox { op: PcBoxOp::Deposit { slot: 2 } });
         assert_eq!(request(r#"{"move":"pc_pokemon","op":"withdraw","box_slot":7}"#),
                    FieldMoveRequest::UsePcBox { op: PcBoxOp::Withdraw { box_slot: 7 } });
-        // 1-based on the wire, 0-based inside, because the cartridge's own CHANGE BOX menu counts
-        // from one and the model is reading the same numbers a player would.
+        // 1-based on the wire, as the cartridge's CHANGE BOX menu counts, and 0-based inside.
         assert_eq!(request(r#"{"move":"pc_pokemon","op":"change_box","box":1}"#),
                    FieldMoveRequest::UsePcBox { op: PcBoxOp::ChangeBox { n: 0 } });
         assert_eq!(request(r#"{"move":"pc_items","op":"withdraw","item":"Potion","quantity":3}"#),
@@ -2302,7 +2189,7 @@ mod tests {
         assert!(bad.contains("deposit, withdraw, release or change_box"), "{bad}");
     }
 
-    /// Two menu rows may never share an id, and hidden objects broke it the day they were added.
+    /// Two menu rows may never share an id.
     #[test]
     fn no_two_menu_rows_can_share_an_id() {
         let mut gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
@@ -2326,8 +2213,6 @@ mod tests {
         }
     }
 
-    /// Every kind, so a loop that meant "all of them" cannot quietly stop meaning it when a
-    /// seventh is added.
     const KINDS: [DecisionKind; 6] = ALL_KINDS;
 
     /// A menu row carries what its id cannot, and nothing else.
@@ -2346,8 +2231,7 @@ mod tests {
         assert_eq!(row(&elsewhere, "OaksLab:5,11:Warp"), "take the warp to PalletTown, arriving at (12, 12)");
     }
 
-    /// A row says what choosing it *does*, as a verb phrase — the id is a key, not a description,
-    /// and a model that had to parse the action out of the key took a Rocket for a warp.
+    /// A row says what choosing it does, as a verb phrase; the id is a key, not a description.
     #[test]
     fn a_menu_row_explains_the_action_in_words() {
         let state = fixture_state();
@@ -2356,7 +2240,7 @@ mod tests {
             menu.iter().map(|item| format!("- `{}` — {}", item.id, item.description)).collect();
 
         assert!(rows.contains(&"- `OaksLab:5,11:Warp` — take the warp to PalletTown, arriving at (12, 12)".to_string()), "{rows:#?}");
-        // A person is named by the id *and* by the row: the name is what the verb needs.
+        // A person is named by the id and by the row: the name is what the verb needs.
         assert!(rows.contains(&"- `OaksLab:Pokedex1` — read the Pokedex 1".to_string()), "{rows:#?}");
         assert!(!rows.iter().any(|row| row.contains("Sprite")),
                 "no row may call a person a sprite: {rows:#?}");
@@ -2367,9 +2251,8 @@ mod tests {
         }
     }
 
-    /// A warp's landing coordinate is in the destination's *picture* coordinates — the ones its
-    /// own warps are labelled and listed in — which differ from the warp table's by the
-    /// connection strips that map draws.
+    /// A landing is in the destination's picture coordinates, offset from the warp table's by
+    /// its connection strips.
     #[test]
     fn a_landing_coordinate_is_where_the_destination_picture_puts_it() {
         let mut gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
@@ -2412,8 +2295,7 @@ mod tests {
         assert_eq!(view.slots_used, raw, "read_bag says {} of the bag's slots are used, the game says {raw}", view.slots_used);
         assert_eq!(view.items.len(), raw, "and every one of them has to be listed: {:?}", view.items);
 
-        // The machines are the ones that went missing, and the name has to be the one the model
-        // can quote back into `toss_item` or `teach`.
+        // A machine's name is one the model can quote back into `toss_item` or `teach`.
         let named: Vec<&str> = view.items.iter().map(|i| i.item.as_str()).collect();
         assert!(named.contains(&"Tm34Bide"), "{named:?}");
         assert!(named.contains(&"Hm01Cut"), "{named:?}");
@@ -2421,7 +2303,7 @@ mod tests {
             assert!(item_by_name(name).is_some(), "{name} is listed but cannot be named back");
         }
 
-        // This fixture cannot prove the bug on its own and the loop below is what does.
+        // Every machine id, which this fixture alone cannot cover.
         for id in 0xC4..=0xFAu8 {
             let item = ItemId::from_repr(id)
                 .unwrap_or_else(|| panic!("${id:02X} is a machine and `read_bag` would drop it"));
@@ -2430,8 +2312,7 @@ mod tests {
         }
     }
 
-    /// A battle id that was not offered is told which rule kept it off the menu, and nothing
-    /// about maps.
+    /// A refused battle id is told the rule that kept it off the menu, and nothing about maps.
     #[test]
     fn a_refused_battle_id_carries_the_rule_and_says_nothing_about_maps() {
         let trainer: Vec<String> = ["fight:Peck", "item:GreatBall", "switch:1"]
@@ -2447,8 +2328,7 @@ mod tests {
         let gone = format!("{gone}{}", battle_rule_behind("item:PokeBall", &trainer));
         assert!(gone.contains("not in the bag"), "no rule was given: {gone}");
 
-        // The Safari menu gets neither, because neither rule is true there: `run` *is* offered
-        // and there is no bag.
+        // The Safari menu gets neither: `run` is offered and there is no bag.
         let safari: Vec<String> =
             ["ball", "bait", "rock", "run"].iter().map(|id| id.to_string()).collect();
         assert_eq!(battle_rule_behind("item:Potion", &safari), "");
@@ -2466,8 +2346,7 @@ mod tests {
     /// What the `tools` array costs, per kind, with a ceiling on each.
     #[test]
     fn the_tool_array_stays_within_its_budget() {
-        // Overworld is the big one: it carries `use_field_move`, which is a dozen field actions
-        // behind one `move` discriminant precisely so it is one entry rather than twelve.
+        // Overworld is the big one: it carries `use_field_move`.
         for (kind, ceiling) in [
             (DecisionKind::Overworld, 12_975),
             (DecisionKind::Battle, 5_575),
@@ -2481,8 +2360,7 @@ mod tests {
         }
     }
 
-    /// [`READ_ROUTE`]'s four answers, which is the whole of it — and none of them is an `error`
-    /// string, because each is a different thing for the model to do next.
+    /// [`READ_ROUTE`]'s four answers, each a different next step for the model.
     #[test]
     fn a_route_answers_the_four_questions_and_never_bluffs() {
         let state = fixture_state();
@@ -2506,8 +2384,7 @@ mod tests {
         assert_eq!(unwalked["to"], json!(format!("{}", Map::CeruleanCity)));
         assert!(unwalked["note"].as_str().expect("a sentence").contains("not been to"), "{unwalked}");
 
-        // Spelled the way a model spells things, not the way the enum does — `map_by_name`
-        // normalises, and a rejection over a space would be a rejection over nothing.
+        // `map_by_name` normalises the way a model spells a map.
         assert_eq!(ask(r#"{"to":"cerulean city"}"#), unwalked);
 
         // The whole graph is never serialised, whatever is asked.
@@ -2556,7 +2433,7 @@ mod tests {
         assert_eq!(fight_row_note(PokemonMoveName::Growl, &me, &foe), "",
                    "a status move is not priced");
 
-        // And the multiplier is withheld from a status move as well, which is the subtler half.
+        // The multiplier is withheld from a status move as well.
         let ghost = summary(PokemonSpecies::Gastly, [Ghost, Poison], &[PokemonMoveName::Lick]);
         assert_eq!(fight_row_note(PokemonMoveName::Growl, &me, &ghost), "",
                    "a status move is never labelled by the type chart");
@@ -2567,7 +2444,6 @@ mod tests {
         assert_eq!(row, " — no effect", "immunity is the whole row: {row}");
     }
 
-    /// The PC is the one menu row that lied by succeeding.
     #[test]
     fn the_menu_does_not_offer_a_pc_nothing_can_use() {
         use crate::pokemon::tile::MetaTile;
@@ -2624,9 +2500,7 @@ mod tests {
         };
         assert_eq!(format!("{switch}"), "PKMN   Charizard Lv100 — 200/360 HP");
 
-        // A healthy Pokémon says nothing about its status; `PokemonStatus`' own `Display` is
-        // `strum`'s, so an unconditional one would read `, None` — a missing value, not good
-        // news.
+        // A healthy Pokémon says nothing about its status, rather than `, None`.
         assert!(!format!("{switch}").contains("None"));
         let poisoned = match switch {
             BattleAction::SwitchPokemon { slot, mut pokemon } => {
@@ -2654,18 +2528,14 @@ mod tests {
                     }
                     false => assert!(!has_summary, "`{}` is not a decision", tool.function.name),
                 }
-                // Every terminal schema is `additionalProperties: false`, so an argument that is
-                // not declared is not merely ignored — the call is schema-invalid.
+                // `additionalProperties: false`, so an undeclared argument is schema-invalid.
                 assert_eq!(tool.function.parameters["additionalProperties"], json!(false),
                            "`{}` would accept an undeclared argument", tool.function.name);
             }
         }
     }
 
-    /// Required of the model, optional to the parser, and the asymmetry is deliberate: rejecting
-    /// a terminal call for a missing summary would not end the turn — it becomes another tool
-    /// result and spends another of `GB_MAX_TOOL_STEPS` — so a model that forgot it would be
-    /// pushed towards the forced `wait` rather than towards remembering.
+    /// `call_summary` tolerates an absent summary; [`classify`] is what demands one.
     #[test]
     fn a_summary_is_read_off_the_call_and_never_demanded() {
         let call = |arguments: &str| ToolCall {
@@ -2682,7 +2552,6 @@ mod tests {
             Some("letting the battle text finish".to_string()),
             "trimmed, because it is printed on a page",
         );
-        // A turn that omits it is still a turn: the decision is carried out either way.
         assert_eq!(call_summary(&call(r#"{"ticks": 5}"#)), None);
         assert_eq!(call_summary(&call(r#"{"ticks": 5, "summary": "   "}"#)), None, "blank is absent");
         assert_eq!(call_summary(&call("not json")), None, "and a broken call is not a panic");
@@ -2693,8 +2562,7 @@ mod tests {
         assert_eq!(capped.chars().count(), MAX_SUMMARY);
     }
 
-    /// `press_buttons`' `why`: the headline of the record `llm::incident` writes, on the one turn
-    /// that still offers the tool.
+    /// `press_buttons`' `why` is the headline of the record `llm::incident` writes.
     #[test]
     fn a_press_without_a_why_is_refused() {
         let schema = &press_buttons_spec().function.parameters;
@@ -2722,8 +2590,7 @@ mod tests {
         assert_eq!(capped.chars().count(), MAX_REASON, "a schema's maxLength is a request");
     }
 
-    /// Every terminal call has to say what it is doing, on every kind — the one note the model
-    /// keeps about its own turn.
+    /// The summary is the one note the model keeps about its own turn.
     #[test]
     fn a_terminal_call_must_say_what_it_is_doing() {
         for (kind, name, arguments) in [
@@ -2738,8 +2605,7 @@ mod tests {
                 panic!("{name} on a {kind:?} turn must be made to say what it is doing");
             };
             assert!(complaint.contains("summary") && complaint.contains(name), "{complaint}");
-            // …and the same call *with* one goes through, so the rule is the only thing being
-            // tested.
+            // The same call with one goes through.
             assert!(
                 matches!(classify(kind, &call(name, arguments), &[]), CallKind::Terminal(_)),
                 "{name} with a summary is fine",
@@ -2747,8 +2613,7 @@ mod tests {
         }
     }
 
-    /// `take_over` defaults to off in both directions that matter: absent, and present as
-    /// something that is not a boolean.
+    /// `take_over` is off when absent and when not a boolean.
     #[test]
     fn take_over_is_off_unless_it_is_actually_asked_for() {
         let id = r#""fight:Tackle""#;
@@ -2766,7 +2631,7 @@ mod tests {
         }
     }
 
-    /// The tool that replaced the escape hatch on every turn that has a menu.
+    /// `report_issue`, on every turn that has a menu.
     #[test]
     fn an_issue_report_does_not_end_the_turn_and_must_carry_a_message() {
         for kind in [DecisionKind::Overworld, DecisionKind::Battle, DecisionKind::Stuck] {
@@ -2793,9 +2658,7 @@ mod tests {
             }
         }
 
-        // The single-question prompts have nothing for the agent to get wrong, so they do not
-        // carry it — and a call there is named and explained rather than falling through to "no
-        // such tool".
+        // Single-question prompts do not carry it, and a call there is explained.
         for kind in [DecisionKind::Nickname, DecisionKind::MartPurchase, DecisionKind::ForgetMove] {
             assert!(!offers_issue_report(kind));
             assert!(!names(kind).contains(&REPORT_ISSUE), "{kind:?} does not offer it");
@@ -2844,13 +2707,11 @@ mod tests {
                           "buy_item", "forget_move"] {
             assert!(!stuck.contains(&elsewhere), "a stuck turn must not offer {elsewhere}");
         }
-        // …and the reads are all there, because working out *why* it is stuck is the useful thing
-        // to do before pressing anything.
+        // The reads are all there, to work out why it is stuck before pressing anything.
         assert!(stuck.contains(&"read_map") && stuck.contains(&SCREENSHOT));
         assert!(!names(DecisionKind::Battle).contains(&"use_field_move"), "field moves are overworld-only");
 
-        // The battle-script tools are on the overworld turn and on no other, including the battle
-        // turn they are about.
+        // The battle-script tools are on the overworld turn only, not even the battle turn.
         for name in BATTLE_SCRIPT_TOOL_NAMES {
             assert!(names(DecisionKind::Overworld).contains(name), "the overworld turn writes the script");
             for elsewhere in [DecisionKind::Battle, DecisionKind::Nickname, DecisionKind::MartPurchase,
@@ -2862,8 +2723,7 @@ mod tests {
         for kind in KINDS {
             let offered = names(kind);
             assert!(offered.contains(&"wait"), "{kind:?} must always be able to wait");
-            // The contract restated in the prompt has to match the array actually sent, or the
-            // two drift and the model is told about a tool it does not have.
+            // The contract in the prompt matches the array actually sent.
             for terminal in terminal_names(kind) {
                 assert!(offered.contains(terminal), "{kind:?} promises {terminal} but does not offer it");
             }
@@ -2880,19 +2740,16 @@ mod tests {
         }
     }
 
-    /// The reads are scoped too, and the reason is not only tokens.
     #[test]
     fn reads_are_scoped_per_kind_too() {
         assert!(!names(DecisionKind::Battle).contains(&"read_map"), "there is no map in a battle");
         assert!(!names(DecisionKind::Battle).contains(&READ_ROUTE));
         assert!(!names(DecisionKind::Overworld).contains(&"read_battle"), "it can only answer null");
 
-        // The forget-move prompt legitimately fires mid-fight — it is the one menu kind that
-        // pre-empts a battle turn — so which move to drop is a question the battle can answer.
+        // The forget-move prompt fires mid-fight, so the battle is its business.
         assert!(names(DecisionKind::ForgetMove).contains(&"read_battle"));
 
-        // The screen is the only thing that can explain an unfamiliar menu or a wedged agent, so
-        // it is the one read every kind keeps.
+        // The screen is the one read every kind keeps.
         for kind in KINDS {
             assert!(names(kind).contains(&SCREENSHOT), "{kind:?} cannot look at the screen");
         }
@@ -2901,7 +2758,7 @@ mod tests {
         assert_eq!(names(DecisionKind::Nickname), ["read_party", SCREENSHOT, "todo_set", "todo_complete",
                                                    "todo_delete", "set_nickname", "wait"]);
 
-        // A read that exists but is not offered *here* is told which turn it belongs to.
+        // A read that exists but is not offered here is told which turn it belongs to.
         let rejected = classify(DecisionKind::Battle, &call("read_map", "{}"), &[]);
         let CallKind::Rejected(complaint) = rejected else { panic!("read_map is not a battle read") };
         assert!(complaint.contains("not available in a battle turn"), "{complaint}");
@@ -2909,8 +2766,7 @@ mod tests {
         assert!(matches!(classify(DecisionKind::Overworld, &call("read_map", "{}"), &[]), CallKind::Read));
     }
 
-    /// Every schema must be a JSON Schema object with the properties it claims — a malformed one
-    /// is a 400 from the endpoint on the very first turn of a run.
+    /// A malformed schema is a 400 on the first turn of a run.
     #[test]
     fn every_schema_is_a_well_formed_object() {
         for kind in KINDS {
@@ -2928,8 +2784,7 @@ mod tests {
         }
     }
 
-    /// Chaining: every id in a `then` is held to the same menu as the first, and an over-long
-    /// chain is refused rather than quietly cut down to size.
+    /// Every id in a `then` is held to the same menu, and an over-long chain is refused, not cut.
     #[test]
     fn every_id_in_a_chain_is_held_to_the_menu_the_turn_offered() {
         let menu = ["PalletTown:5,6:Warp".to_string(), "PalletTown:Mom".to_string()];
@@ -2945,9 +2800,7 @@ mod tests {
         assert_eq!(then, ["PalletTown:Mom"]);
         assert!(resume_after_battle, "a battle does not end the action unless the model says so");
 
-        // The id is checked, not merely the count: a chained id from an earlier turn is exactly
-        // the mistake `not_on_the_menu` exists for, and it must not be let through by being
-        // second.
+        // Each id is checked, not merely the count: a stale id is not let through by being second.
         let CallKind::Rejected(complaint) = chain(
             r#"{"id":"PalletTown:5,6:Warp","then":["OaksLab:5,11:Warp"],"summary":"a stale id"}"#,
         ) else {
@@ -2979,8 +2832,7 @@ mod tests {
         assert!(!resume_after_battle, "and `false` is what turns it off");
     }
 
-    /// A terminal call from the other kind is answerable, not fatal — and the answer names the
-    /// tool that would have worked.
+    /// A terminal call from another kind is answered with the tool that would have worked.
     #[test]
     fn a_terminal_tool_from_the_wrong_kind_is_rejected_with_the_right_one() {
         let CallKind::Rejected(complaint) =
@@ -3024,8 +2876,7 @@ mod tests {
         assert!(matches!(classify(DecisionKind::Overworld, &call("read_map", ""), &[]), CallKind::Read));
     }
 
-    /// A battle id must survive the thing that changes most often about a battle action: its PP,
-    /// which `BattleAction`'s own `Display` includes.
+    /// A battle id survives its PP changing, which `BattleAction`'s `Display` includes.
     #[test]
     fn a_battle_id_ignores_the_volatile_parts() {
         use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
@@ -3054,8 +2905,7 @@ mod tests {
         assert_eq!(button_by_name("shoulder"), None);
     }
 
-    /// The escape hatch has to reject what it cannot press rather than silently drop it — a queue
-    /// that is one button short walks the player somewhere nobody asked for.
+    /// A press queue one button short walks the player somewhere nobody asked for.
     #[test]
     fn an_id_the_turn_never_offered_is_refused_before_it_costs_the_turn() {
         let menu = [
@@ -3077,14 +2927,13 @@ mod tests {
         else {
             panic!("an id for a map the player is not on can never resolve");
         };
-        // The complaint has to name the *right* mistake.
+        // The complaint has to name the right mistake.
         assert!(complaint.contains("ViridianCity") && complaint.contains("ViridianPokecenter"),
                 "it must say which map the id is for and which map the player is on; got {complaint}");
         assert!(complaint.contains("ViridianPokecenter:3,7:Warp"),
                 "and it must repeat what can be chosen instead; got {complaint}");
 
-        // An empty menu checks nothing: `Nickname`, `ForgetMove` and `Stuck` have no menu, and a
-        // check that read that as "nothing is allowed" would reject every answer they give.
+        // An empty menu checks nothing: `Nickname`, `ForgetMove` and `Stuck` have none.
         assert!(
             matches!(
                 classify(DecisionKind::Overworld, &chose("anything at all"), &[]),
@@ -3112,8 +2961,7 @@ mod tests {
                 "{bad} should have been rejected",
             );
         }
-        // …and the agent's own cap is the cap here, so a runaway list is trimmed rather than
-        // half-delivered by a queue that silently stops accepting.
+        // The agent's queue capacity is the cap, so a runaway list is trimmed, not half-delivered.
         let many = format!(r#"{{"buttons":{},"why":"a menu nothing closes"}}"#,
             serde_json::to_string(&vec!["a"; MANUAL_INPUT_CAPACITY * 2]).unwrap());
         let CallKind::Terminal(Terminal::PressButtons { buttons }) =
@@ -3124,8 +2972,7 @@ mod tests {
         assert_eq!(buttons.len(), MANUAL_INPUT_CAPACITY);
     }
 
-    /// `screenshot` is a read as far as the turn contract goes, but it never reaches the emulator
-    /// thread — the worker answers it.
+    /// `screenshot` is a read to the turn contract, but the worker answers it.
     #[test]
     fn a_screenshot_is_classified_apart_from_the_other_reads() {
         assert!(matches!(classify(DecisionKind::Battle, &call(SCREENSHOT, "{}"), &[]), CallKind::Screenshot));
@@ -3171,25 +3018,19 @@ mod tests {
         );
         assert_eq!(request(r#"{"move":"reorder_party","slot":3}"#), FieldMoveRequest::ReorderParty { slot: 3 });
 
-        // Every one of these is answerable — the model is told what is missing and can try again
-        // in the same turn, which is the whole reason a bad call is a tool result and not a dead
-        // turn.
+        // Each is a tool result the model can correct in the same turn.
         for (arguments, expected) in [
             (r#"{"move":"teleportation"}"#, "not one of the field moves"),
             (r#"{"move":"fly","map":"Atlantis"}"#, "is not a map"),
             (r#"{"move":"teach","item":"Hm03Surf"}"#, "needs a `slot`"),
             (r#"{"move":"toss_item","item":"Sandwich"}"#, "is not an item"),
-            // A `target` that is *present* is still checked; what changed is that leaving it out
-            // is now a use on nobody rather than a complaint.
+            // A `target` that is present is still checked.
             (r#"{"move":"use_item","item":"PokeFlute","target":{"x":"here"}}"#, "must be a tile coordinate"),
-            // `cut`, `push_boulder` and `strength` are gone and have to stay gone, for the reason
-            // `interact` below does: a resumed run replays its own history, and a model that
-            // called one before the deploy will call it again.
+            // `cut`, `push_boulder` and `strength` are menu rows, not verbs.
             (r#"{"move":"cut"}"#, "not one of the field moves"),
             (r#"{"move":"push_boulder","target":{"x":1,"y":1},"direction":"left"}"#, "not one of the field moves"),
             (r#"{"move":"strength"}"#, "not one of the field moves"),
             (r#"{"move":"reorder_party","slot":9}"#, "no party slot 9"),
-            // `interact` is gone and has to stay gone.
             (r#"{"move":"interact","target":{"x":1,"y":2}}"#, "not one of the field moves"),
             ("{}", "`move` is required"),
         ] {
@@ -3200,8 +3041,7 @@ mod tests {
         }
     }
 
-    /// The menu-prompt tools, whose whole subtlety is that *omitting* the argument is a real
-    /// answer rather than a malformed call: no nickname, no purchase, no move forgotten.
+    /// In the menu-prompt tools, omitting the argument is a real answer, not a malformed call.
     #[test]
     fn omitting_the_argument_is_an_answer_for_the_three_menu_prompts() {
         let parse = |kind, name, arguments: &str| classify(kind, &call(name, arguments), &[]);
@@ -3210,8 +3050,7 @@ mod tests {
             parse(DecisionKind::Nickname, "set_nickname", "{}"),
             CallKind::Terminal(Terminal::SetNickname { name: None }),
         ));
-        // An empty buffer is how the naming screen itself says "keep the default", so agreeing
-        // with it here means a blank `name` and an absent one cannot mean different things.
+        // A blank `name` and an absent one both keep the default, as the naming screen does.
         assert!(matches!(
             parse(DecisionKind::Nickname, "set_nickname", r#"{"name":"   "}"#),
             CallKind::Terminal(Terminal::SetNickname { name: None }),
@@ -3234,8 +3073,7 @@ mod tests {
             },
             Some(BagItem::new(ItemId::Potion, 4)),
         );
-        // An omitted quantity is one, not zero — zero would be an order the mart silently
-        // refuses.
+        // An omitted quantity is one: the mart silently refuses zero.
         assert!(matches!(
             parse(DecisionKind::MartPurchase, "buy_item", r#"{"item":"Potion"}"#),
             CallKind::Terminal(Terminal::BuyItem { item: Some(BagItem { quantity: 1, .. }), .. }),
@@ -3275,8 +3113,7 @@ mod tests {
         );
     }
 
-    /// Resolution against a real game, which is where the checks that need the party and the bag
-    /// live.
+    /// Resolution against a real game, where the party and bag checks live.
     #[test]
     fn a_field_move_is_resolved_against_the_party_and_the_bag_it_needs() {
         // Oak's lab: one Pokémon, no HMs, no trees.
@@ -3303,7 +3140,7 @@ mod tests {
         );
     }
 
-    /// The machine gate, which is the HM gate one menu further in.
+    /// The machine gate: a teach the party cannot learn is refused.
     #[test]
     fn a_machine_no_one_in_the_party_can_learn_is_refused_here_instead() {
         use crate::pokemon::pokemon::Pokemon;
@@ -3323,13 +3160,13 @@ mod tests {
             Ok(resolved) => panic!("{request:?} should not have resolved to {resolved:?}"),
         };
 
-        // Somebody can: the answer is which slot, which is the whole of what the model needs.
+        // Somebody can: the answer names the slot.
         let mixed = with_hm(ItemId::Hm01Cut, &[PokemonSpecies::Venusaur, PokemonSpecies::Pidgey]);
         let wrong_slot = complaint(&mixed, FieldMoveRequest::Teach { item: ItemId::Hm01Cut, slot: 1 });
         assert!(wrong_slot.contains("cannot learn Cut"), "{wrong_slot}");
         assert!(wrong_slot.contains("slot 0"), "it has to name who can: {wrong_slot}");
 
-        // …and the slot that can resolves, so the gate is not simply refusing every teach.
+        // The slot that can resolves.
         assert_eq!(
             resolve_field_move(&mixed, &FieldMoveRequest::Teach { item: ItemId::Hm01Cut, slot: 0 }),
             Ok(FieldMove::TeachMove { item: ItemId::Hm01Cut, target_slot: 0 }),
@@ -3340,8 +3177,7 @@ mod tests {
         assert!(hopeless.contains("nor can anything else in the party"), "{hopeless}");
         assert!(!hopeless.contains("In the party,"), "there is nobody to name: {hopeless}");
 
-        // Not a machine, so not a question: a stone rides the same menu chain and a check written
-        // for TMs must not refuse it.
+        // A stone rides the same menu chain, and the machine check must not refuse it.
         let stone = with_hm(ItemId::WaterStone, &[PokemonSpecies::Eevee]);
         assert_eq!(
             resolve_field_move(&stone, &FieldMoveRequest::Evolve { stone: ItemId::WaterStone, slot: 0 }),
@@ -3350,7 +3186,7 @@ mod tests {
         );
     }
 
-    /// The item gate, which is the machine gate one bag row along.
+    /// The item gate: an item the game would not use is refused before a press.
     #[test]
     fn an_item_the_game_will_never_use_is_refused_here_instead() {
         let holding = |item: ItemId| {
@@ -3371,26 +3207,22 @@ mod tests {
         assert!(fossil.contains("carry"), "it has to say what to do instead: {fossil}");
         assert!(complaint(&holding(ItemId::SilphScope), ItemId::SilphScope).contains("no bag use"));
 
-        // A ball is the same `ItemUseNotTime` by a different route, and the alternative is a tool
-        // rather than a shrug.
+        // A ball is the same `ItemUseNotTime`, and the refusal names the alternative.
         let ball = complaint(&holding(ItemId::PokeBall), ItemId::PokeBall);
         assert!(ball.contains("choose_battle_action"), "{ball}");
 
-        // A machine never reaches the table at all (`cp HM01 / jp nc, ItemUseTMHM`) and has its
-        // own tool, so it is pointed at `teach` rather than called unusable.
+        // A machine never reaches the table (`ItemUseTMHM`), so it is pointed at `teach`.
         let machine = complaint(&holding(ItemId::Hm01Cut), ItemId::Hm01Cut);
         assert!(machine.contains("teach"), "{machine}");
 
-        // The gate is not "refuse every key item": the Poké Flute is a key item, is
-        // `ItemUsePokeFlute`, and is the one use the scripted route actually makes.
+        // Not "refuse every key item": the Poké Flute is one, and the scripted route uses it.
         assert!(ItemId::PokeFlute.is_key_item(), "the point of the case");
         assert_eq!(
             resolve_field_move(&holding(ItemId::PokeFlute), &FieldMoveRequest::UseItem { item: ItemId::PokeFlute, target: Some(at), slot: None }),
             Ok(FieldMove::UseFieldItem { item: ItemId::PokeFlute, target: at }),
         );
 
-        // And an item that is not in the bag is still the bag's complaint, not the gate's: the
-        // `held` check runs first, so "you do not have one" beats "it would not work".
+        // `held` runs first, so "you do not have one" beats "it would not work".
         let empty = complaint(&fixture_state(), ItemId::HelixFossil);
         assert!(empty.contains("no HelixFossil in the bag"), "{empty}");
     }
@@ -3419,8 +3251,7 @@ mod tests {
         use crate::pokemon::policy::FieldMove;
         use crate::pokemon::postgame::items::UseTarget;
 
-        // Route 11: outdoors, in `BikeRidingTilesets`, and the walk that dropped this state was
-        // carrying the Bicycle along with every other key item.
+        // Route 11: outdoors, in `BikeRidingTilesets`, with the Bicycle in the bag.
         let outdoors = {
             let mut gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
             gb.load_state(include_bytes!("../pokemon/data/route-11-youngster-on-the-pacing-tile.bin"))
@@ -3435,8 +3266,7 @@ mod tests {
         assert_eq!(resolve_field_move(&outdoors, &ride).expect("a bike outdoors is a legal call"),
                    FieldMove::UseBagItem { item: ItemId::Bicycle, target: UseTarget::Nothing });
 
-        // Oak's lab: indoors, so `IsBikeRidingAllowed` refuses, and the answer says so before a
-        // button is pressed rather than after 60 s of A-mashing.
+        // Oak's lab: indoors, so `IsBikeRidingAllowed` refuses, said before a button is pressed.
         let mut indoors = fixture_state();
         indoors.bag.push(BagItem { id: ItemId::Bicycle, quantity: 1 }).expect("room in the bag");
         let refusal = resolve_field_move(&indoors, &ride).expect_err("a bike indoors is refused");
@@ -3456,10 +3286,10 @@ mod tests {
         let empty = flute(Point8 { x: 7, y: 5 }).expect_err("open ground is not a target");
         assert!(empty.contains("nothing at (7, 5)"), "{empty}");
         assert!(empty.contains("open ground"), "it says what the square is: {empty}");
-        // The half that cost three turns: which convention is which.
+        // Which coordinate convention is which.
         assert!(empty.contains("square the *thing* is standing on"), "{empty}");
         assert!(empty.contains("where the player stands"), "{empty}");
-        // …and the recovery `read_map` sold the run, for free: what is actually next door.
+        // And what is actually next door.
         let beside = flute(Point8 { x: 7, y: 4 }).expect_err("the player's own square is not one either");
         assert!(beside.contains("Rival, at (8, 4)"), "it names what is beside the miss: {beside}");
 
@@ -3467,8 +3297,7 @@ mod tests {
         let off = flute(Point8 { x: 40, y: 40 }).expect_err("off the map");
         assert!(off.contains("not a square on"), "{off}");
 
-        // No em dashes, the rule `item_use::field_use_refusal` next door carries and tests: a
-        // refusal from this function is shown on the page as well as sent to the model.
+        // No em dashes: a refusal is shown on the page as well as sent to the model.
         for refusal in [&empty, &beside, &off] {
             assert!(!refusal.contains('—'), "no em dashes in what the agent writes: {refusal}");
         }
@@ -3480,7 +3309,7 @@ mod tests {
         );
     }
 
-    /// The HM gate, and why it is worth a test of its own.
+    /// The HM gate names which half is missing.
     #[test]
     fn an_hm_the_game_would_refuse_is_refused_here_instead() {
         let none = fixture_state();
@@ -3519,8 +3348,7 @@ mod tests {
         assert!(!untaught.contains("BoulderBadge"), "the badge is held: {untaught}");
     }
 
-    /// A cut or a push the game would refuse is not a refusal any more, it is a row that is not
-    /// there — and the two rows that are there do the whole job.
+    /// A cut or push the game would refuse is a row that is not there.
     #[test]
     fn a_cut_or_a_push_the_game_would_refuse_is_never_a_row() {
         use crate::pokemon::tile::MetaTile;
@@ -3539,13 +3367,11 @@ mod tests {
             assert_ne!(boulder, Point8 { x: 5, y: 14 },
                 "the sealed boulder cannot be pushed any way at all, so no goal names it");
         }
-        // On this floor that leaves no rows at all, and that is the finding rather than a gap in
-        // the fixture.
+        // On this floor that leaves no rows at all.
         assert!(!stuck.map.actions().iter().any(|a| matches!(a.tile, MetaTile::BoulderGoal { .. })),
             "the run sealed its own boulder, so nothing can reach the switch and nothing is offered");
 
-        // So the other half — that a *solvable* floor is a row, or the filter above proves
-        // nothing — is stated on the same floor before the run wedged it.
+        // The same floor before it was wedged is solvable, so it has rows.
         let pristine = state_from(include_bytes!("../pokemon/data/vr1f-strength.bin"));
         assert!(pristine.map.actions().iter().any(|a| matches!(a.tile, MetaTile::BoulderGoal { .. })),
             "VictoryRoad1F's switch is a goal row from its starting layout");
@@ -3556,8 +3382,7 @@ mod tests {
             "a boulder's own sprite row is withheld: {menu:?}");
         assert!(menu.iter().any(|item| item.id.contains("PushBoulder")), "{menu:?}");
 
-        // Without the move or the badge there is nothing to choose, which is the whole of what
-        // the turn's boulder line then has to explain.
+        // Without the move or the badge there is nothing to choose.
         let mut unarmed = pristine;
         unarmed.map.can_strength = false;
         assert!(!unarmed.map.actions().iter().any(|a| matches!(a.tile, MetaTile::BoulderGoal { .. })),
@@ -3578,16 +3403,14 @@ mod tests {
         let parse = |arguments: &str| classify(DecisionKind::Nickname, &call("set_nickname", arguments), &[]);
         let named = |name: &str| parse(&json!({"name": name}).to_string());
         assert!(matches!(named("Rocky"), CallKind::Terminal(Terminal::SetNickname { name: Some(_) })));
-        // `/` is `$F3` and a space is `$7F` — "is it alphanumeric" is the wrong question, which
-        // is why the check round-trips through the charmap instead of listing characters twice.
+        // `/` is `$F3` and a space `$7F`, so the check asks the charmap, not "is it alphanumeric".
         assert!(matches!(named("MT/MOON"), CallKind::Terminal(Terminal::SetNickname { name: Some(_) })));
         assert!(
             matches!(named("Poké"), CallKind::Rejected(_)),
             "an accented letter has no byte in this charmap and must not reach the buffer",
         );
         assert!(matches!(named("🔥"), CallKind::Rejected(_)));
-        // An omitted or blank name is still the decline, because the naming screen reads an empty
-        // buffer as one — the two must not be able to disagree.
+        // An omitted or blank name is the decline, as the naming screen reads an empty buffer.
         assert!(matches!(
             parse("{}"),
             CallKind::Terminal(Terminal::SetNickname { name: None }),
@@ -3628,13 +3451,11 @@ mod tests {
         }
     }
 
-    /// The party menu lists a mon's field moves in its own move-slot order, so the index of the
-    /// one being asked for depends on what else that mon knows.
+    /// A field move's index in the party menu depends on what else that mon knows.
     #[test]
     fn a_party_field_moves_index_is_computed_from_the_moves_it_knows() {
         let mut state = fixture_state();
-        // The HM gate sits above the index arithmetic, so this mon has to be able to use Flash at
-        // all before the index is the thing under test.
+        // The HM gate comes before the index, so Flash has to be usable first.
         state.badges |= crate::pokemon::badge::Badge::BoulderBadge;
         state.pokemon.get_mut(0).expect("the fixture has a starter").moves = [
             Some(PokemonMove::with_max_pp(PokemonMoveName::Tackle)),
@@ -3648,8 +3469,7 @@ mod tests {
                 name: PokemonMoveName::Flash,
                 slot: None,
             }),
-            // Cut is a field move and sits in an earlier move slot, so Flash is the *second* row
-            // of the field-move box — not the third, and not the first.
+            // Cut sits in an earlier move slot, so Flash is the second field-move row.
             Ok(FieldMove::UseFieldMove { slot: 0, move_index: 1 }),
         );
     }
