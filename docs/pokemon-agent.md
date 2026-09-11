@@ -31,6 +31,9 @@ can break in silence.
 - A battle menu outlives the choice made on it by a frame or two, so `BattleState::AwaitingPolicy`
   goes back to reading once the menu is off the screen, and only on a tick the policy did not answer:
   the scripted policies answer at once, and their timing is the golden replay.
+- A catch's battle ends when the naming screen closes, not when `wIsInBattle` clears, so
+  `BattleEnded` and the reader's last box are emitted there. Every tree cut on the map is forgotten
+  with it: a battle reloads the map and they have all grown back.
 
 ## Closed loops under A
 
@@ -43,6 +46,8 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   on wherever the cursor was left.
 - Each gated loop — the PC menus, the START menu, a TM outside its learnset, a refused key item, a
   mart open while the policy thinks — is a frame-timing change only `full_playthrough` can price.
+- A teach whose move-to-forget is declined is over. The bag reopens where the use started, so a
+  driver that reads "not done yet" and begins the chain again asks the same question for ever.
 
 ## What the map layer will and will not offer
 
@@ -65,6 +70,10 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
 - A `Pace` row stands only where the cartridge rolls an encounter off grass: any floor of an indoor
   map outside the forest tileset, and water whose bottom-right tile is `$14` (`paces_on`). A shore
   square is water that never rolls.
+- A vending row names the drink it buys, one drink per machine, because the roof girl trades a
+  different machine for each of the three and the menu opens on the cheapest.
+- A walk to a counter waits on whoever is pacing in front of it (`BLOCKED_TICKS`) rather than
+  reporting no route; the Game Corner's prize room has a gambler who walks across all three.
 - A step onto water costs `SURF_MOUNT_COST`, so `bfs_from_player`'s `dist` is a price, not a step
   count; `wander_action` is the one caller that means steps.
 - A square the cartridge refuses to let you stand on is not in the block map, so routing over one

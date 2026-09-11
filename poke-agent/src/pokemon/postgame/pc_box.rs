@@ -185,7 +185,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PcBoxState) -
         }
         api.release_all_buttons();
         agent.event(AgentEvent::TextBox {
-            message: format!("PC box: {:?} done — party {party}, box {} holds {boxed}", s.op, current + 1),
+            message: format!("PC box: {:?} done, party {party}, box {} holds {boxed}", s.op, current + 1),
         });
         agent.set_state(AgentState::Idle);
         return Ok(());
@@ -193,7 +193,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PcBoxState) -
 
     if !s.entered_menu {
         if let Some(why) = s.op.blocked_by(party, boxed, current) {
-            abort(agent, api, format!("{:?} not possible — {why}", s.op));
+            abort(agent, api, format!("{:?} not possible: {why}", s.op));
             return Ok(());
         }
     }
