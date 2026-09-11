@@ -13,6 +13,10 @@ fn main() -> std::io::Result<()> {
     let reader = BufReader::new(sym_file);
 
     let entry_regex = Regex::new(r"^([0-9a-fA-F]{2}):([0-9a-fA-F]{4})\s+(\w+)$").unwrap();
+    let trainer_header_regex = Regex::new(r"^\w+TrainerHeader(\d+)$").unwrap();
+    let mut trainer_headers = Vec::new();
+    // A header's own label abbreviates its map (`Mansion4`); the map script it follows does not.
+    let mut map_script = String::new();
     let const_regex = Regex::new(r"^([0-9a-fA-F]{2})\s+(\w+)$").unwrap();
 
     writeln!(output, "// Auto-generated from pokered.sym")?;
@@ -30,6 +34,12 @@ fn main() -> std::io::Result<()> {
             let address: u16 = u16::from_str_radix(&caps[2], 16).unwrap();
             let name = &caps[3];
 
+            if let Some(map) = name.strip_suffix("_Script") {
+                map_script = map.to_string();
+            }
+            if let Some(caps) = trainer_header_regex.captures(name) {
+                trainer_headers.push(format!("(\"{map_script}\", {}, {name})", &caps[1]));
+            }
             if let Some(bank_type) = infer_bank(name, bank_id, address) {
                 writeln!(output, "    pub const {}: DmgPointer = DmgPointer {{ bank: {}, address: 0x{:04X} }};",
                          name, bank_type, address)?;
@@ -41,10 +51,18 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    // Every `trainer` header a map script declares, as (its map, its index, where).
+    writeln!(output, "    pub const TRAINER_HEADERS: &[(&str, u8, DmgPointer)] = &[{}];", trainer_headers.join(", "))?;
     writeln!(output, "}}")?;
     writeln!(output, "")?;
 
+    // `wEventFlags` bit indices, and `wToggleableObjectFlags` ones.
+    write_consts(&mut output, "pokered_events", "../vendor/pokered/constants/event_constants.asm")?;
+    write_consts(&mut output, "pokered_toggles", "../vendor/pokered/constants/toggle_constants.asm")?;
+
     println!("cargo:rerun-if-changed=../vendor/pokered/pokered.sym");
+    println!("cargo:rerun-if-changed=../vendor/pokered/constants/event_constants.asm");
+    println!("cargo:rerun-if-changed=../vendor/pokered/constants/toggle_constants.asm");
 
     Ok(())
 }
@@ -58,5 +76,36 @@ fn infer_bank(name: &str, bank_id: u8, _address: u16) -> Option<String> {
         'v' => Some("VRAM".to_string()),
         'h' => Some("HRAM".to_string()),
         _ => Some(format!("ROM {{ bank: 0x{:02X} }}", bank_id)),
+    }
+}
+
+
+/// A module of the indices an asm file's `const` sequence counts out.
+fn write_consts(output: &mut File, module: &str, path: &str) -> std::io::Result<()> {
+    let source = std::fs::read_to_string(path)?;
+    writeln!(output, "#[allow(dead_code)]")?;
+    writeln!(output, "pub mod {module} {{")?;
+    let mut next: u32 = 0;
+    for line in source.lines() {
+        let line = line.split(';').next().unwrap_or("").trim();
+        let mut words = line.split_whitespace();
+        match (words.next(), words.next()) {
+            (Some("const_def"), _) => next = 0,
+            (Some("const"), Some(name)) => {
+                writeln!(output, "    pub const {name}: u16 = {next};")?;
+                next += 1;
+            }
+            (Some("const_skip"), count) => next += count.map_or(1, parse_number),
+            (Some("const_next"), Some(value)) => next = parse_number(value),
+            _ => {}
+        }
+    }
+    writeln!(output, "}}")
+}
+
+fn parse_number(text: &str) -> u32 {
+    match text.strip_prefix('$') {
+        Some(hex) => u32::from_str_radix(hex, 16).unwrap(),
+        None => text.parse().unwrap(),
     }
 }
