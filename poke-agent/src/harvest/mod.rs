@@ -1,7 +1,9 @@
 //! Calls a cartridge routine on the emulator with chosen inputs and records what it returns, as
 //! tier-1 fixtures for `pokered`.
 
+mod experience;
 mod math;
+mod pokemon;
 mod stats;
 
 use gb::core::CoreMode;

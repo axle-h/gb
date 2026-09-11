@@ -16,7 +16,7 @@ impl PokemonMove {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::Display, strum_macros::FromRepr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::Display, strum_macros::FromRepr, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum PokemonMoveName {
     Pound = 0x1,
@@ -187,6 +187,18 @@ pub enum PokemonMoveName {
 }
 
 impl PokemonMoveName {
+    /// `GetMoveName`: charmap bytes, unterminated.
+    pub fn name(self) -> Vec<u8> {
+        use crate::rom_gfx::rom_slice;
+        use crate::symbols::pokered_symbols;
+        const TERMINATOR: u8 = 0x50;
+        rom_slice(pokered_symbols::MoveNames)
+            .split(|&b| b == TERMINATOR)
+            .nth(self as usize - 1)
+            .expect("every move has a name")
+            .to_vec()
+    }
+
     pub fn metadata(&self) -> &'static PokemonMoveMetadata {
         match self {
             PokemonMoveName::Pound => &PokemonMoveMetadata::POUND,
@@ -712,4 +724,17 @@ impl PokemonMoveMetadata {
     pub const SUBSTITUTE: Self = Self::new("Substitute", Normal, PokemonMoveEffect::Substitute, None, 100, 10);
     pub const STRUGGLE: Self = Self::new("Struggle", Normal, PokemonMoveEffect::Recoil, Some(50), 100, 10);
 
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::charmap::encode;
+    use super::PokemonMoveName::*;
+
+    #[test]
+    fn a_move_name_is_the_cartridges() {
+        assert_eq!(Pound.name(), encode("POUND").unwrap());
+        assert_eq!(Struggle.name(), encode("STRUGGLE").unwrap());
+        assert_eq!(Solarbeam.name(), encode("SOLARBEAM").unwrap());
+    }
 }
