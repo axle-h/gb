@@ -300,6 +300,35 @@ fn a_machine_prize_is_refused_to_a_full_bag() {
     assert_eq!(run.fixture().game_state().coins, 9000, "coins were spent on a prize that could not be held");
 }
 
+/// Every floor a lift serves can be picked, not only the first: the Rocket Hideout's B4F is the
+/// third row of its panel and the one way into Giovanni's half of that floor.
+#[test]
+fn a_lift_goes_to_every_floor_its_panel_lists() {
+    use crate::pokemon::map::Map;
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    // Down to B1F, the panel's first floor, and back up to B4F, its third.
+    let brain = walk_in_then(&["RocketHideoutElevator"], vec![
+        field_move(serde_json::json!({ "move": "elevator", "map": "RocketHideoutB1F" })),
+        field_move(serde_json::json!({ "move": "elevator", "map": "RocketHideoutB4F" })),
+    ], Arc::clone(&seen));
+    let mut run = LlmRun::builder(include_bytes!("../data/post-silph-scope.bin"))
+        .named("lift-third-floor")
+        .game_time(Duration::from_secs(20 * 60))
+        .start(Box::new(brain));
+
+    let down = run.tick_until(PATIENCE, |run| {
+        run.drain_events();
+        run.fixture().try_game_state().is_ok_and(|state| state.map.map == Map::RocketHideoutB1F)
+    });
+    assert!(down, "the lift never reached B1F");
+    let up = run.tick_until(PATIENCE, |run| {
+        run.drain_events();
+        run.fixture().try_game_state().is_ok_and(|state| state.map.map == Map::RocketHideoutB4F)
+    });
+    let turns = seen.lock().expect("not poisoned").overworld_turns.clone();
+    assert!(up, "the lift never came back to B4F; the last turn:\n{}", turns.last().map_or("", String::as_str));
+}
+
 /// The Name Rater's party menu is declined, and the conversation hands the run back unchanged.
 #[test]
 fn talking_to_the_name_rater_changes_nothing() {

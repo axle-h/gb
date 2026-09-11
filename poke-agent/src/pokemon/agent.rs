@@ -558,7 +558,7 @@ pub(crate) enum AgentState {
     CheckingTrashCan { target: Point8, checked: bool, press: bool, facing: Option<crate::pokemon::map_metadata::PlayerFacingDirection> },
 
     /// An elevator panel: face it, pick `floor` from its list, then ride the redirected warp out.
-    UsingElevator { panel: Point8, floor: u8, selected: bool, press: bool },
+    UsingElevator { panel: Point8, floor: u8, selected: bool, press: bool, ticks: u16 },
 
     /// Using a bag item on the sprite at `target`: face it, then START→ITEM→bag→USE.
     UsingFieldItem { item: crate::pokemon::item::ItemId, target: Point8, press: bool, entered_menu: bool, backing_out: u16 },
@@ -1797,7 +1797,7 @@ CascadeBadge; not cutting".to_string(),
                         }
                         Some(crate::pokemon::policy::FieldMove::UseElevator { panel, floor }) => {
                             api.release_all_buttons();
-                            self.set_state(AgentState::UsingElevator { panel, floor, selected: false, press: true });
+                            self.set_state(AgentState::UsingElevator { panel, floor, selected: false, press: true, ticks: 0 });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::UseFieldItem { item, target }) => {
@@ -3369,7 +3369,18 @@ CascadeBadge; not cutting".to_string(),
                     }
                 }
             }
-            AgentState::UsingElevator { panel, floor, selected, press } => {
+            AgentState::UsingElevator { panel, floor, selected, press, ticks } => {
+                // Every other driver is bounded; without this one a lift that will not answer
+                // takes the rest of the run.
+                const ELEVATOR_BUDGET: u16 = 1200;
+                if ticks > ELEVATOR_BUDGET {
+                    self.event(AgentEvent::TextBox {
+                        message: format!("elevator: floor {floor} was not reached in {ELEVATOR_BUDGET} ticks") });
+                    api.release_all_buttons();
+                    self.set_state(AgentState::Idle);
+                    return Ok(());
+                }
+                let ticks = ticks + 1;
                 let gs = self.observe_state(api)?;
                 // Rode the elevator out.
                 let in_elevator = matches!(gs.map.map,
@@ -3380,7 +3391,12 @@ CascadeBadge; not cutting".to_string(),
                     return Ok(());
                 }
                 const SPECIAL_LIST_MENU: u8 = 0x04;
-                if !selected && api.list_menu_id() == SPECIAL_LIST_MENU {
+                // `wListMenuID` still reads the floor menu long after it closed, so the screen is
+                // what says the menu is up: a second ride otherwise navigates a menu that is not
+                // there and never opens the one that is.
+                let floor_menu_showing = api.list_menu_id() == SPECIAL_LIST_MENU
+                    && api.on_screen_text(false).is_some_and(|text| text.to_lowercase().contains("floor"));
+                if !selected && floor_menu_showing {
                     // The floor menu scrolls, so compare the absolute index with the target floor.
                     let current = api.menu_state().map(|m| m.list_absolute_index()).unwrap_or(0);
                     api.release_all_buttons();
@@ -3393,12 +3409,12 @@ CascadeBadge; not cutting".to_string(),
                             Ordering::Equal   => { api.press_button(JoypadButton::A); selected = true; }
                         }
                     }
-                    self.set_state(AgentState::UsingElevator { panel, floor, selected, press: !press });
+                    self.set_state(AgentState::UsingElevator { panel, floor, selected, press: !press, ticks });
                     return Ok(());
                 }
                 if game_mode != GameMode::Overworld {
                     api.toggle_button(JoypadButton::A);
-                    self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true });
+                    self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true, ticks });
                     return Ok(());
                 }
                 if !selected {
@@ -3406,12 +3422,12 @@ CascadeBadge; not cutting".to_string(),
                         Some([]) => {
                             api.release_all_buttons();
                             if press { api.press_button(JoypadButton::A); }
-                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: !press });
+                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: !press, ticks });
                         }
                         Some(&[btn, ..]) => {
                             api.release_all_buttons();
                             api.press_button(btn);
-                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true });
+                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true, ticks });
                         }
                         _ => {
                             self.event(AgentEvent::TextBox { message: format!("Can't reach elevator panel at {panel}") });
@@ -3427,7 +3443,7 @@ CascadeBadge; not cutting".to_string(),
                         Some(btn) => {
                             api.release_all_buttons();
                             api.press_button(btn);
-                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true });
+                            self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true, ticks });
                         }
                         None => {
                             self.event(AgentEvent::TextBox { message: "Can't reach the elevator exit warp".into() });
