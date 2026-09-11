@@ -131,7 +131,8 @@ computed from a graph of all 248 maps built out of the ROM's own headers. A **wa
 one failure nothing else can see, the agent reaching no decision point at all. And when the quota
 runs out the run **pauses rather than fails**: a dated 429 is not something to retry, so `gb` stops
 asking and stops the emulator with it, and the same question is put again to a world that has not
-moved.
+moved. An endpoint that refuses outright three times running, a spent credit or a dead key, is
+paused the same way, for longer each time.
 
 The other policies are `RandomPolicy`, `ConsolePolicy` (stdin) and `DeterministicPolicy`.
 `--policy deterministic` is the last one served rather than tested, on the same queue, seed and fresh

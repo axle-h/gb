@@ -16,7 +16,7 @@ use crate::llm::client::{OpenAiClient, RetryPolicy};
 use crate::llm::config::LlmConfig;
 use crate::llm::history::History;
 use crate::llm::todo::TodoList;
-use crate::llm::worker;
+use crate::llm::worker::{self, RefusalPark};
 use crate::pokemon::integration_tests::fixture::TestFixture;
 use crate::pokemon::llm_policy::LlmPolicy;
 use crate::published::{Published, UiEvent, UiEventBody};
@@ -542,6 +542,10 @@ pub const HOST_TICK: Duration = Duration::from_millis(20);
 pub const NO_BACKOFF: RetryPolicy =
     RetryPolicy { attempts: 3, base: Duration::ZERO, max: Duration::ZERO };
 
+/// The deployed streak, parked for long enough to tick through and no longer.
+pub const SHORT_REFUSAL_PARK: RefusalPark =
+    RefusalPark { after: 3, first: Duration::from_millis(100), max: Duration::from_millis(200) };
+
 /// The assembled stack: mock endpoint, worker, run directory, policy, agent, emulator.
 pub struct LlmRun {
     pub endpoint: MockEndpoint,
@@ -557,6 +561,7 @@ pub struct LlmRun {
     _scratch: crate::run::Scratch,
     config: LlmConfig,
     retry: RetryPolicy,
+    refusal_park: RefusalPark,
     worker: Option<std::thread::JoinHandle<()>>,
     events: Mutex<tokio::sync::broadcast::Receiver<UiEvent>>,
     seen: Mutex<Vec<UiEvent>>,
@@ -581,6 +586,7 @@ pub struct LlmRunBuilder {
     max_tool_steps: usize,
     request_timeout: Duration,
     retry: RetryPolicy,
+    refusal_park: RefusalPark,
     name: &'static str,
     coverage: bool,
 }
@@ -596,6 +602,7 @@ impl LlmRunBuilder {
             max_tool_steps: 6,
             request_timeout: Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
             retry: NO_BACKOFF,
+            refusal_park: SHORT_REFUSAL_PARK,
             name: "llm-run",
             coverage: false,
         }
@@ -627,6 +634,11 @@ impl LlmRunBuilder {
     }
 
     /// Names the scratch directory, so a failing test says which run's files to look at.
+    pub fn refusal_park(mut self, park: RefusalPark) -> Self {
+        self.refusal_park = park;
+        self
+    }
+
     pub fn named(mut self, name: &'static str) -> Self {
         self.name = name;
         self
@@ -674,6 +686,7 @@ impl LlmRunBuilder {
             _scratch: scratch,
             config,
             retry: self.retry,
+            refusal_park: self.refusal_park,
             worker: None,
             events,
             seen: Mutex::new(Vec::new()),
@@ -721,6 +734,7 @@ impl LlmRun {
         self.worker = Some(
             worker
                 .with_retry(self.retry)
+                .with_refusal_park(self.refusal_park)
                 .with_run(current)
                 .spawn()
                 .expect("the worker thread starts"),

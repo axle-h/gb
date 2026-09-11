@@ -63,8 +63,8 @@ export type RunStatus =
   | { state: 'compacting' }
   | { state: 'rate_limited'; retry_in_ms: number }
   /**
-   * The endpoint's quota is spent and the whole run is paused until `until_ms` — the emulator
-   * included, so nothing is missed while it waits.
+   * The endpoint's quota is spent, or it has refused a streak of requests outright, and the whole
+   * run is paused until `until_ms` — the emulator included, so nothing is missed while it waits.
    *
    * ⚠️ **An absolute Unix millisecond, not a countdown, and the page must keep it that way.** The
    * status is published once when the park starts and then replayed on every heartbeat and to every

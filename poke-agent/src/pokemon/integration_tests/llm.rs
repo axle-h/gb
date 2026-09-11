@@ -257,8 +257,8 @@ fn an_undated_hard_failure_does_not_ratchet_the_history() {
         served.load(std::sync::atomic::Ordering::SeqCst),
     );
 
-    // A 402 is not retryable, so one request is one turn: what follows is a picture of the
-    // conversation across `FAILURES` consecutive failed turns.
+    // A 402 is not retryable, so one request is one attempt: what follows is a picture of the
+    // conversation across `FAILURES` consecutive failed turns and parks.
     let sizes: Vec<usize> = run.endpoint.requests().iter().map(|r| r.messages.len()).collect();
     let plans: Vec<usize> = run
         .endpoint
@@ -286,6 +286,55 @@ fn an_undated_hard_failure_does_not_ratchet_the_history() {
         run.tick_until(PATIENCE, |run| run.decisions().len() > before),
         "the run never recovered once the endpoint did",
     );
+}
+
+/// An endpoint that refuses outright and never says when to come back is parked too, once the
+/// refusals are a streak rather than one bad request: the game stops rather than being asked about
+/// every two seconds of it.
+#[test]
+fn a_streak_of_undated_hard_failures_parks_the_run_and_stops_the_cartridge_clock() {
+    use crate::llm::worker::RefusalPark;
+    use crate::published::RunStatus;
+
+    let park = RefusalPark { after: 3, first: Duration::from_secs(2), max: Duration::from_secs(2) };
+    let brain = FaultThen::new(
+        Fault::Http { status: 402, message: "Prompt tokens limit exceeded: add more credits".into() },
+        park.after as usize,
+        Reply::Calls(vec![Call::wait(1)]),
+    );
+    let served = Arc::clone(&brain.served);
+    let mut run = LlmRun::builder(FIXTURE).named("park-402").refusal_park(park).start(Box::new(brain));
+
+    assert!(
+        run.tick_until(PATIENCE, |run| matches!(run.published.run_status(), RunStatus::Throttled { .. })),
+        "a streak of refusals did not park the run; status is {:?}",
+        run.published.run_status(),
+    );
+    // Parked on the streak's last refusal, and not before it: the ones before are failed turns.
+    assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), park.after as usize);
+    let failed_turns = run.notices().iter().filter(|(_, m)| m.contains("the turn could not be completed")).count();
+    assert_eq!(failed_turns, park.after as usize - 1, "{:?}", run.notices());
+    assert!(run.said("the endpoint refused 3 requests in a row"), "a park has to say why: {:?}", run.notices());
+    let stopped_at = run.playtime_seconds();
+    // The failed turns before the park resolved to waits, and those are decisions too.
+    let decided = run.decisions().len();
+
+    let parked_until = std::time::Instant::now() + Duration::from_millis(1500);
+    while std::time::Instant::now() < parked_until {
+        run.tick();
+    }
+    assert_eq!(run.playtime_seconds(), stopped_at, "the cartridge clock ran while the run was parked");
+
+    assert!(
+        run.tick_until(PATIENCE, |run| run.decisions().len() > decided),
+        "the run never resumed after the park",
+    );
+    assert!(run.said("the pause is over"), "{:?}", run.notices());
+    // The same question, because the world it was about did not move.
+    let requests = run.endpoint.requests();
+    let (refused, answered) = (&requests[park.after as usize - 1], &requests[park.after as usize]);
+    assert_eq!(refused.messages.len(), answered.messages.len(), "the parked turn was not re-asked as it stood");
+    assert!(refused.messages.iter().zip(&answered.messages).all(|(a, b)| a.text == b.text));
 }
 
 /// A dated 429 parks the run: the emulator stops, the cartridge's own clock stops with it, and
