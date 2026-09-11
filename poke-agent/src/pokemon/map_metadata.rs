@@ -394,6 +394,32 @@ fn map_warp_gate_specs(map: Map) -> &'static [WarpGateSpec] {
     }
 }
 
+/// A lift's doors lead wherever `wWarpEntries` says: the floor it was entered from until the panel
+/// picks another, which the ROM's table, written for one floor, cannot know.
+fn with_live_exits(mmu: &MMU, metadata: &MapMetadata) -> MapMetadata {
+    let mut live = metadata.clone();
+    let count = mmu.read_pointer(&pokered_symbols::wNumberOfWarps) as usize;
+    for (index, warp) in live.warp_events.iter_mut().enumerate().take(count) {
+        let entry = pokered_symbols::wWarpEntries.address + index as u16 * 4;
+        let (warp_id, raw_map) = (mmu.read(entry + 2) as u16, mmu.read(entry + 3));
+        let Some(map) = Map::from_repr(raw_map).filter(|map| map.header_pointer().is_some()) else { continue };
+        if let Ok(position) = mmu.read_destination_warp_position(map, warp_id) {
+            warp.destination_map = map;
+            warp.destination_position = position;
+        }
+    }
+    // The tiles were placed from the ROM's table when the map was first read.
+    let dimensions = live.dimensions();
+    for warp in live.warp_events.clone() {
+        let at = warp.position.x as usize + dimensions.west_extra
+            + (warp.position.y as usize + dimensions.north_extra) * dimensions.full_width();
+        if let Some(tile @ MetaTile::Warp { .. }) = live.meta_tiles_base.get_mut(at) {
+            *tile = warp.tile();
+        }
+    }
+    live
+}
+
 /// The squares on `map` whose warp a script is cancelling now, in raw coordinates.
 pub(crate) fn script_cancelled_warps(mmu: &MMU, map: Map) -> Vec<Point8> {
     let base = pokered_symbols::wEventFlags.address;
@@ -568,6 +594,8 @@ impl MapMetadataCache {
             sprites: mmu.read_sprites()?,
             metadata: if map_uses_runtime_blocks(map) {
                 Arc::new(mmu.read_map_metadata_runtime(map)?)
+            } else if crate::pokemon::tile_map::elevator_for(map).is_some() {
+                Arc::new(with_live_exits(mmu, &*self.read_map(mmu, map)?))
             } else {
                 self.read_map(mmu, map)?
             },
@@ -616,6 +644,8 @@ impl MapMetadataReader for MMU {
                 sprites: self.read_sprites()?,
                 metadata: if map_uses_runtime_blocks(map) {
                     Arc::new(self.read_map_metadata_runtime(map)?)
+                } else if crate::pokemon::tile_map::elevator_for(map).is_some() {
+                    Arc::new(with_live_exits(self, &self.read_map_metadata(map)?))
                 } else {
                     Arc::new(self.read_map_metadata(map)?)
                 },

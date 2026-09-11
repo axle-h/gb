@@ -46,6 +46,10 @@ pub struct Cheats {
     pub badges: Option<Badge>,
     /// Install the god party once the game has produced a party of its own.
     pub god_party: bool,
+    /// Whether the god party brings the members that know the HMs, or only the fighter.
+    pub hm_slaves: bool,
+    /// Money to hold the player at or above. `None` leaves it alone.
+    pub money: Option<u32>,
     /// Top the party up to full HP and PP whenever it is safe to.
     pub keep_healthy: bool,
     /// Whether the god party has been installed.
@@ -69,6 +73,8 @@ impl Default for Cheats {
         Self {
             badges: Some(Badge::all()),
             god_party: true,
+            hm_slaves: true,
+            money: None,
             keep_healthy: true,
             installed: false,
             top_ups: 0,
@@ -82,6 +88,11 @@ impl Default for Cheats {
 }
 
 impl Cheats {
+    /// For a save whose story is still to be played: battle strength and money, and nothing else.
+    /// Badges, key items, event flags and HMs stay the save's own, so every gate is the cartridge's.
+    pub fn story(money: u32) -> Self {
+        Self { badges: None, hm_slaves: false, money: Some(money), ..Self::default() }
+    }
 
     /// Stock the bag with [`COVERAGE_KEY_ITEMS`] and `money`, once.
     pub fn with_key_items(mut self, money: u32) -> Self {
@@ -103,7 +114,7 @@ impl Cheats {
         }
 
         if self.god_party && !self.installed && state.pokemon.len() > 0 {
-            match api.debug_set_party(&god_party(state)) {
+            match api.debug_set_party(&god_party(state, self.hm_slaves)) {
                 Ok(()) => self.installed = true,
                 Err(why) => panic!("could not install the god party: {why}"),
             }
@@ -127,6 +138,12 @@ impl Cheats {
             }
             api.debug_set_money(money);
             self.stocked = true;
+        }
+
+        if let Some(money) = self.money
+            && state.money < money
+        {
+            api.debug_set_money(money);
         }
 
         if self.keep_healthy && self.needs_a_top_up(state) {
@@ -157,9 +174,9 @@ impl Cheats {
     }
 }
 
-/// A fighter that cannot lose and the field moves that reach the whole map, then whatever the game
-/// produced.
-pub fn god_party(state: &GameState) -> PokemonParty {
+/// A fighter that cannot lose and, with `hm_slaves`, the field moves that reach the whole map, then
+/// whatever the game produced.
+pub fn god_party(state: &GameState, hm_slaves: bool) -> PokemonParty {
     let (name, id) = (state.name.clone(), state.player_id);
     let mut party = PokemonParty::default();
     let mut push = |species, nickname: &str, moves| {
@@ -167,8 +184,10 @@ pub fn god_party(state: &GameState) -> PokemonParty {
         let _ = party.push(Pokemon::maxed(species, nickname, moves, name.clone(), id));
     };
     push(PokemonSpecies::Mewtwo, "MEWTWO", FIGHTER_MOVES);
-    push(PokemonSpecies::Lapras, "TERRAIN", TERRAIN_MOVES);
-    push(PokemonSpecies::Pidgeot, "FLIGHT", FLIGHT_MOVES);
+    if hm_slaves {
+        push(PokemonSpecies::Lapras, "TERRAIN", TERRAIN_MOVES);
+        push(PokemonSpecies::Pidgeot, "FLIGHT", FLIGHT_MOVES);
+    }
     for member in state.pokemon.iter() {
         if party.push(member.clone()).is_err() {
             break;
@@ -196,7 +215,7 @@ mod tests {
         assert_eq!(fixture.game_state().badges, Badge::all(), "the badges did not reach `GameState`");
 
         let state = fixture.game_state();
-        fixture.api().debug_set_party(&god_party(&state)).expect("a party can be installed");
+        fixture.api().debug_set_party(&god_party(&state, true)).expect("a party can be installed");
         let installed = fixture.game_state();
         // The three named members lead, and what the fixture carried follows as evidence the story
         // ran.
@@ -253,7 +272,7 @@ mod tests {
     fn every_coverage_start_can_be_handed_all_of_the_key_items() {
         use crate::pokemon::integration_tests::coverage::COVERAGE_STARTS;
 
-        for start in COVERAGE_STARTS {
+        for start in COVERAGE_STARTS.iter().filter(|start| !start.story) {
             let mut fixture = TestFixture::with_policy(
                 start.state,
                 Duration::from_secs(10),
@@ -284,6 +303,37 @@ mod tests {
                 used < crate::pokemon::bag::Bag::MAX_ITEMS,
                 "{}: the bag came out full at {used} kinds, so no pickup can land", start.name,
             );
+        }
+    }
+
+    /// The story mode gives battle strength and money and nothing the story is meant to earn.
+    #[test]
+    fn the_story_cheats_give_no_badge_key_item_or_hm() {
+        let mut fixture = TestFixture::with_policy(
+            include_bytes!("../data/back-in-cerulean.bin"),
+            Duration::from_secs(10),
+            Box::new(crate::pokemon::policy::RandomPolicy::seeded(0)),
+        );
+        let before = fixture.game_state();
+        let knows = |state: &GameState, hm: PokemonMoveName| state.pokemon.iter()
+            .any(|mon| mon.moves.iter().flatten().any(|m| m.name == hm));
+
+        let mut cheats = Cheats::story(500_000);
+        for _ in 0..4 {
+            let state = fixture.game_state();
+            cheats.apply(&mut fixture.api(), &state);
+        }
+        let after = fixture.game_state();
+
+        assert!(cheats.installed, "the fighter was never installed");
+        assert_eq!(after.pokemon[0].species, PokemonSpecies::Mewtwo);
+        assert_eq!(after.money, 500_000, "the money was not held");
+        assert_eq!(after.badges, before.badges, "a badge was given");
+        let ids = |state: &GameState| state.bag.iter().map(|item| item.id).collect::<Vec<_>>();
+        assert_eq!(ids(&after), ids(&before), "the bag was changed");
+        for hm in [PokemonMoveName::Cut, PokemonMoveName::Fly, PokemonMoveName::Surf,
+                   PokemonMoveName::Strength, PokemonMoveName::Flash] {
+            assert_eq!(knows(&after, hm), knows(&before, hm), "the party's {hm} changed");
         }
     }
 
