@@ -80,7 +80,8 @@ impl Evaluation {
 enum Choice {
     Fight(Ref),
     Switch(Ref),
-    Item(String),
+    /// An item, and for one that asks which Pokémon, who: the one out when the script says nobody.
+    Item(String, Option<Ref>),
     Run,
     Ask,
 }
@@ -163,6 +164,18 @@ impl Battle {
         Err(EvalAltResult::ErrorTerminated(Dynamic::UNIT, Position::NONE).into())
     }
 
+    fn use_item(&self, value: Dynamic, on: Option<Dynamic>) -> Result<(), Box<EvalAltResult>> {
+        let fail = |why: String| Err(EvalAltResult::ErrorRuntime(Dynamic::from(why), Position::NONE).into());
+        let name = match value.into_string() {
+            Ok(name) => name,
+            Err(actual) => return fail(format!("`use_item` takes an item name, got a {actual}")),
+        };
+        match on.map(|on| Ref::of(&on)).transpose() {
+            Ok(on) => self.commit(Choice::Item(name, on)),
+            Err(why) => fail(format!("`use_item`'s second argument is who it is for, and {why}")),
+        }
+    }
+
     fn action(&self, kind: fn(Ref) -> Choice, value: Dynamic) -> Result<(), Box<EvalAltResult>> {
         match Ref::of(&value) {
             Ok(reference) => self.commit(kind(reference)),
@@ -221,16 +234,8 @@ fn engine(deadline: Instant, prints: Rc<RefCell<Vec<String>>>) -> Engine {
         .register_fn("fight", |battle: &mut Battle, value: Dynamic| battle.action(Choice::Fight, value))
         // `switch_to`, because `switch` is a reserved word in rhai.
         .register_fn("switch_to", |battle: &mut Battle, value: Dynamic| battle.action(Choice::Switch, value))
-        .register_fn("use_item", |battle: &mut Battle, value: Dynamic| {
-            match value.clone().into_string() {
-                Ok(name) => battle.commit(Choice::Item(name)),
-                Err(actual) => Err(EvalAltResult::ErrorRuntime(
-                    Dynamic::from(format!("`use_item` takes an item name, got a {actual}")),
-                    Position::NONE,
-                )
-                .into()),
-            }
-        })
+        .register_fn("use_item", |battle: &mut Battle, value: Dynamic| battle.use_item(value, None))
+        .register_fn("use_item", |battle: &mut Battle, value: Dynamic, on: Dynamic| battle.use_item(value, Some(on)))
         .register_fn("run", |battle: &mut Battle| battle.commit(Choice::Run))
         .register_fn("ask", |battle: &mut Battle| battle.commit(Choice::Ask));
 
@@ -477,13 +482,38 @@ fn resolve(choice: Choice, state: &GameState, options: &[BattleAction]) -> Outco
                 )),
             }
         }
-        Choice::Item(name) => {
-            let found = options.iter().find(|action| match action {
-                BattleAction::UseItem { item, .. } => normalised(&item.id.to_string()) == normalised(&name),
-                _ => false,
+        Choice::Item(name, on) => {
+            let named = |action: &&BattleAction| matches!(action,
+                BattleAction::UseItem { item, .. } if normalised(&item.id.to_string()) == normalised(&name));
+            let active = state.battle.as_ref().map(|battle| battle.active_party_slot);
+            let is_for = |target: u8| match &on {
+                None => Some(target) == active,
+                Some(Ref::Slot(wanted)) => target as i64 == *wanted,
+                Some(Ref::Name(wanted)) => state.pokemon.get(target as usize).is_some_and(|mon| {
+                    normalised(&mon.nickname.to_default_string()) == normalised(wanted)
+                        || normalised(&mon.species.to_string()) == normalised(wanted)
+                }),
+            };
+            let found = options.iter().filter(named).find(|action| match action {
+                BattleAction::UseItem { target: Some(target), .. } => is_for(*target),
+                _ => true,
             });
+            let in_bag = state.bag.iter().any(|item| item.quantity > 0
+                && normalised(&item.id.to_string()) == normalised(&name));
             match found {
                 Some(action) => Outcome::Action(action.clone()),
+                None if in_bag => Outcome::Failed(format!(
+                    "`battle.use_item` was given `{name}` for {}, and it would do nothing there: the \
+                     cartridge would only say \"It won't have any effect.\" It can go to: {}.",
+                    on.as_ref().map_or("the Pokémon that is out".to_string(), Ref::describe),
+                    list(options.iter().filter(named).filter_map(|action| match action {
+                        BattleAction::UseItem { target: Some(target), .. } => state
+                            .pokemon
+                            .get(*target as usize)
+                            .map(|mon| mon.nickname.to_default_string()),
+                        _ => None,
+                    })),
+                )),
                 None => Outcome::Failed(format!(
                     "`battle.use_item` was given `{name}`, which is not in the bag. In it now: {}.",
                     list(options.iter().filter_map(|action| match action {
@@ -1134,8 +1164,28 @@ mod tests {
         }
         // The actions, each in the position a script actually calls it from.
         for call in ["fight(battle.best_move)", "switch_to(battle.party[1])", r#"use_item("Potion")"#, "run()", "ask()"] {
-            let outcome = decide(&format!("battle.{call};"), &wild());
+            // A Potion only where it would do something.
+            let outcome = decide(&format!("battle.{call};"), &scenarios::hurt_wild());
             assert!(!matches!(outcome, Outcome::Failed(_)), "`battle.{call}` failed: {outcome:?}");
+        }
+    }
+
+    /// A potion goes to the one out unless the script names another, and nowhere it would do nothing.
+    #[test]
+    fn a_potion_goes_where_it_helps_and_to_whom_it_is_aimed() {
+        let refused = decide(r#"battle.use_item("Potion");"#, &wild());
+        assert!(matches!(&refused, Outcome::Failed(why) if why.contains("It won't have any effect")),
+                "a Potion on a Pokémon at full HP: {refused:?}");
+
+        let out = decide(r#"battle.use_item("Potion");"#, &scenarios::hurt_wild());
+        assert!(matches!(out, Outcome::Action(BattleAction::UseItem { target: Some(0), .. })), "got {out:?}");
+
+        let mut bench_hurt = wild();
+        bench_hurt.pokemon[1].current_hp = 1;
+        for script in [r#"battle.use_item("Potion", battle.party[1]);"#, r#"battle.use_item("Potion", 1);"#] {
+            let outcome = decide(script, &bench_hurt);
+            assert!(matches!(outcome, Outcome::Action(BattleAction::UseItem { target: Some(1), .. })),
+                    "`{script}` got {outcome:?}");
         }
     }
 

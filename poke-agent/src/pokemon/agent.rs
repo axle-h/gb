@@ -374,7 +374,8 @@ pub(crate) enum BattleState {
     },
 
     /// Dedicated driver for using any bag item in battle.
-    UsingItem { item: crate::pokemon::item::ItemId, start_qty: u8, entry_hp: u16, press: bool, confirmed: bool, delay: DelayContext, ticks: u16, reader: PokemonTextReader },
+    /// `aim` is the party slot the item goes to, and `entry_hp` that member's HP when it was chosen.
+    UsingItem { item: crate::pokemon::item::ItemId, aim: u8, start_qty: u8, entry_hp: u16, press: bool, confirmed: bool, delay: DelayContext, ticks: u16, reader: PokemonTextReader },
 }
 
 impl Default for BattleState {
@@ -2162,6 +2163,11 @@ CascadeBadge; not cutting".to_string(),
                                     self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default(), menu_gone: 0 });
                                 }
                                 Some(BattleMenuState::PokemonList { index }) => {
+                                    // The geometry outlives an item's party menu, and what the game says
+                                    // next, the item's effect and the enemy's reply, is typed under it.
+                                    if menu_state.text_box_id == crate::pokemon::menu::TextBoxId::MessageBox {
+                                        reader.accumulate(api);
+                                    }
                                     // Only if the party list is what is on screen.
                                     if api.on_screen_text(false).map_or(0, |t| t.matches('/').count()) < 2 {
                                         api.toggle_button(JoypadButton::A);
@@ -2283,18 +2289,27 @@ CascadeBadge; not cutting".to_string(),
                             let game_state = api.game_state()?;
                             self.poll_policy(&game_state, api);
                             if let Some(action) = self.policy.pick_battle_action(&game_state) {
+                                let active = game_state.battle.as_ref().map(|b| b.active_party_slot).unwrap_or(0);
+                                // An item is used on someone, who is the actor of the sentence.
+                                let actor = match action {
+                                    BattleAction::UseItem { target: Some(target), .. } => game_state.pokemon
+                                        .get(target as usize)
+                                        .map(|mon| mon.nickname.to_default_string())
+                                        .unwrap_or_else(|| active_pokemon_name(&game_state)),
+                                    _ => active_pokemon_name(&game_state),
+                                };
                                 new_events.push(AgentEvent::BattleActionStarted {
-                                    actor: active_pokemon_name(&game_state),
+                                    actor,
                                     opponent: opponent_pokemon_name(&game_state),
                                     action,
                                 });
-                                if let BattleAction::UseItem { item, .. } = action {
+                                if let BattleAction::UseItem { item, target, .. } = action {
                                     let start_qty = game_state.bag.iter()
                                         .find(|b| b.id == item.id).map(|b| b.quantity).unwrap_or(0);
-                                    let active = game_state.battle.as_ref().map(|b| b.active_party_slot).unwrap_or(0);
-                                    let entry_hp = game_state.pokemon.get(active as usize).map(|p| p.current_hp).unwrap_or(0);
+                                    let aim = target.unwrap_or(active);
+                                    let entry_hp = game_state.pokemon.get(aim as usize).map(|p| p.current_hp).unwrap_or(0);
                                     self.set_battle_state(BattleState::UsingItem { ticks: 0,
-                                        item: item.id, start_qty, entry_hp, press: true, confirmed: false,
+                                        item: item.id, aim, start_qty, entry_hp, press: true, confirmed: false,
                                         delay: DelayContext::default(),
                                         reader: PokemonTextReader::message_box_only(),
                                     });
@@ -2428,7 +2443,7 @@ CascadeBadge; not cutting".to_string(),
                         }
                     }
 
-                    BattleState::UsingItem { item, start_qty, entry_hp, press, confirmed, delay: _, ticks, reader } => {
+                    BattleState::UsingItem { item, aim, start_qty, entry_hp, press, confirmed, delay: _, ticks, reader } => {
                         // Same bound as `Navigating`: six menus deep and nothing polled on the way.
                         const MAX_HEALING_TICKS: u16 = 250;
                         let ticks = *ticks;
@@ -2446,6 +2461,7 @@ CascadeBadge; not cutting".to_string(),
                         }
                         use crate::pokemon::item::ItemId;
                         let item = *item;
+                        let aim = *aim;
                         let start_qty = *start_qty;
                         let entry_hp = *entry_hp;
                         let press = *press;
@@ -2454,10 +2470,9 @@ CascadeBadge; not cutting".to_string(),
                         let raw = api.menu_state();
                         let bms = raw.and_then(|m| m.battle_menu_state());
 
-                        // Keyed on the item's bag count and the active mon's HP.
+                        // Keyed on the item's bag count and the HP of the member it is aimed at.
                         let gs = api.game_state().ok();
-                        let active = gs.as_ref().and_then(|g| g.battle.as_ref().map(|b| b.active_party_slot)).unwrap_or(0);
-                        let active_hp = gs.as_ref().and_then(|g| g.pokemon.get(active as usize).map(|p| p.current_hp)).unwrap_or(0);
+                        let aimed_hp = gs.as_ref().and_then(|g| g.pokemon.get(aim as usize).map(|p| p.current_hp)).unwrap_or(0);
                         let live = gs.as_ref()
                             .and_then(|g| g.bag.iter().find(|b| b.id == item).map(|b| b.quantity))
                             .unwrap_or(0);
@@ -2467,16 +2482,16 @@ CascadeBadge; not cutting".to_string(),
                             self.set_battle_state(BattleState::carrying(reader));
                             return Ok(());
                         }
-                        if active_hp > entry_hp {
+                        if aimed_hp > entry_hp {
                             // The HP bar is filling: leave the still-open party menu alone.
                             api.release_all_buttons();
-                            self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: !press, confirmed: true, delay: DelayContext::default(), ticks: ticks + 1, reader });
+                            self.set_battle_state(BattleState::UsingItem { item, aim, start_qty, entry_hp, press: !press, confirmed: true, delay: DelayContext::default(), ticks: ticks + 1, reader });
                             return Ok(());
                         }
                         // Press and release on alternate ticks for clean rising edges.
                         if !press {
                             api.release_all_buttons();
-                            self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: true, confirmed, delay: DelayContext::default(), ticks: ticks + 1, reader });
+                            self.set_battle_state(BattleState::UsingItem { item, aim, start_qty, entry_hp, press: true, confirmed, delay: DelayContext::default(), ticks: ticks + 1, reader });
                             return Ok(());
                         }
 
@@ -2492,8 +2507,8 @@ CascadeBadge; not cutting".to_string(),
                         let next_confirmed = confirmed;
                         let button: Option<JoypadButton> = if party_showing {
                             let cur = raw.map_or(0, |m| m.current_item);
-                            if cur == active { Some(JoypadButton::A) }
-                            else if cur < active { Some(JoypadButton::Down) }
+                            if cur == aim { Some(JoypadButton::A) }
+                            else if cur < aim { Some(JoypadButton::Down) }
                             else { Some(JoypadButton::Up) }
                         } else if let Some(BattleMenuState::ItemList { index }) = bms {
                             // The bag's raw order is the battle list's order.
@@ -2515,7 +2530,7 @@ CascadeBadge; not cutting".to_string(),
 
                         api.release_all_buttons();
                         if let Some(b) = button { api.press_button(b); }
-                        self.set_battle_state(BattleState::UsingItem { item, start_qty, entry_hp, press: false, confirmed: next_confirmed, delay: DelayContext::default(), ticks: ticks + 1, reader });
+                        self.set_battle_state(BattleState::UsingItem { item, aim, start_qty, entry_hp, press: false, confirmed: next_confirmed, delay: DelayContext::default(), ticks: ticks + 1, reader });
                     }
                 }
             }
@@ -3596,7 +3611,7 @@ mod tests {
             "the move's own Display already spaces and capitalises it",
         );
         assert_eq!(
-            say(BattleAction::UseItem { slot: 0, item: BagItem::new(ItemId::Potion, 1) }),
+            say(BattleAction::UseItem { slot: 0, item: BagItem::new(ItemId::Potion, 1), target: Some(0) }),
             "used Potion on BULBASAUR",
         );
         assert_eq!(
@@ -3626,7 +3641,7 @@ mod tests {
         let say = |item| format!("{}", AgentEvent::BattleActionStarted {
             actor: "BULBASAUR".into(),
             opponent: "Pidgey".into(),
-            action: BattleAction::UseItem { slot: 0, item: BagItem::new(item, 1) },
+            action: BattleAction::UseItem { slot: 0, item: BagItem::new(item, 1), target: None },
         });
 
         assert_eq!(say(ItemId::PokeBall), "threw a PokeBall at Pidgey");

@@ -1130,7 +1130,20 @@ fn battle_rule_behind(id: &str, menu: &[String]) -> &'static str {
                 printing so and putting the same menu straight back, which is why it is not \
                 offered. Win the fight, or switch to something that can.";
     }
-    if id.starts_with("item:") && has("fight:") {
+    if let Some(item) = id.strip_prefix("item:") && has("fight:") {
+        let name = item.split('@').next().unwrap_or(item);
+        let aimed = menu.iter().any(|offered| offered.starts_with(&format!("item:{name}@")));
+        if !item.contains('@') && aimed {
+            return " That item asks which Pokémon it is for, so its rows carry the party slot after an \
+                    `@`, as `item:Potion@1` does. Use one of those.";
+        }
+        if item.contains('@') {
+            return " Either the bag has none left, or it would do nothing for that Pokémon and the \
+                    cartridge would only say \"It won't have any effect.\" An item that asks which \
+                    Pokémon has a row for each one it would help: a Revive for one that has fainted, a \
+                    potion for one that is hurt, a cure for one with that status. `read_bag` says what \
+                    is left.";
+        }
         return " That item is not in the bag. A bag row goes the moment the last one is used, so an \
                 id you read on an earlier turn stops resolving; `read_bag` says what is left.";
     }
@@ -1845,7 +1858,8 @@ pub fn resolve_overworld(state: &GameState, id: &str) -> Option<OverworldAction>
 pub fn battle_id(action: &BattleAction) -> String {
     match action {
         BattleAction::Fight { battle_move, .. } => format!("fight:{}", battle_move.name),
-        BattleAction::UseItem { item, .. } => format!("item:{:?}", item.id),
+        BattleAction::UseItem { item, target: None, .. } => format!("item:{:?}", item.id),
+        BattleAction::UseItem { item, target: Some(target), .. } => format!("item:{:?}@{target}", item.id),
         BattleAction::SwitchPokemon { slot, .. } => format!("switch:{slot}"),
         BattleAction::Run => "run".to_string(),
         BattleAction::SafariBall => "ball".to_string(),
@@ -1864,6 +1878,17 @@ pub fn battle_menu(state: &GameState) -> Vec<MenuItem> {
             let mut description = format!("{action}");
             if let (BattleAction::Fight { battle_move, .. }, Some((me, foe))) = (action, sides) {
                 description.push_str(&fight_row_note(battle_move.name, me, foe));
+            }
+            if let BattleAction::UseItem { item, target: Some(target), .. } = action
+                && let Some(mon) = state.pokemon.get(*target as usize)
+            {
+                let condition = match (mon.current_hp, mon.status) {
+                    (0, _) => "fainted".to_string(),
+                    (hp, crate::pokemon::status::PokemonStatus::None) => format!("{hp}/{} HP", mon.stats.hp),
+                    (hp, status) => format!("{hp}/{} HP, {status}", mon.stats.hp),
+                };
+                description = format!("ITEM   {} ×{} on {} the {}, {condition}",
+                    item.id, item.quantity, mon.nickname.to_default_string(), mon.species);
             }
             MenuItem { id: battle_id(action), description }
         })
@@ -2335,6 +2360,11 @@ mod tests {
         let safari: Vec<String> =
             ["ball", "bait", "rock", "run"].iter().map(|id| id.to_string()).collect();
         assert_eq!(battle_rule_behind("item:Potion", &safari), "");
+
+        // An item that asks which Pokémon: a missing target, and a target it would not help.
+        let hurt: Vec<String> = ["fight:Peck", "item:Potion@1"].iter().map(|id| id.to_string()).collect();
+        assert!(battle_rule_behind("item:Potion", &hurt).contains("`@`"), "the slot was not asked for");
+        assert!(battle_rule_behind("item:Revive@0", &hurt).contains("It won't have any effect."));
         assert_eq!(battle_rule_behind("fight:Tackle", &safari), "");
 
         let here: Vec<String> = vec!["ViridianCity:18,6:Sprite".to_string()];

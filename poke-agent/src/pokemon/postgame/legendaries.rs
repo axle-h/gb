@@ -38,9 +38,9 @@ fn heal_amount(item: ItemId) -> u16 {
 }
 
 /// The cheapest sufficient heal on offer, or the biggest one if nothing covers the damage.
-fn heal_action(actions: &[BattleAction], missing: u16) -> Option<&BattleAction> {
+fn heal_action(actions: &[BattleAction], missing: u16, active: u8) -> Option<&BattleAction> {
     let offered = || actions.iter().filter(|a| matches!(a,
-        BattleAction::UseItem { item, .. } if heal_amount(item.id) > 0));
+        BattleAction::UseItem { item, target, .. } if heal_amount(item.id) > 0 && *target == Some(active)));
     let amount = |a: &BattleAction| match a {
         BattleAction::UseItem { item, .. } => heal_amount(item.id),
         _ => 0,
@@ -110,7 +110,7 @@ pub fn pre_catch_action(
 
     if battle.player.remaining_hp() < 0.35 {
         let missing = battle.player.stats.hp.saturating_sub(battle.player.current_hp);
-        if let Some(heal) = heal_action(actions, missing) {
+        if let Some(heal) = heal_action(actions, missing, battle.active_party_slot) {
             println!("[legendaries] {:?} at {:.0}% — {heal}", battle.player.species,
                 battle.player.remaining_hp() * 100.0);
             return Some(heal.clone());

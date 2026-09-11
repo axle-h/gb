@@ -111,8 +111,7 @@ Every element of `battle.bag`. Only things usable in a battle appear, and only w
 | `name` | string | as the game spells it: `"Potion"`, `"SuperPotion"`, `"HyperPotion"`, `"FullRestore"`, `"PokeBall"`, `"GreatBall"`, `"Antidote"` |
 | `count` | number | how many you have |
 
-`use_item` ignores case and punctuation, so `"poke ball"`, `"POKE BALL"` and `"PokeBall"` all reach
-the same item. Comparing `item.name` yourself is exact, so loop over `battle.bag` and pass
+`use_item` ignores case and punctuation; comparing `item.name` yourself is exact, so pass
 `item.name` straight through rather than guessing at a spelling.
 
 ## Choosing
@@ -122,7 +121,8 @@ Exactly one of these, and **calling one ends the script immediately** — nothin
 ```rhai
 battle.fight(mv)         // a Move object, its name, or its slot number
 battle.switch_to(mon)    // a Pokemon object, its name, or its slot number
-battle.use_item(name)    // a string
+battle.use_item(name)    // a string; a potion or Revive goes to the one out
+battle.use_item(name, mon) // ...or to mon; fails where it would do nothing
 battle.run()             // wild battles only
 battle.ask()             // hand THIS turn to yourself, and stay installed
 ```
@@ -154,7 +154,7 @@ The mistakes that actually happen:
 - Fighting a ghost (Pokemon Tower, no Silph Scope). Only Run works there: `best_move` is `()`, no
   move is `usable` and `battle.ghost` is true.
 - A `fn` that reaches for `battle`. See the language section.
-- Assuming an item is in the bag. Loop over `battle.bag` and act on what is there.
+- Assuming an item is in the bag. Act on what `battle.bag` holds.
 
 ## After a battle
 

@@ -30,6 +30,26 @@ pub fn is_ball(item: ItemId) -> bool {
     matches!(item, ItemId::MasterBall | ItemId::UltraBall | ItemId::GreatBall | ItemId::PokeBall | ItemId::SafariBall)
 }
 
+/// For a battle item that asks "Use item on which POKéMON?", whether it would do anything for a
+/// party member at `hp` of `max_hp` with `status`; `None` for an item that asks no such thing. Ethers
+/// ask a second question, which move, that nothing drives, so they stay on the Pokémon that is out.
+pub fn helps_in_battle(item: ItemId, hp: u16, max_hp: u16, status: crate::pokemon::status::PokemonStatus) -> Option<bool> {
+    use crate::pokemon::status::PokemonStatus as S;
+    let alive = hp > 0;
+    Some(match item {
+        ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion | ItemId::MaxPotion => alive && hp < max_hp,
+        ItemId::FullRestore => alive && (hp < max_hp || status != S::None),
+        ItemId::Revive | ItemId::MaxRevive => !alive,
+        ItemId::FullHeal => alive && status != S::None,
+        ItemId::Antidote => alive && status == S::Poisoned,
+        ItemId::BurnHeal => alive && status == S::Burned,
+        ItemId::IceHeal => alive && status == S::Frozen,
+        ItemId::ParlyzHeal => alive && status == S::Paralyzed,
+        ItemId::Awakening => alive && matches!(status, S::Asleep { .. }),
+        _ => return None,
+    })
+}
+
 /// What to say when `use_item` is aimed at something the game will not use.
 pub fn field_use_refusal(item: ItemId) -> Option<String> {
     if item.is_hm() || is_machine(item) {

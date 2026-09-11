@@ -120,6 +120,8 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   the toss where the bag binds, not beside the pickup it is for.
 - Two arms over one decision must share a damage model: a 0-PP move scoring 122 livelocked the
   Elite-Four switch tactic.
+- A battle item that asks which Pokémon has a row per member it would help (`helps_in_battle`), so
+  rows of one item compare equal; a scripted heal pins `target` to the one out, or its choice moves.
 - A wedged scripted run is silent — no watchdog, and `/api/events` goes on looking healthy.
 - `route_toward` scores every reachable crossing into a neighbour, not only the nearest one
   `actions()` offers, or a route out of a pocket takes the pocket's own crossing back in for ever.
