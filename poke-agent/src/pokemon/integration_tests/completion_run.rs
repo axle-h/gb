@@ -406,9 +406,11 @@ impl CompletionBrain {
 
     fn overworld(&mut self, request: &TurnRequest) -> Reply {
         let text = request.situation().to_string();
-        // A pickup the bag had no room for: take it back, and make room.
+        // A pickup the bag had no room for: take it back, and make room. Only for that reason: a
+        // starter's ball in Oak's lab is not picked up either, and never will be.
         if let Some((map, id, name, _)) = self.last_walk.as_ref()
             && text.contains(&format!("nothing was picked up: the {name}"))
+            && text.contains("No more room")
         {
             if let Some(chosen) = self.chosen.get_mut(map) {
                 chosen.remove(id);

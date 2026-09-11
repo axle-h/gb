@@ -60,6 +60,8 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
 - `actions()` emits one crossing per adjacent map *per kind*, land and water: one row per edge
   perturbs the scripted run's timing, and collapsing the kinds hides every neighbour whose land
   crossing is nearer than its water one.
+- A person or item with only tall grass beside it is reached from the grass, and only then:
+  floor is tried first, so no row that already existed moves.
 - A `Pace` row stands only where the cartridge rolls an encounter off grass: any floor of an indoor
   map outside the forest tileset, and water whose bottom-right tile is `$14` (`paces_on`). A shore
   square is water that never rolls.

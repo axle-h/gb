@@ -93,6 +93,9 @@ argument lives in the code.
   anything here runs, and its arm sits above the in-battle arm.
 - `handed_back` returns the turns the script took since the model last chose. Without it a model
   asked mid-battle sees a fight in which its own last decision was silently replaced.
+- What the game says after the model's own last choice is `BattleReport::after_answered`, never the
+  script's last turn: a model's turn opens no report turn, and a walk resumed after the battle asks
+  nothing in between, so the faint, the level and the evolution had nowhere else to go.
 - `take_over` stops the script deciding the rest of *this* battle and nothing more. It cannot be
   scoped to the run: a disarm reached for mid-battle is one nothing brings back.
 
