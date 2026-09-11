@@ -293,12 +293,25 @@ fn pallet_to_the_hall_of_fame() -> Vec<Intent> {
 #[test]
 #[cfg(feature = "slow-tests")]
 fn godmode_run() {
+    play_the_god_run(crate::pokemon::options::HEADLESS_OPTIONS);
+}
+
+/// [`godmode_run`] with battle animations on: the `LlmPolicy` configuration that is deployed.
+#[test]
+#[cfg(feature = "slow-tests")]
+fn godmode_run_animated() {
+    play_the_god_run(crate::pokemon::options::SERVED_OPTIONS);
+}
+
+#[cfg(feature = "slow-tests")]
+fn play_the_god_run(options: crate::pokemon::options::GameOptions) {
     let brain = ScriptedBrain::new(pallet_to_the_hall_of_fame());
     let (stuck, turns) = (Arc::clone(&brain.stuck), Arc::clone(&brain.turns));
 
     let mut run = LlmRun::builder(include_bytes!("../data/start-of-game-state.bin"))
         .named("godmode-run")
         .game_time(Duration::from_mins(400))
+        .options(options)
         .with_coverage()
         .start(Box::new(brain));
     // Badges and a party that cannot lose, applied between ticks.

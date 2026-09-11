@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::pokemon::integration_tests::llm_harness::{Brain, Call, LlmRun, Reply, TurnRequest};
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::Map;
+use crate::pokemon::options::GameOptions;
 
 /// How long a test waits on the wall clock; a deadline, so a passing run spends none of it.
 const PATIENCE: Duration = Duration::from_secs(120);
@@ -97,8 +98,17 @@ impl Brain for Refuser {
                 serde_json::json!({ "buttons": ["b"], "why": "the agent is wedged" }),
             );
         }
+        if request.has_tool("set_nickname") {
+            return Reply::call("set_nickname", serde_json::json!({ "summary": "keeping the species name" }));
+        }
         if request.is_battle() {
-            if let Some(call) = self.plan.pop_front() {
+            if let Some(mut call) = self.plan.pop_front() {
+                // `kind:*` is the first row of that kind, for a cell that does not care which.
+                if let Some(kind) = call.arguments["id"].as_str().and_then(|id| id.strip_suffix('*')) {
+                    if let Some(id) = request.menu_ids().into_iter().find(|id| id.starts_with(kind)) {
+                        call.arguments["id"] = serde_json::json!(id);
+                    }
+                }
                 return Reply::Calls(vec![call]);
             }
         }
@@ -115,13 +125,14 @@ fn choose(id: &str) -> Call {
 }
 
 /// The assembled run, with the brain's log.
-fn run_on(fixture: &'static [u8], name: &'static str, plan: Vec<Call>) -> (LlmRun, Arc<Mutex<Seen>>) {
+fn run_on(fixture: &'static [u8], name: &'static str, plan: Vec<Call>, options: GameOptions) -> (LlmRun, Arc<Mutex<Seen>>) {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let brain = Refuser { plan: plan.into(), seen: Arc::clone(&seen) };
     let run = LlmRun::builder(fixture)
         .named(name)
         // Fifteen game-minutes for a battle that takes seconds.
         .game_time(Duration::from_secs(15 * 60))
+        .options(options)
         .start(Box::new(brain));
     (run, seen)
 }
@@ -142,9 +153,24 @@ const BALL_FAILED: [&str; 5] =
 
 // ── The cells ──
 
-#[test]
-fn a_poke_ball_that_fails_hands_the_battle_back_rather_than_ending_it() {
-    let (mut run, seen) = run_on(WILD, "refusal-ball", vec![choose("item:PokeBall")]);
+in_both_animation_modes!(
+    a_poke_ball_that_fails_hands_the_battle_back_rather_than_ending_it,
+    a_run_the_game_refuses_hands_the_turn_back_rather_than_ending_the_battle,
+    run_is_withheld_from_a_trainer_battle_and_asking_for_it_is_refused_in_the_turn,
+    a_ball_thrown_at_a_trainer_is_blocked_and_the_ball_is_spent_saying_so,
+    an_item_the_bag_has_run_out_of_leaves_the_menu_and_is_refused_by_name,
+    a_key_item_the_game_refuses_in_a_battle_says_why_rather_than_going_quiet,
+    the_last_safari_ball_ends_the_game_around_the_battle_it_was_thrown_in,
+    a_ball_that_catches_ends_the_battle_with_the_catch_in_the_party,
+    a_potion_in_battle_heals_the_active_pokemon,
+    a_switch_puts_the_chosen_pokemon_out,
+    a_faint_brings_the_next_pokemon_out,
+    a_trainers_last_pokemon_ends_the_battle,
+    a_run_that_works_ends_the_battle,
+);
+
+fn a_poke_ball_that_fails_hands_the_battle_back_rather_than_ending_it(options: GameOptions) {
+    let (mut run, seen) = run_on(WILD, "refusal-ball", vec![choose("item:PokeBall")], options);
     run.fixture().api().debug_set_catch_rate(0);
     let before = held(&mut run, ItemId::PokeBall);
     assert_eq!(before, 5, "the committed fixture carries five Poké Balls");
@@ -190,39 +216,48 @@ fn a_poke_ball_that_fails_hands_the_battle_back_rather_than_ending_it() {
 }
 
 /// A run the cartridge refuses hands the turn back, and the escape is never certain.
-#[test]
-fn a_run_the_game_refuses_hands_the_turn_back_rather_than_ending_the_battle() {
-    let (mut run, seen) = run_on(WILD, "refusal-run", vec![choose("run"), choose("run")]);
-    run.fixture().api().debug_set_battle_speeds(1, 255);
+fn a_run_the_game_refuses_hands_the_turn_back_rather_than_ending_the_battle(options: GameOptions) {
+    // Even at 1 against 255 the first try escapes on one random byte, so a lucky escape is re-run.
+    for _ in 0..3 {
+        let (mut run, seen) = run_on(WILD, "refusal-run", vec![choose("run"), choose("run")], options);
+        let asked_twice = run.tick_until(PATIENCE, |run| {
+            run.drain_events();
+            // Held every tick: the cartridge recomputes the speeds after the fixture was cut.
+            if run.fixture().game_state().battle.is_some() {
+                run.fixture().api().debug_set_battle_speeds(1, 255);
+            }
+            seen.lock().expect("not poisoned").battle_turns.len() >= 2
+                || run.fixture().game_state().battle.is_none()
+        });
+        if run.fixture().game_state().battle.is_none() {
+            continue;
+        }
 
-    let asked_twice = run.tick_until(PATIENCE, |run| {
-        run.drain_events();
-        seen.lock().expect("not poisoned").battle_turns.len() >= 2
-    });
-
-    let seen = seen.lock().expect("not poisoned");
-    assert!(
-        asked_twice,
-        "the model was asked {} battle turns after a failed escape; the fight is still on, so it \
-         should have been asked again.\n  tool results: {:?}",
-        seen.battle_turns.len(),
-        seen.tool_results,
-    );
-    assert!(!seen.was_stuck, "the watchdog fired: a failed escape left the agent with nothing to do");
-    assert!(
-        seen.battle_said("Can't escape"),
-        "the model was never told the escape failed — `CantEscapeText` is the cartridge's own \
-         sentence and it did not reach the turn.\n  turn 2 was:\n{}",
-        seen.battle_turns.get(1).map_or("<never asked>", String::as_str),
-    );
-    assert!(seen.battle_said("Oddish"), "the battle ended after all: the escape worked");
+        let seen = seen.lock().expect("not poisoned");
+        assert!(
+            asked_twice,
+            "the model was asked {} battle turns after a failed escape; the fight is still on, so it \
+             should have been asked again.\n  tool results: {:?}",
+            seen.battle_turns.len(),
+            seen.tool_results,
+        );
+        assert!(!seen.was_stuck, "the watchdog fired: a failed escape left the agent with nothing to do");
+        assert!(
+            seen.battle_said("Can't escape"),
+            "the model was never told the escape failed — `CantEscapeText` is the cartridge's own \
+             sentence and it did not reach the turn.\n  turn 2 was:\n{}",
+            seen.battle_turns.get(1).map_or("<never asked>", String::as_str),
+        );
+        assert!(seen.battle_said("Oddish"), "the second turn was about a different Pokémon");
+        return;
+    }
+    panic!("three escapes at 1 speed against 255 all worked, which the odds do not allow");
 }
 
 /// `run` is not on a trainer battle's menu, and asking for it is answered inside the turn.
-#[test]
-fn run_is_withheld_from_a_trainer_battle_and_asking_for_it_is_refused_in_the_turn() {
+fn run_is_withheld_from_a_trainer_battle_and_asking_for_it_is_refused_in_the_turn(options: GameOptions) {
     let (mut run, seen) =
-        run_on(TRAINER, "refusal-trainer-run", vec![choose("run"), choose("fight:Ice Beam")]);
+        run_on(TRAINER, "refusal-trainer-run", vec![choose("run"), choose("fight:Ice Beam")], options);
 
     let decided = run.tick_until(PATIENCE, |run| {
         run.drain_events();
@@ -261,10 +296,9 @@ fn run_is_withheld_from_a_trainer_battle_and_asking_for_it_is_refused_in_the_tur
 }
 
 /// A ball thrown at a trainer's Pokémon is blocked, costs the ball, and the model is told both.
-#[test]
-fn a_ball_thrown_at_a_trainer_is_blocked_and_the_ball_is_spent_saying_so() {
+fn a_ball_thrown_at_a_trainer_is_blocked_and_the_ball_is_spent_saying_so(options: GameOptions) {
     let (mut run, seen) =
-        run_on(TRAINER, "refusal-trainer-ball", vec![choose("item:GreatBall")]);
+        run_on(TRAINER, "refusal-trainer-ball", vec![choose("item:GreatBall")], options);
     let before = held(&mut run, ItemId::GreatBall);
     assert_eq!(before, 8, "the committed fixture carries eight Great Balls");
 
@@ -296,12 +330,12 @@ fn a_ball_thrown_at_a_trainer_is_blocked_and_the_ball_is_spent_saying_so() {
 }
 
 /// An item the bag has run out of stops being a row, and asking for it is refused by name.
-#[test]
-fn an_item_the_bag_has_run_out_of_leaves_the_menu_and_is_refused_by_name() {
+fn an_item_the_bag_has_run_out_of_leaves_the_menu_and_is_refused_by_name(options: GameOptions) {
     let (mut run, seen) = run_on(
         WILD,
         "refusal-item-gone",
         vec![choose("item:PokeBall"), choose("item:PokeBall"), choose("run")],
+        options,
     );
     run.fixture().api().debug_set_catch_rate(0);
     // One ball, so the throw below is the last.
@@ -343,9 +377,8 @@ fn an_item_the_bag_has_run_out_of_leaves_the_menu_and_is_refused_by_name() {
 }
 
 /// A key item the game refuses in a battle says so, rather than costing a turn in silence.
-#[test]
-fn a_key_item_the_game_refuses_in_a_battle_says_why_rather_than_going_quiet() {
-    let (mut run, seen) = run_on(WILD, "refusal-key-item", vec![choose("item:SSTicket")]);
+fn a_key_item_the_game_refuses_in_a_battle_says_why_rather_than_going_quiet(options: GameOptions) {
+    let (mut run, seen) = run_on(WILD, "refusal-key-item", vec![choose("item:SSTicket")], options);
     let before = held(&mut run, ItemId::SSTicket);
     assert_eq!(before, 1, "the committed fixture carries the S.S. Ticket");
 
@@ -372,10 +405,114 @@ fn a_key_item_the_game_refuses_in_a_battle_says_why_rather_than_going_quiet() {
     );
 }
 
-/// The last Safari Ball ends the game, and the run comes out of it at the gate.
+/// Ticks `run` until `seen` holds an overworld turn, the proof that a battle handed the run back.
+fn played_on(run: &mut LlmRun, seen: &Arc<Mutex<Seen>>) -> bool {
+    run.tick_until(PATIENCE, |run| {
+        run.drain_events();
+        !seen.lock().expect("not poisoned").overworld_turns.is_empty()
+    })
+}
+
+/// A ball that catches ends the battle, and the catch joins the party.
+fn a_ball_that_catches_ends_the_battle_with_the_catch_in_the_party(options: GameOptions) {
+    let (mut run, seen) = run_on(WILD, "battle-catch", vec![choose("item:MasterBall")], options);
+    run.fixture().api().debug_give_item(ItemId::MasterBall, 1).expect("a bag with a slot free");
+
+    assert!(played_on(&mut run, &seen), "no overworld turn followed the catch");
+    let state = run.fixture().game_state();
+    assert!(state.battle.is_none(), "still in the battle");
+    assert_eq!(state.pokemon.len(), 3, "the Oddish did not join the party");
+    assert!(!seen.lock().expect("not poisoned").was_stuck, "the watchdog fired around a catch");
+}
+
+/// A Potion in battle heals the Pokémon that is out and costs the turn, not the battle.
+fn a_potion_in_battle_heals_the_active_pokemon(options: GameOptions) {
+    let (mut run, seen) = run_on(WILD, "battle-potion", vec![choose("item:Potion")], options);
+    run.fixture().api().debug_give_item(ItemId::Potion, 1).expect("a bag with a slot free");
+    // Out of reach, so the enemy's reply cannot undo the heal before it is read.
+    run.fixture().api().debug_set_hp(0, 20);
+
+    let asked_twice = run.tick_until(PATIENCE, |run| {
+        run.drain_events();
+        seen.lock().expect("not poisoned").battle_turns.len() >= 2
+    });
+    assert!(asked_twice, "no second battle turn after the Potion");
+    assert_eq!(held(&mut run, ItemId::Potion), 0, "the Potion was not used");
+    // A resisted Absorb from a lv13 Oddish cannot take back what a Potion gives.
+    assert!(run.fixture().game_state().pokemon[0].current_hp > 20, "the Ivysaur was not healed");
+}
+
+/// A switch puts the chosen Pokémon out and asks again.
+fn a_switch_puts_the_chosen_pokemon_out(options: GameOptions) {
+    let (mut run, seen) = run_on(WILD, "battle-switch", vec![choose("switch:1")], options);
+
+    let asked_twice = run.tick_until(PATIENCE, |run| {
+        run.drain_events();
+        seen.lock().expect("not poisoned").battle_turns.len() >= 2
+    });
+    assert!(asked_twice, "no second battle turn after the switch");
+    let out = run.fixture().game_state().battle.map(|battle| battle.active_party_slot);
+    assert_eq!(out, Some(1), "the Pidgey is not the one out");
+}
+
+/// A Pokémon that faints is replaced by the next one standing, and the battle goes on.
+fn a_faint_brings_the_next_pokemon_out(options: GameOptions) {
+    let (mut run, seen) = run_on(WILD, "battle-faint", vec![choose("fight:*")], options);
+    run.fixture().api().debug_set_hp(0, 1);
+
+    let asked_twice = run.tick_until(PATIENCE, |run| {
+        run.drain_events();
+        // The Oddish moves first, and one hit of anything is the faint.
+        if run.fixture().game_state().pokemon[0].current_hp > 0 {
+            run.fixture().api().debug_set_battle_speeds(1, 255);
+        }
+        seen.lock().expect("not poisoned").battle_turns.len() >= 2
+    });
+    let seen = seen.lock().expect("not poisoned");
+    assert!(asked_twice, "no battle turn after the faint.\n  tool results: {:?}", seen.tool_results);
+    let state = run.fixture().game_state();
+    assert_eq!(state.pokemon[0].current_hp, 0, "the Ivysaur never fainted, so this proves nothing");
+    assert_eq!(state.battle.map(|battle| battle.active_party_slot), Some(1), "the Pidgey was not sent out");
+    assert!(!seen.was_stuck, "the watchdog fired around a forced switch");
+}
+
+/// A trainer's last Pokémon fainting ends the battle and hands the run back.
+fn a_trainers_last_pokemon_ends_the_battle(options: GameOptions) {
+    let (mut run, seen) = run_on(TRAINER, "battle-trainer-won", vec![choose("fight:Ice Beam"); 6], options);
+
+    assert!(played_on(&mut run, &seen), "no overworld turn followed the trainer battle");
+    let seen = seen.lock().expect("not poisoned");
+    assert!(seen.battle_turns.len() >= 2, "one battle turn for a trainer with more than one Pokémon");
+    assert!(run.fixture().game_state().battle.is_none(), "still in the trainer battle");
+    assert!(!seen.was_stuck, "the watchdog fired around the end of a trainer battle");
+}
+
+/// SHIFT, which only a human or an old save leaves set: the agent declines every switch offer.
 #[test]
-fn the_last_safari_ball_ends_the_game_around_the_battle_it_was_thrown_in() {
-    let (mut run, seen) = run_on(SAFARI, "refusal-safari", vec![choose("ball"), choose("ball")]);
+fn a_trainer_battle_on_shift_declines_the_switch_it_is_offered() {
+    use crate::pokemon::options::{BattleStyle, SERVED_OPTIONS};
+    a_trainers_last_pokemon_ends_the_battle(GameOptions { battle_style: BattleStyle::Shift, ..SERVED_OPTIONS });
+}
+
+/// A run the cartridge allows ends the battle.
+fn a_run_that_works_ends_the_battle(options: GameOptions) {
+    let (mut run, seen) = run_on(WILD, "battle-run", vec![choose("run")], options);
+
+    let escaped = run.tick_until(PATIENCE, |run| {
+        run.drain_events();
+        // Held every tick, as in the refused escape above.
+        if run.fixture().game_state().battle.is_some() {
+            run.fixture().api().debug_set_battle_speeds(255, 1);
+        }
+        !seen.lock().expect("not poisoned").overworld_turns.is_empty()
+    });
+    assert!(escaped, "no overworld turn followed the escape");
+    assert!(run.fixture().game_state().battle.is_none(), "still in the battle");
+}
+
+/// The last Safari Ball ends the game, and the run comes out of it at the gate.
+fn the_last_safari_ball_ends_the_game_around_the_battle_it_was_thrown_in(options: GameOptions) {
+    let (mut run, seen) = run_on(SAFARI, "refusal-safari", vec![choose("ball"), choose("ball")], options);
     run.fixture().api().debug_set_safari_balls(1);
 
     let ejected = run.tick_until(PATIENCE, |run| {

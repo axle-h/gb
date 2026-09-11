@@ -116,6 +116,21 @@ impl<'a> PokemonApi<'a> {
         self.mmu_mut().write(battle_hp + 1, 0);
     }
 
+    /// Set party member `member`'s HP, and the battle copy's too when it is the one out.
+    pub fn debug_set_hp(&mut self, member: usize, hp: u16) {
+        use crate::pokemon::encoding::PokemonBlockAddresses;
+        let at = pokered_symbols::wPartyMons.address + member as u16 * PokemonBlockAddresses::POKEMON_BLOCK_SIZE + 1;
+        let out = self.mmu().read_pointer(&pokered_symbols::wPlayerMonNumber) as usize == member;
+        let mut targets = vec![at];
+        if out && self.mmu().read_pointer(&pokered_symbols::wIsInBattle) != 0 {
+            targets.push(pokered_symbols::wBattleMonHP.address);
+        }
+        for address in targets {
+            self.mmu_mut().write(address, (hp >> 8) as u8);
+            self.mmu_mut().write(address + 1, (hp & 0xff) as u8);
+        }
+    }
+
     pub fn debug_set_catch_rate(&mut self, rate: u8) {
         self.mmu_mut().write(pokered_symbols::wEnemyMonActualCatchRate.address, rate);
     }

@@ -270,6 +270,15 @@ fn opponent_pokemon_name(state: &GameState) -> String {
     }
 }
 
+/// Whether the battle menu, or the Safari Zone's, is what the screen shows.
+fn battle_menu_is_showing(api: &PokemonApi) -> bool {
+    let screen = api.on_screen_text(false).unwrap_or_default();
+    (screen.contains("FIGHT") && screen.contains("RUN"))
+        || matches!(api.menu_state().and_then(|m| m.battle_menu_state()),
+            Some(BattleMenuState::Fight | BattleMenuState::SafariBall
+                 | BattleMenuState::SafariBait | BattleMenuState::SafariRock))
+}
+
 /// Whether this battle item is aimed at the enemy rather than the active party member.
 fn thrown_at_the_enemy(item: crate::pokemon::item::ItemId) -> bool {
     use crate::pokemon::item::ItemId;
@@ -349,7 +358,11 @@ pub(crate) enum BattleState {
     },
 
     /// Battle menu is up but policy hasn't returned an action yet.
-    AwaitingPolicy { delay: DelayContext },
+    AwaitingPolicy {
+        delay: DelayContext,
+        /// Consecutive unanswered ticks the menu has been off the screen.
+        menu_gone: u8,
+    },
 
     /// Navigating the menus.
     Navigating {
@@ -2082,8 +2095,12 @@ CascadeBadge; not cutting".to_string(),
             AgentState::Battle(ref mut battle_state) => {
                 // The game has refused what was just selected.
                 if api.on_screen_text(false).map_or(false, |t| shows_battle_refusal(&t)) {
+                    let mut carried = battle_state.take_reader();
+                    // The refusal is read now, as far as it has been typed: backing out never reads.
+                    if api.menu_state().is_some_and(|m| m.text_box_id == crate::pokemon::menu::TextBoxId::MessageBox) {
+                        carried.accumulate(api);
+                    }
                     api.toggle_button(JoypadButton::B);
-                    let carried = battle_state.take_reader();
                     self.set_battle_state(BattleState::backing_out_carrying(carried));
                     return Ok(());
                 }
@@ -2128,7 +2145,7 @@ CascadeBadge; not cutting".to_string(),
                             } else if screen.contains("FIGHT") && screen.contains("RUN") {
                                 new_events.push(AgentEvent::text_box_from_reader(reader));
                                 api.release_all_buttons();
-                                self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default() });
+                                self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default(), menu_gone: 0 });
                                 // Drained here because this arm returns.
                                 for event in new_events {
                                     self.event(event);
@@ -2142,7 +2159,7 @@ CascadeBadge; not cutting".to_string(),
                                     new_events.push(AgentEvent::text_box_from_reader(reader));
 
                                     api.release_all_buttons();
-                                    self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default() });
+                                    self.set_battle_state(BattleState::AwaitingPolicy { delay: DelayContext::default(), menu_gone: 0 });
                                 }
                                 Some(BattleMenuState::PokemonList { index }) => {
                                     // Only if the party list is what is on screen.
@@ -2260,7 +2277,8 @@ CascadeBadge; not cutting".to_string(),
                         }
                     }
 
-                    BattleState::AwaitingPolicy { delay } => {
+                    BattleState::AwaitingPolicy { delay, menu_gone } => {
+                        let gone_before = *menu_gone;
                         if delay.tick(delta_cycles) {
                             let game_state = api.game_state()?;
                             self.poll_policy(&game_state, api);
@@ -2283,6 +2301,16 @@ CascadeBadge; not cutting".to_string(),
                                     return Ok(());
                                 }
                                 self.set_battle_state(BattleState::Navigating { action, delay: DelayContext::default(), ticks: 0, stable: 0 });
+                            } else {
+                                // A menu drawn a frame too long after the last choice, a successful
+                                // escape's say: whatever replaced it waits on A that only
+                                // `WaitingForMenu` presses, and a policy that waits never would.
+                                let gone = if battle_menu_is_showing(api) { 0 } else { gone_before + 1 };
+                                if gone >= 2 {
+                                    self.set_battle_state(BattleState::default());
+                                } else if let AgentState::Battle(BattleState::AwaitingPolicy { menu_gone, .. }) = &mut self.state {
+                                    *menu_gone = gone;
+                                }
                             }
                         }
                     }
