@@ -25,8 +25,28 @@ rule names the comment in the code that carries the argument, so the code stays 
   a fragment at a time, where a dash reads as punctuation the writer did not choose. The rule is
   deliberately this narrow: the prompt, the tool descriptions and every action-menu row use em dashes
   by design.
-- **A new invariant goes first into a comment on the code it constrains, and then as one line in the
-  doc for its area pointing at it.** The docs are indexes, not the argument.
+## Keeping it tidy
+
+The repository was cleaned up deliberately and it is worth keeping that way. Five rules.
+
+- **A plan lives in `docs/PLAN-<name>.md` and nowhere else.** It is a scratchpad: excluded from git
+  by `.git/info/exclude`, and deleted when its last task is done. Nothing outside it may refer to it
+  or to anything in it — **not a task id, not a phase number, not a section number, not a workstream
+  letter**. A comment reading "W6b" or "§9" or "Phase C" names a file nobody can open, and every one
+  of those had to be hunted down and deleted once already.
+- **Let the code say it, and say the rest once.** Prefer a name that needs no comment. A comment
+  earns its place by carrying a constraint the code below obeys and nothing else pins — and then it
+  is one or two sentences, in plain words, where the constraint is. No history, no dates, no
+  measurements, no "used to", no argument for a decision already taken. A block over a dozen lines is
+  a design document in the wrong place; the exception is a wire or file-format table.
+- **A new invariant goes first into a comment on the code it constrains, then as one line in the doc
+  for its area pointing at it.** The docs are indexes, not the argument — and a rule a test already
+  pins does not need a line at all.
+- **`README.md` and `CLAUDE.md` stay slim.** The README is for someone who has not seen the project;
+  this file is the map. Neither is the place for a design essay. If something permanent genuinely
+  does not fit either, make a document for it under `docs/` and add one row to the table below — but
+  reach for that last, after "delete it" and "one line where the code is".
+- **Terse wins.** When a paragraph and a sentence say the same thing, the sentence is correct.
 
 ## Where the rest of it lives
 
