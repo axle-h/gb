@@ -318,6 +318,13 @@ pub fn checklist(mmu: &MMU) -> Vec<Item> {
             Way::GiftLapras => Check::Flag { address: pokered_symbols::wStatusFlags4.address, mask: 0x01 },
             Way::GiftEevee => toggle(pokered_toggles::TOGGLE_CELADON_MANSION_EEVEE_GIFT),
             Way::BoughtMagikarp => event(pokered_events::EVENT_BOUGHT_MAGIKARP),
+            // Either ball, since taking one is the whole choice: the two toggles share a byte.
+            Way::GiftFightingDojo => Check::Flag {
+                address: pokered_symbols::wToggleableObjectFlags.address
+                    + pokered_toggles::TOGGLE_FIGHTING_DOJO_GIFT_1 / 8,
+                mask: (1 << (pokered_toggles::TOGGLE_FIGHTING_DOJO_GIFT_1 % 8))
+                    | (1 << (pokered_toggles::TOGGLE_FIGHTING_DOJO_GIFT_2 % 8)),
+            },
             // Aerodactyl comes from the Old Amber and nowhere else; the other fossils' two likewise.
             Way::RevivedOldAmber => Check::Owned(PokemonSpecies::Aerodactyl),
             // Porygon is sold at the prize counter and found nowhere else.
