@@ -266,8 +266,10 @@ pub struct CompletionBrain {
 const UNRESOLVED_TICKS: u64 = 60;
 
 impl CompletionBrain {
-    /// Turns a step may find nothing before the run is called stuck.
-    const PATIENCE: usize = 25;
+    /// Turns a step may find nothing before the run is called stuck. Rows come and go as people
+    /// walk: a route is computed with them as obstacles, and half of Silph Co's third floor hangs
+    /// off a one-tile gap that a Rocket paces across, so this has to outlast a person.
+    const PATIENCE: usize = 80;
     const MAX_REISSUES: usize = 30;
 
     pub fn new(steps: Vec<Step>, ledger: Arc<Mutex<Ledger>>) -> Self {
@@ -1549,12 +1551,11 @@ pub fn to_the_marsh_badge() -> Vec<Step> {
         // teleport pads: 3F (11, 11) lands on 7F (5, 3), and 7F (5, 7) lands inside the office.
         GoTo("SilphCoElevator"), Field(r#"{"move":"elevator","map":"SilphCo3F"}"#),
         Take("warp to SilphCo7F, arriving at (5, 3)"),
-        // The rival is fought head-on: routing past him trips his sight and desyncs the 11F pad.
-        Talk("Rival"),
         Take("warp to SilphCo11F, arriving at (3, 2)"),
         // The president reaches into his pocket for a Master Ball.
         Tidy,
-        Talk("Rocket1"), Talk("Giovanni"), Talk("SilphPresident"),
+        // Giovanni and the president are the exploring's, wherever it meets them: what the phase
+        // asserts is the badge, the Lapras and the Master Ball, not who was talked to when.
         Explore { maps: SILPH, patience: 1500 },
         Take("warp to SilphCo7F, arriving at (5, 7)"),
         Take("warp to SilphCo3F, arriving at (11, 11)"),
@@ -1565,6 +1566,14 @@ pub fn to_the_marsh_badge() -> Vec<Step> {
         Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"),
         Field(r#"{"move":"fly","map":"SaffronCity"}"#), GoTo("SaffronCity"),
         GoTo("SaffronGym"), Explore { maps: &["SaffronGym"], patience: 600 }, GoTo("SaffronCity"),
+        // Freeing the president sends the Rockets home, and the doors they stood in open. The
+        // Dojo's master has to be beaten before either of his Poké Balls will open.
+        GoTo("FightingDojo"), Talk("KarateMaster"), Clear(&[]), GoTo("SaffronCity"),
+        GoTo("SaffronPidgeyHouse"), Clear(&[]), GoTo("SaffronCity"),
+        // Then the rest of the city, which was Rockets and shut doors the first time round.
+        Explore { maps: &["SaffronCity", "SaffronPidgeyHouse", "CopycatsHouse1F", "CopycatsHouse2F",
+                          "MrPsychicsHouse", "FightingDojo", "SaffronPokecenter", "SaffronMart"],
+                  patience: 800 },
     ]);
     steps
 }
