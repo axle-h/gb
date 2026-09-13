@@ -15,6 +15,9 @@ fn main() -> std::io::Result<()> {
     let entry_regex = Regex::new(r"^([0-9a-fA-F]{2}):([0-9a-fA-F]{4})\s+(\w+)$").unwrap();
     let trainer_header_regex = Regex::new(r"^\w+TrainerHeader(\d+)$").unwrap();
     let mut trainer_headers = Vec::new();
+    // The far-text bodies, which every `text_far` points at and which carry the text commands.
+    let text_label_regex = Regex::new(r"^_\w*Text\w*$").unwrap();
+    let mut text_labels = Vec::new();
     // A header's own label abbreviates its map (`Mansion4`); the map script it follows does not.
     let mut map_script = String::new();
     let const_regex = Regex::new(r"^([0-9a-fA-F]{2})\s+(\w+)$").unwrap();
@@ -37,6 +40,9 @@ fn main() -> std::io::Result<()> {
             if let Some(map) = name.strip_suffix("_Script") {
                 map_script = map.to_string();
             }
+            if text_label_regex.is_match(name) && (0x4000..0x8000).contains(&address) {
+                text_labels.push(format!("(\"{name}\", {name})"));
+            }
             if let Some(caps) = trainer_header_regex.captures(name) {
                 trainer_headers.push(format!("(\"{map_script}\", {}, {name})", &caps[1]));
             }
@@ -53,6 +59,8 @@ fn main() -> std::io::Result<()> {
 
     // Every `trainer` header a map script declares, as (its map, its index, where).
     writeln!(output, "    pub const TRAINER_HEADERS: &[(&str, u8, DmgPointer)] = &[{}];", trainer_headers.join(", "))?;
+    // Every far-text body, as (its label, where), so a sweep can decode all of them.
+    writeln!(output, "    pub const TEXT_LABELS: &[(&str, DmgPointer)] = &[{}];", text_labels.join(", "))?;
     writeln!(output, "}}")?;
     writeln!(output, "")?;
 
