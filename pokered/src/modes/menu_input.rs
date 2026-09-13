@@ -7,17 +7,73 @@ use crate::mode::Ctx;
 use crate::modes::blink::ArrowBlink;
 
 const CURSOR: u8 = 0xED;
+pub const UNFILLED_CURSOR: u8 = 0xEC;
 const DOWN_ARROW: u8 = 0xEE;
 /// The `▼` some menus put at `(18, 11)`, which `HandleMenuInput` blinks while it waits.
 const ARROW: (usize, usize) = (18, 11);
 /// `HandleMenuInput`'s iterations a frame, in hundredths.
 const BLINK_PER_FRAME: u32 = 6661;
 
-/// `wLastMenuItem` and `wTileBehindCursor`, which outlive the menu that set them.
+/// `wMenuExitMethod`: one byte read under two vocabularies. 1 is `CHOSE_MENU_ITEM` to a list and
+/// `CHOSE_FIRST_ITEM` to a two-option menu; 2 is `CANCELLED_MENU` and `CHOSE_SECOND_ITEM`. Picking
+/// the second option and backing out are therefore the same answer, which is why B picks it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MenuExit {
+    #[default]
+    Chose,
+    Cancelled,
+}
+
+impl MenuExit {
+    pub const CHOSE_FIRST: Self = Self::Chose;
+    pub const CHOSE_SECOND: Self = Self::Cancelled;
+}
+
+/// The cursor globals that outlive the menu that set them. `cursor_at` is `wMenuCursorLocation`,
+/// which is what `EraseMenuCursor` and `PlaceUnfilledArrowMenuCursor` act on: both mark wherever
+/// the cursor was last placed, which may be a menu that is no longer on top.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CursorMemory {
     pub last_item: u8,
     pub tile_behind: u8,
+    pub cursor_at: usize,
+    /// `wBattleAndStartSavedMenuItem`: where the start menu reopens.
+    pub battle_and_start: u8,
+    /// `wPartyAndBillsPCSavedMenuItem`, the same for the party menu and the PC.
+    pub party_and_bills: u8,
+    /// `wChosenMenuItem` and `wMenuExitMethod`, which a caller reads after its menu has gone.
+    pub chosen_item: u8,
+    pub exit_method: MenuExit,
+}
+
+impl CursorMemory {
+    /// `PlaceMenuCursor`'s tail: save what the cursor covers, unless a cursor already covers it.
+    pub fn place_at(&mut self, ui: &mut UiSurface, at: usize) {
+        if tile_at(ui, at) != CURSOR {
+            self.tile_behind = tile_at(ui, at);
+        }
+        put(ui, at, CURSOR);
+        self.cursor_at = at;
+    }
+
+    /// `EraseMenuCursor`.
+    pub fn erase_cursor(&self, ui: &mut UiSurface) {
+        put(ui, self.cursor_at, UiSurface::BLANK);
+    }
+
+    /// `PlaceUnfilledArrowMenuCursor`: the `▷` that marks a parent menu's place, or a setting the
+    /// cursor has left behind.
+    pub fn unfilled_cursor(&self, ui: &mut UiSurface) {
+        put(ui, self.cursor_at, UNFILLED_CURSOR);
+    }
+}
+
+pub fn tile_at(ui: &UiSurface, at: usize) -> u8 {
+    ui.get(at % SCREEN_TILES_X, at / SCREEN_TILES_X)
+}
+
+pub fn put(ui: &mut UiSurface, at: usize, tile: u8) {
+    ui.set(at % SCREEN_TILES_X, at / SCREEN_TILES_X, tile);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,8 +90,6 @@ pub struct MenuInput {
     pub return_at_ends: bool,
     /// `wMenuWrappingEnabled`.
     pub wrapping: bool,
-    /// `wMenuCursorLocation`.
-    pub cursor_at: usize,
     /// `Delay3` after placing the cursor, counting down; polling once it is zero.
     delay: u8,
     blink: Option<ArrowBlink>,
@@ -43,7 +97,7 @@ pub struct MenuInput {
 
 impl MenuInput {
     pub fn new(current: u8, max: u8, top: (u8, u8), watched: Joypad) -> Self {
-        Self { current, max, top, watched, return_at_ends: false, wrapping: false, cursor_at: 0, delay: 0, blink: None }
+        Self { current, max, top, watched, return_at_ends: false, wrapping: false, delay: 0, blink: None }
     }
 
     pub fn is_polling(&self) -> bool {
@@ -107,17 +161,11 @@ impl MenuInput {
     pub fn place_cursor(&mut self, ui: &mut UiSurface, memory: &mut CursorMemory) {
         let top = self.top.1 as usize * SCREEN_TILES_X + self.top.0 as usize;
         let row = |item: u8| top + item as usize * 2 * SCREEN_TILES_X;
-        let tile = |ui: &UiSurface, at: usize| ui.get(at % SCREEN_TILES_X, at / SCREEN_TILES_X);
         let old = row(memory.last_item);
-        if tile(ui, old) == CURSOR {
-            ui.set(old % SCREEN_TILES_X, old / SCREEN_TILES_X, memory.tile_behind);
+        if tile_at(ui, old) == CURSOR {
+            put(ui, old, memory.tile_behind);
         }
-        let new = row(self.current);
-        if tile(ui, new) != CURSOR {
-            memory.tile_behind = tile(ui, new);
-        }
-        ui.set(new % SCREEN_TILES_X, new / SCREEN_TILES_X, CURSOR);
-        self.cursor_at = new;
+        memory.place_at(ui, row(self.current));
         memory.last_item = self.current;
     }
 }

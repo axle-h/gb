@@ -7,12 +7,11 @@ use crate::command::Decision;
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
 use crate::input::Joypad;
 use crate::mode::{Ctx, ModeUpdate, Outcome, Status, Transition};
-use crate::modes::menu_input::MenuInput;
+use crate::modes::menu_input::{MenuInput, UNFILLED_CURSOR};
 use crate::systems::print_num::{print_number, NumberFormat};
 
 const TIMES: u8 = 0xF1;
 const DOWN_ARROW: u8 = 0xEE;
-const UNFILLED_CURSOR: u8 = 0xEC;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListMenu {
@@ -21,6 +20,9 @@ pub struct ListMenu {
     scroll: u8,
     input: MenuInput,
     phase: Phase,
+    /// `wMenuItemToSwap`, counting from 1 over the whole list. Zeroed as the menu opens and as it
+    /// closes, so it never outlives the list it marks.
+    to_swap: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +31,8 @@ enum Phase {
     Opening(u8),
     /// The `Delay3` after printing the entries.
     Printed(u8),
+    /// `HandleItemListSwapping`'s `DelayFrames 20`, which passes before the list is drawn again.
+    Swapping(u8),
     Input,
 }
 
@@ -38,7 +42,7 @@ impl ListMenu {
         let max = if entries.len() < 2 { 1 } else { 2 };
         let mut input = MenuInput::new(current, max, (5, 4), Joypad::A | Joypad::B | Joypad::SELECT);
         input.return_at_ends = true;
-        Self { entries, scroll, input, phase: Phase::Opening(10) }
+        Self { entries, scroll, input, phase: Phase::Opening(10), to_swap: 0 }
     }
 
     pub fn len(&self) -> usize {
@@ -62,10 +66,13 @@ impl ListMenu {
         let mut at = 4 * SCREEN_TILES_X + 6;
         for row in 0..4 {
             let Some(&(item, quantity)) = self.entries.get(self.scroll as usize + row) else {
-                place(ui, at, &poke_core::charmap::encode("CANCEL").unwrap());
+                ui.place(at % SCREEN_TILES_X, at / SCREEN_TILES_X, &poke_core::charmap::encode("CANCEL").unwrap());
                 return;
             };
-            place(ui, at, &item::name(item));
+            ui.place(at % SCREEN_TILES_X, at / SCREEN_TILES_X, &item::name(item));
+            if self.to_swap != 0 && self.scroll as usize + row == self.to_swap as usize - 1 {
+                ui.set(5, 4 + 2 * row, UNFILLED_CURSOR);
+            }
             if !(item.is_key_item() || item.is_hm()) {
                 let times = at + SCREEN_TILES_X + 8;
                 ui.set(times % SCREEN_TILES_X, times / SCREEN_TILES_X, TIMES);
@@ -76,17 +83,55 @@ impl ListMenu {
         ui.set((at - 8) % SCREEN_TILES_X, (at - 8) / SCREEN_TILES_X, DOWN_ARROW);
     }
 
+    /// `HandleItemListSwapping`. Neither the `CANCEL` row nor an entry against itself can be
+    /// swapped, and both go back to the loop without the twenty frames the real thing costs.
+    fn select(&mut self, ctx: &mut Ctx) -> Transition {
+        let chosen = self.selected();
+        if chosen >= self.entries.len() {
+            self.redraw(ctx);
+            return Transition::Stay;
+        }
+        let numbered = chosen as u8 + 1;
+        if self.to_swap == 0 {
+            self.to_swap = numbered;
+        } else if self.to_swap == numbered {
+            self.redraw(ctx);
+            return Transition::Stay;
+        } else {
+            let first = self.to_swap as usize - 1;
+            self.to_swap = 0;
+            self.swap(first, chosen);
+        }
+        self.phase = Phase::Swapping(20);
+        Transition::Stay
+    }
+
+    /// The three ways two slots come together. The quantities are summed in one byte before the
+    /// hundred is tested, so two slots that overflow it merge into one small one instead of capping.
+    fn swap(&mut self, first: usize, second: usize) {
+        if self.entries[first].0 != self.entries[second].0 {
+            self.entries.swap(first, second);
+            return;
+        }
+        let sum = self.entries[first].1.wrapping_add(self.entries[second].1);
+        if sum >= 100 {
+            // The donor keeps what ninety-nine leaves behind, which is one more than a hundred would.
+            self.entries[first].1 = sum - 99;
+            self.entries[second].1 = 99;
+            return;
+        }
+        self.entries[second].1 = sum;
+        self.entries.remove(first);
+        self.scroll = 0;
+        self.input.current = 0;
+        self.input.max = if self.entries.len() < 2 { 1 } else { 2 };
+    }
+
     /// `ExitListMenu`, or the chosen entry's return; either way `hJoy7` and the text delay reset.
     fn close(&self, ctx: &mut Ctx, outcome: Outcome) -> Transition {
         ctx.pad.repeat_held = false;
         ctx.world.no_text_delay = false;
         Transition::Pop(outcome)
-    }
-}
-
-fn place(ui: &mut UiSurface, at: usize, bytes: &[u8]) {
-    for (i, &byte) in bytes.iter().enumerate() {
-        ui.set((at + i) % SCREEN_TILES_X, (at + i) / SCREEN_TILES_X, byte);
     }
 }
 
@@ -115,12 +160,19 @@ impl ModeUpdate for ListMenu {
                 self.phase = Phase::Input;
                 Transition::Stay
             }
+            Phase::Swapping(frames) if frames > 1 => {
+                self.phase = Phase::Swapping(frames - 1);
+                Transition::Stay
+            }
+            Phase::Swapping(_) => {
+                self.redraw(ctx);
+                Transition::Stay
+            }
             Phase::Input => {
                 let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
                 self.input.place_cursor(&mut ctx.screen.ui, ctx.menu);
                 if keys.contains(Joypad::A) {
-                    let at = self.input.cursor_at;
-                    ctx.screen.ui.set(at % SCREEN_TILES_X, at / SCREEN_TILES_X, UNFILLED_CURSOR);
+                    ctx.menu.unfilled_cursor(&mut ctx.screen.ui);
                     let chosen = self.selected();
                     let outcome = if chosen < self.entries.len() { Outcome::Chosen(chosen as u8) } else { Outcome::Cancelled };
                     return self.close(ctx, outcome);
@@ -128,11 +180,14 @@ impl ModeUpdate for ListMenu {
                 if keys.contains(Joypad::B) {
                     return self.close(ctx, Outcome::Cancelled);
                 }
+                if keys.contains(Joypad::SELECT) {
+                    return self.select(ctx);
+                }
                 if keys.contains(Joypad::DOWN) {
                     if self.entries.len() >= self.scroll as usize + 3 {
                         self.scroll += 1;
                     }
-                } else if !keys.contains(Joypad::SELECT) && self.scroll > 0 {
+                } else if self.scroll > 0 {
                     self.scroll -= 1;
                 }
                 self.redraw(ctx);
@@ -263,5 +318,159 @@ mod tests {
             assert_eq!((whole.ui(), a.events), (restored.ui(), b.events), "frame {frame}");
         }
         assert!(restored.modes().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod swapping {
+    use poke_core::item::ItemId;
+    use crate::input::Joypad;
+    use crate::mode::{Mode, Status};
+    use crate::command::Decision;
+    use crate::rng::GameRng;
+    use crate::world::World;
+    use crate::{Game, Input, Pacing};
+    use super::*;
+
+    fn game(bag: Vec<(ItemId, u8)>) -> Game {
+        let mut game = Game::new(World::default(), GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::ListMenu(ListMenu::items(bag, 0, 0)));
+        game
+    }
+
+    fn until_waiting(game: &mut Game) {
+        for _ in 0..200 {
+            if game.status() == Status::Waiting(Decision::List) {
+                return;
+            }
+            game.frame(Input::None);
+        }
+        panic!("the list never waited");
+    }
+
+    fn press(game: &mut Game, button: Joypad) {
+        game.frame(Input::Buttons(button));
+        game.frame(Input::None);
+    }
+
+    fn list(game: &Game) -> &ListMenu {
+        match game.modes().last() {
+            Some(Mode::ListMenu(list)) => list,
+            _ => panic!("the list closed"),
+        }
+    }
+
+    fn marker_row(game: &Game) -> Option<usize> {
+        (0..18).find(|&y| game.ui().get(5, y) == UNFILLED_CURSOR)
+    }
+
+    const PAIR: [(ItemId, u8); 3] = [(ItemId::Potion, 3), (ItemId::Antidote, 1), (ItemId::Potion, 5)];
+
+    /// The cursor and the marker are drawn on the same column, and the cursor goes on last, so an
+    /// armed row shows its `▷` only once the cursor has moved off and put back what it covered.
+    #[test]
+    fn select_arms_the_row_it_is_pressed_on() {
+        let mut game = game(PAIR.to_vec());
+        until_waiting(&mut game);
+        press(&mut game, Joypad::SELECT);
+        until_waiting(&mut game);
+        assert_eq!(list(&game).to_swap, 1, "counting from one");
+        assert_eq!(marker_row(&game), None, "the cursor is still covering it");
+        press(&mut game, Joypad::DOWN);
+        until_waiting(&mut game);
+        assert_eq!(marker_row(&game), Some(4), "and now the first row shows it");
+    }
+
+    /// The marker is compared against a counter seeded with the scroll, so it stays with its item
+    /// rather than with the row it was armed on.
+    /// The marker is compared against a counter seeded with the scroll offset, so it stays with its
+    /// entry and moves up the screen as the list scrolls under it.
+    #[test]
+    fn the_marker_follows_its_item_when_the_list_scrolls() {
+        let bag = vec![(ItemId::Potion, 3), (ItemId::Antidote, 1), (ItemId::PokeBall, 12),
+                       (ItemId::Repel, 4), (ItemId::Elixer, 2), (ItemId::Ether, 1)];
+        let mut game = game(bag);
+        until_waiting(&mut game);
+        for _ in 0..2 {
+            press(&mut game, Joypad::DOWN);
+            until_waiting(&mut game);
+        }
+        press(&mut game, Joypad::SELECT);
+        until_waiting(&mut game);
+        assert_eq!(list(&game).to_swap, 3, "the third entry, counting from one");
+        press(&mut game, Joypad::DOWN);
+        until_waiting(&mut game);
+        assert_eq!(list(&game).scroll, 1, "the list scrolled under it");
+        assert_eq!(marker_row(&game), Some(6), "so the marker moved up a row with its item");
+    }
+
+    #[test]
+    fn neither_cancel_nor_an_entry_against_itself_can_be_swapped() {
+        let mut game = game(PAIR.to_vec());
+        until_waiting(&mut game);
+        press(&mut game, Joypad::SELECT);
+        until_waiting(&mut game);
+        press(&mut game, Joypad::SELECT);
+        until_waiting(&mut game);
+        assert_eq!(list(&game).to_swap, 1, "still armed, nothing swapped");
+        assert_eq!(list(&game).entries[0], (ItemId::Potion, 3));
+    }
+
+    #[test]
+    fn two_different_items_change_places() {
+        let mut game = game(PAIR.to_vec());
+        until_waiting(&mut game);
+        press(&mut game, Joypad::SELECT);
+        until_waiting(&mut game);
+        press(&mut game, Joypad::DOWN);
+        until_waiting(&mut game);
+        press(&mut game, Joypad::SELECT);
+        until_waiting(&mut game);
+        assert_eq!(list(&game).entries[..2], [(ItemId::Antidote, 1), (ItemId::Potion, 3)]);
+        assert_eq!(list(&game).to_swap, 0, "and the marker is put away");
+    }
+
+    #[test]
+    fn two_stacks_of_one_item_merge_and_close_the_gap() {
+        let mut game = game(PAIR.to_vec());
+        until_waiting(&mut game);
+        press(&mut game, Joypad::SELECT);
+        until_waiting(&mut game);
+        for _ in 0..2 {
+            press(&mut game, Joypad::DOWN);
+            until_waiting(&mut game);
+        }
+        press(&mut game, Joypad::SELECT);
+        until_waiting(&mut game);
+        assert_eq!(list(&game).entries, [(ItemId::Antidote, 1), (ItemId::Potion, 8)]);
+        assert_eq!((list(&game).scroll, list(&game).input.current), (0, 0), "back to the top");
+    }
+
+    /// Ninety-nine is the most a slot takes, and the donor keeps one more than a hundred would leave.
+    #[test]
+    fn a_sum_over_a_hundred_caps_the_second_slot_at_ninety_nine() {
+        let mut game = game(vec![(ItemId::Potion, 60), (ItemId::Potion, 50)]);
+        until_waiting(&mut game);
+        press(&mut game, Joypad::SELECT);
+        until_waiting(&mut game);
+        press(&mut game, Joypad::DOWN);
+        until_waiting(&mut game);
+        press(&mut game, Joypad::SELECT);
+        until_waiting(&mut game);
+        assert_eq!(list(&game).entries, [(ItemId::Potion, 11), (ItemId::Potion, 99)]);
+    }
+
+    /// The sum is one byte before the hundred is tested, so two big slots wrap and merge.
+    #[test]
+    fn a_sum_that_overflows_the_byte_merges_instead_of_capping() {
+        let mut game = game(vec![(ItemId::Potion, 200), (ItemId::Potion, 100)]);
+        until_waiting(&mut game);
+        press(&mut game, Joypad::SELECT);
+        until_waiting(&mut game);
+        press(&mut game, Joypad::DOWN);
+        until_waiting(&mut game);
+        press(&mut game, Joypad::SELECT);
+        until_waiting(&mut game);
+        assert_eq!(list(&game).entries, [(ItemId::Potion, 44)], "300 in a byte is 44");
     }
 }
