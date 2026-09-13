@@ -23,6 +23,8 @@ impl OverworldAction {
         // A boulder goal is keyed on its target, not on where the walk starts.
         let at = match self.tile {
             MetaTile::BoulderGoal { at, .. } => at,
+            // A one-shove row is keyed on the boulder, which is the half of it that holds still.
+            MetaTile::BoulderPush { boulder, .. } => boulder,
             _ => self.destination,
         };
         format!("{}:{},{}:{}", self.map, at.x, at.y, self.tile.id_kind())

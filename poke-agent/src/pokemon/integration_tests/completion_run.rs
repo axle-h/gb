@@ -1761,7 +1761,13 @@ pub fn to_surf() -> Vec<Step> {
         // stands in the north half is only reachable coming down from the north.
         GoTo("SafariZoneNorth"), GoTo("SafariZoneCenter"), Clear(&[]),
         GoTo("FuchsiaCity"), Collect(true),
-        GoTo("WardensHouse"), Clear(&[]), GoTo("FuchsiaCity"),
+        // The teeth buy HM04 in this house, and the house's own boulder stands on the one square
+        // the Rare Candy can be faced from, so Strength is taught where it is handed over and the
+        // shove that clears the square happens before the run leaves.
+        GoTo("WardensHouse"), Clear(&[]),
+        Teach { item: "Hm04Strength", species: "Mewtwo" },
+        Talk("PushBoulderLeft"), Talk("RareCandy"),
+        GoTo("FuchsiaCity"),
         // The party was full, so the catch went to the box and has to be fetched to be taught.
         GoTo("FuchsiaPokecenter"),
         AtPc(Pc::Deposit("Abra")), AtPc(Pc::Withdraw("Kangaskhan")),
@@ -1791,14 +1797,12 @@ fn completion_phase_surf() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-soul.bin"), "completion-surf",
                           to_surf(), 1200, Duration::from_secs(5400));
-    // Two the game will not hand over, named here rather than left off the map list, so that what
-    // is out of reach is out of reach for a reason somebody can read. The zone's Nugget stands on
-    // an island and `TilePairCollisionsWater` refuses the step from its banks, so nothing routes
-    // to it and Surf is no help. The Warden's Rare Candy is behind a boulder, and a boulder row is
-    // minted only for a switch or a hole, so there is nothing to choose even with Strength taught.
+    // Named here rather than left off the map list, so that what is out of reach is out of reach
+    // for a reason somebody can read. The zone's Nugget stands on an island and
+    // `TilePairCollisionsWater` refuses the step from its banks, so nothing routes to it and Surf
+    // is no help.
     let out_of_reach = [
         Entry::ItemBall { map: Map::SafariZoneCenter, object: 1, item: ItemId::Nugget as u8 },
-        Entry::ItemBall { map: Map::WardensHouse, object: 2, item: ItemId::RareCandy as u8 },
     ];
     let missing = missing_on(&mut played, &[
         Map::SafariZoneGate, Map::SafariZoneCenter, Map::SafariZoneEast, Map::SafariZoneNorth,

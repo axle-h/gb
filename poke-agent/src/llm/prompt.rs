@@ -568,10 +568,19 @@ pub fn situation(
             let badged = state.badges.contains(Badge::RainbowBadge);
             // Counted off `actions()`, never `boulder_pushes()`: a floor can have legal shoves
             // left and still offer no goal.
-            let boulder_goals = state.map.actions().iter()
+            let rows = state.map.actions();
+            let boulder_goals = rows.iter()
                 .filter(|action| matches!(action.tile,
                     crate::pokemon::tile::MetaTile::BoulderGoal { .. })).count();
+            let boulder_shoves = rows.iter()
+                .filter(|action| matches!(action.tile,
+                    crate::pokemon::tile::MetaTile::BoulderPush { .. })).count();
             out.push_str(&match (known, badged) {
+                // Nothing on this map to aim at, so a row is one shove rather than a whole job.
+                (true, true) if boulder_shoves > 0 => " There is no switch and no hole on this map \
+                    to aim a boulder at, so each boulder row below is one shove of one boulder one \
+                    square, to get it out of the way. Leaving the map and coming back puts every \
+                    boulder on it back where it started.".to_string(),
                 // Zero rows is not "every legal shove is below".
                 (true, true) if boulder_goals == 0 => " There are no boulder rows in the menu below. \
                     A boulder row is a whole job rather than a shove, and one is offered only when \
