@@ -692,6 +692,8 @@ pub struct PokemonAgent {
     naming_after_battle: bool,
     /// Silph Co door-graphic walls ($18/$24 that won't open), by `(map, tile position)`.
     blocked_tiles: std::collections::HashSet<(Map, Point8)>,
+    /// The Card Key has been in the bag, so no card-key door is still refusing for want of it.
+    card_key_found: bool,
     /// Consecutive A presses on the card-key door in front of the player.
     door_open_attempts: u32,
     /// Squares this visit to this map has been turned away from, learned rather than known.
@@ -782,6 +784,7 @@ impl PokemonAgent {
             cut_tiles: std::collections::HashSet::new(),
             naming_after_battle: false,
             blocked_tiles: std::collections::HashSet::new(),
+            card_key_found: false,
             turned_back_tiles: std::collections::HashSet::new(),
             turn_back_watch: None,
             walk_squares: None,
@@ -813,6 +816,7 @@ impl PokemonAgent {
         self.cut_tiles.clear();
         self.naming_after_battle = false;
         self.blocked_tiles.clear();
+        self.card_key_found = false;
         self.turned_back_tiles.clear();
         self.turn_back_watch = None;
         self.walk_squares = None;
@@ -1111,6 +1115,13 @@ impl PokemonAgent {
         use crate::pokemon::map_metadata::{map_has_card_key_doors, PlayerFacingDirection};
         let Ok(state) = api.game_state() else { return false; };
         if !map_has_card_key_doors(state.map.map) { self.door_open_attempts = 0; return false; }
+        // A door given up on before the Card Key was found is a locked door, not a wall, and the
+        // key changes what its refusal meant. Forgiving them cannot wait until one is faced again:
+        // each is an obstacle by then, so no route goes near it.
+        if !self.card_key_found && state.bag.contains(&crate::pokemon::item::ItemId::CardKey) {
+            self.card_key_found = true;
+            self.blocked_tiles.retain(|(map, _)| !map_has_card_key_doors(*map));
+        }
         let front = api.mmu().read_pointer(&pokered_symbols::wTileInFrontOfPlayer);
         // The Silph 11F gate is $5e, which `PrintCardKeyText` special-cases.
         let is_11f_gate = front == 0x5e && state.map.map == Map::SilphCo11F;
@@ -3705,6 +3716,36 @@ mod tests {
     use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 
     /// A battle turn formats as a sentence.
+    #[test]
+    /// A door given up on for want of the Card Key is not scenery, and the key says so.
+    #[test]
+    fn the_card_key_forgives_the_doors_that_refused_without_it() {
+        use crate::pokemon::map::Map;
+        use crate::pokemon::policy::RandomPolicy;
+        let mut gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(include_bytes!("data/silph-card-key.bin")).expect("the fixture loads");
+        let mut agent = PokemonAgent::new(Box::new(RandomPolicy::seeded(0)));
+
+        // Both tiles of the gap that feeds Silph 3F's west half, given up on before the key.
+        let gap = [Point8 { x: 17, y: 8 }, Point8 { x: 17, y: 9 }];
+        for at in gap {
+            agent.blocked_tiles.insert((Map::SilphCo3F, at));
+        }
+        // A wall that is a wall whatever is in the bag stays one.
+        agent.blocked_tiles.insert((Map::PalletTown, Point8 { x: 1, y: 1 }));
+
+        let mut api = crate::pokemon::PokemonApi::new(&mut gb);
+        agent.handle_card_key_door(&mut api);
+
+        assert!(agent.card_key_found, "the key is in this fixture's bag");
+        for at in gap {
+            assert!(!agent.blocked_tiles.contains(&(Map::SilphCo3F, at)),
+                    "{at} is a locked door, not scenery, and the key unlocks it");
+        }
+        assert!(agent.blocked_tiles.contains(&(Map::PalletTown, Point8 { x: 1, y: 1 })),
+                "only the maps with card-key doors are forgiven");
+    }
+
     #[test]
     fn a_battle_turn_reads_as_a_sentence() {
         let say = |action| format!("{}", AgentEvent::BattleActionStarted {
