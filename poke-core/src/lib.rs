@@ -30,6 +30,7 @@ pub mod sprite;
 pub mod status;
 pub mod strings;
 pub mod symbols;
+pub mod text_script;
 pub mod trainers;
 pub mod types;
 pub mod wild;

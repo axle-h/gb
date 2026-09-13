@@ -1,9 +1,10 @@
 //! A banked address: which of the cartridge's or the console's banks, and the address inside it.
 
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, strum_macros::Display)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum_macros::Display)]
 pub enum DmgBank {
     #[strum(serialize = "ROM:{bank:02X}")]
     ROM { bank: u8 },
@@ -24,7 +25,7 @@ impl DmgBank {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DmgPointer {
     pub bank: DmgBank,
     pub address: u16
