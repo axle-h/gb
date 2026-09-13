@@ -60,8 +60,9 @@ pub enum Step {
     /// Answer the mart that is open with these orders, then leave.
     Buy(&'static [(&'static str, u32)]),
     /// Choose the row whose id ends in `:{row}` until a wild `species` is caught with `ball`;
-    /// `*` is any species not caught yet.
-    Hunt { species: &'static str, row: &'static str, ball: &'static str, way: Way },
+    /// `*` is any species not caught yet. A hunt wanders, and wandering crosses a map edge, so
+    /// `on` is walked back to whenever the row is missing because the run has drifted off it.
+    Hunt { species: &'static str, row: &'static str, ball: &'static str, way: Way, on: &'static str },
     /// Choose the `row` and fight every wild battle, except from the species in `flee`, until a
     /// turn says `until`, then record `way`.
     Train { row: &'static str, until: &'static str, way: Way, flee: &'static [&'static str] },
@@ -232,8 +233,12 @@ pub struct CompletionBrain {
     pocket_edges: std::collections::HashMap<(String, String), String>,
     /// The pocket and passage the last turn left by.
     left_by: Option<(String, String)>,
-    /// Turns the current [`Step::Explore`] has taken.
+    /// Turns the current [`Step::Explore`] has taken, and how many of them have passed since it
+    /// last saw somewhere new or took something.
     exploring: usize,
+    explore_idle: usize,
+    /// The maps this exploring has stood on.
+    explored_maps: HashSet<String>,
     /// A tidy under way: `None` until the bag has been read, then what is left to toss.
     tidying: Option<Option<VecDeque<String>>>,
     /// The bins: where the first switch was found, the bins searched since, and the last one.
@@ -256,6 +261,8 @@ pub struct CompletionBrain {
     day_care_sent: Option<usize>,
     /// Pickups that failed, per map and row.
     pickups_failed: std::collections::HashMap<String, u8>,
+    /// Walks given up on the way, per map and row.
+    walks_given_up: std::collections::HashMap<String, u8>,
     pub ledger: Arc<Mutex<Ledger>>,
     pub stuck: Arc<Mutex<Option<String>>>,
     pub turns: Arc<Mutex<usize>>,
@@ -270,6 +277,12 @@ impl CompletionBrain {
     /// walk: a route is computed with them as obstacles, and half of Silph Co's third floor hangs
     /// off a one-tile gap that a Rocket paces across, so this has to outlast a person.
     const PATIENCE: usize = 80;
+
+    /// How often one place may stop one walk before the target is written off. A worker who
+    /// wanders back into the way stops a walk a couple of times and then does not; a prompt built
+    /// into the ground stops it for ever, so the net is set well clear of what a walk that is
+    /// getting closer has ever needed.
+    const RETRIES_PER_PLACE: u8 = 6;
     const MAX_REISSUES: usize = 30;
 
     pub fn new(steps: Vec<Step>, ledger: Arc<Mutex<Ledger>>) -> Self {
@@ -279,7 +292,7 @@ impl CompletionBrain {
             ran: Default::default(), running_at: 0, came: Came::Given, named: 0, party_was_full: false,
             graph: Default::default(), travelled: Default::default(), offered: HashSet::new(), barren: 0,
             last_walk: None, here: String::new(), pockets: Default::default(), pocket_edges: Default::default(), left_by: None,
-            exploring: 0, tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), day_care_sent: None, used_on: false, prize_pending: false, evolving: None, repeated: (String::new(), 0), ledger,
+            exploring: 0, explore_idle: 0, explored_maps: HashSet::new(), tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), walks_given_up: Default::default(), day_care_sent: None, used_on: false, prize_pending: false, evolving: None, repeated: (String::new(), 0), ledger,
             stuck: Arc::new(Mutex::new(None)), turns: Arc::new(Mutex::new(0)),
         }
     }
@@ -306,6 +319,7 @@ impl CompletionBrain {
         let foe = situation.lines().find_map(|line| line.strip_prefix("Enemy: "))
             .and_then(|rest| rest.split_whitespace().next()).unwrap_or("").to_string();
         let choose = |id: &str| Reply::call("choose_battle_action", serde_json::json!({ "id": id, "summary": "as planned" }));
+        // The game draws this message over itself, so only the part that always survives is matched.
         if situation.contains("BOX is full") {
             self.box_full = true;
         }
@@ -338,7 +352,21 @@ impl CompletionBrain {
                 return choose("run");
             }
         }
-        match ids.iter().find(|id| id.starts_with("fight:")) {
+        // Whatever the menu holds, in preference to nothing: a Safari battle offers a ball, bait,
+        // a rock and a run and no `fight:` at all, and a turn answered with `wait` for ever is a
+        // battle that never ends and an emulator that runs on burning game time in silence. A ball
+        // is never that answer, though: thrown at whatever turned up it fills the box with Pokemon
+        // nothing asked for, and a full box then refuses every later throw in the same words for
+        // ever. The way out of the battle comes first, then anything that is not a ball.
+        if let Some(id) = ids.iter().find(|id| id.starts_with("fight:")) {
+            return choose(id);
+        }
+        let refused = self.box_full;
+        let spare = |id: &String| !id.starts_with("read_") && id.as_str() != "wait";
+        match ids.iter().find(|id| id.as_str() == "run")
+            .or_else(|| ids.iter().find(|id| spare(id) && id.as_str() != "ball"))
+            .or_else(|| ids.iter().find(|id| spare(id) && !(refused && id.as_str() == "ball")))
+        {
             Some(id) => choose(id),
             None => Reply::Calls(vec![Call::wait(10)]),
         }
@@ -439,44 +467,48 @@ impl CompletionBrain {
         {
             self.pocket_edges.insert(from, key.clone());
         }
+        // A map not walked yet in this exploring is progress. A pocket is not: it is known by the
+        // exits it offers, so a map that offers different ones on a later visit -- the Safari gate
+        // lets you in or lets you leave -- looks new every time, and would reset this for ever.
+        if self.explored_maps.insert(map.clone()) {
+            self.explore_idle = 0;
+        }
         self.pockets.insert(key.clone(), Pocket { map, things, exits });
         self.here = key.clone();
         Some(key)
     }
 
-    /// Whether `pocket` has anything [`Step::Explore`] has not taken: a thing, or a way on.
-    fn unfinished(&self, pocket: &Pocket, key: &str, maps: &[&str]) -> bool {
+    /// Whether `pocket` holds anything [`Step::Explore`] has not taken.
+    fn has_things(&self, pocket: &Pocket) -> bool {
         let chosen = self.chosen.get(&pocket.map);
         pocket.things.iter().any(|id| !chosen.is_some_and(|c| c.contains(id)))
-            || pocket.exits.iter().any(|(way, _, to)| maps.contains(&to.as_str())
-                && !self.pocket_edges.contains_key(&(key.to_string(), way.clone())))
     }
 
-    /// What [`Step::Explore`] takes next from `here`: something in this pocket, a passage never
-    /// taken, or the first passage toward the nearest pocket with either.
-    fn explore(&self, here: &str, maps: &[&str]) -> Option<String> {
-        let pocket = self.pockets.get(here)?;
-        let chosen = self.chosen.get(&pocket.map);
-        let untaken = |id: &String| !chosen.is_some_and(|c| c.contains(id));
-        if let Some(id) = pocket.things.iter().find(|id| untaken(id)) {
-            return Some(id.clone());
-        }
+    /// Whether `pocket` has a way on that has never been walked from it.
+    fn has_untaken_exit(&self, pocket: &Pocket, key: &str, maps: &[&str]) -> bool {
+        self.untaken_exit(pocket, key, maps).is_some()
+    }
+
+    fn untaken_exit(&self, pocket: &Pocket, key: &str, maps: &[&str]) -> Option<String> {
+        pocket.exits.iter()
+            .find(|(way, _, to)| maps.contains(&to.as_str())
+                && !self.pocket_edges.contains_key(&(key.to_string(), way.clone())))
+            .map(|(_, id, _)| id.clone())
+    }
+
+    /// The first hop from `here` toward the nearest pocket `wanted` picks, over the passages
+    /// already walked, skipping any hop that has been walked to death.
+    fn nearest(&self, here: &str, maps: &[&str], wanted: impl Fn(&Pocket, &str) -> bool) -> Option<String> {
         let inside = |to: &String| maps.contains(&to.as_str());
-        if let Some((_, id, _)) = pocket.exits.iter()
-            .find(|(way, _, to)| inside(to) && !self.pocket_edges.contains_key(&(here.to_string(), way.clone())))
-        {
-            return Some(id.clone());
-        }
-        // Breadth-first over the passages taken, to the nearest pocket with work left.
         let mut first: std::collections::HashMap<String, String> = Default::default();
         let mut queue = VecDeque::from([here.to_string()]);
         let mut seen = HashSet::from([here.to_string()]);
         while let Some(at) = queue.pop_front() {
-            let Some(p) = self.pockets.get(&at) else { continue };
-            if at != here && self.unfinished(p, &at, maps) {
+            let Some(pocket) = self.pockets.get(&at) else { continue };
+            if at != here && wanted(pocket, &at) {
                 return first.get(&at).cloned();
             }
-            for (way, id, _) in p.exits.iter().filter(|(.., to)| inside(to)) {
+            for (way, id, _) in pocket.exits.iter().filter(|(.., to)| inside(to)) {
                 let Some(next) = self.pocket_edges.get(&(at.clone(), way.clone())) else { continue };
                 if seen.insert(next.clone()) {
                     let hop = if at == here { id.clone() } else { first[&at].clone() };
@@ -486,6 +518,25 @@ impl CompletionBrain {
             }
         }
         None
+    }
+
+    /// What [`Step::Explore`] takes next from `here`. Things come before passages, and things
+    /// anywhere known come before a passage here: a border with several doors is otherwise walked
+    /// back and forth, each crossing paying for whatever the grass rolls, while what is left to
+    /// pick up waits two rooms away.
+    fn explore(&self, here: &str, maps: &[&str]) -> Option<String> {
+        let pocket = self.pockets.get(here)?;
+        let chosen = self.chosen.get(&pocket.map);
+        if let Some(id) = pocket.things.iter().find(|id| !chosen.is_some_and(|c| c.contains(*id))) {
+            return Some(id.clone());
+        }
+        if let Some(hop) = self.nearest(here, maps, |pocket, _| self.has_things(pocket)) {
+            return Some(hop);
+        }
+        if let Some(id) = self.untaken_exit(pocket, here, maps) {
+            return Some(id);
+        }
+        self.nearest(here, maps, |pocket, key| self.has_untaken_exit(pocket, key, maps))
     }
 
     /// The first hop from `here` toward the nearest pocket with an exit `wanted` picks, over the
@@ -524,6 +575,10 @@ impl CompletionBrain {
             .and_then(|(_, what)| ["talk to ", "pick up the ", "pick up ", "examine the ", "examine ", "read the "].iter()
                 .find_map(|lead| what.strip_prefix(lead)).map(|rest| rest.split(" (").next().unwrap_or(rest).to_string()));
         self.last_walk = name.map(|name| (map.clone(), id.clone(), name, self.at));
+        // Taking a person or a thing is progress; walking through a door on the way is not.
+        if id.matches(':').count() == 1 {
+            self.explore_idle = 0;
+        }
         *self.travelled.entry(format!("{map}|{id}")).or_default() += 1;
         // A row that never gets anywhere: what the agent could not do is the finding. Pacing
         // and fishing are chosen over and over on purpose.
@@ -653,7 +708,7 @@ impl CompletionBrain {
         let full = text.contains("No more room");
         // A gift the bag had no room for: talk again once there is some.
         if let Some((map, id, _, _)) = self.last_walk.as_ref()
-            && (text.contains("have any room for this") || text.contains("make room for this"))
+            && text.contains("room for this")
         {
             if let Some(chosen) = self.chosen.get_mut(map) {
                 chosen.remove(id);
@@ -685,14 +740,25 @@ impl CompletionBrain {
         if let Some(reply) = self.tidy(request) {
             return reply;
         }
-        // A walk given up on the way did not happen: take it back, and the step with it.
+        // A walk given up on the way did not happen: take it back, and the step with it. Where it
+        // was stopped is what says whether trying again is worth it. A walk stopped somewhere new
+        // each time is getting closer, whatever stopped it; a walk stopped at the same place for
+        // the same reason will be stopped there again for ever, and a target taken back for ever
+        // is one the exploring returns to for ever. The Safari gate's workers stand behind the
+        // prompt that asks whether you are leaving, always on the same tile, so approaching one
+        // ends the visit every time it is tried.
         if let Some((map, id, name, step)) = self.last_walk.take()
-            && text.contains(&format!("gave up on {name}"))
+            && let Some(said) = text.split(&format!("gave up on {name}")).nth(1)
         {
-            if let Some(chosen) = self.chosen.get_mut(&map) {
-                chosen.remove(&id);
+            let stopped = said.lines().next().unwrap_or("").trim();
+            let tries = self.walks_given_up.entry(format!("{map}|{id}|{stopped}")).or_default();
+            *tries += 1;
+            if *tries <= Self::RETRIES_PER_PLACE {
+                if let Some(chosen) = self.chosen.get_mut(&map) {
+                    chosen.remove(&id);
+                }
+                self.at = self.at.min(step);
             }
-            self.at = self.at.min(step);
         }
         // Six rows under the party heading: the next catch goes to the box.
         self.party_was_full = text.split("### Party").nth(1)
@@ -737,6 +803,10 @@ impl CompletionBrain {
                     if next.is_none() { self.at += 1; continue }
                     next
                 }
+                Step::Hunt { row, on, .. } if !on.is_empty() && request.location().as_deref() != Some(*on) =>
+                    Intent::Enter(on).resolve(request)
+                        .or_else(|| self.toward(&here, |_, to| to == *on))
+                        .or_else(|| self.route(request, on)),
                 Step::Hunt { row, .. } | Step::Train { row, .. } =>
                     rows.iter().map(|(id, _)| id).find(|id| id.ends_with(&format!(":{row}"))).cloned(),
                 Step::Field(arguments) => {
@@ -765,11 +835,22 @@ impl CompletionBrain {
                             .map(|(_, id, _)| id.clone())))
                 }
                 Step::Explore { maps, patience } => {
+                    /// Turns an exploring may go without seeing anywhere new or taking anything.
+                    /// A pocket is known by the exits it offers, so a map that offers different
+                    /// ones on a later visit — the Safari gate lets you in or lets you leave — looks
+                    /// like somewhere never stood in, and the search for what is left in it walks
+                    /// out and back in for ever. Standing still is the fault, not repetition.
+                    const IDLE: usize = 40;
                     self.exploring += 1;
+                    self.explore_idle += 1;
                     match self.explore(&here, maps) {
-                        Some(id) if self.exploring < *patience => Some(id),
+                        Some(id) if self.exploring < *patience && self.explore_idle < IDLE => Some(id),
                         _ => {
-                            self.exploring = 0; self.at += 1; continue
+                            self.exploring = 0;
+                            self.explore_idle = 0;
+                            self.explored_maps.clear();
+                            self.at += 1;
+                            continue
                         }
                     }
                 }
@@ -1141,7 +1222,7 @@ pub fn to_the_boulder_badge() -> Vec<Step> {
         Go(&["ViridianCity", "Route2"]), Clear(&[]),
         Go(&["ViridianForestSouthGate"]), Clear(&[]),
         Go(&["ViridianForest"]),
-        Hunt { species: "Weedle", row: "Grass", ball: "MasterBall", way: Way::WildInGrass },
+        Hunt { species: "Weedle", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "" },
         // The catch is the last of three in the party: it leads, and fights until it evolves at 7.
         Field(r#"{"move":"reorder_party","slot":2}"#),
         // A Kakuna or Metapod only hardens, and the fight never ends.
@@ -1207,7 +1288,7 @@ pub fn to_bill() -> Vec<Step> {
     steps.extend([
         GoTo("Route24"), Clear(&[]),
         // For the Route 2 trade house, which wants an Abra.
-        Hunt { species: "Abra", row: "Grass", ball: "MasterBall", way: Way::WildInGrass },
+        Hunt { species: "Abra", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "" },
         GoTo("Route25"), Clear(&[]),
         // Bill hands over nothing to a full bag.
         Tidy,
@@ -1260,10 +1341,10 @@ pub fn to_the_thunder_badge() -> Vec<Step> {
     }
     steps.extend([
         // The Old Rod's one catch is a Magikarp, at any water's edge.
-        Hunt { species: "Magikarp", row: "Fish", ball: "MasterBall", way: Way::OldRod },
+        Hunt { species: "Magikarp", row: "Fish", ball: "MasterBall", way: Way::OldRod, on: "" },
         GoTo("Route11"), Clear(&[]),
         // For the Vermilion trade, which gives a Farfetch'd that can learn both Cut and Fly.
-        Hunt { species: "Spearow", row: "Grass", ball: "MasterBall", way: Way::WildInGrass },
+        Hunt { species: "Spearow", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "" },
         // The party is full, so the catch went to the box.
         GoTo("VermilionPokecenter"),
         AtPc(Pc::Deposit("Kakuna")), AtPc(Pc::Withdraw("Spearow")), AtPc(Pc::Release("Kakuna")),
@@ -1309,7 +1390,7 @@ pub fn to_celadon() -> Vec<Step> {
         // Out of the gym's corner, which the tree closes again behind every visit.
         Take("cut down the tree"),
         GoTo("Route11"), GoTo("DiglettsCaveRoute11"), Clear(&[]), GoTo("DiglettsCave"),
-        Hunt { species: "*", row: "Pace", ball: "MasterBall", way: Way::WildOnACaveFloor },
+        Hunt { species: "*", row: "Pace", ball: "MasterBall", way: Way::WildOnACaveFloor, on: "" },
         GoTo("DiglettsCaveRoute2"), Clear(&[]), GoTo("Route2"),
         Explore { maps: &["Route2", "Route2TradeHouse", "Route2Gate"], patience: 300 },
         GoTo("DiglettsCaveRoute2"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute11"), GoTo("Route11"),
@@ -1593,5 +1674,147 @@ fn completion_phase_marsh_badge() {
     ], &[Entry::Badge(5), Entry::Way(Way::GiftLapras), Entry::Way(Way::GiftFightingDojo),
          Entry::KeyItem(vec![ItemId::CardKey as u8])]);
     cut(&mut played, "completion-marsh");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// Fuchsia: the cycling road down Route 16 to 18, the city behind its trees, and Koga.
+pub fn to_the_soul_badge() -> Vec<Step> {
+    use Step::*;
+    vec![
+        Collect(true),
+        // The phase before ended indoors, and Fly is refused under a roof.
+        GoTo("SaffronCity"),
+        // The cycling road is the way south, and the guard only lets a cyclist by.
+        Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"),
+        GoTo("Route16"), GoTo("Route16Gate1F"), Clear(&[]),
+        Take("Route16, arriving at (17, 1"),
+        GoTo("Route17"), Explore { maps: &["Route17"], patience: 400 },
+        GoTo("Route18"), Explore { maps: &["Route18", "Route18Gate1F", "Route18Gate2F"], patience: 300 },
+        // Fuchsia is carved into pockets by eight cuttable trees, so the doors are the walk's.
+        GoTo("FuchsiaCity"),
+        Explore { maps: &["FuchsiaCity", "FuchsiaPokecenter", "FuchsiaMart", "FuchsiaBillsGrandpasHouse",
+                          "FuchsiaGoodRodHouse", "WardensHouse", "FuchsiaMeetingRoom"], patience: 800 },
+        GoTo("FuchsiaGym"), Explore { maps: &["FuchsiaGym"], patience: 400 }, GoTo("FuchsiaCity"),
+    ]
+}
+
+#[test]
+#[ignore = "a phase of the completion run; run with --ignored"]
+fn completion_phase_soul_badge() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-marsh.bin"), "completion-soul",
+                          to_the_soul_badge(), 300, Duration::from_secs(2400));
+    let missing = missing_on(&mut played, &[
+        Map::Route17, Map::Route18, Map::Route18Gate1F, Map::Route18Gate2F, Map::FuchsiaCity,
+        Map::FuchsiaPokecenter, Map::FuchsiaMart, Map::FuchsiaBillsGrandpasHouse,
+        Map::FuchsiaGoodRodHouse, Map::WardensHouse, Map::FuchsiaMeetingRoom, Map::FuchsiaGym,
+    ], &[Entry::Badge(4), Entry::KeyItem(vec![ItemId::GoodRod as u8])]);
+    cut(&mut played, "completion-soul");
+    // The warden's own room is walked again when the teeth are brought to him.
+    let later = [Entry::ItemBall { map: Map::WardensHouse, object: 2, item: ItemId::RareCandy as u8 }];
+    let missing: Vec<Entry> = missing.into_iter().filter(|entry| !later.contains(entry)).collect();
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// The smallest thing that reproduces the Safari turnstile, from the state it happened in: a walk
+/// that is given up on every time it is tried, beside a door that puts the player out of the area.
+/// The gate's workers stand behind the prompt that asks whether you are leaving, so approaching one
+/// answers it, ends the visit, and the run pays to come back. A target taken back for ever is one
+/// the exploring returns to for ever. The money the gate charges is held up by the cheats, so what
+/// this watches is the clock, which a loop spends and a finished walk does not.
+#[test]
+#[ignore = "a phase of the completion run; run with --ignored"]
+fn a_walk_given_up_on_every_time_is_not_tried_for_ever() {
+    play(include_bytes!("../data/completion-soul.bin"), "safari-turnstile", vec![
+        Step::Collect(false),
+        Step::GoTo("SafariZoneGate"),
+        Step::Explore { maps: &["SafariZoneGate", "SafariZoneCenter"], patience: 300 },
+    ], 45, Duration::from_secs(900));
+}
+
+/// The Safari Zone: the warden's teeth, the Surf in its secret house, and then the water the
+/// phases before it could only look at from dry land.
+pub fn to_surf() -> Vec<Step> {
+    use Step::*;
+    const SAFARI: &[&str] = &["SafariZoneGate", "SafariZoneCenter", "SafariZoneEast", "SafariZoneNorth",
+                              "SafariZoneWest", "SafariZoneCenterRestHouse", "SafariZoneEastRestHouse",
+                              "SafariZoneNorthRestHouse", "SafariZoneWestRestHouse", "SafariZoneSecretHouse"];
+    vec![
+        // The zone's grass is thick with species the run has never caught, and every one of them
+        // is a catch that spends the five hundred steps a visit is worth.
+        Collect(false), Tidy,
+        // Nothing the run is carrying can take Surf and the zone's own grass is the nearest thing
+        // that can, so the hunt goes first, on a whole visit rather than the tail of one: the zone
+        // ends a visit after five hundred steps and an exploring spends them. A Safari battle
+        // offers a ball rather than a bag, so the hunt needs no wording of its own.
+        GoTo("SafariZoneGate"), Clear(&[]),
+        GoTo("SafariZoneEast"),
+        Hunt { species: "Kangaskhan", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "SafariZoneEast" },
+        Explore { maps: SAFARI, patience: 1200 },
+        // The west side and the house on it, named: the gate is a turnstile, and an exploring that
+        // has to pay its way back in each time will not wander that far on its own.
+        GoTo("SafariZoneWest"), Clear(&[]),
+        GoTo("SafariZoneWestRestHouse"), Clear(&[]), GoTo("SafariZoneWest"),
+        GoTo("SafariZoneSecretHouse"), Clear(&[]), GoTo("SafariZoneWest"),
+        GoTo("SafariZoneNorth"), GoTo("SafariZoneNorthRestHouse"), Clear(&[]),
+        // The centre is two halves that do not join: the gate opens on the south one, and what
+        // stands in the north half is only reachable coming down from the north.
+        GoTo("SafariZoneNorth"), GoTo("SafariZoneCenter"), Clear(&[]),
+        GoTo("FuchsiaCity"), Collect(true),
+        // The teeth buy HM04 in this house, and the house's own boulder stands on the one square
+        // the Rare Candy can be faced from, so Strength is taught where it is handed over and the
+        // shove that clears the square happens before the run leaves.
+        GoTo("WardensHouse"), Clear(&[]),
+        Teach { item: "Hm04Strength", species: "Mewtwo" },
+        Talk("PushBoulderLeft"), Talk("RareCandy"),
+        GoTo("FuchsiaCity"),
+        // The party was full, so the catch went to the box and has to be fetched to be taught.
+        GoTo("FuchsiaPokecenter"),
+        AtPc(Pc::Deposit("Abra")), AtPc(Pc::Withdraw("Kangaskhan")),
+        GoTo("FuchsiaCity"),
+        Teach { item: "Hm03Surf", species: "Kangaskhan" },
+        // What the phases before could only look at from dry land.
+        Field(r#"{"move":"fly","map":"LavenderTown"}"#), GoTo("LavenderTown"),
+        // Route 12 carries on south of its gate, so the gate is part of walking the route. The
+        // walk can end inside it, and Fly is refused indoors, so the way out comes before the way on.
+        GoTo("Route12"), Explore { maps: &["Route12", "Route12Gate1F"], patience: 400 },
+        GoTo("Route12"),
+        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
+        GoTo("Route24"), GoTo("Route25"), Explore { maps: &["Route25"], patience: 300 },
+        // Walking back down from Nugget Bridge does not land where the walk up started: Cerulean's
+        // north west corner is a pocket of water and bank that the city proper cannot be reached
+        // from, and Route 4 opens into the same one. Flying in lands at the Pokemon Centre.
+        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
+        GoTo("CeruleanTrashedHouse"), Take("CeruleanCity, arriving at (28, 10)"),
+        GoTo("Route9"), GoTo("Route10"), Explore { maps: &["Route10"], patience: 400 },
+        Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"),
+    ]
+}
+
+#[test]
+#[ignore = "a phase of the completion run; run with --ignored"]
+fn completion_phase_surf() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-soul.bin"), "completion-surf",
+                          to_surf(), 1200, Duration::from_secs(5400));
+    // Named here rather than left off the map list, so that what is out of reach is out of reach
+    // for a reason somebody can read. The zone's Nugget stands on an island and
+    // `TilePairCollisionsWater` refuses the step from its banks, so nothing routes to it and Surf
+    // is no help.
+    let out_of_reach = [
+        Entry::ItemBall { map: Map::SafariZoneCenter, object: 1, item: ItemId::Nugget as u8 },
+    ];
+    let missing = missing_on(&mut played, &[
+        Map::SafariZoneGate, Map::SafariZoneCenter, Map::SafariZoneEast, Map::SafariZoneNorth,
+        Map::SafariZoneWest, Map::SafariZoneCenterRestHouse, Map::SafariZoneEastRestHouse,
+        Map::SafariZoneNorthRestHouse, Map::SafariZoneWestRestHouse, Map::SafariZoneSecretHouse,
+        Map::WardensHouse,
+    ], &[Entry::Machine(ItemId::Hm03Surf as u8), Entry::KeyItem(vec![ItemId::GoldTeeth as u8]),
+         // Deferred by the phases that could only reach these from dry land.
+         Entry::Trainer { map: Map::Route10, index: 0 },
+         Entry::ItemBall { map: Map::Route12, object: 9, item: ItemId::Tm16PayDay as u8 },
+         Entry::ItemBall { map: Map::Route25, object: 10, item: ItemId::Tm19SeismicToss as u8 }])
+        .into_iter().filter(|entry| !out_of_reach.contains(entry)).collect::<Vec<_>>();
+    cut(&mut played, "completion-surf");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }

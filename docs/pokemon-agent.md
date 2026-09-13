@@ -93,6 +93,10 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   moves when an NPC steps.
 - A boulder goal is bounded on progress (`MAX_PUSHES_WITHOUT_PROGRESS`), never on a shove count. A
   switch keeps its boulder and a hole swallows it, so one completion test for both stalls the floor.
+- A bare shove (`MetaTile::BoulderPush`) is the other kind of boulder row, offered only where the map
+  has no switch and no hole to aim at, so a floor with a target never shows one beside its goals. It
+  completes on the boulder leaving its tile, which is the only answer a shove with no goal around it
+  ever gets.
 - The turn must not tell a model that a Strength floor is lost — two versions of that sentence have
   shipped and been reverted, and the tombstone is in `prompt::situation`. Say what is measured: these
   are the legal pushes, and leaving the map puts every boulder back.

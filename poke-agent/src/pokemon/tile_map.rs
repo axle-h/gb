@@ -1293,6 +1293,24 @@ impl MetaTileMap {
                 actions.push(OverworldAction { map: self.map, origin: self.player_position,
                     destination: stand, tile: MetaTile::BoulderGoal { boulder: which, at, hole }, route });
             }
+
+            // A map with nothing to aim at: the shove is the whole action, one row per way a
+            // boulder will actually go. Gated on there being no target at all, so no floor that
+            // has one ever offers a bare shove beside its goal.
+            if self.strength_switches.is_empty() && self.holes.is_empty() {
+                for (boulder, push, stand) in self.boulder_pushes_within(&reach) {
+                    if !reach.contains(&stand) { continue }
+                    let mut route = reconstruct(stand, &came);
+                    if route.is_empty() {
+                        let facing: JoypadButton = facing_button(self.player_direction);
+                        if facing != push { route.push(push); }
+                    } else if route.last() != Some(&push) {
+                        route.push(push);
+                    }
+                    actions.push(OverworldAction { map: self.map, origin: self.player_position,
+                        destination: stand, tile: MetaTile::BoulderPush { boulder, dir: push }, route });
+                }
+            }
         }
 
         actions.sort();
@@ -1658,7 +1676,8 @@ impl Display for MetaTileMap {
                     MetaTile::Switch { .. } => write!(f, "s")?,
                     MetaTile::CutTree => write!(f, "t")?,
                     // Never in `meta_tiles`: an action on the floor beside a thing drawn as itself.
-                    MetaTile::Cut { .. } | MetaTile::BoulderGoal { .. } | MetaTile::Pace { .. } => write!(f, "_")?,
+                    MetaTile::Cut { .. } | MetaTile::BoulderGoal { .. } | MetaTile::BoulderPush { .. }
+                    | MetaTile::Pace { .. } => write!(f, "_")?,
                     MetaTile::Pc      => write!(f, "p")?,
                     MetaTile::Grass   => write!(f, "g")?,
                     // Never in `meta_tiles` — a fishing spot is an action on ordinary ground.
@@ -1827,7 +1846,7 @@ pub fn elevator_for(map: Map) -> Option<(Point8, &'static [Map])> {
 }
 
 /// The word `use_field_move`'s `direction` takes, so a refusal names a push as the model types it.
-fn push_word(dir: JoypadButton) -> &'static str {
+pub(crate) fn push_word(dir: JoypadButton) -> &'static str {
     match dir {
         JoypadButton::Up => "up", JoypadButton::Down => "down",
         JoypadButton::Left => "left", JoypadButton::Right => "right",
@@ -1995,6 +2014,45 @@ mod boulder_solver_tests {
             // No ROM map behind it.
             metadata: None,
         }, switch)
+    }
+
+    /// A floor with nothing to aim at: the shove is the action, one row per way it will go.
+    #[test]
+    fn a_map_with_nothing_to_aim_at_offers_the_shove_itself() {
+        let (mut map, _) = from_ascii(&["#####", "#...#", "#P1.#", "#...#", "#####"]);
+        map.can_strength = true;
+        map.strength_switches.clear();
+
+        let shoves: Vec<(Point8, JoypadButton)> = map.actions().into_iter()
+            .filter_map(|action| match action.tile {
+                MetaTile::BoulderPush { boulder, dir } => Some((boulder, dir)),
+                _ => None,
+            })
+            .collect();
+        assert!(shoves.iter().all(|(b, _)| *b == Point8 { x: 2, y: 2 }),
+            "every row names the one boulder on the floor: {shoves:?}");
+        let mut ways: Vec<JoypadButton> = shoves.iter().map(|(_, d)| *d).collect();
+        ways.sort();
+        assert_eq!(ways, vec![JoypadButton::Up, JoypadButton::Down, JoypadButton::Left, JoypadButton::Right],
+            "open floor on all four sides is four rows, one per way it will go");
+
+        // The walk ends on the shove, so the row is one press from doing what it says.
+        for action in map.actions().iter().filter(|a| matches!(a.tile, MetaTile::BoulderPush { .. })) {
+            let MetaTile::BoulderPush { dir, .. } = action.tile else { unreachable!() };
+            assert_eq!(action.route.last(), Some(&dir), "{action:?}");
+        }
+    }
+
+    /// The gate: a floor that has a target keeps its goal rows and gains no bare shove beside them.
+    #[test]
+    fn a_floor_with_a_switch_offers_no_bare_shove() {
+        let (mut map, _) = from_ascii(&["#####", "#...#", "#P1S#", "#...#", "#####"]);
+        map.can_strength = true;
+        let actions = map.actions();
+        assert!(actions.iter().any(|a| matches!(a.tile, MetaTile::BoulderGoal { .. })),
+            "the switch is reachable, so its goal row stands");
+        assert!(!actions.iter().any(|a| matches!(a.tile, MetaTile::BoulderPush { .. })),
+            "a map with something to aim at never offers the shove on its own");
     }
 
     #[test]

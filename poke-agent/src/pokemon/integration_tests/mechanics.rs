@@ -2382,6 +2382,82 @@ fn a_seafoam_staircase_the_script_cancels_is_not_a_row() {
     }
 }
 
+/// The Warden's Rare Candy stands in a nook whose one approach square the house's boulder sits on.
+/// Nothing on that map is a switch or a hole, so the shove itself has to be the row.
+#[test]
+fn the_wardens_boulder_can_be_shoved_off_the_square_the_rare_candy_is_reached_from() {
+    use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
+    use crate::pokemon::tile::MetaTile;
+    use gb::joypad::JoypadButton;
+    use poke_core::map::MapSprite;
+    use poke_core::sprite::{PictureId, Sprite, SpriteFacing};
+    use std::sync::Arc;
+
+    const CANDY: Point8 = Point8 { x: 8, y: 3 };
+    const BOULDER: Point8 = Point8 { x: 8, y: 4 };
+
+    let mmu = gb::mmu::MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
+    let metadata = Arc::new(mmu.read_map_metadata(Map::WardensHouse).unwrap());
+    let build = |boulder: Point8| {
+        let sprite = |index, picture_id, position, name| Sprite {
+            index, picture_id, position, on_screen: true, hidden: false,
+            facing: SpriteFacing::Down, name };
+        let mut map = MetaTileMap::new(&CurrentMap {
+            player_position: Point8 { x: 4, y: 6 },
+            player_direction: PlayerFacingDirection::Up,
+            // Both names off the table the live game is read through, never typed here: a boulder
+            // is only a boulder to `boulders()` because its name begins with one.
+            sprites: vec![
+                sprite(2, PictureId::PokeBall, CANDY, MapSprite::WARDENSHOUSE_RARE_CANDY.name),
+                sprite(3, PictureId::Boulder, boulder, MapSprite::WARDENSHOUSE_BOULDER.name),
+            ],
+            metadata: Arc::clone(&metadata),
+            closed_doors: Vec::new(),
+            grass_encounter_rate: 0,
+            water_encounter_rate: 0,
+            card_key_locked: false,
+            header_loaded: true,
+            surfing: false,
+            sprites_loaded: true,
+            script_cancelled_warps: Vec::new(),
+            standing_on_warp: false,
+        });
+        map.can_strength = true;
+        map
+    };
+    let candy = MapSprite::WARDENSHOUSE_RARE_CANDY.name;
+    let candy_row = |map: &MetaTileMap| map.actions().iter()
+        .any(|action| matches!(action.tile, MetaTile::Sprite(name) if name == candy));
+
+    let held = build(BOULDER);
+    assert!(!candy_row(&held),
+        "the boulder stands on the one square the Rare Candy is reached from, so it is not a row");
+    let shoves: Vec<JoypadButton> = held.actions().iter()
+        .filter_map(|action| match action.tile {
+            MetaTile::BoulderPush { boulder, dir } if boulder == BOULDER => Some(dir),
+            _ => None,
+        })
+        .collect();
+    assert!(!shoves.is_empty(),
+        "nothing on this map is a switch or a hole, so the shove itself is what is offered");
+
+    // The whole point of the row: one of those shoves frees the square, and the pickup appears.
+    let landed = |dir: JoypadButton| match dir {
+        JoypadButton::Up => Point8 { x: BOULDER.x, y: BOULDER.y - 1 },
+        JoypadButton::Down => Point8 { x: BOULDER.x, y: BOULDER.y + 1 },
+        JoypadButton::Left => Point8 { x: BOULDER.x - 1, y: BOULDER.y },
+        _ => Point8 { x: BOULDER.x + 1, y: BOULDER.y },
+    };
+    // Sideways only: the Rare Candy's own sprite blocks the shove up, and the wall blocks it down.
+    assert_eq!(shoves, vec![JoypadButton::Left, JoypadButton::Right],
+        "the two ways the cartridge would take are the two the menu offers");
+    for dir in shoves {
+        assert!(candy_row(&build(landed(dir))),
+            "{dir:?} frees ({}, {}), so the Rare Candy must be a row after it",
+            BOULDER.x, BOULDER.y);
+    }
+}
+
 #[test]
 fn a_warp_reached_by_surfing_is_entered_rather_than_leant_on() {
     use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};

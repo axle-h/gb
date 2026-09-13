@@ -71,7 +71,7 @@ fn tint_for(tile: MetaTile) -> Option<Tint> {
         // Never in `meta_tiles`: a PC and a hidden object are looked up per map.
         MetaTile::Pc | MetaTile::Switch { .. } => PC,
         // Nor these: both are actions on ordinary floor beside a tree or boulder drawn as art.
-        MetaTile::Cut { .. } | MetaTile::BoulderGoal { .. } => return None,
+        MetaTile::Cut { .. } | MetaTile::BoulderGoal { .. } | MetaTile::BoulderPush { .. } => return None,
         // Nor `Fish` or `Pace`: actions on floor or water that is already drawn as itself.
         MetaTile::Fish { .. } | MetaTile::Pace { .. } => return None,
         MetaTile::Empty | MetaTile::Obstacle | MetaTile::Sprite(_) => return None,
