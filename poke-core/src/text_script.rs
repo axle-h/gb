@@ -217,6 +217,16 @@ impl TextSound {
 const MAX_DEPTH: usize = 8;
 
 /// The script at `at`, with every `TX_FAR` followed and flattened.
+/// The script a `text_far` label names. A caller that knows a text by name rather than by address
+/// goes through here, since the address is the build's rather than the game's.
+pub fn far_text(label: &str) -> Result<Vec<TextCommand>, String> {
+    let (_, at) = crate::symbols::pokered_symbols::TEXT_LABELS
+        .iter()
+        .find(|(name, _)| *name == label)
+        .ok_or_else(|| format!("no text is labelled {label}"))?;
+    decode(*at)
+}
+
 pub fn decode(at: DmgPointer) -> Result<Vec<TextCommand>, String> {
     let mut commands = Vec::new();
     decode_into(rom_slice(at), at, &mut commands, 0)?;

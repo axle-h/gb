@@ -1,6 +1,7 @@
 pub mod colour;
 pub mod compose;
 pub mod layers;
+pub mod text_boxes;
 pub mod tiles;
 pub mod ui;
 

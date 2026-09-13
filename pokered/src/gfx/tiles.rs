@@ -68,6 +68,21 @@ impl TileData {
         self.load(V_CHARS2 + 0x60, &rom_slice(start)[..len]);
     }
 
+    /// `LoadHpBarAndStatusTilePatterns`, which lands where the text box tiles do not overlap it.
+    pub fn load_hp_bar_and_status_tiles(&mut self) {
+        let start = pokered_symbols::HpBarAndStatusGraphics;
+        let len = (pokered_symbols::HpBarAndStatusGraphicsEnd.address - start.address) as usize;
+        self.load(V_CHARS2 + 0x62, &rom_slice(start)[..len]);
+    }
+
+    /// `LoadEDTile`. It lands on the tile `¥` is drawn from, so the naming screen is the one place
+    /// a yen sign would come out reading `ED`.
+    pub fn load_ed_tile(&mut self) {
+        let start = pokered_symbols::ED_Tile;
+        let len = (pokered_symbols::ED_TileEnd.address - start.address) as usize;
+        self.load_1bpp(V_CHARS1 + 0x70, &rom_slice(start)[..len]);
+    }
+
     /// `LoadTilesetTilePatternData`.
     pub fn load_tileset(&mut self, tileset: TileSetId) {
         self.load(V_CHARS2, tileset_sheet(tileset));

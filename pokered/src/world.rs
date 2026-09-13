@@ -1,16 +1,51 @@
 use std::collections::BTreeMap;
 use poke_core::text_script::{TextBuffer, TextMoney, TextNumber};
 use serde::{Deserialize, Serialize};
+use crate::party::{Named, PartyMon};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct World {
     pub options: Options,
+    pub events: EventFlags,
     /// Charmap bytes, unterminated.
     pub player_name: Vec<u8>,
     pub rival_name: Vec<u8>,
+    /// `wPartySpecies` and the mons beside it. The boxes and the day care belong to the chunk that
+    /// first reads them, which is not this one.
+    pub party: Vec<Named<PartyMon>>,
+    /// `wPlayerMoney`, BCD, two digits to a byte.
+    pub money: [u8; 3],
     /// `BIT_NO_TEXT_DELAY`.
     pub no_text_delay: bool,
     pub text: TextVars,
+}
+
+/// `NUM_EVENTS`: the event space, most of it unused.
+pub const NUM_EVENTS: usize = 0xA00;
+
+/// `wEventFlags`, indexed by the constants `poke_core::symbols::pokered_events` generates.
+/// `CheckEvent` reads bit `n % 8` of byte `n / 8`, least significant first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventFlags(Vec<u8>);
+
+impl Default for EventFlags {
+    fn default() -> Self {
+        Self(vec![0; NUM_EVENTS / 8])
+    }
+}
+
+impl EventFlags {
+    pub fn is_set(&self, event: u16) -> bool {
+        self.0[event as usize / 8] & 1 << (event % 8) != 0
+    }
+
+    pub fn set(&mut self, event: u16) {
+        self.0[event as usize / 8] |= 1 << (event % 8);
+    }
+
+    pub fn clear(&mut self, event: u16) {
+        self.0[event as usize / 8] &= !(1 << (event % 8));
+    }
 }
 
 /// What a text command reads. The cartridge points at scratch WRAM a caller filled, and several of

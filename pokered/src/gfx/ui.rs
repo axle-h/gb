@@ -47,6 +47,13 @@ impl UiSurface {
         }
     }
 
+    /// Charmap bytes straight onto the grid, as `PlaceString` leaves them when nothing delays it.
+    pub fn place(&mut self, x: usize, y: usize, bytes: &[u8]) {
+        for (i, &byte) in bytes.iter().enumerate() {
+            self.set(x + i, y, byte);
+        }
+    }
+
     pub fn row(&self, y: usize) -> &[u8] {
         &self.tiles[y * SCREEN_TILES_X..(y + 1) * SCREEN_TILES_X]
     }

@@ -7,6 +7,7 @@
 use poke_core::text_script::TextCommand;
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
+use crate::gfx::text_boxes::TextBoxId;
 use crate::gfx::ui::UiSurface;
 use crate::input::Joypad;
 use crate::mode::{Ctx, ModeUpdate, Outcome, Status, Transition};
@@ -172,7 +173,7 @@ impl TextBox {
 impl ModeUpdate for TextBox {
     /// `DisplayTextBoxID` with `MESSAGE_BOX`.
     fn enter(&mut self, ctx: &mut Ctx) {
-        ctx.screen.ui.text_box_border(0, 12, 18, 4);
+        TextBoxId::MessageBox.draw(&mut ctx.screen.ui);
         self.phase = Phase::Opening(self.delay(ctx, 3));
     }
 

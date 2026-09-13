@@ -5,9 +5,16 @@ use serde::{Deserialize, Serialize};
 use crate::command::Decision;
 use crate::gfx::Screen;
 use crate::input::Pad;
+use crate::modes::buy_sell_quit::BuySellQuitMenu;
+use crate::modes::field_move_menu::FieldMoveMenu;
 use crate::modes::list_menu::ListMenu;
 use crate::modes::menu_input::CursorMemory;
+use crate::modes::naming_screen::NamingScreen;
+use crate::modes::option_menu::OptionMenu;
+use crate::modes::party_menu::PartyMenu;
+use crate::modes::start_menu::StartMenu;
 use crate::modes::text_box::TextBox;
+use crate::modes::two_option_menu::TwoOptionMenu;
 use crate::rng::GameRng;
 use crate::world::World;
 use crate::{Event, Pacing};
@@ -60,6 +67,13 @@ pub trait ModeUpdate {
 pub enum Mode {
     TextBox(TextBox),
     ListMenu(ListMenu),
+    StartMenu(StartMenu),
+    OptionMenu(OptionMenu),
+    TwoOptionMenu(TwoOptionMenu),
+    BuySellQuitMenu(BuySellQuitMenu),
+    PartyMenu(PartyMenu),
+    NamingScreen(NamingScreen),
+    FieldMoveMenu(FieldMoveMenu),
 }
 
 macro_rules! each_mode {
@@ -67,6 +81,13 @@ macro_rules! each_mode {
         match $mode {
             Mode::TextBox($inner) => $body,
             Mode::ListMenu($inner) => $body,
+            Mode::StartMenu($inner) => $body,
+            Mode::OptionMenu($inner) => $body,
+            Mode::TwoOptionMenu($inner) => $body,
+            Mode::BuySellQuitMenu($inner) => $body,
+            Mode::PartyMenu($inner) => $body,
+            Mode::NamingScreen($inner) => $body,
+            Mode::FieldMoveMenu($inner) => $body,
         }
     };
 }

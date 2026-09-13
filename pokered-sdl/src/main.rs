@@ -1,11 +1,15 @@
-//! Until the game boots on its own, this sets a scene by hand: Pallet Town, then a text box and
-//! the bag, over and over.
+//! Until the game boots on its own, this sets a scene by hand: Pallet Town, then a text box, the
+//! bag, the start menu, a yes/no, the party, the naming screen and a mon's field moves, over and
+//! over.
 
 use std::time::{Duration, Instant};
 use poke_core::charmap::encode;
 use poke_core::item::ItemId;
 use poke_core::map::Map;
 use poke_core::map_header::MapHeader;
+use poke_core::move_name::PokemonMoveName;
+use poke_core::species::PokemonSpecies;
+use poke_core::symbols::pokered_events::EVENT_GOT_POKEDEX;
 use pokered::gfx::colour::ColourMode;
 use pokered::gfx::compose::{HEIGHT, WIDTH};
 use pokered::gfx::layers::MapLayer;
@@ -13,7 +17,15 @@ use pokered::gfx::ui::{SCREEN_TILES_X, SCREEN_TILES_Y};
 use pokered::input::Joypad;
 use pokered::mode::Mode;
 use pokered::modes::list_menu::ListMenu;
+use pokered::modes::start_menu::StartMenu;
 use pokered::modes::text_box::TextBox;
+use pokered::modes::field_move_menu::FieldMoveMenu;
+use pokered::modes::naming_screen::{NamingScreen, NamingScreenType};
+use pokered::modes::party_menu::{PartyMenu, PartyMenuType};
+use pokered::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
+use pokered::party::Named;
+use pokered::systems::add_mon::{new_party_mon, Origin};
+use pokered::systems::field_moves::field_moves;
 use pokered::rng::GameRng;
 use pokered::systems::map_data::{camera, tile_block_map, MAP_BORDER};
 use pokered::world::World;
@@ -26,7 +38,17 @@ const SCALE: u32 = 4;
 const FRAME: Duration = Duration::from_nanos(16_742_706);
 
 fn scene() -> Game {
-    let world = World { player_name: encode("RED").unwrap(), ..World::default() };
+    let mut world = World { player_name: encode("RED").unwrap(), ..World::default() };
+    // Without it the start menu is a row shorter.
+    world.events.set(EVENT_GOT_POKEDEX as u16);
+    world.party = [(PokemonSpecies::Ivysaur, 22, "IVY"), (PokemonSpecies::Pidgey, 9, "PIDGE"),
+                   (PokemonSpecies::Rattata, 100, "RAT")]
+        .into_iter()
+        .map(|(species, level, nick)| {
+            let mon = new_party_mon(species, level, 0, &Origin::Trainer, &mut GameRng::tape(vec![]));
+            Named { mon, ot: encode("RED").unwrap(), nick: encode(nick).unwrap() }
+        })
+        .collect();
     let mut game = Game::new(world, GameRng::from_entropy(), Pacing::Faithful);
     let header = MapHeader::read(Map::PalletTown).expect("Pallet Town has a header");
     let screen = game.screen_mut();
@@ -44,13 +66,23 @@ fn scene() -> Game {
 }
 
 fn next_mode(shown: usize) -> Mode {
-    if shown % 2 == 0 {
-        Mode::TextBox(TextBox::new(encode("Hello, <PLAYER>!<LINE>This is Pallet<CONT>Town, recreated.<PROMPT>").unwrap()))
-    } else {
-        Mode::ListMenu(ListMenu::items(vec![
+    match shown % 7 {
+        0 => Mode::TextBox(TextBox::new(encode("Hello, <PLAYER>!<LINE>This is Pallet<CONT>Town, recreated.<PROMPT>").unwrap())),
+        1 => Mode::ListMenu(ListMenu::items(vec![
             (ItemId::Potion, 5), (ItemId::PokeBall, 10), (ItemId::Antidote, 2),
             (ItemId::TownMap, 1), (ItemId::Hm01Cut, 1), (ItemId::Repel, 3),
-        ], 0, 0))
+        ], 0, 0)),
+        // OPTION is the one row that opens a screen; the other five are still to be recreated.
+        2 => Mode::StartMenu(StartMenu::new()),
+        // Drawn over the town and taken back down again, which is the part worth watching.
+        3 => Mode::TwoOptionMenu(TwoOptionMenu::new(TwoOptionMenuId::YesNo, (14, 7), false)),
+        4 => Mode::PartyMenu(PartyMenu::new(PartyMenuType::Normal)),
+        // START or A on ED hands the name back; B rubs a letter out.
+        5 => Mode::NamingScreen(NamingScreen::new(NamingScreenType::Player, None)),
+        // Two field moves, so the box is both taller and wider than its empty form.
+        _ => Mode::FieldMoveMenu(FieldMoveMenu::new(field_moves([
+            PokemonMoveName::Cut as u8, PokemonMoveName::Strength as u8, 0, 0,
+        ]))),
     }
 }
 
@@ -122,7 +154,7 @@ mod tests {
     fn dump_scene() {
         let dir = std::env::var("POKERED_DUMP").unwrap();
         let mut game = scene();
-        for shown in 0..2 {
+        for shown in 0..7 {
             game.screen_mut().ui.uncover(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y);
             game.push(next_mode(shown));
             for _ in 0..120 {

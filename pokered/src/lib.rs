@@ -102,6 +102,15 @@ impl Game {
         &mut self.screen
     }
 
+    /// What the menus left behind: the chosen row and how the menu was left.
+    pub fn menu(&self) -> &CursorMemory {
+        &self.menu
+    }
+
+    pub fn menu_mut(&mut self) -> &mut CursorMemory {
+        &mut self.menu
+    }
+
     pub fn modes(&self) -> &[Mode] {
         &self.modes
     }

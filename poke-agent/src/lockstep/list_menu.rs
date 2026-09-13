@@ -4,14 +4,14 @@ use gb::joypad::JoypadButtonState;
 use gb::ram::ROM;
 use pokered::command::Decision;
 use pokered::input::Joypad;
-use pokered::mode::{Mode, Status};
+use pokered::mode::Mode;
 use pokered::modes::list_menu::ListMenu;
 use pokered::rng::GameRng;
 use pokered::world::World;
 use pokered::{Game, Input, Pacing};
 use crate::pokemon::item::ItemId;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
-use super::{breakpoint, tile_row, to_vblank};
+use super::{breakpoint, cartridge_until_polling, joypad, recreation_until_polling, tile_row, to_vblank};
 
 const ITEM_ROW: u8 = 2;
 
@@ -72,46 +72,6 @@ fn recreation_box(game: &Game) -> Vec<Vec<u8>> {
     (2..=12).map(|y| game.ui().row(y)[4..].to_vec()).collect()
 }
 
-fn joypad(buttons: Joypad) -> JoypadButtonState {
-    JoypadButtonState {
-        a: buttons.contains(Joypad::A),
-        b: buttons.contains(Joypad::B),
-        up: buttons.contains(Joypad::UP),
-        down: buttons.contains(Joypad::DOWN),
-        ..Default::default()
-    }
-}
-
-/// Frames until the cartridge's `HandleMenuInput` polls, finishing that frame.
-fn cartridge_until_polling(gb: &mut GameBoy) -> u32 {
-    let poll = breakpoint(pokered_symbols::JoypadLowSensitivity);
-    let vblank = breakpoint(pokered_symbols::VBlank);
-    for frames in 0..600 {
-        loop {
-            let (stop, _) = gb.run_until(&[poll, vblank], MachineCycles::PER_FRAME * 2);
-            if stop == Stop::Breakpoint(poll) {
-                to_vblank(gb);
-                return frames + 1;
-            }
-            if stop == Stop::Breakpoint(vblank) {
-                break;
-            }
-            panic!("{stop:?}");
-        }
-    }
-    panic!("the cartridge never polled");
-}
-
-fn recreation_until_polling(game: &mut Game) -> u32 {
-    for frames in 1..600 {
-        game.frame(Input::None);
-        if game.status() == Status::Waiting(Decision::List) {
-            return frames;
-        }
-    }
-    panic!("the recreation never polled");
-}
-
 /// The same box wherever both poll. The cartridge may get there late, never early: printing the
 /// entries can outlast a frame, and lag frames are not modelled.
 fn compare(presses: &[Joypad]) {
@@ -125,7 +85,7 @@ fn compare(presses: &[Joypad]) {
 
     let (last, presses) = presses.split_last().unwrap();
     for (step, &press) in presses.iter().chain([last]).enumerate() {
-        let (cartridge, recreation) = (cartridge_until_polling(&mut gb), recreation_until_polling(&mut game));
+        let (cartridge, recreation) = (cartridge_until_polling(&mut gb), recreation_until_polling(&mut game, Decision::List));
         assert_eq!(cartridge_box(&gb), recreation_box(&game), "polling before press {step}");
         assert!((0..=2).contains(&(cartridge as i64 - recreation as i64)),
             "before press {step} the cartridge took {cartridge} frames and the recreation {recreation}");
@@ -150,6 +110,14 @@ fn scrolling_the_bag_shows_what_the_cartridge_shows_at_every_poll() {
     compare(&[J::DOWN, J::DOWN, J::DOWN, J::DOWN, J::DOWN, J::UP, J::UP, J::UP, J::UP, J::A]);
 }
 
+/// SELECT arms an entry and a second SELECT commits it, both of which cost twenty frames the
+/// cartridge spends before it redraws.
+#[test]
+fn swapping_two_entries_shows_what_the_cartridge_shows_at_every_poll() {
+    use Joypad as J;
+    compare(&[J::SELECT, J::DOWN, J::SELECT, J::B]);
+}
+
 #[test]
 fn cancelling_the_bag_shows_what_the_cartridge_shows_at_every_poll() {
     compare(&[Joypad::DOWN, Joypad::B]);
@@ -163,7 +131,7 @@ fn the_list_s_down_arrow_blinks_within_a_frame_of_the_cartridge() {
     game.push(Mode::ListMenu(the_list(&gb)));
     to_vblank(&mut gb);
     cartridge_until_polling(&mut gb);
-    recreation_until_polling(&mut game);
+    recreation_until_polling(&mut game, Decision::List);
     let toggles = |arrow: &mut dyn FnMut() -> u8| {
         let mut last = arrow();
         (0..400).filter(|_| {

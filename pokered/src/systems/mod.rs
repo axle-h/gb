@@ -2,6 +2,8 @@ pub mod add_mon;
 pub mod ball;
 pub mod evos_moves;
 pub mod experience;
+pub mod field_moves;
+pub mod hp_bar;
 pub mod inventory;
 pub mod map_data;
 pub mod math;
