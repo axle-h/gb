@@ -323,11 +323,13 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         // `BIT_ALWAYS_ON_BIKE` marks Cycling Road, where `IsSurfingAllowed` refuses Surf.
         const BIT_ALWAYS_ON_BIKE: u8 = 1 << 5;
         let forced_onto_bike = mmu.read_pointer(&pokered_symbols::wStatusFlags6) & BIT_ALWAYS_ON_BIKE != 0;
-        // The Safari Zone refuses Surf too.
         let mut map = MetaTileMap::new(&match &self.map_cache {
             Some(c) => c.read_current_map(mmu)?,
             None    => mmu.read_current_map()?,
         });
+        // The Safari Zone's ponds cannot be mounted: `TilePairCollisionsWater` refuses the step
+        // from their banks, so a map that believed otherwise would route walks into water the
+        // cartridge will not enter, and a way across can tie with the way round.
         let in_safari_zone = matches!(map.map,
             Map::SafariZoneCenter | Map::SafariZoneEast | Map::SafariZoneNorth | Map::SafariZoneWest);
         let can_use_surf = badges.contains(Badge::SoulBadge)
