@@ -2,6 +2,7 @@
 //! tier-1 fixtures for `pokered`.
 
 mod experience;
+mod items;
 mod math;
 mod pokemon;
 mod stats;

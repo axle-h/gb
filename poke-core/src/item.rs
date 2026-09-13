@@ -1,3 +1,4 @@
+use crate::move_name::PokemonMoveName;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, strum_macros::Display, strum_macros::FromRepr, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum ItemId {
@@ -196,10 +197,137 @@ pub fn name(item: ItemId) -> Vec<u8> {
         .to_vec()
 }
 
+/// `GetItemPrice`: the price as three BCD bytes, most significant first. `None` for an HM, which
+/// `GetMachinePrice` refuses before it writes anything, leaving whatever the last item cost on
+/// screen.
+pub fn price(item: ItemId) -> Option<[u8; 3]> {
+    use crate::rom_gfx::rom_slice;
+    use crate::symbols::pokered_symbols;
+    let id = item as u8;
+    if item.is_hm() {
+        return None;
+    }
+    if id >= ItemId::Tm01MegaPunch as u8 {
+        // `GetMachinePrice`: a nybble of thousands each, the first machine in the high nybble.
+        let machine = id - ItemId::Tm01MegaPunch as u8;
+        let byte = rom_slice(pokered_symbols::TechnicalMachinePrices)[machine as usize / 2];
+        let thousands = if machine % 2 == 0 { byte >> 4 } else { byte & 0xF };
+        return Some([0, thousands << 4, 0]);
+    }
+    let row = &rom_slice(pokered_symbols::ItemPrices)[(id as usize - 1) * 3..][..3];
+    Some([row[0], row[1], row[2]])
+}
+
+/// `IsKeyItem_`: an HM counts, a TM does not, and everything below them is one bit of
+/// `KeyItemFlags`.
+pub fn is_key_item(item: ItemId) -> bool {
+    use crate::rom_gfx::rom_slice;
+    use crate::symbols::pokered_symbols;
+    let id = item as u8;
+    if id >= ItemId::Hm01Cut as u8 {
+        return item.is_hm();
+    }
+    let bit = id - 1;
+    rom_slice(pokered_symbols::KeyItemFlags)[bit as usize / 8] & 1 << (bit % 8) != 0
+}
+
+/// `TMToMove` over `TechnicalMachines`: the move a machine teaches. The HMs follow the 50 TMs in
+/// the table even though their item ids come first.
+pub fn machine_move(item: ItemId) -> Option<PokemonMoveName> {
+    use crate::rom_gfx::rom_slice;
+    use crate::symbols::pokered_symbols;
+    const NUM_TMS: u8 = 50;
+    let id = item as u8;
+    let index = if item.is_hm() {
+        NUM_TMS + id - ItemId::Hm01Cut as u8
+    } else if id >= ItemId::Tm01MegaPunch as u8 {
+        id - ItemId::Tm01MegaPunch as u8
+    } else {
+        return None;
+    };
+    PokemonMoveName::from_repr(rom_slice(pokered_symbols::TechnicalMachines)[index as usize])
+}
+
+/// `UsableItems_PartyMenu`: the items that ask which Pokémon to use them on.
+pub fn opens_party_menu(item: ItemId) -> bool {
+    in_terminated_list(crate::symbols::pokered_symbols::UsableItems_PartyMenu, item)
+}
+
+/// `UsableItems_CloseMenu`: the items whose use closes the bag.
+pub fn closes_menu(item: ItemId) -> bool {
+    in_terminated_list(crate::symbols::pokered_symbols::UsableItems_CloseMenu, item)
+}
+
+/// `GuardDrinksList`: what the Saffron guards will take. Terminated by 0 rather than `-1`.
+pub fn is_guard_drink(item: ItemId) -> bool {
+    use crate::rom_gfx::rom_slice;
+    rom_slice(crate::symbols::pokered_symbols::GuardDrinksList)
+        .iter().take_while(|&&b| b != 0).any(|&b| b == item as u8)
+}
+
+/// `VendingPrices`: what the Celadon machine sells, each with its own price in BCD.
+pub fn vending_prices() -> Vec<(ItemId, [u8; 3])> {
+    use crate::rom_gfx::rom_slice;
+    const ENTRIES: usize = 3;
+    rom_slice(crate::symbols::pokered_symbols::VendingPrices)
+        .chunks(4).take(ENTRIES)
+        .map(|e| (ItemId::from_repr(e[0]).expect("a vending item"), [e[1], e[2], e[3]]))
+        .collect()
+}
+
+fn in_terminated_list(list: crate::symbols::DmgPointer, item: ItemId) -> bool {
+    use crate::rom_gfx::rom_slice;
+    rom_slice(list).iter().take_while(|&&b| b != 0xFF).any(|&b| b == item as u8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::charmap::encode;
+
+    /// `bcd3`: three bytes, most significant first, two digits a byte.
+    fn bcd(price: [u8; 3]) -> u32 {
+        price.iter().fold(0, |n, &b| n * 100 + (b >> 4) as u32 * 10 + (b & 0xF) as u32)
+    }
+
+    #[test]
+    fn prices_match_the_table_and_a_machine_costs_its_nybble_of_thousands() {
+        assert_eq!(price(ItemId::MasterBall).map(bcd), Some(0));
+        assert_eq!(price(ItemId::UltraBall).map(bcd), Some(1200));
+        assert_eq!(price(ItemId::Potion).map(bcd), Some(300));
+        assert_eq!(price(ItemId::Nugget).map(bcd), Some(10000), "six digits");
+        assert_eq!(price(ItemId::Tm01MegaPunch).map(bcd), Some(3000), "the first nybble");
+        assert_eq!(price(ItemId::Tm02RazorWind).map(bcd), Some(2000), "the second");
+        assert_eq!(price(ItemId::Hm01Cut), None, "an HM is priceless");
+    }
+
+    #[test]
+    fn a_key_item_is_a_flag_and_every_hm_is_one() {
+        assert!(is_key_item(ItemId::TownMap) && is_key_item(ItemId::Bicycle));
+        assert!(!is_key_item(ItemId::Potion) && !is_key_item(ItemId::MasterBall));
+        assert!(is_key_item(ItemId::Hm01Cut), "an HM cannot be tossed or sold");
+        assert!(!is_key_item(ItemId::Tm01MegaPunch), "a TM can");
+    }
+
+    #[test]
+    fn a_machine_teaches_its_move_and_the_hms_follow_the_tms() {
+        use crate::move_name::PokemonMoveName::*;
+        assert_eq!(machine_move(ItemId::Tm01MegaPunch), Some(MegaPunch));
+        assert_eq!(machine_move(ItemId::Hm01Cut), Some(Cut));
+        assert_eq!(machine_move(ItemId::Hm05Flash), Some(Flash));
+        assert_eq!(machine_move(ItemId::Potion), None);
+    }
+
+    #[test]
+    fn the_use_lists_and_the_vending_machine_read_back() {
+        assert!(opens_party_menu(ItemId::Potion) && opens_party_menu(ItemId::RareCandy));
+        assert!(!opens_party_menu(ItemId::EscapeRope));
+        assert!(closes_menu(ItemId::EscapeRope) && closes_menu(ItemId::PokeFlute));
+        assert!(!closes_menu(ItemId::Potion));
+        assert!(is_guard_drink(ItemId::FreshWater) && !is_guard_drink(ItemId::Potion));
+        let vending: Vec<_> = vending_prices().into_iter().map(|(item, p)| (item, bcd(p))).collect();
+        assert_eq!(vending, [(ItemId::FreshWater, 200), (ItemId::SodaPop, 300), (ItemId::Lemonade, 350)]);
+    }
 
     #[test]
     fn names_come_from_the_cartridge_and_machines_are_numbered() {

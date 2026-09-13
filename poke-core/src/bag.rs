@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 use crate::item::ItemId;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BagItem {
     pub id:       ItemId,
     pub quantity: u8,
