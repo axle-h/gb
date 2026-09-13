@@ -1865,6 +1865,12 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
                 _ => format!("talk to {name}"),
             }
         }
+        // No switch and no hole on this map, so the shove is the whole action.
+        MetaTile::BoulderPush { boulder, dir } => format!(
+            "push the boulder at ({}, {}) one square {}, to get it out of the way (you stand at \
+             ({}, {}))",
+            boulder.x, boulder.y, crate::pokemon::tile_map::push_word(dir),
+            action.destination.x, action.destination.y),
         other => format!("walk to {other}"),
     }
 }

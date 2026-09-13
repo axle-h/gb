@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use gb::joypad::JoypadButton;
 use poke_core::geometry::Point8;
 use crate::pokemon::map::Map;
 
@@ -29,6 +30,9 @@ pub enum MetaTile {
     Fish { rod: crate::pokemon::postgame::fishing::Rod },
     /// Floor or water to walk up and down until something attacks, where there is no grass.
     Pace { water: bool },
+    /// One shove of the boulder at `boulder`, one square in `dir`. Offered only where the map has
+    /// no switch and no hole to aim at, so getting it out of the way is the whole action.
+    BoulderPush { boulder: Point8, dir: JoypadButton },
 }
 
 impl MetaTile {
@@ -58,6 +62,8 @@ impl MetaTile {
             Self::BoulderGoal { hole, .. } =>
                 if *hole { "PushBoulderIntoHole".into() } else { "PushBoulderOntoSwitch".into() },
             Self::Cut { .. } => "CutTree".into(),
+            // The direction is part of the id: one row per way the boulder will actually go.
+            Self::BoulderPush { dir, .. } => format!("PushBoulder{dir}").into(),
             Self::Pace { water: true } => "PaceOnWater".into(),
             other => other.kind().into(),
         }
@@ -92,6 +98,10 @@ impl Display for MetaTile {
             Self::Grass => write!(f, "tall grass"),
             Self::Pace { water: false } => write!(f, "the floor, to walk it for wild Pokémon"),
             Self::Pace { water: true } => write!(f, "the water, to surf it for wild Pokémon"),
+            // Nothing on this map to aim at, so the row names the shove rather than a goal.
+            Self::BoulderPush { boulder, dir } => write!(
+                f, "the boulder at ({}, {}), to push it {} out of the way",
+                boulder.x, boulder.y, crate::pokemon::tile_map::push_word(*dir)),
         }
     }
 }

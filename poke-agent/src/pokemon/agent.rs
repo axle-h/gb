@@ -679,6 +679,9 @@ pub struct PokemonAgent {
     boulder_goal_stale: u8,
     /// Shoves the game never answered ([`DRIVER_ESCAPE_SILENCE`] under `PushingBoulder`).
     boulder_goal_silences: u8,
+    /// The one-shove row being carried out on a map with nothing to aim at. A bare shove has no
+    /// goal around it to report, so the row it came from is held here until the boulder moves.
+    boulder_push_row: Option<MetaTile>,
     /// Consecutive `OverworldMovement` ticks on which the chosen row was absent from `actions()`.
     route_lost_ticks: u16,
     /// `MetaTileMap::row_blocked_by_people` for this walk's row, asked once when
@@ -778,6 +781,7 @@ impl PokemonAgent {
             boulder_goal_best: usize::MAX,
             boulder_goal_stale: 0,
             boulder_goal_silences: 0,
+            boulder_push_row: None,
             route_lost_ticks: 0,
             route_lost_to_people: false,
             last_map: None,
@@ -1631,6 +1635,9 @@ impl PokemonAgent {
             if self.boulder_goal.is_some() && matches!(self.state, AgentState::PushingBoulder { .. }) {
                 self.boulder_goal_silences = self.boulder_goal_silences.saturating_add(1);
             }
+            // A one-shove row that went silent is dropped here, or it would report itself completed
+            // on somebody else's shove later in the run.
+            self.boulder_push_row = None;
             api.release_all_buttons();
             self.set_state(AgentState::Idle);
             self.event(AgentEvent::TextBox { message: abandoned });
@@ -2070,6 +2077,18 @@ CascadeBadge; not cutting".to_string(),
                                     self.boulder_goal_silences = 0;
                                     self.set_state(AgentState::SolvingBoulderPuzzle {
                                         boulder, target: at, hole, pushes: 0, settle: 0 });
+                                    return Ok(());
+                                }
+                                if let MetaTile::BoulderPush { boulder, dir } = destination {
+                                    api.release_all_buttons();
+                                    // The same last line of defence as `CutTree`.
+                                    if let Some(refusal) = game_state.map.boulder_push_refusal(boulder, dir) {
+                                        self.event(AgentEvent::TextBox { message: refusal });
+                                        self.set_state(AgentState::Idle);
+                                        return Ok(());
+                                    }
+                                    self.boulder_push_row = Some(destination);
+                                    self.set_state(AgentState::PushingBoulder { boulder, dir, armed: false });
                                     return Ok(());
                                 }
                                 new_events.push(AgentEvent::OverworldActionCompleted { destination });
@@ -3269,7 +3288,13 @@ CascadeBadge; not cutting".to_string(),
                             let pushes = self.boulder_goal_pushes;
                             self.set_state(AgentState::SolvingBoulderPuzzle { boulder, target, hole, pushes, settle: 0 });
                         }
-                        None => self.set_state(AgentState::Idle),
+                        // A one-shove row is done here: the boulder moving is the whole of it.
+                        None => {
+                            if let Some(row) = self.boulder_push_row.take() {
+                                self.event(AgentEvent::OverworldActionCompleted { destination: row });
+                            }
+                            self.set_state(AgentState::Idle);
+                        }
                     }
                     return Ok(());
                 }
@@ -3285,6 +3310,11 @@ CascadeBadge; not cutting".to_string(),
                             OverworldActionAbortedReason::Unknown,
                             Some(at),
                         );
+                        return Ok(());
+                    }
+                    // A one-shove row reports the same way, so a refusal is never silent.
+                    if let Some(row) = self.boulder_push_row.take() {
+                        self.abort_overworld(row, OverworldActionAbortedReason::Unknown, Some(at));
                         return Ok(());
                     }
                     self.set_state(AgentState::Idle);
