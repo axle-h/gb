@@ -38,6 +38,10 @@ impl ModeUpdate for BuySellQuitMenu {
         self.input.call(ctx);
     }
 
+    fn open(&mut self, ctx: &mut Ctx) -> Transition {
+        self.update(ctx)
+    }
+
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
         let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
         ctx.menu.unfilled_cursor(&mut ctx.screen.ui);

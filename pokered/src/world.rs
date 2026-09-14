@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use poke_core::text_script::{TextBuffer, TextMoney, TextNumber};
 use serde::{Deserialize, Serialize};
 use crate::party::{Named, PartyMon, Pokedex};
+use crate::systems::inventory::Inventory;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct World {
@@ -15,6 +16,8 @@ pub struct World {
     pub party: Vec<Named<PartyMon>>,
     /// `wPokedexOwned` and `wPokedexSeen`.
     pub pokedex: Pokedex,
+    /// `wNumBagItems` and `wBagItems`.
+    pub bag: Inventory,
     /// `wPlayerMoney`, BCD, two digits to a byte.
     pub money: [u8; 3],
     /// `BIT_NO_TEXT_DELAY`.

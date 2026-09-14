@@ -4,16 +4,18 @@
 //! buffer or a number at it, and wait for the player. A `<DONE>` or `<PROMPT>` inside a printed run
 //! ends the whole script, which is why the printer reports how it returned.
 
-use poke_core::text_script::TextCommand;
+use poke_core::species::PokemonSpecies;
+use poke_core::text_script::{TextCommand, TextSound};
 use serde::{Deserialize, Serialize};
+use crate::audio::data::sounds;
 use crate::command::Decision;
 use crate::gfx::text_boxes::TextBoxId;
 use crate::gfx::ui::UiSurface;
 use crate::input::Joypad;
 use crate::mode::{Ctx, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::blink::ArrowBlink;
-use crate::modes::place_string::{ch, PlaceString, Printed, ARROW, FIRST_LINE, SECOND_LINE};
-use crate::systems::print_num::{print_bcd, print_number, BcdFormat, NumberFormat};
+use crate::modes::place_string::{ch, LetterDelay, PlaceString, Printed, ARROW, FIRST_LINE, SECOND_LINE};
+use crate::systems::print_num::{bcd_writes, print_number, BcdFormat, BcdWrite, NumberFormat};
 
 /// `wTileMap`: `TX_MOVE` and `TX_BOX` name a tile by its address, and the engine works in indices.
 const TILE_MAP: u16 = 0xC3A0;
@@ -36,10 +38,8 @@ pub struct TextBox {
     answered: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum Phase {
-    /// `PrintText`'s `Delay3` after drawing the box.
-    Opening(u8),
     /// A command is printing, or the next one runs this frame.
     Running,
     /// `ManualTextScroll`, with the `▼` up for `TX_PROMPT_BUTTON` and not for `TX_WAIT_BUTTON`.
@@ -48,6 +48,10 @@ enum Phase {
     Pausing(u8),
     /// `TX_DOTS`: a `…` every ten frames, or at once while A or B is held.
     Dotting { left: u8, frames: u8 },
+    /// `TX_BCD`: `PrintBCDNumber`'s writes, a letter delay after each digit.
+    Digits { writes: Vec<BcdWrite>, next: usize, end: u16, delay: Option<LetterDelay> },
+    /// `TX_SOUND`'s `WaitForSoundToFinish`, or `PlayCry`'s own.
+    Sounding,
 }
 
 impl TextBox {
@@ -57,7 +61,7 @@ impl TextBox {
     }
 
     pub fn script(commands: Vec<TextCommand>) -> Self {
-        Self { commands, index: 0, dest: FIRST_LINE, printer: None, phase: Phase::Opening(3), answered: 0 }
+        Self { commands, index: 0, dest: FIRST_LINE, printer: None, phase: Phase::Running, answered: 0 }
     }
 
     pub fn answered(&self) -> u32 {
@@ -111,7 +115,9 @@ impl TextBox {
             TextCommand::Bcd { source, skip_leading_zeroes, left_align, money_sign, .. } => {
                 let digits = ctx.world.text.bcd(source);
                 let format = BcdFormat { skip_leading_zeroes, left_align, money_sign };
-                self.dest = print_bcd(&mut ctx.screen.ui, self.dest as usize, &digits, format) as u16;
+                let (writes, end) = bcd_writes(self.dest as usize, &digits, format);
+                self.phase = Phase::Digits { writes, next: 0, end: end as u16, delay: None };
+                return Some(self.digits(ctx));
             }
             TextCommand::Low => self.dest = SECOND_LINE,
             TextCommand::Move(at) => self.dest = at.wrapping_sub(TILE_MAP),
@@ -132,7 +138,8 @@ impl TextBox {
                     PlaceString::put(&mut ctx.screen.ui, ARROW, ch::DOWN_ARROW);
                 }
                 self.phase = Phase::Waiting { arrow, blink: ArrowBlink::default() };
-                return Some(Transition::Stay);
+                // `ManualTextScroll` reads the pad in the frame it is called.
+                return Some(self.wait(ctx));
             }
             TextCommand::Pause => {
                 ctx.pad.poll();
@@ -146,11 +153,74 @@ impl TextBox {
                 self.phase = Phase::Dotting { left: dots, frames: 0 };
                 return Some(Transition::Stay);
             }
-            // The audio engine's, and the 599 escapes are each their own chunk's.
-            TextCommand::Sound(_) => {}
+            TextCommand::Sound(sound) => {
+                match sound {
+                    TextSound::CryNidorina => ctx.audio.play_cry(PokemonSpecies::Nidorina as u8),
+                    TextSound::CryPidgeot => ctx.audio.play_cry(PokemonSpecies::Pidgeot as u8),
+                    TextSound::CryDewgong => ctx.audio.play_cry(PokemonSpecies::Dewgong as u8),
+                    // `SFX_GET_ITEM_1` is `SFX_LEVEL_UP`'s id in the battle bank, so which plays is
+                    // the bank's business.
+                    TextSound::GetItem1 | TextSound::GetItem1Duplicate => ctx.audio.play_sound(sounds::SFX_GET_ITEM_1),
+                    TextSound::GetItem2 => ctx.audio.play_sound(sounds::SFX_GET_ITEM_2),
+                    TextSound::GetKeyItem => ctx.audio.play_sound(sounds::SFX_GET_KEY_ITEM),
+                    TextSound::CaughtMon => ctx.audio.play_sound(sounds::SFX_CAUGHT_MON),
+                    TextSound::DexPageAdded => ctx.audio.play_sound(sounds::SFX_DEX_PAGE_ADDED),
+                    TextSound::PokedexRating => ctx.audio.play_sound(sounds::SFX_POKEDEX_RATING),
+                }
+                if ctx.pacing != crate::Pacing::Instant && !ctx.audio.sound_finished() {
+                    self.phase = Phase::Sounding;
+                    return Some(Transition::Stay);
+                }
+            }
+            // The 599 escapes are each their own chunk's.
             TextCommand::Asm(_) => return Some(Transition::Pop(Outcome::Done)),
         }
         None
+    }
+
+    /// `PrintBCDNumber`'s writes up to the next letter delay, then the next command.
+    fn digits(&mut self, ctx: &mut Ctx) -> Transition {
+        let Phase::Digits { writes, mut next, end, mut delay } = std::mem::replace(&mut self.phase, Phase::Running) else {
+            unreachable!("only a number being printed has digits");
+        };
+        if let Some(waiting) = &mut delay {
+            if !waiting.update(ctx) {
+                self.phase = Phase::Digits { writes, next, end, delay };
+                return Transition::Stay;
+            }
+        }
+        while let Some(&BcdWrite { at, tile, delayed }) = writes.get(next) {
+            PlaceString::put(&mut ctx.screen.ui, at as u16, tile);
+            next += 1;
+            if delayed && let Some(waiting) = LetterDelay::start(ctx) {
+                self.phase = Phase::Digits { writes, next, end, delay: Some(waiting) };
+                return Transition::Stay;
+            }
+        }
+        self.dest = end;
+        self.run(ctx)
+    }
+
+    /// `ManualTextScroll`: one pass of its loop, which answers or blinks.
+    fn wait(&mut self, ctx: &mut Ctx) -> Transition {
+        let Phase::Waiting { arrow, mut blink } = self.phase else {
+            unreachable!("only a waiting box reads the pad for its prompt");
+        };
+        if ctx.pad.low_sensitivity(ctx.frame_counter).intersects(Joypad::A | Joypad::B) {
+            self.answered += 1;
+            if arrow {
+                PlaceString::put(&mut ctx.screen.ui, ARROW, UiSurface::BLANK);
+            }
+            self.phase = Phase::Running;
+            return self.run(ctx);
+        }
+        if let Some(shown) = blink.tick(BLINK_PER_FRAME)
+            && arrow
+        {
+            PlaceString::put(&mut ctx.screen.ui, ARROW, if shown { ch::DOWN_ARROW } else { UiSurface::BLANK });
+        }
+        self.phase = Phase::Waiting { arrow, blink };
+        Transition::Stay
     }
 
     /// One `…` of `TX_DOTS`, which waits ten frames unless A or B is held.
@@ -174,33 +244,24 @@ impl ModeUpdate for TextBox {
     /// `DisplayTextBoxID` with `MESSAGE_BOX`.
     fn enter(&mut self, ctx: &mut Ctx) {
         TextBoxId::MessageBox.draw(&mut ctx.screen.ui);
-        self.phase = Phase::Opening(self.delay(ctx, 3));
+    }
+
+    /// `PrintText`'s `Delay3` after drawing the box is loading and not modelled, so the first
+    /// command runs in the frame the box goes up.
+    fn open(&mut self, ctx: &mut Ctx) -> Transition {
+        self.run(ctx)
     }
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
         match self.phase {
-            Phase::Opening(frames) if frames > 1 => {
-                self.phase = Phase::Opening(frames - 1);
-                Transition::Stay
+            Phase::Running => self.run(ctx),
+            Phase::Waiting { .. } => self.wait(ctx),
+            Phase::Digits { .. } => self.digits(ctx),
+            Phase::Sounding if ctx.audio.sound_finished() => {
+                self.phase = Phase::Running;
+                self.run(ctx)
             }
-            Phase::Opening(_) | Phase::Running => self.run(ctx),
-            Phase::Waiting { arrow, mut blink } => {
-                if ctx.pad.low_sensitivity(ctx.frame_counter).intersects(Joypad::A | Joypad::B) {
-                    self.answered += 1;
-                    if arrow {
-                        PlaceString::put(&mut ctx.screen.ui, ARROW, UiSurface::BLANK);
-                    }
-                    self.phase = Phase::Running;
-                    return self.run(ctx);
-                }
-                if let Some(shown) = blink.tick(BLINK_PER_FRAME)
-                    && arrow
-                {
-                    PlaceString::put(&mut ctx.screen.ui, ARROW, if shown { ch::DOWN_ARROW } else { UiSurface::BLANK });
-                }
-                self.phase = Phase::Waiting { arrow, blink };
-                Transition::Stay
-            }
+            Phase::Sounding => Transition::Stay,
             Phase::Pausing(frames) if frames > 1 => {
                 self.phase = Phase::Pausing(frames - 1);
                 Transition::Stay
@@ -278,9 +339,9 @@ mod tests {
     }
 
     #[test]
-    fn the_box_opens_three_frames_before_the_first_letter_and_letters_come_every_three() {
+    fn the_first_letter_goes_up_with_the_box_and_letters_come_every_three() {
         let mut game = game("AB@", Pacing::Faithful);
-        assert_eq!(frames_until(&mut game, |g| row(g, 14) == "A"), 3);
+        assert_eq!(frames_until(&mut game, |g| row(g, 14) == "A"), 0);
         assert_eq!(frames_until(&mut game, |g| row(g, 14) == "AB"), 3);
         assert_eq!(frames_until(&mut game, |g| g.modes().is_empty()), 3);
     }
@@ -298,11 +359,10 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_waits_three_frames_then_takes_a_fresh_press() {
+    fn a_prompt_waits_from_the_frame_its_arrow_goes_up_and_takes_a_fresh_press() {
         let mut game = game("A<PROMPT>", Pacing::Faithful);
         frames_until(&mut game, |g| row(g, 16).ends_with('v'));
-        assert_eq!(game.status(), Status::Busy, "ProtectedDelay3");
-        assert_eq!(frames_until(&mut game, |g| g.status() == Status::Waiting(Decision::Text)), 3);
+        assert_eq!(game.status(), Status::Waiting(Decision::Text), "no ProtectedDelay3");
 
         game.frame(Input::Buttons(Joypad::A));
         assert!(game.modes().is_empty(), "a prompt ends the text");

@@ -11,6 +11,7 @@ mod palettes;
 mod pokedex;
 mod pokemon;
 mod stats;
+mod status_screen;
 
 use gb::core::CoreMode;
 use gb::cycles::MachineCycles;
@@ -85,6 +86,12 @@ impl Oracle {
     /// `call routine`, with the registers as set, run until it returns. A banked routine gets its
     /// bank mapped and `hLoadedROMBank` set, as `farcall` would leave them.
     pub fn call(&mut self, routine: DmgPointer) -> Called {
+        self.call_until(routine, &[]).0
+    }
+
+    /// `call`, stopped at the first of `stops` reached instead of at the return: for a routine
+    /// that goes on to wait for a frame, which a masked machine never gives it. `None` is a return.
+    pub fn call_until(&mut self, routine: DmgPointer, stops: &[DmgPointer]) -> (Called, Option<DmgPointer>) {
         let mmu = self.gb.core_mut().mmu_mut();
         if let DmgBank::ROM { bank } = routine.bank && routine.address >= 0x4000 {
             mmu.write(MBC_ROM_BANK, bank);
@@ -98,6 +105,8 @@ impl Oracle {
 
         let random = breakpoint(pokered_symbols::Random);
         let trap = Breakpoint::new(0, TRAP);
+        let mut points = vec![trap, random];
+        points.extend(stops.iter().map(|&stop| breakpoint(stop)));
         let mut called = Called::default();
         let budget = MachineCycles::PER_FRAME * 600;
         loop {
@@ -106,9 +115,13 @@ impl Oracle {
                 assert!(matches!(stop, Stop::Returned { .. }), "Random did not return: {stop:?}");
                 called.rng.push(self.registers().a);
             }
-            match self.gb.run_until(&[trap, random], budget).0 {
-                Stop::Breakpoint(hit) if hit == trap => return called,
-                Stop::Breakpoint(_) => {}
+            match self.gb.run_until(&points, budget).0 {
+                Stop::Breakpoint(hit) if hit == trap => return (called, None),
+                Stop::Breakpoint(hit) if hit == random => {}
+                Stop::Breakpoint(hit) => {
+                    let stop = stops.iter().copied().find(|&stop| breakpoint(stop) == hit).expect("a stop");
+                    return (called, Some(stop));
+                }
                 stop => panic!("{routine} did not return: {stop:?}"),
             }
         }

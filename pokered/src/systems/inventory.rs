@@ -41,6 +41,13 @@ pub struct RemoveInput {
     pub quantity: u8,
 }
 
+/// An empty bag.
+impl Default for Inventory {
+    fn default() -> Self {
+        Self::bag(Vec::new())
+    }
+}
+
 impl Inventory {
     pub fn bag(items: Vec<BagItem>) -> Self {
         Self { items, capacity: BAG_ITEM_CAPACITY }

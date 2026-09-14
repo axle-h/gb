@@ -71,14 +71,9 @@ pub struct NamingScreen {
     lower_case: bool,
     /// `wNamingScreenSubmitName`.
     submit: bool,
-    phase: Phase,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-enum Phase {
-    /// `PrintAlphabet`'s `Delay3`, on the way in and after every case switch.
-    Drawing(u8),
-    Input,
+    /// Whether the input loop has run since the screen was drawn, which is when it takes a press:
+    /// `AnimatePartyMon_ForceSpeed1` waits a frame before every read of the pad.
+    polling: bool,
 }
 
 impl NamingScreen {
@@ -91,7 +86,7 @@ impl NamingScreen {
             column: FIRST_COLUMN,
             lower_case: false,
             submit: false,
-            phase: Phase::Drawing(3),
+            polling: false,
         }
     }
 
@@ -280,7 +275,6 @@ impl NamingScreen {
         }
         self.print_name(ctx);
         self.place_cursor(ctx);
-        self.phase = Phase::Input;
         Transition::Stay
     }
 }
@@ -294,42 +288,35 @@ impl ModeUpdate for NamingScreen {
         self.print_header(&mut ctx.screen.ui);
         ctx.menu.last_item = self.row;
         self.print_alphabet(&mut ctx.screen.ui);
-        self.phase = Phase::Drawing(3);
+    }
+
+    /// `PrintAlphabet`'s `Delay3` is loading and not modelled, so the name and the cursor go up in
+    /// the frame the alphabet does.
+    fn open(&mut self, ctx: &mut Ctx) -> Transition {
+        self.redraw(ctx)
     }
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
-        match self.phase {
-            Phase::Drawing(frames) if frames > 1 => {
-                self.phase = Phase::Drawing(frames - 1);
-                Transition::Stay
+        self.polling = true;
+        let keys = ctx.pad.low_sensitivity(ctx.frame_counter);
+        if keys.is_empty() {
+            return Transition::Stay;
+        }
+        match self.pressed(keys, ctx) {
+            Return::Alphabet => {
+                self.print_alphabet(&mut ctx.screen.ui);
+                self.redraw(ctx)
             }
-            Phase::Drawing(_) => self.redraw(ctx),
-            Phase::Input => {
-                let keys = ctx.pad.low_sensitivity(ctx.frame_counter);
-                if keys.is_empty() {
-                    return Transition::Stay;
-                }
-                match self.pressed(keys, ctx) {
-                    Return::Alphabet => {
-                        self.print_alphabet(&mut ctx.screen.ui);
-                        self.phase = Phase::Drawing(3);
-                        Transition::Stay
-                    }
-                    Return::Name => self.redraw(ctx),
-                    Return::Cursor => {
-                        self.place_cursor(ctx);
-                        Transition::Stay
-                    }
-                }
+            Return::Name => self.redraw(ctx),
+            Return::Cursor => {
+                self.place_cursor(ctx);
+                Transition::Stay
             }
         }
     }
 
     fn status(&self) -> Status {
-        match self.phase {
-            Phase::Input => Status::Waiting(Decision::NamingScreen),
-            _ => Status::Busy,
-        }
+        if self.polling { Status::Waiting(Decision::NamingScreen) } else { Status::Busy }
     }
 }
 

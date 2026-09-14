@@ -50,7 +50,7 @@ fn encode_box(mon: &BoxMon) -> Vec<u8> {
     bytes
 }
 
-fn encode_party(mon: &PartyMon) -> Vec<u8> {
+pub(super) fn encode_party(mon: &PartyMon) -> Vec<u8> {
     let mut bytes = encode_box(&mon.mon);
     bytes.push(mon.level);
     bytes.extend(mon.stats.iter().flat_map(|stat| stat.to_be_bytes()));
@@ -74,7 +74,7 @@ fn decode_box(b: &[u8]) -> BoxMon {
     }
 }
 
-fn decode_party(b: &[u8]) -> PartyMon {
+pub(super) fn decode_party(b: &[u8]) -> PartyMon {
     PartyMon { mon: decode_box(b), level: b[33], stats: [0, 1, 2, 3, 4].map(|i| be16(&b[34 + 2 * i..])) }
 }
 

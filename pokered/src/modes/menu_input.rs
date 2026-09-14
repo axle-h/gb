@@ -44,6 +44,13 @@ pub struct CursorMemory {
     /// `wChosenMenuItem` and `wMenuExitMethod`, which a caller reads after its menu has gone.
     pub chosen_item: u8,
     pub exit_method: MenuExit,
+    /// `wBagSavedMenuItem`: where the bag reopens.
+    #[serde(default)]
+    pub bag_saved: u8,
+    /// `wListScrollOffset`, which outlives a list: the bag reopens scrolled where it was left, and
+    /// the mart zeroes it and puts it back.
+    #[serde(default)]
+    pub list_scroll: u8,
 }
 
 impl CursorMemory {
@@ -90,40 +97,36 @@ pub struct MenuInput {
     pub return_at_ends: bool,
     /// `wMenuWrappingEnabled`.
     pub wrapping: bool,
-    /// `Delay3` after placing the cursor, counting down; polling once it is zero.
-    delay: u8,
+    /// `BIT_DOUBLE_SPACED_MENU` set, which despite its name steps the cursor one row per item.
+    #[serde(default)]
+    pub single_spaced: bool,
+    /// Whether the pad has been read since the call. A menu reports `Waiting` only once it has, so
+    /// a driver's release is always seen before its next press.
+    #[serde(default)]
+    polled: bool,
     blink: Option<ArrowBlink>,
 }
 
 impl MenuInput {
     pub fn new(current: u8, max: u8, top: (u8, u8), watched: Joypad) -> Self {
-        Self { current, max, top, watched, return_at_ends: false, wrapping: false, delay: 0, blink: None }
+        Self { current, max, top, watched, return_at_ends: false, wrapping: false, single_spaced: false, polled: false, blink: None }
     }
 
     pub fn is_polling(&self) -> bool {
-        self.delay == 0
+        self.polled
     }
 
-    /// The call. The blink starts afresh on each one, and only if the `▼` is already up.
+    /// The call, up to `.loop1`'s cursor. Its `Delay3` is loading and not modelled, so a caller
+    /// whose loop has no `DelayFrame` of its own runs `update` in this same frame.
     pub fn call(&mut self, ctx: &mut Ctx) {
         self.blink = (ctx.screen.ui.get(ARROW.0, ARROW.1) == DOWN_ARROW).then(ArrowBlink::default);
-        self.restart(ctx);
-    }
-
-    /// `.loop1`: place the cursor, then `Delay3`.
-    fn restart(&mut self, ctx: &mut Ctx) {
+        self.polled = false;
         self.place_cursor(&mut ctx.screen.ui, ctx.menu);
-        self.delay = 3;
     }
 
-    /// One frame of `HandleMenuInput`; `Some(hJoy5)` when it returns.
+    /// One frame of `HandleMenuInput`'s `.loop2`; `Some(hJoy5)` when it returns.
     pub fn update(&mut self, ctx: &mut Ctx) -> Option<Joypad> {
-        if self.delay > 0 {
-            self.delay -= 1;
-            if self.delay > 0 {
-                return None;
-            }
-        }
+        self.polled = true;
         let keys = ctx.pad.low_sensitivity(ctx.frame_counter);
         if keys.is_empty() {
             if let Some(shown) = self.blink.as_mut().and_then(|blink| blink.tick(BLINK_PER_FRAME)) {
@@ -153,14 +156,16 @@ impl MenuInput {
             self.wrapping = false;
             return Some(keys);
         }
-        self.restart(ctx);
+        // Back to `.loop1`, whose `Delay3` is not modelled: the cursor moves in the frame the key lands.
+        self.place_cursor(&mut ctx.screen.ui, ctx.menu);
         None
     }
 
     /// `PlaceMenuCursor`, for a double-spaced menu.
     pub fn place_cursor(&mut self, ui: &mut UiSurface, memory: &mut CursorMemory) {
         let top = self.top.1 as usize * SCREEN_TILES_X + self.top.0 as usize;
-        let row = |item: u8| top + item as usize * 2 * SCREEN_TILES_X;
+        let spacing = if self.single_spaced { 1 } else { 2 };
+        let row = |item: u8| top + item as usize * spacing * SCREEN_TILES_X;
         let old = row(memory.last_item);
         if tile_at(ui, old) == CURSOR {
             put(ui, old, memory.tile_behind);

@@ -11,7 +11,8 @@ use pokered::world::World;
 use pokered::{Game, Input, Pacing};
 use crate::pokemon::item::ItemId;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
-use super::{breakpoint, cartridge_until_polling, joypad, recreation_until_polling, tile_row, to_vblank};
+use super::{assert_late, breakpoint, cartridge_until_polling, joypad, recreation_until_polling, tile_row, to_vblank,
+            CURSOR, LIST, LIST_REDRAWN};
 
 const ITEM_ROW: u8 = 2;
 
@@ -72,8 +73,18 @@ fn recreation_box(game: &Game) -> Vec<Vec<u8>> {
     (2..=12).map(|y| game.ui().row(y)[4..].to_vec()).collect()
 }
 
-/// The same box wherever both poll. The cartridge may get there late, never early: printing the
-/// entries can outlast a frame, and lag frames are not modelled.
+/// Whether a press returns from `HandleMenuInput` and so prints the list again: SELECT, or a step
+/// off either end of the three cursor rows. Anything else moves the cursor inside it.
+fn redraws(gb: &GameBoy, press: Joypad) -> bool {
+    let mmu = gb.core().mmu();
+    let current = mmu.read_pointer(&pokered_symbols::wCurrentMenuItem);
+    let max = mmu.read_pointer(&pokered_symbols::wMaxMenuItem);
+    press == Joypad::SELECT || (press == Joypad::UP && current == 0) || (press == Joypad::DOWN && current == max)
+}
+
+/// The same box wherever both poll, the cartridge late by the loading the recreation leaves out:
+/// opening the list, printing it again, or placing the cursor. Printing the entries can also
+/// outlast a frame, and lag frames are not modelled.
 fn compare(presses: &[Joypad]) {
     let (mut gb, returns) = open_the_bag();
     let menu = the_list(&gb);
@@ -81,14 +92,14 @@ fn compare(presses: &[Joypad]) {
     let mut game = Game::new(World::default(), GameRng::seeded(0), Pacing::Faithful);
     game.push(Mode::ListMenu(menu));
     to_vblank(&mut gb);
-    assert_eq!(cartridge_box(&gb), recreation_box(&game), "the box as drawn");
 
     let (last, presses) = presses.split_last().unwrap();
+    let mut loading = LIST;
     for (step, &press) in presses.iter().chain([last]).enumerate() {
         let (cartridge, recreation) = (cartridge_until_polling(&mut gb), recreation_until_polling(&mut game, Decision::List));
         assert_eq!(cartridge_box(&gb), recreation_box(&game), "polling before press {step}");
-        assert!((0..=2).contains(&(cartridge as i64 - recreation as i64)),
-            "before press {step} the cartridge took {cartridge} frames and the recreation {recreation}");
+        assert_late(cartridge, recreation, loading, &format!("before press {step}"));
+        loading = if redraws(&gb, press) { LIST_REDRAWN } else { CURSOR };
         gb.hold_buttons(joypad(press));
         game.frame(Input::Buttons(press));
         if step == presses.len() {

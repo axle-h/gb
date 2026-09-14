@@ -137,6 +137,10 @@ impl ModeUpdate for TwoOptionMenu {
         self.input.call(ctx);
     }
 
+    fn open(&mut self, ctx: &mut Ctx) -> Transition {
+        self.update(ctx)
+    }
+
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
         match self.phase {
             Phase::Leaving(frames) if frames > 1 => {
@@ -153,7 +157,7 @@ impl ModeUpdate for TwoOptionMenu {
                 if backed_out && self.id == TwoOptionMenuId::NoYes {
                     // The one menu B cannot answer: it asks again.
                     self.input.call(ctx);
-                    return Transition::Stay;
+                    return self.update(ctx);
                 }
                 // B is not a refusal here, it picks the second option, which is the safe one.
                 self.chosen = if backed_out { 1 } else { self.input.current };

@@ -346,6 +346,11 @@ impl AudioEngine {
         self.audio_fade_out_control = frames;
     }
 
+    /// `rAUDVOL` written from outside the engine, as the status screen turns the music down with.
+    pub fn set_master_volume(&mut self, value: u8) {
+        self.write_register(0xFF24, value);
+    }
+
     /// `AudioN_OverwriteChannelPointer`: `Music_RivalAlternateStart` and the Poké Flute start a
     /// song and then move a channel to different data. Nothing else in the game edits a pointer.
     pub fn overwrite_channel_pointer(&mut self, channel: usize, address: u16) {

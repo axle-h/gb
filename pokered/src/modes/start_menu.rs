@@ -11,7 +11,9 @@ use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
 use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::menu_input::MenuInput;
+use crate::modes::item_menu::ItemMenu;
 use crate::modes::option_menu::OptionMenu;
+use crate::modes::pokemon_menu::PokemonMenu;
 
 /// The entries in the order `.displayMenuItem` dispatches them, which is the order they are drawn
 /// when the player has the Pokédex. Without it `POKéDEX` is missing and every row moves up one.
@@ -37,19 +39,11 @@ pub struct StartMenu {
     /// `wTileMapBackup2`. The cartridge saves it here and has each sub-menu restore it; restoring
     /// it as the sub-menu returns puts the same screen back a frame earlier.
     saved: Option<UiSurface>,
-    phase: Phase,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-enum Phase {
-    Input,
-    /// `StartMenu_Option`'s `ClearScreen`, whose `Delay3` runs before the option screen draws.
-    ClearingForOption(u8),
 }
 
 impl StartMenu {
     pub fn new() -> Self {
-        Self { entries: Vec::new(), input: MenuInput::new(0, 0, (0, 0), Joypad::empty()), saved: None, phase: Phase::Input }
+        Self { entries: Vec::new(), input: MenuInput::new(0, 0, (0, 0), Joypad::empty()), saved: None }
     }
 
     /// The index under the cursor, counting the blank row past `EXIT` as one past the last.
@@ -122,15 +116,11 @@ impl ModeUpdate for StartMenu {
         self.redisplay(ctx);
     }
 
+    fn open(&mut self, ctx: &mut Ctx) -> Transition {
+        self.update(ctx)
+    }
+
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
-        if let Phase::ClearingForOption(frames) = self.phase {
-            if frames > 1 {
-                self.phase = Phase::ClearingForOption(frames - 1);
-                return Transition::Stay;
-            }
-            self.phase = Phase::Input;
-            return Transition::Push(Mode::OptionMenu(OptionMenu::new()));
-        }
         let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
 
         if keys.contains(Joypad::UP) {
@@ -140,7 +130,7 @@ impl ModeUpdate for StartMenu {
                 ctx.menu.erase_cursor(&mut ctx.screen.ui);
             }
             self.input.call(ctx);
-            return Transition::Stay;
+            return self.update(ctx);
         }
         if keys.contains(Joypad::DOWN) {
             if self.input.current == self.entries.len() as u8 {
@@ -148,7 +138,7 @@ impl ModeUpdate for StartMenu {
                 ctx.menu.erase_cursor(&mut ctx.screen.ui);
             }
             self.input.call(ctx);
-            return Transition::Stay;
+            return self.update(ctx);
         }
 
         ctx.menu.unfilled_cursor(&mut ctx.screen.ui);
@@ -160,10 +150,11 @@ impl ModeUpdate for StartMenu {
         match self.entries.get(self.input.current as usize) {
             Some(StartMenuEntry::Option) => {
                 ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
-                self.phase = Phase::ClearingForOption(3);
-                Transition::Stay
+                Transition::Push(Mode::OptionMenu(OptionMenu::new()))
             }
             // The other five screens are their own chunks; the choice is answered rather than run.
+            Some(StartMenuEntry::Pokemon) => Transition::Push(Mode::PokemonMenu(PokemonMenu::new())),
+            Some(StartMenuEntry::Item) => Transition::Push(Mode::ItemMenu(ItemMenu::new())),
             Some(&entry) if entry != StartMenuEntry::Exit => Transition::Pop(Outcome::Chosen(entry as u8)),
             _ => self.close(ctx),
         }
@@ -175,15 +166,11 @@ impl ModeUpdate for StartMenu {
         }
         ctx.screen.tiles.load_text_box_tiles();
         self.redisplay(ctx);
-        Transition::Stay
+        self.update(ctx)
     }
 
     fn status(&self) -> Status {
-        if self.phase == Phase::Input && self.input.is_polling() {
-            Status::Waiting(Decision::StartMenu)
-        } else {
-            Status::Busy
-        }
+        if self.input.is_polling() { Status::Waiting(Decision::StartMenu) } else { Status::Busy }
     }
 }
 
@@ -324,14 +311,14 @@ mod tests {
     fn a_command_walks_to_the_row_it_names() {
         let mut game = game(true);
         until_waiting(&mut game);
-        let command = Command::ChooseStartMenuEntry(StartMenuEntry::Item);
+        let command = Command::ChooseStartMenuEntry(StartMenuEntry::TrainerInfo);
         assert_eq!(game.frame(Input::Command(command.clone())).reply, Some(Reply::Accepted));
         let mut events = vec![];
         for _ in 0..60 {
             events.extend(game.frame(Input::None).events);
         }
         assert_eq!(events, [Event::CommandDone(command)]);
-        assert!(game.modes().is_empty(), "ITEM is another chunk's, so the choice is answered");
+        assert!(game.modes().is_empty(), "TRAINER INFO is another chunk's, so the choice is answered");
     }
 
     #[test]

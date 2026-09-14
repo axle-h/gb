@@ -26,6 +26,13 @@ pub enum Command {
     ChooseDexEntry(u8),
     /// Back out of whichever of the Pokédex's three screens is up.
     CloseDex,
+    /// Press B through an evolution's animation, which stops it unless an item forced it.
+    CancelEvolution,
+    /// Back out with B from the party menu, the bag's USE/TOSS, or a mon's moves.
+    CancelOption,
+    /// Count up or down to a quantity and take it.
+    ChooseQuantity(u8),
+    CancelQuantity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +54,16 @@ pub enum Decision {
     PokedexSideMenu,
     /// A data page, which is read and then left.
     PokedexData,
+    /// A page of the status screen, which is read and then left.
+    StatusScreen,
+    /// `LearnMove`'s list of the four moves, one of which is to be forgotten.
+    ForgetMove,
+    /// The bag's USE/TOSS menu, which `ChooseOption` answers.
+    UseToss,
+    /// `DisplayChooseQuantityMenu`.
+    Quantity,
+    /// A mon's moves, as the PP items ask for one; `ChooseOption` answers.
+    MoveMenu,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,12 +93,15 @@ pub(crate) struct Executor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 enum Driver {
-    Advance { answered: u32 },
+    /// Holds A until the prompt answers. A box that takes the press can be replaced by another in
+    /// the same frame, with the count it started from, so a wait that ends after a press is an answer
+    /// too.
+    Advance { answered: u32, pressed: bool },
     /// A press at a time, released on a frame the menu polls so that each is an edge.
     List { target: Option<u8>, released: bool },
     StartMenu { target: Option<u8>, released: bool },
     Options { released: bool },
-    Option { target: u8, released: bool },
+    Option { target: u8, from: Decision, released: bool },
     /// The grid is walked a letter at a time, so the target is kept and the next press worked out
     /// against whatever is typed so far.
     Name { target: Vec<u8>, released: bool },
@@ -90,6 +110,11 @@ enum Driver {
     /// mode going away: `from` is the screen it was asked on and `answers` catches the one row
     /// that answers without leaving.
     Dex { target: Option<u8>, from: Decision, answers: u32, released: bool },
+    /// B while the evolution can still be stopped; one edge is enough.
+    CancelEvolution,
+    /// B on a polling frame; the menu has taken it by the next.
+    Cancel { from: Decision, pressed: bool },
+    Quantity { target: Option<u8>, released: bool },
 }
 
 impl Executor {
@@ -97,7 +122,11 @@ impl Executor {
         let driver = match &command {
             Command::Advance => match modes.last() {
                 Some(Mode::TextBox(text)) if text.status() == Status::Waiting(Decision::Text) =>
-                    Driver::Advance { answered: text.answered() },
+                    Driver::Advance { answered: text.answered(), pressed: false },
+                Some(Mode::StatusScreen(screen)) if screen.status() == Status::Waiting(Decision::StatusScreen) =>
+                    Driver::Advance { answered: screen.answered(), pressed: false },
+                Some(Mode::UseItem(flow)) if flow.status() == Status::Waiting(Decision::Text) =>
+                    Driver::Advance { answered: flow.answered(), pressed: false },
                 _ => return Err(Refusal::Invalid("no text box is waiting".into())),
             },
             Command::ChooseListEntry(_) | Command::CancelList => match modes.last() {
@@ -133,6 +162,11 @@ impl Executor {
                         world.party.len(),
                     Some(Mode::FieldMoveMenu(menu)) if menu.status() == Status::Waiting(Decision::FieldMoveMenu) =>
                         menu.rows() as usize,
+                    Some(Mode::LearnMove(learn)) if learn.status() == Status::Waiting(Decision::ForgetMove) =>
+                        learn.rows() as usize,
+                    Some(Mode::ItemMenu(menu)) if menu.status() == Status::Waiting(Decision::UseToss) => 2,
+                    Some(Mode::MoveSelectionMenu(menu)) if menu.status() == Status::Waiting(Decision::MoveMenu) =>
+                        menu.rows() as usize,
                     Some(Mode::Pokedex(dex)) if dex.status() == Status::Waiting(Decision::PokedexSideMenu) => 4,
                     _ => return Err(Refusal::Invalid("no menu of options is waiting".into())),
                 };
@@ -146,7 +180,11 @@ impl Executor {
                         answers: dex.answered(),
                         released: true,
                     },
-                    _ => Driver::Option { target: *row, released: true },
+                    Some(top) => {
+                        let Status::Waiting(from) = top.status() else { unreachable!("only a waiting menu has rows") };
+                        Driver::Option { target: *row, from, released: true }
+                    }
+                    None => unreachable!("a menu was matched above"),
                 }
             }
             Command::EnterName(name) => match modes.last() {
@@ -186,6 +224,27 @@ impl Executor {
                 }
                 _ => return Err(Refusal::Invalid("the Pokédex is not open".into())),
             },
+            Command::CancelOption => match modes.last().map(|mode| mode.status()) {
+                Some(Status::Waiting(from @ (Decision::PartyMenu | Decision::UseToss | Decision::MoveMenu))) =>
+                    Driver::Cancel { from, pressed: false },
+                _ => return Err(Refusal::Invalid("no menu that B backs out of is waiting".into())),
+            },
+            Command::ChooseQuantity(_) | Command::CancelQuantity => match modes.last() {
+                Some(Mode::QuantityMenu(menu)) if menu.status() == Status::Waiting(Decision::Quantity) => {
+                    let target = match command {
+                        Command::ChooseQuantity(n) if (1..=menu.max()).contains(&n) => Some(n),
+                        Command::ChooseQuantity(n) =>
+                            return Err(Refusal::Invalid(format!("the count runs from 1 to {}, not {n}", menu.max()))),
+                        _ => None,
+                    };
+                    Driver::Quantity { target, released: true }
+                }
+                _ => return Err(Refusal::Invalid("no quantity is being chosen".into())),
+            },
+            Command::CancelEvolution => match modes.last() {
+                Some(Mode::Evolution(evolution)) if evolution.can_cancel() => Driver::CancelEvolution,
+                _ => return Err(Refusal::Invalid("no evolution can be stopped".into())),
+            },
             Command::CloseOptions => match modes.last() {
                 Some(Mode::OptionMenu(menu)) if menu.status() == Status::Waiting(Decision::Options) =>
                     Driver::Options { released: true },
@@ -197,10 +256,19 @@ impl Executor {
 
     pub fn drive(&mut self, modes: &[Mode], _world: &World) -> Drive {
         match &mut self.driver {
-            Driver::Advance { answered } => match modes.last() {
-                Some(Mode::TextBox(text)) if text.answered() == *answered => Drive::Press(Joypad::A),
-                _ => Drive::Done,
-            },
+            Driver::Advance { answered, pressed } => {
+                let (count, status, decision) = match modes.last() {
+                    Some(Mode::TextBox(text)) => (text.answered(), text.status(), Decision::Text),
+                    Some(Mode::StatusScreen(screen)) => (screen.answered(), screen.status(), Decision::StatusScreen),
+                    Some(Mode::UseItem(flow)) => (flow.answered(), flow.status(), Decision::Text),
+                    _ => return Drive::Done,
+                };
+                if count != *answered || (*pressed && status != Status::Waiting(decision)) {
+                    return Drive::Done;
+                }
+                *pressed = true;
+                Drive::Press(Joypad::A)
+            }
             Driver::List { target, released } => match modes.last() {
                 Some(Mode::ListMenu(list)) => {
                     if list.status() != Status::Waiting(Decision::List) || !*released {
@@ -235,18 +303,22 @@ impl Executor {
                 }
                 _ => Drive::Done,
             },
-            Driver::Option { target, released } => {
-                let (waiting, selected) = match modes.last() {
-                    Some(Mode::TwoOptionMenu(menu)) =>
-                        (menu.status() == Status::Waiting(Decision::TwoOption), menu.selected()),
-                    Some(Mode::BuySellQuitMenu(menu)) =>
-                        (menu.status() == Status::Waiting(Decision::BuySellQuit), menu.selected()),
-                    Some(Mode::PartyMenu(menu)) =>
-                        (menu.status() == Status::Waiting(Decision::PartyMenu), menu.selected()),
-                    Some(Mode::FieldMoveMenu(menu)) =>
-                        (menu.status() == Status::Waiting(Decision::FieldMoveMenu), menu.selected()),
+            Driver::Option { target, from, released } => {
+                let (kind, status, selected) = match modes.last() {
+                    Some(Mode::TwoOptionMenu(menu)) => (Decision::TwoOption, menu.status(), menu.selected()),
+                    Some(Mode::BuySellQuitMenu(menu)) => (Decision::BuySellQuit, menu.status(), menu.selected()),
+                    Some(Mode::PartyMenu(menu)) => (Decision::PartyMenu, menu.status(), menu.selected()),
+                    Some(Mode::FieldMoveMenu(menu)) => (Decision::FieldMoveMenu, menu.status(), menu.selected()),
+                    Some(Mode::LearnMove(learn)) => (Decision::ForgetMove, learn.status(), learn.selected()),
+                    Some(Mode::ItemMenu(menu)) => (Decision::UseToss, menu.status(), menu.selected()),
+                    Some(Mode::MoveSelectionMenu(menu)) => (Decision::MoveMenu, menu.status(), menu.selected()),
                     _ => return Drive::Done,
                 };
+                // A different menu of options is up, so the one asked has answered and led to it.
+                if kind != *from {
+                    return Drive::Done;
+                }
+                let waiting = status == Status::Waiting(kind);
                 if !waiting || !*released {
                     *released = true;
                     return Drive::Press(Joypad::empty());
@@ -307,6 +379,34 @@ impl Executor {
                     }
                     *released = false;
                     Drive::Press(Joypad::B)
+                }
+                _ => Drive::Done,
+            },
+            Driver::CancelEvolution => match modes.last() {
+                Some(Mode::Evolution(evolution)) if evolution.can_cancel() => Drive::Press(Joypad::B),
+                _ => Drive::Done,
+            },
+            Driver::Cancel { from, pressed } => {
+                if *pressed {
+                    return Drive::Done;
+                }
+                match modes.last().map(|mode| mode.status()) {
+                    Some(Status::Waiting(decision)) if decision == *from => {
+                        *pressed = true;
+                        Drive::Press(Joypad::B)
+                    }
+                    Some(_) => Drive::Press(Joypad::empty()),
+                    None => Drive::Done,
+                }
+            }
+            Driver::Quantity { target, released } => match modes.last() {
+                Some(Mode::QuantityMenu(menu)) => {
+                    if menu.status() != Status::Waiting(Decision::Quantity) || !*released {
+                        *released = true;
+                        return Drive::Press(Joypad::empty());
+                    }
+                    *released = false;
+                    Drive::Press(menu.press_toward(*target))
                 }
                 _ => Drive::Done,
             },

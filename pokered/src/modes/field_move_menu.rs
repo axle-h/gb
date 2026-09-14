@@ -98,6 +98,10 @@ impl ModeUpdate for FieldMoveMenu {
         self.input.call(ctx);
     }
 
+    fn open(&mut self, ctx: &mut Ctx) -> Transition {
+        self.update(ctx)
+    }
+
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
         let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
         // The caller puts the screen back before it looks at what was pressed.
