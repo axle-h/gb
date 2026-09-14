@@ -271,6 +271,10 @@ pub struct CompletionBrain {
     explore_idle: usize,
     /// The maps this exploring has stood on.
     explored_maps: HashSet<String>,
+    /// The trees this exploring has cut. A tree opened is progress; the same tree grown back after
+    /// a battle reloaded the map is not, or a route thick with encounters resets the idle count for
+    /// ever and only the patience bound is left to stop it.
+    explore_cut: HashSet<String>,
     /// A tidy under way: `None` until the bag has been read, then what is left to toss.
     tidying: Option<Option<VecDeque<String>>>,
     /// The bins: where the first switch was found, the bins searched since, and the last one.
@@ -326,7 +330,7 @@ impl CompletionBrain {
             ran: Default::default(), running_at: 0, came: Came::Given, named: 0, party_was_full: false,
             graph: Default::default(), travelled: Default::default(), offered: HashSet::new(), barren: 0,
             last_walk: None, here: String::new(), pockets: Default::default(), pocket_edges: Default::default(), left_by: None,
-            exploring: 0, explore_idle: 0, explored_maps: HashSet::new(), tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), walks_given_up: Default::default(), day_care_sent: None, used_on: false, prize_pending: false, quiz_pending: false, evolving: None, repeated: (String::new(), 0), ledger,
+            exploring: 0, explore_idle: 0, explored_maps: HashSet::new(), explore_cut: HashSet::new(), tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), walks_given_up: Default::default(), day_care_sent: None, used_on: false, prize_pending: false, quiz_pending: false, evolving: None, repeated: (String::new(), 0), ledger,
             stuck: Arc::new(Mutex::new(None)), turns: Arc::new(Mutex::new(0)),
         }
     }
@@ -614,8 +618,11 @@ impl CompletionBrain {
             .and_then(|(_, what)| ["talk to ", "pick up the ", "pick up ", "examine the ", "examine ", "read the "].iter()
                 .find_map(|lead| what.strip_prefix(lead)).map(|rest| rest.split(" (").next().unwrap_or(rest).to_string()));
         self.last_walk = name.map(|name| (map.clone(), id.clone(), name, self.at));
-        // Taking a person or a thing is progress; walking through a door on the way is not.
-        if id.matches(':').count() == 1 {
+        // Taking a person or a thing is progress; walking through a door on the way is not. So is
+        // cutting a tree that was not cut before in this exploring: a cut row carries coordinates
+        // and so two colons, and Route 2's eight trees regrow on every battle, so counting each one
+        // as standing still spent the whole idle allowance on the work that opens the route.
+        if id.matches(':').count() == 1 || (id.ends_with(":CutTree") && self.explore_cut.insert(id.clone())) {
             self.explore_idle = 0;
         }
         *self.travelled.entry(format!("{map}|{id}")).or_default() += 1;
@@ -890,6 +897,7 @@ impl CompletionBrain {
                             self.exploring = 0;
                             self.explore_idle = 0;
                             self.explored_maps.clear();
+                            self.explore_cut.clear();
                             self.at += 1;
                             continue
                         }
