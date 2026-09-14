@@ -255,6 +255,8 @@ pub struct CompletionBrain {
     used_on: bool,
     /// A prize Pokémon was bought and its nickname prompt not yet seen.
     prize_pending: bool,
+    /// A quiz machine was answered and the turn that says whether it was right not yet seen.
+    quiz_pending: bool,
     /// The party slot a stone was used on.
     evolving: Option<u8>,
     /// The party's size when a Day Care call was sent.
@@ -292,7 +294,7 @@ impl CompletionBrain {
             ran: Default::default(), running_at: 0, came: Came::Given, named: 0, party_was_full: false,
             graph: Default::default(), travelled: Default::default(), offered: HashSet::new(), barren: 0,
             last_walk: None, here: String::new(), pockets: Default::default(), pocket_edges: Default::default(), left_by: None,
-            exploring: 0, explore_idle: 0, explored_maps: HashSet::new(), tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), walks_given_up: Default::default(), day_care_sent: None, used_on: false, prize_pending: false, evolving: None, repeated: (String::new(), 0), ledger,
+            exploring: 0, explore_idle: 0, explored_maps: HashSet::new(), tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), walks_given_up: Default::default(), day_care_sent: None, used_on: false, prize_pending: false, quiz_pending: false, evolving: None, repeated: (String::new(), 0), ledger,
             stuck: Arc::new(Mutex::new(None)), turns: Arc::new(Mutex::new(0)),
         }
     }
@@ -302,7 +304,12 @@ impl CompletionBrain {
     }
 
     fn saw(&self, way: Way) {
-        self.ledger.lock().expect("not poisoned").saw(Entry::Way(way));
+        self.saw_entry(Entry::Way(way));
+    }
+
+    /// What only the moment shows, where the entry is not one of the ways.
+    fn saw_entry(&self, entry: Entry) {
+        self.ledger.lock().expect("not poisoned").saw(entry);
     }
 
     fn stuck(&self, why: String) {
@@ -580,6 +587,8 @@ impl CompletionBrain {
             self.explore_idle = 0;
         }
         *self.travelled.entry(format!("{map}|{id}")).or_default() += 1;
+        // Either answer to a quiz machine: which one it was is what the next turn says.
+        self.quiz_pending |= id.contains(":Quiz");
         // A row that never gets anywhere: what the agent could not do is the finding. Pacing
         // and fishing are chosen over and over on purpose.
         let hunting = ["Grass", "Pace", "PaceOnWater", "Fish"].iter().any(|kind| id.ends_with(&format!(":{kind}")))
@@ -1052,6 +1061,12 @@ impl Brain for CompletionBrain {
         }
         if request.is_stuck() {
             return Reply::call("press_buttons", serde_json::json!({ "buttons": ["a"], "why": "no decision point" }));
+        }
+        // A quiz machine answered wrong is a battle at once, so a quiz row followed by anything
+        // else is the answer its gate wanted. Nothing left in RAM tells the two apart: the gate
+        // flag is set by the right answer and by beating the trainer behind it alike.
+        if std::mem::take(&mut self.quiz_pending) && !request.is_battle() {
+            self.saw_entry(Entry::CinnabarQuiz);
         }
         // Whatever kind of turn it arrives on: a walk resumed after a battle asks nothing between.
         if let Some(Step::Train { until, way, .. }) = self.steps.get(self.at).cloned()
@@ -1816,5 +1831,115 @@ fn completion_phase_surf() {
          Entry::ItemBall { map: Map::Route25, object: 10, item: ItemId::Tm19SeismicToss as u8 }])
         .into_iter().filter(|entry| !out_of_reach.contains(entry)).collect::<Vec<_>>();
     cut(&mut played, "completion-surf");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// Probe: stand on the open water of a sea route and report what the model is offered there, to
+/// answer why every swimmer on Routes 19, 20 and 21 goes unfought. The last step names a row that
+/// cannot exist, so the run reports itself stuck, and `play` both prints that turn and saves the
+/// state for `probe_stall_actions`. It fails by design; what it is for is the turn it prints.
+#[test]
+#[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
+fn probe_sea_route_menu() {
+    play(include_bytes!("../data/completion-surf.bin"), "probe-sea-route", vec![
+        Step::Collect(false),
+        Step::GoTo("Route19"),
+        Step::Explore { maps: &["Route19"], patience: 300 },
+        Step::GoTo("Route20"),
+        Step::Talk("NoSuchRowEver"),
+    ], 300, Duration::from_secs(1200));
+}
+
+/// Cinnabar: the two sea routes south, the island and its lab, the fossil the run has carried
+/// since Mt Moon, the Mansion's statue switches and the Secret Key behind them, then Blaine.
+pub fn to_the_volcano_badge() -> Vec<Step> {
+    use Step::*;
+    const MANSION: &[&str] = &["PokemonMansion1F", "PokemonMansion2F", "PokemonMansion3F",
+                               "PokemonMansionB1F"];
+    vec![
+        Collect(true),
+        // The zone left the bag full, and a full bag refuses a pickup and a gift in silence.
+        Tidy,
+        // South over the water: the sea routes, which no phase before this one could cross.
+        GoTo("Route19"), Explore { maps: &["Route19"], patience: 500 },
+        GoTo("Route20"), Explore { maps: &["Route20"], patience: 600 },
+        // Route 20 is two halves with the Seafoam islands between them, and nothing west of them
+        // can be reached from the Route 19 end: the water stops at the islands' east door. So the
+        // island is reached the way the cartridge intends, down Route 21 from Pallet, and the
+        // route's west half is walked back from Cinnabar's own shore.
+        Field(r#"{"move":"fly","map":"PalletTown"}"#), GoTo("PalletTown"),
+        GoTo("Route21"), Explore { maps: &["Route21"], patience: 500 },
+        GoTo("CinnabarIsland"),
+        GoTo("Route20"), Explore { maps: &["Route20"], patience: 600 },
+        GoTo("CinnabarIsland"),
+        Explore { maps: &["CinnabarIsland", "CinnabarPokecenter", "CinnabarMart"], patience: 400 },
+        // The lab is four maps: the hall and three back rooms.
+        GoTo("CinnabarLab"), Clear(&[]),
+        GoTo("CinnabarLabTradeRoom"), Clear(&[]), GoTo("CinnabarLab"),
+        GoTo("CinnabarLabMetronomeRoom"), Clear(&[]), GoTo("CinnabarLab"),
+        // The scientist takes the fossil, and hands the Pokemon over only after a walk out of the
+        // room and back: leaving is what clears the flag saying he is still working on it. The
+        // party is full, so it arrives in the box, which the dex entry records either way.
+        GoTo("CinnabarLabFossilRoom"), Talk("Scientist1"),
+        GoTo("CinnabarLab"), GoTo("CinnabarIsland"),
+        GoTo("CinnabarLab"), GoTo("CinnabarLabFossilRoom"), Talk("Scientist1"), Clear(&[]),
+        GoTo("CinnabarLab"), GoTo("CinnabarIsland"),
+        // The Mansion. One switch toggles every floor's doors at once, so the statues are pressed
+        // in the order the way down needs them. The exploring cannot disturb that: it takes people
+        // and item balls, never a statue, whose row carries its coordinates and so two colons.
+        GoTo("PokemonMansion1F"),
+        Explore { maps: &["PokemonMansion1F", "PokemonMansion2F", "PokemonMansion3F"], patience: 1000 },
+        GoTo("PokemonMansion3F"), Talk("Statue1"),
+        // 3F's holes are warps down to 1F's right side, which is the only way to the B1F stairs.
+        GoTo("PokemonMansion1F"), GoTo("PokemonMansionB1F"),
+        Talk("Statue2"),
+        Explore { maps: MANSION, patience: 1200 },
+        Talk("Statue1"), Clear(&[]),
+        // The stairs up are shut by the two flips that opened the key's corner, so they are undone
+        // in the order they were made.
+        Talk("Statue1"), Talk("Statue2"),
+        GoTo("PokemonMansion1F"), GoTo("CinnabarIsland"),
+        // Six machines, six gates, and Blaine behind the lot of them. An exploring opens none of
+        // them: it takes people and item balls, whose ids have one colon, and a machine's row
+        // carries its coordinates and so has two. Every machine is answered YES, which is right
+        // for the first, where the ledger's quiz entry comes from, and wrong for some of the rest,
+        // whose gate opens anyway once the trainer the wrong answer sets on you is beaten.
+        GoTo("CinnabarGym"),
+        // A machine is answered and the step is done the moment its row is chosen, but the answer
+        // is not: a wrong one walks the trainer over and fights him, and only winning that opens
+        // the gate. So each press is given the turns to land before the next is asked for, or the
+        // one after it hunts for a row on the far side of a gate that never opened.
+        Talk("QuizYes1"), Explore { maps: &["CinnabarGym"], patience: 150 },
+        Talk("QuizYes3"), Explore { maps: &["CinnabarGym"], patience: 150 },
+        Talk("QuizYes5"), Explore { maps: &["CinnabarGym"], patience: 150 },
+        Talk("QuizYes7"), Explore { maps: &["CinnabarGym"], patience: 150 },
+        Talk("QuizYes9"), Explore { maps: &["CinnabarGym"], patience: 150 },
+        Talk("QuizYes11"), Explore { maps: &["CinnabarGym"], patience: 900 },
+        Talk("Blaine"),
+        GoTo("CinnabarIsland"),
+    ]
+}
+
+#[test]
+#[ignore = "a phase of the completion run; run with --ignored"]
+fn completion_phase_volcano_badge() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-surf.bin"), "completion-volcano",
+                          to_the_volcano_badge(), 900, Duration::from_secs(4500));
+    let missing = missing_on(&mut played, &[
+        Map::Route19, Map::Route20, Map::Route21, Map::CinnabarIsland, Map::CinnabarPokecenter,
+        Map::CinnabarMart,
+        Map::CinnabarLab, Map::CinnabarLabTradeRoom, Map::CinnabarLabMetronomeRoom,
+        Map::CinnabarLabFossilRoom, Map::PokemonMansion1F, Map::PokemonMansion2F,
+        Map::PokemonMansion3F, Map::PokemonMansionB1F, Map::CinnabarGym,
+    ], &[Entry::Badge(6), Entry::CinnabarQuiz, Entry::Way(Way::RevivedFossil),
+         Entry::KeyItem(vec![ItemId::SecretKey as u8])]);
+    cut(&mut played, "completion-volcano");
+    // 3F's east half, and 2F's, are pockets this phase never opens: of 2F's three staircases only
+    // the one at (25, 14) lands on the scientist's side, and it is offered in none of the parities
+    // these steps leave the floor in, pressing 2F's own switch included. Left for whichever phase
+    // walks the Mansion again, and for the whole-run ledger if none does.
+    let later = [Entry::Trainer { map: Map::PokemonMansion3F, index: 1 }];
+    let missing: Vec<Entry> = missing.into_iter().filter(|entry| !later.contains(entry)).collect();
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }

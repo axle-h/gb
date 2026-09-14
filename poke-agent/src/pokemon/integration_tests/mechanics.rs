@@ -2685,6 +2685,59 @@ fn a_water_crossing_is_a_row_of_its_own_beside_the_bridge_to_the_same_map() {
          {surfing:?}");
 }
 
+/// A trainer standing on open water is faced from a square that is water too, so unless water
+/// counts as somewhere to stand there is no row for one at all: the sea routes' swimmers can only
+/// be surfed past, and the ones a run does fight are the ones whose line of sight it crossed.
+#[test]
+fn a_trainer_on_open_water_is_a_row_once_surf_is_up() {
+    use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
+    use crate::pokemon::sprite::{PictureId, Sprite, SpriteFacing};
+    use crate::pokemon::tile::MetaTile;
+    use std::sync::Arc;
+
+    let mmu = gb::mmu::MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
+    let metadata = Arc::new(mmu.read_map_metadata(Map::Route20).expect("Route 20's header"));
+    // Swimmer 1 where the cartridge puts him, and the player out on the water a crossing leaves it on.
+    let route_20 = |can_surf: bool| {
+        let mut map = MetaTileMap::new(&CurrentMap {
+            player_position: Point8 { x: 100, y: 4 },
+            player_direction: PlayerFacingDirection::Left,
+            sprites: vec![Sprite {
+                index: 1,
+                picture_id: PictureId::CoolTrainerMale,
+                position: Point8 { x: 88, y: 8 },
+                on_screen: true,
+                hidden: false,
+                facing: SpriteFacing::Down,
+                name: "Swimmer 1",
+            }],
+            metadata: Arc::clone(&metadata),
+            closed_doors: Vec::new(),
+            grass_encounter_rate: 0,
+            water_encounter_rate: 0,
+            card_key_locked: false,
+            header_loaded: true,
+            surfing: true,
+            sprites_loaded: true,
+            script_cancelled_warps: Vec::new(),
+            standing_on_warp: false,
+        });
+        // `game_state()` sets `can_surf` from the party; the map builder does not.
+        map.can_surf = can_surf;
+        map.actions().into_iter().map(|action| action.tile).collect::<Vec<_>>()
+    };
+
+    let faced = |tiles: &[MetaTile]| tiles.iter().any(|t| matches!(t, MetaTile::Sprite("Swimmer 1")));
+
+    let on_foot = route_20(false);
+    assert!(!faced(&on_foot), "a party that cannot surf cannot face someone out on the water: {on_foot:?}");
+
+    let surfing = route_20(true);
+    assert!(faced(&surfing),
+        "every square beside a swimmer is water, so without it counting as somewhere to stand the \
+         sea routes' trainers cannot be fought at all: {surfing:?}");
+}
+
 #[test]
 fn a_duplicate_map_is_not_a_coverage_gap() {
     use crate::pokemon::map_metadata::MapMetadataReader;
