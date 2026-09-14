@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::gfx::colour::Source;
 use crate::gfx::layers::Object;
 use crate::gfx::tiles::pixel;
 use crate::gfx::ui::SCREEN_TILES_X;
@@ -12,6 +13,9 @@ const OBJECTS_PER_LINE: usize = 10;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Framebuffer {
     pub shades: Vec<u8>,
+    /// Which palette register each shade came through, one to a pixel: what a colour mode needs to
+    /// tell a sprite from the background, since the shade itself no longer says.
+    pub sources: Vec<Source>,
 }
 
 impl Framebuffer {
@@ -50,6 +54,7 @@ impl Screen {
     /// order breaking ties, and `BEHIND_BG` losing to any background colour but 0.
     pub fn frame(&self) -> Framebuffer {
         let mut shades = vec![0; WIDTH * HEIGHT];
+        let mut sources = vec![Source::Background; WIDTH * HEIGHT];
         for y in 0..HEIGHT {
             let mut line: Vec<(usize, &Object)> = self.sprites.iter().enumerate()
                 .filter(|(_, o)| (o.y as usize) <= y + 16 && y + 16 < o.y as usize + 8)
@@ -59,6 +64,7 @@ impl Screen {
             for x in 0..WIDTH {
                 let background = self.background(x, y);
                 let mut shade = apply(self.effects.bgp, background);
+                let mut source = Source::Background;
                 for &(_, object) in &line {
                     let ox = x + 8;
                     if ox < object.x as usize || ox >= object.x as usize + 8 {
@@ -73,14 +79,20 @@ impl Screen {
                         continue;
                     }
                     if object.attributes & Object::BEHIND_BG == 0 || background == 0 {
-                        let palette = if object.attributes & Object::OBP1 != 0 { self.effects.obp1 } else { self.effects.obp0 };
+                        let (palette, from) = if object.attributes & Object::OBP1 != 0 {
+                            (self.effects.obp1, Source::Object1)
+                        } else {
+                            (self.effects.obp0, Source::Object0)
+                        };
                         shade = apply(palette, colour);
+                        source = from;
                     }
                     break;
                 }
                 shades[y * WIDTH + x] = shade;
+                sources[y * WIDTH + x] = source;
             }
         }
-        Framebuffer { shades }
+        Framebuffer { shades, sources }
     }
 }

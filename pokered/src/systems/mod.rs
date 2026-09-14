@@ -8,6 +8,7 @@ pub mod inventory;
 pub mod map_data;
 pub mod math;
 pub mod money;
+pub mod pokedex;
 pub mod pp;
 pub mod print_num;
 pub mod stats;

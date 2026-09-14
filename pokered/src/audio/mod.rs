@@ -1,6 +1,10 @@
 //! The sound hardware as the audio engine sees it. The engine speaks in `Write`s, each the exact
 //! register byte it would be on the cartridge, and a backend renders them.
 
+pub mod data;
+pub mod engine;
+pub mod synth;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -8,6 +8,20 @@ use crate::mode::Ctx;
 use crate::modes::blink::ArrowBlink;
 use crate::Pacing;
 
+/// `<POKE>` and `<PKMN>` are one byte in the cartridge's text and several tiles on the screen.
+pub const POKE_TILES: [u8; 4] = [0x8F, 0x8E, 0x8A, 0xBA];
+pub const PKMN_TILES: [u8; 2] = [0xE1, 0xE2];
+
+/// The tiles a byte draws as, for the one caller that is not pacing a string: `None` is a byte that
+/// draws as the tile it names.
+pub fn ligature(byte: u8) -> Option<&'static [u8]> {
+    match byte {
+        ch::POKE => Some(&POKE_TILES),
+        ch::PKMN => Some(&PKMN_TILES),
+        _ => None,
+    }
+}
+
 pub mod ch {
     pub const PAGE: u8 = 0x49;
     pub const PKMN: u8 = 0x4A;
@@ -185,8 +199,8 @@ impl PlaceString {
                 }
                 ch::PLAYER => self.splice(&ctx.world.player_name.clone()),
                 ch::RIVAL => self.splice(&ctx.world.rival_name.clone()),
-                ch::POKE => self.splice(&[0x8F, 0x8E, 0x8A, 0xBA]),
-                ch::PKMN => self.splice(&[0xE1, 0xE2]),
+                ch::POKE => self.splice(&POKE_TILES),
+                ch::PKMN => self.splice(&PKMN_TILES),
                 ch::PC => self.splice(&[0x8F, 0x82]),
                 ch::TM => self.splice(&[0x93, 0x8C]),
                 ch::TRAINER => self.splice(&[0x93, 0x91, 0x80, 0x88, 0x8D, 0x84, 0x91]),

@@ -1,5 +1,6 @@
 use gb::game_boy::GameBoy;
 use gb::ram::ROM;
+use pokered::gfx::colour::{self, ColourMode};
 use pokered::gfx::compose::{HEIGHT, WIDTH};
 use pokered::gfx::layers::{MapLayer, Object};
 use pokered::gfx::tiles::TileData;
@@ -157,4 +158,46 @@ fn the_overworld_buffer_is_built_as_the_cartridge_builds_it() {
         let (x, y) = (mmu.read_pointer(&pokered_symbols::wXCoord), mmu.read_pointer(&pokered_symbols::wYCoord));
         assert_eq!(pokered::systems::map_data::camera(x, y), screen_from(&gb).map.camera, "{map} at ({x}, {y})");
     }
+}
+
+/// The same state on Game Boy Color hardware, where a DMG-only cartridge runs in compatibility
+/// mode: the picture is the DMG's and all the colour is the boot ROM's.
+fn settled_cgb(state: &[u8]) -> GameBoy {
+    let mut gb = GameBoy::cgb(crate::pokemon::roms::POKERED);
+    gb.load_state(state).unwrap();
+    for _ in 0..60 {
+        to_vblank(&mut gb);
+    }
+    gb
+}
+
+fn assert_same_colours(state: &[u8], name: &str) {
+    let gb = settled_cgb(state);
+    let ours = ColourMode::Gbc.rgb(&screen_from(&gb));
+    let lcd: Vec<u8> = gb.core().mmu().ppu().screenshot().pixels().flat_map(|pixel| pixel.0).collect();
+    let wrong: Vec<(usize, usize)> = (0..WIDTH * HEIGHT)
+        .filter(|&i| ours[i * 3..i * 3 + 3] != lcd[i * 3..i * 3 + 3])
+        .map(|i| (i % WIDTH, i / WIDTH))
+        .collect();
+    assert!(wrong.is_empty(), "{name}: {} pixels differ, first {:?}", wrong.len(), &wrong[..wrong.len().min(8)]);
+}
+
+#[test]
+fn a_colour_frame_paints_the_cartridge_s_own_colours() {
+    assert_same_colours(include_bytes!("../pokemon/data/pallet-town-state.bin"), "Pallet Town");
+    assert_same_colours(include_bytes!("../pokemon/data/oaks-lab-just-got-squirtle.bin"), "Oak's lab");
+}
+
+/// `ColourMode::Gbc` carries its three palettes rather than deriving them, and this is what keeps
+/// them the emulator's: `gb::boot_palette`'s own tables, for this cartridge's title.
+#[test]
+fn the_colour_palettes_are_the_boot_roms_own() {
+    let boot = gb::boot_palette::for_cartridge(crate::pokemon::roms::POKERED);
+    let colours = |bytes: [u8; 8]| -> [u16; 4] {
+        std::array::from_fn(|i| u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]))
+    };
+    assert_eq!(boot.combination, 13);
+    assert_eq!(colour::GBC_BACKGROUND, colours(boot.background));
+    assert_eq!(colour::GBC_OBJECT0, colours(boot.object0));
+    assert_eq!(colour::GBC_OBJECT1, colours(boot.object1));
 }

@@ -12,6 +12,7 @@ use crate::modes::menu_input::CursorMemory;
 use crate::modes::naming_screen::NamingScreen;
 use crate::modes::option_menu::OptionMenu;
 use crate::modes::party_menu::PartyMenu;
+use crate::modes::pokedex::PokedexMenu;
 use crate::modes::start_menu::StartMenu;
 use crate::modes::text_box::TextBox;
 use crate::modes::two_option_menu::TwoOptionMenu;
@@ -74,6 +75,7 @@ pub enum Mode {
     PartyMenu(PartyMenu),
     NamingScreen(NamingScreen),
     FieldMoveMenu(FieldMoveMenu),
+    Pokedex(PokedexMenu),
 }
 
 macro_rules! each_mode {
@@ -88,6 +90,7 @@ macro_rules! each_mode {
             Mode::PartyMenu($inner) => $body,
             Mode::NamingScreen($inner) => $body,
             Mode::FieldMoveMenu($inner) => $body,
+            Mode::Pokedex($inner) => $body,
         }
     };
 }

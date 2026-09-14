@@ -22,6 +22,10 @@ pub enum Command {
     ChooseOption(u8),
     /// Type a name into the naming screen and hand it back. Charmap bytes, as the game keeps them.
     EnterName(Vec<u8>),
+    /// Open a Pokédex number's side menu, walking the list to it.
+    ChooseDexEntry(u8),
+    /// Back out of whichever of the Pokédex's three screens is up.
+    CloseDex,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +41,12 @@ pub enum Decision {
     PartyMenu,
     NamingScreen,
     FieldMoveMenu,
+    /// The Pokédex's list of numbers.
+    Pokedex,
+    /// Its DATA/CRY/AREA/QUIT menu, which `ChooseOption` answers.
+    PokedexSideMenu,
+    /// A data page, which is read and then left.
+    PokedexData,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +85,11 @@ enum Driver {
     /// The grid is walked a letter at a time, so the target is kept and the next press worked out
     /// against whatever is typed so far.
     Name { target: Vec<u8>, released: bool },
+    /// A dex number to walk to on the list, a row on the side menu, or nothing, which is the way
+    /// out. The dex keeps all three of its screens on one mode, so a driver cannot finish by the
+    /// mode going away: `from` is the screen it was asked on and `answers` catches the one row
+    /// that answers without leaving.
+    Dex { target: Option<u8>, from: Decision, answers: u32, released: bool },
 }
 
 impl Executor {
@@ -118,12 +133,21 @@ impl Executor {
                         world.party.len(),
                     Some(Mode::FieldMoveMenu(menu)) if menu.status() == Status::Waiting(Decision::FieldMoveMenu) =>
                         menu.rows() as usize,
+                    Some(Mode::Pokedex(dex)) if dex.status() == Status::Waiting(Decision::PokedexSideMenu) => 4,
                     _ => return Err(Refusal::Invalid("no menu of options is waiting".into())),
                 };
                 if *row as usize >= rows {
                     return Err(Refusal::Invalid(format!("the menu has {rows} rows, not {}", row + 1)));
                 }
-                Driver::Option { target: *row, released: true }
+                match modes.last() {
+                    Some(Mode::Pokedex(dex)) => Driver::Dex {
+                        target: Some(*row),
+                        from: Decision::PokedexSideMenu,
+                        answers: dex.answered(),
+                        released: true,
+                    },
+                    _ => Driver::Option { target: *row, released: true },
+                }
             }
             Command::EnterName(name) => match modes.last() {
                 Some(Mode::NamingScreen(screen)) if screen.status() == Status::Waiting(Decision::NamingScreen) => {
@@ -136,6 +160,31 @@ impl Executor {
                     Driver::Name { target: name.clone(), released: true }
                 }
                 _ => return Err(Refusal::Invalid("no naming screen is waiting".into())),
+            },
+            Command::ChooseDexEntry(_) | Command::CloseDex => match modes.last() {
+                Some(Mode::Pokedex(dex)) => {
+                    let Status::Waiting(from) = dex.status() else {
+                        return Err(Refusal::Invalid("the Pokédex is not waiting".into()));
+                    };
+                    let target = match command {
+                        Command::ChooseDexEntry(number) => {
+                            if from != Decision::Pokedex {
+                                return Err(Refusal::Invalid("the Pokédex's list is not the screen that is up".into()));
+                            }
+                            if number == 0 || number > dex.max_seen() {
+                                return Err(Refusal::Invalid(format!("the list stops at {}", dex.max_seen())));
+                            }
+                            // An entry the player has not seen answers nothing: the menu never opens.
+                            if !crate::systems::pokedex::is_set(&world.pokedex.seen, number) {
+                                return Err(Refusal::Invalid(format!("nothing has been seen at {number}")));
+                            }
+                            Some(number)
+                        }
+                        _ => None,
+                    };
+                    Driver::Dex { target, from, answers: dex.answered(), released: true }
+                }
+                _ => return Err(Refusal::Invalid("the Pokédex is not open".into())),
             },
             Command::CloseOptions => match modes.last() {
                 Some(Mode::OptionMenu(menu)) if menu.status() == Status::Waiting(Decision::Options) =>
@@ -218,6 +267,36 @@ impl Executor {
                     *released = false;
                     Drive::Press(screen.press_toward(target))
                 }
+                _ => Drive::Done,
+            },
+            Driver::Dex { target, from, answers, released } => match modes.last() {
+                // The side menu answered where it stood, which is what a chosen `CRY` looks like.
+                Some(Mode::Pokedex(dex)) if dex.answered() != *answers => Drive::Done,
+                Some(Mode::Pokedex(dex)) => match dex.status() {
+                    // Another of the dex's screens is up, so the one asked about has answered.
+                    Status::Waiting(decision) if decision != *from => Drive::Done,
+                    // Drawing, printing or clearing: nothing to press at yet.
+                    Status::Busy | Status::Idle => {
+                        *released = true;
+                        Drive::Press(Joypad::empty())
+                    }
+                    Status::Waiting(_) if !*released => {
+                        *released = true;
+                        Drive::Press(Joypad::empty())
+                    }
+                    Status::Waiting(_) => {
+                        *released = false;
+                        match (*target, *from == Decision::Pokedex) {
+                            (None, _) => Drive::Press(Joypad::B),
+                            (Some(number), true) => Drive::Press(dex.press_toward(number)),
+                            (Some(row), false) => Drive::Press(match row.cmp(&dex.selected()) {
+                                std::cmp::Ordering::Less => Joypad::UP,
+                                std::cmp::Ordering::Greater => Joypad::DOWN,
+                                std::cmp::Ordering::Equal => Joypad::A,
+                            }),
+                        }
+                    }
+                },
                 _ => Drive::Done,
             },
             Driver::Options { released } => match modes.last() {

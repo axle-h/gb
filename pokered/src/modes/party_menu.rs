@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
 use crate::gfx::text_boxes::TextBoxId;
+use crate::modes::place_string::ligature;
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
 use crate::mode::{Ctx, ModeUpdate, Outcome, Status, Transition};
@@ -139,8 +140,11 @@ impl PartyMenu {
                     0x4F => at = 16 * SCREEN_TILES_X + 1,
                     0x4E => at += 2 * SCREEN_TILES_X,
                     letter => {
-                        ctx.screen.ui.set(at % SCREEN_TILES_X, at / SCREEN_TILES_X, letter);
-                        at += 1;
+                        // `#` is one byte in the cartridge's text and four tiles on the screen.
+                        for &tile in ligature(letter).unwrap_or(std::slice::from_ref(&letter)) {
+                            ctx.screen.ui.set(at % SCREEN_TILES_X, at / SCREEN_TILES_X, tile);
+                            at += 1;
+                        }
                     }
                 }
             }
@@ -281,6 +285,14 @@ mod tests {
 
     fn two() -> Vec<Named<PartyMon>> {
         vec![mon(PokemonSpecies::Pidgey, 7, "BIRD"), mon(PokemonSpecies::Rattata, 100, "RAT")]
+    }
+
+    #[test]
+    fn the_prompt_spells_the_poke_byte_out() {
+        let mut game = game(two());
+        until_waiting(&mut game);
+        assert_eq!(game.ui().row(14)[1..18], encode("Choose a POKéMON.").unwrap()[..],
+            "`#` is one byte in the cartridge's text and four tiles here");
     }
 
     fn until_waiting(game: &mut Game) {

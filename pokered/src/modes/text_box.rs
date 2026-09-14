@@ -249,8 +249,8 @@ mod tests {
     fn row(game: &Game, y: usize) -> String {
         game.ui().row(y)[1..19].iter().map(|&tile| match tile {
             0x80..=0x99 => (b'A' + tile - 0x80) as char,
-            0xA0..=0xB9 => (b'a' + tile - 0xA0) as char,
-            0xF6..=0xFF => (b'0' + tile - 0xF6) as char,
+            0xA0..=0xB9 => (b'a' + (tile - 0xA0)) as char,
+            0xF6..=0xFF => (b'0' + (tile - 0xF6)) as char,
             0x75 => '.',
             0xE7 => '!',
             0xE8 => '.',

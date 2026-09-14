@@ -15,6 +15,9 @@ const TERMINATOR: u8 = 0x50;
 /// `<DONE>` and `<PROMPT>`, which end the whole script from inside a string.
 const DONE: u8 = 0x57;
 const PROMPT: u8 = 0x58;
+/// `<DEXEND>`, which does the same. A Pokedex description is the one text in the cartridge with no
+/// `text_end`, so the bytes past this one belong to the next entry and the scan must stop here.
+const DEX_END: u8 = 0x5F;
 
 const TX_START: u8 = 0x00;
 const TX_RAM: u8 = 0x01;
@@ -254,7 +257,10 @@ fn decode_into(bytes: &[u8], at: DmgPointer, commands: &mut Vec<TextCommand>, de
             TERMINATOR => return Ok(()),
             TX_START => {
                 let start = i;
-                while !matches!(bytes[i], TERMINATOR | DONE | PROMPT) {
+                while !matches!(
+                    *bytes.get(i).ok_or_else(|| format!("{at} runs off the end of its bank"))?,
+                    TERMINATOR | DONE | PROMPT | DEX_END
+                ) {
                     i += 1;
                 }
                 let ends_here = bytes[i] != TERMINATOR;

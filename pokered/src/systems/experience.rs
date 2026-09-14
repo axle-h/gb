@@ -24,8 +24,8 @@ pub fn calc_experience(growth_rate: u8, level: u8) -> u32 {
     experience = if squared & 0x80 != 0 {
         experience.wrapping_sub(squared_term)
     } else {
-        experience + squared_term
-    };
+        experience.wrapping_add(squared_term)
+    } & EXPERIENCE_MASK;
     (experience + cubed_term) & EXPERIENCE_MASK
 }
 

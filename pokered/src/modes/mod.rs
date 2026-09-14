@@ -7,6 +7,7 @@ pub mod party_menu;
 pub mod naming_screen;
 pub mod option_menu;
 pub mod place_string;
+pub mod pokedex;
 pub mod start_menu;
 pub mod text_box;
 pub mod two_option_menu;
