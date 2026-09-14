@@ -340,6 +340,15 @@ fn dump_fixture_states() {
         ("vr2f-ladder", include_bytes!("../data/vr2f-ladder.bin")),
         ("at-indigo-articuno", include_bytes!("../data/at-indigo-articuno.bin")),
         ("post-champion", include_bytes!("../data/post-champion.bin")),
+        ("completion-boulder", include_bytes!("../data/completion-boulder.bin")),
+        ("completion-bill", include_bytes!("../data/completion-bill.bin")),
+        ("completion-thunder", include_bytes!("../data/completion-thunder.bin")),
+        ("completion-celadon", include_bytes!("../data/completion-celadon.bin")),
+        ("completion-rainbow", include_bytes!("../data/completion-rainbow.bin")),
+        ("completion-flute", include_bytes!("../data/completion-flute.bin")),
+        ("completion-marsh", include_bytes!("../data/completion-marsh.bin")),
+        ("completion-soul", include_bytes!("../data/completion-soul.bin")),
+        ("completion-surf", include_bytes!("../data/completion-surf.bin")),
     ];
     for (name, bytes) in FIXTURES {
         let mut fixture = TestFixture::new(bytes, Duration::from_mins(1), vec![]);
