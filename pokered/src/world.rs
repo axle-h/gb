@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use poke_core::text_script::{TextBuffer, TextMoney, TextNumber};
 use serde::{Deserialize, Serialize};
-use crate::party::{Named, PartyMon};
+use crate::party::{Named, PartyMon, Pokedex};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct World {
@@ -13,6 +13,8 @@ pub struct World {
     /// `wPartySpecies` and the mons beside it. The boxes and the day care belong to the chunk that
     /// first reads them, which is not this one.
     pub party: Vec<Named<PartyMon>>,
+    /// `wPokedexOwned` and `wPokedexSeen`.
+    pub pokedex: Pokedex,
     /// `wPlayerMoney`, BCD, two digits to a byte.
     pub money: [u8; 3],
     /// `BIT_NO_TEXT_DELAY`.

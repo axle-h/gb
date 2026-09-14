@@ -5,8 +5,10 @@ mod field_move_menu;
 mod list_menu;
 mod naming_screen;
 mod party_menu;
+mod pokedex;
 mod screen;
 mod start_menu;
+mod synth;
 mod text_box;
 mod two_option_menu;
 

@@ -1,12 +1,14 @@
 pub mod colour;
 pub mod compose;
 pub mod layers;
+pub mod sgb;
 pub mod text_boxes;
 pub mod tiles;
 pub mod ui;
 
 use serde::{Deserialize, Serialize};
 use layers::{Effects, MapLayer, Object};
+use sgb::SgbState;
 use tiles::TileData;
 use ui::UiSurface;
 
@@ -19,4 +21,6 @@ pub struct Screen {
     /// OAM: forty objects at most.
     pub sprites: Vec<Object>,
     pub effects: Effects,
+    /// The SGB's palettes and per-cell attributes, which only the SGB colour modes read.
+    pub sgb: SgbState,
 }

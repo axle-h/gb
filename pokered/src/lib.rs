@@ -14,6 +14,9 @@ pub mod world;
 mod fixtures;
 
 use serde::{Deserialize, Serialize};
+use audio::data::AudioBank;
+use audio::engine::AudioEngine;
+use audio::Write;
 use command::{Command, Drive, Executor, Reply};
 use gfx::ui::UiSurface;
 use gfx::Screen;
@@ -49,6 +52,9 @@ pub struct Frame {
     pub events: Vec<Event>,
     pub status: Status,
     pub reply: Option<Reply>,
+    /// This frame's register writes, for the host to play. The game holds no audio backend, so a
+    /// save carries no oscillator state.
+    pub audio: Vec<Write>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +68,7 @@ pub struct Game {
     frames: u64,
     screen: Screen,
     menu: CursorMemory,
+    audio: AudioEngine,
     executor: Option<Executor>,
     #[serde(skip)]
     pacing: Pacing,
@@ -81,6 +88,8 @@ impl Game {
             frames: 0,
             screen: Screen::default(),
             menu: CursorMemory::default(),
+            // `PlayMusic` carries the bank its song lives in, so whatever plays first corrects this.
+            audio: AudioEngine::new(AudioBank::One),
             executor: None,
             pacing,
         }
@@ -109,6 +118,14 @@ impl Game {
 
     pub fn menu_mut(&mut self) -> &mut CursorMemory {
         &mut self.menu
+    }
+
+    pub fn audio(&self) -> &AudioEngine {
+        &self.audio
+    }
+
+    pub fn audio_mut(&mut self) -> &mut AudioEngine {
+        &mut self.audio
     }
 
     pub fn modes(&self) -> &[Mode] {
@@ -150,6 +167,7 @@ impl Game {
 
         self.pad.input = buttons;
         self.screen.tiles.update_moving_bg_tiles();
+        let audio = self.audio.frame();
         self.frame_counter = self.frame_counter.saturating_sub(1);
         self.frames += 1;
 
@@ -160,7 +178,7 @@ impl Game {
             }
         });
 
-        Frame { events, status: self.status(), reply }
+        Frame { events, status: self.status(), reply, audio }
     }
 
     pub fn status(&self) -> Status {

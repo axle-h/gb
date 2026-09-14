@@ -88,7 +88,7 @@ fn next_mode(shown: usize) -> Mode {
 
 fn buttons(keys: &sdl2::keyboard::KeyboardState) -> Joypad {
     [
-        (Scancode::Z, Joypad::A), (Scancode::X, Joypad::B), (Scancode::Return, Joypad::START),
+        (Scancode::X, Joypad::A), (Scancode::Z, Joypad::B), (Scancode::Return, Joypad::START),
         (Scancode::RShift, Joypad::SELECT), (Scancode::Up, Joypad::UP), (Scancode::Down, Joypad::DOWN),
         (Scancode::Left, Joypad::LEFT), (Scancode::Right, Joypad::RIGHT),
     ].into_iter().filter(|(key, _)| keys.is_scancode_pressed(*key)).fold(Joypad::empty(), |held, (_, b)| held | b)
@@ -130,7 +130,7 @@ fn main() -> Result<(), String> {
         }
         game.frame(Input::Buttons(buttons(&events.keyboard_state())));
 
-        let rgb = ColourMode::Dmg.rgb(&game.screen().frame());
+        let rgb = ColourMode::Dmg.rgb(game.screen());
         texture.update(None, &rgb, WIDTH * 3).map_err(|e| e.to_string())?;
         canvas.copy(&texture, None, None)?;
         canvas.present();
@@ -160,7 +160,7 @@ mod tests {
             for _ in 0..120 {
                 game.frame(Input::None);
             }
-            std::fs::write(format!("{dir}/scene-{shown}.rgb"), ColourMode::Dmg.rgb(&game.screen().frame())).unwrap();
+            std::fs::write(format!("{dir}/scene-{shown}.rgb"), ColourMode::Dmg.rgb(game.screen())).unwrap();
             while !game.modes().is_empty() {
                 game.frame(Input::Buttons(Joypad::B));
                 game.frame(Input::None);

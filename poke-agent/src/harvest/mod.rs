@@ -1,11 +1,14 @@
 //! Calls a cartridge routine on the emulator with chosen inputs and records what it returns, as
 //! tier-1 fixtures for `pokered`.
 
+mod audio;
 mod experience;
 mod field_moves;
 mod hp_bar;
 mod items;
 mod math;
+mod palettes;
+mod pokedex;
 mod pokemon;
 mod stats;
 
