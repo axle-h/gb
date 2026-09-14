@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::pokemon::integration_tests::cheats::Cheats;
-use crate::pokemon::integration_tests::completion::{checklist, Entry, Ledger, Way};
+use crate::pokemon::integration_tests::completion::{checklist, Entry, Ledger, Legend, Way};
 use crate::pokemon::integration_tests::godmode::Intent;
 use crate::pokemon::integration_tests::llm_harness::{Brain, Call, LlmRun, Reply, TurnRequest};
 use crate::pokemon::item::ItemId;
@@ -1941,5 +1941,47 @@ fn completion_phase_volcano_badge() {
     // walks the Mansion again, and for the whole-run ledger if none does.
     let later = [Entry::Trainer { map: Map::PokemonMansion3F, index: 1 }];
     let missing: Vec<Entry> = missing.into_iter().filter(|entry| !later.contains(entry)).collect();
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// Seafoam: the islands Route 20 is split by, four floors of holes down to the west lake, and
+/// Articuno at the bottom of them.
+pub fn to_seafoam() -> Vec<Step> {
+    use Step::*;
+    const SEAFOAM: &[&str] = &["SeafoamIslands1F", "SeafoamIslandsB1F", "SeafoamIslandsB2F",
+                               "SeafoamIslandsB3F", "SeafoamIslandsB4F"];
+    vec![
+        // The floors are thick with wilds, and every new species is a catch that spends the turns
+        // the boulders need, so the collecting waits for the bird the phase came for.
+        Collect(false), Tidy,
+        // Cinnabar's own shore reaches Route 20's west half, and the islands' door with it.
+        GoTo("Route20"), GoTo("SeafoamIslands1F"),
+        Explore { maps: SEAFOAM, patience: 1200 },
+        // B3F's two holes, each filled by the one boulder that can reach it. The row names both,
+        // and arming Strength is the row's own business.
+        GoTo("SeafoamIslandsB3F"),
+        Repeat("hole at (3, 16)"),
+        Repeat("hole at (6, 16)"),
+        // Down the hole just filled, into the west lake: the staircases land on the other side,
+        // which the current walls off from the bird.
+        Take("SeafoamIslandsB4F, arriving at (5, 14)"),
+        Collect(true),
+        Talk("Articuno"),
+        Explore { maps: SEAFOAM, patience: 600 },
+        GoTo("Route20"),
+    ]
+}
+
+#[test]
+#[ignore = "a phase of the completion run; run with --ignored"]
+fn completion_phase_seafoam() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-volcano.bin"), "completion-seafoam",
+                          to_seafoam(), 600, Duration::from_secs(3000));
+    let missing = missing_on(&mut played, &[
+        Map::SeafoamIslands1F, Map::SeafoamIslandsB1F, Map::SeafoamIslandsB2F,
+        Map::SeafoamIslandsB3F, Map::SeafoamIslandsB4F,
+    ], &[Entry::Way(Way::Legendary(Legend::Articuno))]);
+    cut(&mut played, "completion-seafoam");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
