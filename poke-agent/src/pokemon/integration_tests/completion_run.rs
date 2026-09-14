@@ -1291,7 +1291,6 @@ pub fn to_the_boulder_badge() -> Vec<Step> {
 
 /// The first phase, from the fresh save.
 #[test]
-#[ignore = "a phase of the completion run; run with --ignored"]
 fn completion_phase_boulder_badge() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/start-of-game-state.bin"), "completion-boulder",
@@ -1353,7 +1352,6 @@ pub fn to_bill() -> Vec<Step> {
 }
 
 #[test]
-#[ignore = "a phase of the completion run; run with --ignored"]
 fn completion_phase_bill() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-boulder.bin"), "completion-bill",
@@ -1415,7 +1413,6 @@ pub fn to_the_thunder_badge() -> Vec<Step> {
 }
 
 #[test]
-#[ignore = "a phase of the completion run; run with --ignored"]
 fn completion_phase_thunder_badge() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-bill.bin"), "completion-thunder",
@@ -1479,7 +1476,6 @@ pub fn to_celadon() -> Vec<Step> {
 }
 
 #[test]
-#[ignore = "a phase of the completion run; run with --ignored"]
 fn completion_phase_celadon() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-thunder.bin"), "completion-celadon",
@@ -1560,7 +1556,6 @@ pub fn to_the_rainbow_badge() -> Vec<Step> {
 }
 
 #[test]
-#[ignore = "a phase of the completion run; run with --ignored"]
 fn completion_phase_rainbow_badge() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-celadon.bin"), "completion-rainbow",
@@ -1629,7 +1624,6 @@ pub fn to_the_poke_flute() -> Vec<Step> {
 }
 
 #[test]
-#[ignore = "a phase of the completion run; run with --ignored"]
 fn completion_phase_poke_flute() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-rainbow.bin"), "completion-flute",
@@ -1711,7 +1705,6 @@ pub fn to_the_marsh_badge() -> Vec<Step> {
 }
 
 #[test]
-#[ignore = "a phase of the completion run; run with --ignored"]
 fn completion_phase_marsh_badge() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-flute.bin"), "completion-marsh",
@@ -1750,7 +1743,6 @@ pub fn to_the_soul_badge() -> Vec<Step> {
 }
 
 #[test]
-#[ignore = "a phase of the completion run; run with --ignored"]
 fn completion_phase_soul_badge() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-marsh.bin"), "completion-soul",
@@ -1774,7 +1766,6 @@ fn completion_phase_soul_badge() {
 /// the exploring returns to for ever. The money the gate charges is held up by the cheats, so what
 /// this watches is the clock, which a loop spends and a finished walk does not.
 #[test]
-#[ignore = "a phase of the completion run; run with --ignored"]
 fn a_walk_given_up_on_every_time_is_not_tried_for_ever() {
     play(include_bytes!("../data/completion-soul.bin"), "safari-turnstile", vec![
         Step::Collect(false),
@@ -1843,7 +1834,6 @@ pub fn to_surf() -> Vec<Step> {
 }
 
 #[test]
-#[ignore = "a phase of the completion run; run with --ignored"]
 fn completion_phase_surf() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-soul.bin"), "completion-surf",
@@ -1957,7 +1947,6 @@ pub fn to_the_volcano_badge() -> Vec<Step> {
 }
 
 #[test]
-#[ignore = "a phase of the completion run; run with --ignored"]
 fn completion_phase_volcano_badge() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-surf.bin"), "completion-volcano",
@@ -2009,7 +1998,6 @@ pub fn to_seafoam() -> Vec<Step> {
 }
 
 #[test]
-#[ignore = "a phase of the completion run; run with --ignored"]
 fn completion_phase_seafoam() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-volcano.bin"), "completion-seafoam",
@@ -2042,7 +2030,6 @@ pub fn to_the_earth_badge() -> Vec<Step> {
 }
 
 #[test]
-#[ignore = "a phase of the completion run; run with --ignored"]
 fn completion_phase_earth_badge() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-seafoam.bin"), "completion-earth",
