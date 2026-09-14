@@ -1985,3 +1985,33 @@ fn completion_phase_seafoam() {
     cut(&mut played, "completion-seafoam");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
+
+/// The Earth Badge: off the water at Cinnabar, north to Viridian, and the gym that was shut when
+/// the run first walked past it.
+pub fn to_the_earth_badge() -> Vec<Step> {
+    use Step::*;
+    vec![
+        Collect(true), Tidy,
+        // The islands are the bridge between Route 20's two halves, so the phase before came out of
+        // their east door, on the Fuchsia side, where the only rows are the water, the swimmers and
+        // the way back in. Cinnabar is not reachable from that half at all, and the flight does not
+        // need it to be.
+        Field(r#"{"move":"fly","map":"ViridianCity"}"#), GoTo("ViridianCity"),
+        // Giovanni is only in the gym once Silph Co has sent the Rockets home. The arrow tiles are
+        // the floor itself rather than an obstacle: `MetaTileMap` slides a route over them, so the
+        // gym is walked like any other.
+        GoTo("ViridianGym"), Explore { maps: &["ViridianGym"], patience: 600 },
+        GoTo("ViridianCity"),
+    ]
+}
+
+#[test]
+#[ignore = "a phase of the completion run; run with --ignored"]
+fn completion_phase_earth_badge() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-seafoam.bin"), "completion-earth",
+                          to_the_earth_badge(), 300, Duration::from_secs(1800));
+    let missing = missing_on(&mut played, &[Map::ViridianGym], &[Entry::Badge(7)]);
+    cut(&mut played, "completion-earth");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
