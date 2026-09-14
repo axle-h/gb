@@ -133,8 +133,8 @@ pub enum Check {
     /// Any of these item ids held at any point.
     Held(Vec<u8>),
     Badge(u8),
-    /// Species owned in the Pokédex.
-    Owned(PokemonSpecies),
+    /// Any of these species owned in the Pokédex.
+    Owned(Vec<PokemonSpecies>),
     /// `wNumHoFTeams` above zero.
     HallOfFame,
     /// Seen by [`Ledger::observe`] as it happened, because nothing left in RAM records it.
@@ -310,7 +310,7 @@ pub fn checklist(mmu: &MMU) -> Vec<Item> {
 
     for way in ways() {
         let check = match way {
-            Way::Legendary(legend) => Check::Owned(legend.species()),
+            Way::Legendary(legend) => Check::Owned(vec![legend.species()]),
             Way::SnorlaxOnRoute12 => toggle(pokered_toggles::TOGGLE_ROUTE_12_SNORLAX),
             Way::SnorlaxOnRoute16 => toggle(pokered_toggles::TOGGLE_ROUTE_16_SNORLAX),
             Way::GiftStarter => event(pokered_events::EVENT_GOT_STARTER),
@@ -326,7 +326,9 @@ pub fn checklist(mmu: &MMU) -> Vec<Item> {
                     | (1 << (pokered_toggles::TOGGLE_FIGHTING_DOJO_GIFT_2 % 8)),
             },
             // Aerodactyl comes from the Old Amber and nowhere else; the other fossils' two likewise.
-            Way::RevivedOldAmber => Check::Owned(PokemonSpecies::Aerodactyl),
+            // Which of the two depends on the fossil the run chose at Mt Moon, so either will do.
+            Way::RevivedOldAmber => Check::Owned(vec![PokemonSpecies::Aerodactyl]),
+            Way::RevivedFossil => Check::Owned(vec![PokemonSpecies::Kabuto, PokemonSpecies::Omanyte]),
             // Porygon is sold at the prize counter and found nowhere else.
             // Any prize will do, and the dearest one cannot be bought at all: the clerk refuses
             // to sell a 50-coin lot above 9 940, so 9 990 is the most coins money can hold.
@@ -390,7 +392,7 @@ impl Ledger {
                 && self.toggled.iter().any(|&(a, m, seen_clear)| (a, m) == (*address, *mask) && seen_clear),
             Check::Held(ids) => ids.iter().any(|id| self.held.contains(id)),
             Check::Badge(bit) => state.badges.bits() & (1 << bit) != 0,
-            Check::Owned(species) => state.pokedex_owned.contains(species),
+            Check::Owned(species) => species.iter().any(|it| state.pokedex_owned.contains(it)),
             Check::HallOfFame => state.hall_of_fame_teams > 0,
             Check::Observed => self.observed.contains(&item.entry),
         }

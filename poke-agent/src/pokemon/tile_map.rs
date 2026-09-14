@@ -1080,7 +1080,15 @@ impl MetaTileMap {
                 })
                 .min_by_key(|(_, p)| best_dist_from(p).unwrap().0[p])
                 .copied();
-            let Some((face_dir, dest)) = stand(MetaTile::Empty).or_else(|| stand(MetaTile::Grass)) else { continue };
+            // Then the water, last so that no row which already existed moves: someone standing on
+            // it is faced from a square that is water too, and without this arm the search surfs
+            // straight past every swimmer on a sea route and can never turn to face one. `stand`
+            // still asks the search for a route, so the mount, the shores Surf refuses to launch
+            // from and the water tile pairs rule exactly as they did.
+            let Some((face_dir, dest)) = stand(MetaTile::Empty)
+                .or_else(|| stand(MetaTile::Grass))
+                .or_else(|| self.can_surf.then(|| stand(MetaTile::Water)).flatten())
+            else { continue };
 
             let (_, came_from) = best_dist_from(&dest).unwrap();
             let mut route = reconstruct(dest, came_from);

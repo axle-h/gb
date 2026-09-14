@@ -224,6 +224,36 @@ fn probe_button_at_state() {
     }
 }
 
+/// Print the Cinnabar Gym's six gate flags and seven trainer flags from a dropped save, which is
+/// what says whether a machine that was answered opened anything.
+/// Set `GB_PROBE_STATE` to the save.
+#[test]
+#[cfg(feature = "slow-tests")]
+#[ignore = "probe — run with --ignored --nocapture, see the doc comment"]
+fn probe_cinnabar_gates() {
+    use crate::pokemon::symbols::{pokered_events, pokered_symbols};
+    use gb::ram::ROM;
+    let path = std::env::var("GB_PROBE_STATE").expect("GB_PROBE_STATE");
+    let bytes = std::fs::read(&path).expect("state");
+    let mut fixture = TestFixture::new(&bytes, Duration::from_secs(1), Vec::new());
+    let s = fixture.game_state();
+    println!("{} @ {} facing {:?}", s.map.map, s.map.player_position, s.map.player_direction);
+    let mmu = fixture.gb.core().mmu();
+    let set = |flag: u16| {
+        mmu.read(pokered_symbols::wEventFlags.address + flag / 8) & (1 << (flag % 8)) != 0
+    };
+    // The gate script counts its index from one, so the flag a machine sets is `GATE0` plus its
+    // own number: the window is wider than the six gates to show that off-by-one rather than hide it.
+    for gate in 0..8u16 {
+        println!("  gate {gate} unlocked: {}",
+            set(pokered_events::EVENT_CINNABAR_GYM_GATE0_UNLOCKED + gate));
+    }
+    for trainer in 0..8u16 {
+        println!("  trainer {trainer} beaten: {}",
+            set(pokered_events::EVENT_BEAT_CINNABAR_GYM_TRAINER_0 + trainer));
+    }
+}
+
 /// Dump the map, position, money, party, bag, tile, sprites and every action from a save.
 /// Set `GB_PROBE_STATE` to the save.
 #[test]
