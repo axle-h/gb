@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::pokemon::integration_tests::cheats::Cheats;
 use crate::pokemon::integration_tests::completion::{checklist, Entry, Ledger, Legend, Way};
-use crate::pokemon::integration_tests::godmode::Intent;
+use crate::pokemon::integration_tests::godmode::{names_map, Intent};
 use crate::pokemon::integration_tests::llm_harness::{Brain, Call, LlmRun, Reply, TurnRequest};
 use crate::pokemon::item::ItemId;
 
@@ -147,6 +147,38 @@ fn bin_at(description: &str) -> Option<(u8, u8)> {
     let (x, rest) = at.split_once(", ")?;
     let y = rest.split(')').next()?;
     Some((x.parse().ok()?, y.parse().ok()?))
+}
+
+/// The tile a row's id names, for every row that carries one: `Map:x,y:Kind`. A sprite's id has no
+/// coordinate, so it has none.
+fn id_at(id: &str) -> Option<(u8, u8)> {
+    let (x, y) = id.split(':').nth(1)?.split_once(',')?;
+    Some((x.parse().ok()?, y.parse().ok()?))
+}
+
+/// Where the run came into this map, from the turn's own line. The prompt writes it only for an
+/// arrival it still holds and only on the map that arrival belongs to, so its absence is ordinary.
+fn entered_at(situation: &str) -> Option<(u8, u8)> {
+    let rest = situation.split("Entered this map at (").nth(1)?;
+    let (x, rest) = rest.split_once(", ")?;
+    Some((x.parse().ok()?, rest.split(')').next()?.parse().ok()?))
+}
+
+/// The row to leave this map by for `target`. More than one exit can name the same map: a house
+/// with two doors offers both of them as the way to the town outside, and one of those can land in
+/// a pocket the rest of that town cannot be reached from. The door the run came in by is the one it
+/// knows leads somewhere, so where the turn says where that was, the exit nearest it wins. With no
+/// such line, or no exit carrying a coordinate, the first match stands, which is what
+/// `Intent::Enter` does on its own.
+fn enter_toward(request: &TurnRequest, target: &'static str) -> Option<String> {
+    let first = Intent::Enter(target).resolve(request);
+    let Some(came_in_at) = entered_at(request.situation()) else { return first };
+    request.menu_rows().into_iter()
+        .filter(|(_, what)| names_map(what, target))
+        .filter_map(|(id, _)| id_at(&id).map(|at| (id, at)))
+        .min_by_key(|(_, at)| at.0.abs_diff(came_in_at.0) as u16 + at.1.abs_diff(came_in_at.1) as u16)
+        .map(|(id, _)| id)
+        .or(first)
 }
 
 /// The party slot of the first member of `species`, from the turn's `### Party` lines.
@@ -834,7 +866,7 @@ impl CompletionBrain {
                 }
                 Step::GoTo(target) => {
                     if request.location().as_deref() == Some(*target) { self.at += 1; continue }
-                    Intent::Enter(target).resolve(request)
+                    enter_toward(request, target)
                         .or_else(|| self.toward(&here, |_, to| to == *target))
                         .or_else(|| self.route(request, target))
                         // Walled in with nothing known beyond: a way on within this map, such as a
@@ -1292,6 +1324,10 @@ pub fn to_bill() -> Vec<Step> {
         GoTo("MtMoonPokecenter"), Clear(&[]),
         GoTo("Route4"), GoTo("MtMoon1F"),
         Explore { maps: &["MtMoon1F", "MtMoonB1F", "MtMoonB2F"], patience: 600 },
+        // The exploring stops once the pockets it has stood in hold nothing more, and a thing
+        // further off on a floor was never in one of those menus. A Clear pass over each floor
+        // walks to whatever it missed, which is the same answer naming Route 12's gate was.
+        GoTo("MtMoon1F"), Clear(&[]), GoTo("MtMoonB1F"), Clear(&[]), GoTo("MtMoonB2F"), Clear(&[]),
         // Route 4 is two halves, and only B2F's east ladder comes out on the far one.
         GoTo("MtMoonB2F"), Take("MtMoonB1F, arriving at (23, 3)"), Take("Route4"), Tidy, Clear(&[]),
         GoTo("CeruleanCity"), Clear(&[]),
