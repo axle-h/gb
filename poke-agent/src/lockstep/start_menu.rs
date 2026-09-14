@@ -12,7 +12,8 @@ use pokered::world::{BattleStyle, Options, TextSpeed, World, NUM_EVENTS};
 use pokered::{Game, Input, Pacing};
 use crate::pokemon::options::{self, GameOptionsReader};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
-use super::{breakpoint, cartridge_until_polling, joypad, open_the_start_menu, recreation_until_polling, tile_row, to_vblank};
+use super::{assert_late, breakpoint, cartridge_until_polling, joypad, open_the_start_menu, recreation_until_polling,
+            tile_row, to_vblank, CURSOR};
 
 /// The world the cartridge is in, as far as these two screens read it: the player's name, the
 /// events, one of which decides whether there is a `POKéDEX` row, and the options the option
@@ -66,7 +67,7 @@ fn recreation_menu(game: &Game) -> Vec<Vec<u8>> {
     (0..16).map(|y| game.ui().row(y)[10..].to_vec()).collect()
 }
 
-/// The same menu wherever both poll. The cartridge may arrive late, never early.
+/// The same menu wherever both poll, the cartridge late by `HandleMenuInput`'s `Delay3` each time.
 fn compare(presses: &[Joypad]) {
     let mut gb = open_the_start_menu();
     let mut game = the_menu(&gb);
@@ -74,8 +75,7 @@ fn compare(presses: &[Joypad]) {
         let cartridge = cartridge_until_polling(&mut gb);
         let recreation = recreation_until_polling(&mut game, Decision::StartMenu);
         assert_eq!(cartridge_menu(&gb), recreation_menu(&game), "polling before press {step}");
-        assert!((0..=2).contains(&(cartridge as i64 - recreation as i64)),
-            "before press {step} the cartridge took {cartridge} frames and the recreation {recreation}");
+        assert_late(cartridge, recreation, CURSOR, &format!("before press {step}"));
         gb.hold_buttons(joypad(press));
         game.frame(Input::Buttons(press));
         to_vblank(&mut gb);

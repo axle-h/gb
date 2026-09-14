@@ -203,8 +203,8 @@ impl Game {
     }
 
     fn with_ctx(&mut self, events: &mut Vec<Event>, f: impl FnOnce(&mut Vec<Mode>, &mut Ctx)) {
-        let Self { world, modes, rng, pad, frame_counter, screen, menu, pacing, .. } = self;
-        let mut ctx = Ctx { world, pad, rng, screen, menu, frame_counter, events, pacing: *pacing };
+        let Self { world, modes, rng, pad, frame_counter, screen, menu, audio, pacing, .. } = self;
+        let mut ctx = Ctx { world, pad, rng, screen, menu, audio, frame_counter, events, pacing: *pacing };
         f(modes, &mut ctx);
     }
 
@@ -234,6 +234,7 @@ fn apply(modes: &mut Vec<Mode>, transition: Transition, ctx: &mut Ctx) {
         Transition::Push(mut mode) => {
             mode.enter(ctx);
             modes.push(mode);
+            opened(modes, ctx);
         }
         Transition::Pop(outcome) => {
             modes.pop();
@@ -243,8 +244,14 @@ fn apply(modes: &mut Vec<Mode>, transition: Transition, ctx: &mut Ctx) {
             modes.pop();
             mode.enter(ctx);
             modes.push(mode);
+            opened(modes, ctx);
         }
     }
+}
+
+fn opened(modes: &mut Vec<Mode>, ctx: &mut Ctx) {
+    let transition = modes.last_mut().expect("a mode was just pushed").open(ctx);
+    apply(modes, transition, ctx);
 }
 
 fn resume(modes: &mut Vec<Mode>, outcome: Outcome, ctx: &mut Ctx) {

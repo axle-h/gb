@@ -58,6 +58,42 @@ pub const SECOND_LINE: u16 = coord(1, 16);
 /// `WaitForTextScrollButtonPress`'s iterations a frame, in hundredths.
 const BLINK_PER_FRAME: u32 = 4454;
 
+/// `PrintLetterDelay`, for anything that places a tile and then waits as a letter does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LetterDelay {
+    /// Waiting for `hFrameCounter`.
+    Counting,
+    /// A or B was held, which waits one frame instead.
+    NextFrame,
+}
+
+impl LetterDelay {
+    /// The call, up to its first check of the buttons. `None` when there is nothing to wait for.
+    pub fn start(ctx: &mut Ctx) -> Option<Self> {
+        if ctx.pacing == Pacing::Instant || ctx.world.no_text_delay {
+            return None;
+        }
+        *ctx.frame_counter = ctx.world.options.text_speed as u8;
+        Some(Self::check_buttons(ctx))
+    }
+
+    /// One frame of the wait. True when it is over, and the caller carries on in this frame.
+    pub fn update(&mut self, ctx: &mut Ctx) -> bool {
+        match self {
+            Self::NextFrame => true,
+            Self::Counting => {
+                *self = Self::check_buttons(ctx);
+                *self == Self::Counting && *ctx.frame_counter == 0
+            }
+        }
+    }
+
+    fn check_buttons(ctx: &mut Ctx) -> Self {
+        ctx.pad.poll();
+        if ctx.pad.held.intersects(Joypad::A | Joypad::B) { Self::NextFrame } else { Self::Counting }
+    }
+}
+
 /// How `PlaceString` returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Printed {
@@ -83,12 +119,9 @@ pub struct PlaceString {
 enum Phase {
     /// Nothing is waiting: carry on printing this frame.
     Running,
-    /// `PrintLetterDelay`, waiting for `hFrameCounter`.
-    LetterDelay,
-    /// `PrintLetterDelay` saw A or B held and waits one frame.
-    LetterNextFrame,
-    /// `ProtectedDelay3` with the `▼` up.
-    ArrowDelay(u8, Pause),
+    Letter(LetterDelay),
+    /// `ManualTextScroll` with the `▼` up. The `ProtectedDelay3` before it is loading and not
+    /// modelled, so the pad is read in the frame the arrow is drawn.
     Prompting { pause: Pause, blink: ArrowBlink },
     /// `ScrollTextUpOneLine` has run `scrolled` times and is in its five frames.
     Scrolling { scrolled: u8, frames: u8 },
@@ -123,22 +156,14 @@ impl PlaceString {
                 self.phase = Phase::Cleared(frames - 1);
                 None
             }
-            Phase::Cleared(_) | Phase::LetterNextFrame => self.run(ctx, answered),
-            Phase::LetterDelay => {
-                self.phase = self.check_letter_buttons(ctx);
-                if self.phase == Phase::LetterDelay && *ctx.frame_counter == 0 {
+            Phase::Cleared(_) => self.run(ctx, answered),
+            Phase::Letter(mut delay) => {
+                if delay.update(ctx) {
                     self.run(ctx, answered)
                 } else {
+                    self.phase = Phase::Letter(delay);
                     None
                 }
-            }
-            Phase::ArrowDelay(frames, pause) if frames > 1 => {
-                self.phase = Phase::ArrowDelay(frames - 1, pause);
-                None
-            }
-            Phase::ArrowDelay(_, pause) => {
-                self.phase = Phase::Prompting { pause, blink: ArrowBlink::default() };
-                self.update(ctx, answered)
             }
             Phase::Prompting { pause, mut blink } => {
                 if ctx.pad.low_sensitivity(ctx.frame_counter).intersects(Joypad::A | Joypad::B) {
@@ -210,7 +235,8 @@ impl PlaceString {
                 letter => {
                     Self::put(&mut ctx.screen.ui, self.at, letter);
                     self.at += 1;
-                    if self.letter_delay(ctx) {
+                    if let Some(delay) = LetterDelay::start(ctx) {
+                        self.phase = Phase::Letter(delay);
                         return None;
                     }
                 }
@@ -223,25 +249,10 @@ impl PlaceString {
         self.text.splice(self.cursor..self.cursor, bytes.iter().copied());
     }
 
-    /// `PrintLetterDelay`, up to its first check of the buttons. True when it waits.
-    fn letter_delay(&mut self, ctx: &mut Ctx) -> bool {
-        if ctx.pacing == Pacing::Instant || ctx.world.no_text_delay {
-            return false;
-        }
-        *ctx.frame_counter = ctx.world.options.text_speed as u8;
-        self.phase = self.check_letter_buttons(ctx);
-        true
-    }
-
-    fn check_letter_buttons(&self, ctx: &mut Ctx) -> Phase {
-        ctx.pad.poll();
-        if ctx.pad.held.intersects(Joypad::A | Joypad::B) { Phase::LetterNextFrame } else { Phase::LetterDelay }
-    }
-
     fn arrow(&mut self, ctx: &mut Ctx, pause: Pause, answered: &mut u32) -> Option<Printed> {
         Self::put(&mut ctx.screen.ui, ARROW, ch::DOWN_ARROW);
-        self.phase = Phase::ArrowDelay(self.delay(ctx, 3), pause);
-        self.after_delay(ctx, answered)
+        self.phase = Phase::Prompting { pause, blink: ArrowBlink::default() };
+        self.update(ctx, answered)
     }
 
     fn scroll(&mut self, ctx: &mut Ctx, answered: &mut u32) -> Option<Printed> {
@@ -258,7 +269,7 @@ impl PlaceString {
     /// A delay of zero frames is over at once.
     fn after_delay(&mut self, ctx: &mut Ctx, answered: &mut u32) -> Option<Printed> {
         match self.phase {
-            Phase::ArrowDelay(0, _) | Phase::Scrolling { frames: 0, .. } | Phase::Cleared(0) =>
+            Phase::Scrolling { frames: 0, .. } | Phase::Cleared(0) =>
                 self.update(ctx, answered),
             _ => None,
         }

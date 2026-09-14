@@ -1,13 +1,18 @@
 //! The recreation and the emulator fed the same buttons and compared.
 
 mod audio;
+mod evolution;
 mod field_move_menu;
+mod item_menu;
+mod learn_move;
 mod list_menu;
 mod naming_screen;
 mod party_menu;
 mod pokedex;
+mod pokemart;
 mod screen;
 mod start_menu;
+mod status_screen;
 mod synth;
 mod text_box;
 mod two_option_menu;
@@ -59,6 +64,38 @@ pub(crate) fn cartridge_until_polling(gb: &mut GameBoy) -> u32 {
         }
     }
     panic!("the cartridge never polled");
+}
+
+/// `Delay3`: the cartridge waiting for what it has just drawn to reach the screen, which is loading
+/// and which the recreation leaves out.
+pub(crate) const DELAY3: u32 = 3;
+/// `HandleMenuInput`'s, after it places the cursor.
+pub(crate) const CURSOR: u32 = DELAY3;
+/// `PrintText`'s, after it draws the box.
+pub(crate) const BOX: u32 = DELAY3;
+/// `ProtectedDelay3`, at a `▼`.
+pub(crate) const ARROW: u32 = DELAY3;
+/// `DisplayListMenuID`: the `DelayFrames 10` after its box, the `Delay3` after its entries, and the
+/// cursor's.
+pub(crate) const LIST: u32 = 10 + DELAY3 + CURSOR;
+/// A list printed again, which scrolling, paging and swapping do.
+pub(crate) const LIST_REDRAWN: u32 = DELAY3 + CURSOR;
+
+/// A text a press opens. The press is still held for the first letter's `PrintLetterDelay`, which
+/// the box's `Delay3` kept it clear of on the cartridge, so that letter waits a frame rather than
+/// the text speed.
+pub(crate) fn hurried_letter(game: &Game) -> u32 {
+    game.world().options.text_speed as u32 - 1
+}
+
+/// The cartridge reaches a point both agree on late by the loading the recreation leaves out on the
+/// way plus up to two lag frames, and never early. A recreation that is waiting already reads a
+/// frame long, because `recreation_until_polling` always runs one.
+pub(crate) fn assert_late(cartridge: u32, recreation: u32, loading: u32, what: &str) {
+    let late = cartridge as i64 - recreation as i64;
+    let allowed = (loading as i64 - 1).max(0)..=loading as i64 + 2;
+    assert!(allowed.contains(&late),
+        "{what}: the cartridge took {cartridge} frames and the recreation {recreation}, {late} late for {loading} of loading");
 }
 
 pub(crate) fn recreation_until_polling(game: &mut Game, decision: Decision) -> u32 {

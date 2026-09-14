@@ -4,6 +4,8 @@
 //! absence costs nothing in timing, because `AnimatePartyMon` ends in one `DelayFrame` and the
 //! cursor loop polls once a frame either way; what is missing is the picture, not the cadence.
 
+use poke_core::item::ItemId;
+use poke_core::move_name::PokemonMoveName;
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
 use crate::gfx::text_boxes::TextBoxId;
@@ -13,6 +15,7 @@ use crate::input::Joypad;
 use crate::mode::{Ctx, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::menu_input::{MenuInput, UNFILLED_CURSOR};
 use crate::systems::hp_bar::{draw_hp, HpBarType};
+use crate::systems::item_use::{can_learn_tm, evolves_with};
 use crate::systems::print_num::{print_number, NumberFormat};
 
 /// `<LV>`, the two-tile ":L" the level is printed after.
@@ -48,12 +51,20 @@ impl PartyMenuType {
     }
 }
 
+/// What `ABLE` and `NOT ABLE` are asked about: `wMoveNum` for a machine, `wEvoStoneItemID` for a
+/// stone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Able {
+    Machine(PokemonMoveName),
+    Stone(ItemId),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartyMenu {
     kind: PartyMenuType,
+    #[serde(default)]
+    able: Option<Able>,
     input: MenuInput,
-    /// The `Delay3` after the prompt is printed.
-    opening: u8,
     /// `wMenuItemToSwap`, counting from 1. The same WRAM byte the item list marks its swaps with,
     /// and never live at the same time as that one.
     to_swap: u8,
@@ -64,7 +75,17 @@ pub struct PartyMenu {
 impl PartyMenu {
     pub fn new(kind: PartyMenuType) -> Self {
         let input = MenuInput::new(0, 0, (0, 1), Joypad::A | Joypad::B);
-        Self { kind, input, opening: 3, to_swap: 0, cold: true }
+        Self { kind, able: None, input, to_swap: 0, cold: true }
+    }
+
+    /// `TMHM_PARTY_MENU`: each mon with `ABLE` or `NOT ABLE` to learn the move in place of its HP.
+    pub fn teaching(mv: PokemonMoveName) -> Self {
+        Self { able: Some(Able::Machine(mv)), ..Self::new(PartyMenuType::TmHm) }
+    }
+
+    /// `EVO_STONE_PARTY_MENU`: the same, for whether the stone evolves it.
+    pub fn evo_stone(stone: ItemId) -> Self {
+        Self { able: Some(Able::Stone(stone)), ..Self::new(PartyMenuType::EvoStone) }
     }
 
     /// `.choseSwitch`: the mon in `slot` is marked, and the next one chosen changes places with it.
@@ -99,6 +120,13 @@ impl PartyMenu {
 
     pub fn selected(&self) -> u8 {
         self.input.current
+    }
+
+    /// `RedrawPartyMenu_` up to its message, for an item's result that prints its own message under
+    /// the list rather than one of the menu's prompts.
+    pub fn redraw_entries(ctx: &mut Ctx) {
+        Self::erase_cursors(&mut ctx.screen.ui);
+        Self::new(PartyMenuType::UseItem).draw_rows(ctx);
     }
 
     /// `PrintStatusCondition`: a fainted mon reads `FNT` whatever its status byte says.
@@ -151,7 +179,8 @@ impl PartyMenu {
         }
     }
 
-    /// `RedrawPartyMenu_`'s loop: a name, a status, a bar and a level, two rows apart.
+    /// `RedrawPartyMenu_`'s loop: a name, a status, a bar and a level, two rows apart; for a machine
+    /// or a stone, `ABLE` or `NOT ABLE` where the status and the bar would be.
     fn draw_rows(&self, ctx: &mut Ctx) {
         let rows: Vec<(Vec<u8>, u8, u16, u16, u8)> = ctx.world.party.iter()
             .map(|held| (held.nick.clone(), held.mon.mon.status, held.mon.mon.hp, held.mon.stats[0], held.mon.level))
@@ -163,6 +192,18 @@ impl PartyMenu {
             // only state that enables it is the one that skips the list. No path reaches it.
             if self.to_swap as usize == row + 1 {
                 ctx.screen.ui.set(0, y, UNFILLED_CURSOR);
+            }
+            if let Some(able) = self.able {
+                // `.teachMoveMenu` and `.evolutionStoneMenu` print this instead of a status and a bar.
+                let species = ctx.world.party[row].mon.mon.species;
+                let yes = match able {
+                    Able::Machine(mv) => can_learn_tm(species, mv),
+                    Able::Stone(stone) => evolves_with(species, stone),
+                };
+                let text = poke_core::charmap::encode(if yes { "ABLE" } else { "NOT ABLE" }).expect("the words encode");
+                ctx.screen.ui.place(NAME_X + 9, y + 1, &text);
+                Self::print_level(&mut ctx.screen.ui, LEVEL_X, y, level);
+                continue;
             }
             if let Some(text) = Self::status_text(status, hp) {
                 let bytes = poke_core::charmap::encode(text).expect("a status encodes");
@@ -195,7 +236,6 @@ impl PartyMenu {
         }
         self.draw_rows(ctx);
         self.print_message(ctx);
-        self.opening = 3;
         self.input.call(ctx);
         Transition::Stay
     }
@@ -223,17 +263,12 @@ impl ModeUpdate for PartyMenu {
             self.draw_rows(ctx);
         }
         self.print_message(ctx);
-        self.opening = 3;
+        // `RedrawPartyMenu_`'s `Delay3` is loading and not modelled; the first poll is the next
+        // frame's, after `AnimatePartyMon`'s `DelayFrame`.
         self.input.call(ctx);
     }
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
-        if self.opening > 0 {
-            self.opening -= 1;
-            if self.opening > 0 {
-                return Transition::Stay;
-            }
-        }
         let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
         ctx.menu.party_and_bills = self.input.current;
         if self.to_swap != 0 {
@@ -248,11 +283,7 @@ impl ModeUpdate for PartyMenu {
     }
 
     fn status(&self) -> Status {
-        if self.opening == 0 && self.input.is_polling() {
-            Status::Waiting(Decision::PartyMenu)
-        } else {
-            Status::Busy
-        }
+        if self.input.is_polling() { Status::Waiting(Decision::PartyMenu) } else { Status::Busy }
     }
 }
 
@@ -402,6 +433,23 @@ mod tests {
         }
         assert_eq!(events, [Event::CommandDone(Command::ChooseOption(1))]);
         assert_eq!(game.menu().chosen_item, 1);
+    }
+
+    /// A machine's rows say who can learn it and draw no HP bar; a stone's likewise.
+    #[test]
+    fn a_machine_or_a_stone_asks_each_mon_instead_of_showing_its_hp() {
+        let mut game = Game::new(World { party: two(), ..World::default() }, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::PartyMenu(PartyMenu::teaching(poke_core::move_name::PokemonMoveName::Fly)));
+        until_waiting(&mut game);
+        assert_eq!(game.ui().row(1)[12..16], encode("ABLE").unwrap()[..], "a Pidgey can fly");
+        assert_eq!(game.ui().row(3)[12..20], encode("NOT ABLE").unwrap()[..], "a Rattata cannot");
+        assert_eq!(game.ui().row(1)[4], UiSurface::BLANK, "and no HP bar");
+        assert_eq!(game.ui().row(14)[1..16], encode("Use TM on which").unwrap()[..]);
+
+        let mut game = Game::new(World { party: two(), ..World::default() }, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::PartyMenu(PartyMenu::evo_stone(ItemId::MoonStone)));
+        until_waiting(&mut game);
+        assert_eq!(game.ui().row(1)[12..20], encode("NOT ABLE").unwrap()[..]);
     }
 
     #[test]

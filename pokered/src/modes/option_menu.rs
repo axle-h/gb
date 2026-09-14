@@ -36,13 +36,11 @@ pub struct OptionMenu {
     text_speed_x: u8,
     battle_anim_x: u8,
     battle_style_x: u8,
-    /// The `Delay3` after the screen is drawn, counting down.
-    opening: u8,
 }
 
 impl OptionMenu {
     pub fn new() -> Self {
-        Self { cursor: (1, TEXT_SPEED_Y), text_speed_x: DEFAULT_TEXT_SPEED_X, battle_anim_x: LEFT, battle_style_x: LEFT, opening: 3 }
+        Self { cursor: (1, TEXT_SPEED_Y), text_speed_x: DEFAULT_TEXT_SPEED_X, battle_anim_x: LEFT, battle_style_x: LEFT }
     }
 
     /// `SetCursorPositionsFromOptions`, including the `▷` it leaves on all four rows.
@@ -143,16 +141,14 @@ impl ModeUpdate for OptionMenu {
         ui.place(1, 13, &text(" SHIFT    SET"));
         ui.place(2, 16, &text("CANCEL"));
         self.cursors_from_options(ctx);
-        self.opening = 3;
+    }
+
+    /// The `Delay3` after drawing is loading and not modelled, so `.loop` starts in this frame.
+    fn open(&mut self, ctx: &mut Ctx) -> Transition {
+        self.update(ctx)
     }
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
-        if self.opening > 0 {
-            self.opening -= 1;
-            if self.opening > 0 {
-                return Transition::Stay;
-            }
-        }
         self.place_cursor(ctx);
         self.options_from_cursors(ctx);
 
@@ -196,7 +192,7 @@ impl ModeUpdate for OptionMenu {
     }
 
     fn status(&self) -> Status {
-        if self.opening > 0 { Status::Busy } else { Status::Waiting(Decision::Options) }
+        Status::Waiting(Decision::Options)
     }
 }
 

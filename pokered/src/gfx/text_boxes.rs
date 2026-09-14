@@ -102,12 +102,13 @@ fn place_lines(ui: &mut UiSurface, x: usize, y: usize, text: &str) {
     }
 }
 
-/// `DisplayMoneyBox`. The six digits it clears first are wider than the five a full purse needs, so
-/// a shorter number does not leave the last of the old one behind.
+/// `DisplayMoneyBox`. `LEADING_ZEROES` is the flag that *skips* them for `PrintBCDNumber`, so the
+/// purse is right-aligned with the `¥` against its first digit. The six tiles it clears first are
+/// what stop a shorter purse keeping the head of a longer one.
 pub fn money_box(ui: &mut UiSurface, money: &[u8; 3]) {
     TextBoxId::MoneyBoxTemplate.draw(ui);
     ui.fill(13, 1, 6, 1, UiSurface::BLANK);
-    let format = BcdFormat { skip_leading_zeroes: false, left_align: false, money_sign: true };
+    let format = BcdFormat { skip_leading_zeroes: true, left_align: false, money_sign: true };
     print_bcd(ui, SCREEN_TILES_X + 12, money, format);
 }
 
@@ -163,12 +164,13 @@ mod tests {
         assert_eq!(ui.row(5)[2..6], encode("QUIT").unwrap()[..]);
     }
 
-    /// `LEADING_ZEROES` is set, so a purse of ¥123 prints its zeroes rather than spaces.
+    /// For `PrintBCDNumber`, `LEADING_ZEROES` set means the zeroes are skipped, as the Viridian
+    /// Mart's lockstep showed; the name reads the other way.
     #[test]
-    fn the_money_box_prints_six_digits_behind_a_yen_sign() {
+    fn the_money_box_prints_the_purse_against_the_right_edge() {
         let mut ui = UiSurface::default();
         money_box(&mut ui, &[0x00, 0x01, 0x23]);
         assert_eq!(ui.row(0)[13..18], encode("MONEY").unwrap()[..]);
-        assert_eq!(ui.row(1)[12..19], encode("¥000123").unwrap()[..]);
+        assert_eq!(ui.row(1)[12..19], encode("   ¥123").unwrap()[..]);
     }
 }

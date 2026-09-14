@@ -3,6 +3,7 @@
 
 use poke_core::move_name::PokemonMoveName;
 use poke_core::moves::MoveData;
+use serde::{Deserialize, Serialize};
 use super::math::divide;
 
 /// A move's PP byte: PP left in the low six bits, PP Ups used in the top two.
@@ -63,10 +64,34 @@ pub fn use_pp_up(pp: u8, mv: PokemonMoveName) -> Option<u8> {
     Some(add_bonus_pp(pp + (1 << 6), MoveData::of_move(mv).pp, true))
 }
 
+/// A PP case as its fixtures store it: the move's PP byte, the move, and for an ether whether it
+/// is a Max Ether.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PpInput {
+    pub pp: u8,
+    pub mv: PokemonMoveName,
+    pub full: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use poke_core::move_name::PokemonMoveName::*;
+    use crate::fixtures::cases;
     use super::*;
+
+    #[test]
+    fn every_harvested_ether_matches() {
+        for (input, output, _) in cases::<PpInput, Option<u8>>(include_str!("../../fixtures/items/restore_pp.jsonl")) {
+            assert_eq!(restore_pp(input.pp, input.mv, input.full), output, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn every_harvested_pp_up_matches() {
+        for (input, output, _) in cases::<PpInput, Option<u8>>(include_str!("../../fixtures/items/use_pp_up.jsonl")) {
+            assert_eq!(use_pp_up(input.pp, input.mv), output, "{input:?}");
+        }
+    }
 
     #[test]
     fn a_move_with_no_pp_ups_has_its_own_max() {

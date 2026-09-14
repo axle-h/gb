@@ -8,9 +8,8 @@
 //!
 //! Exact: the seen and owned counts (`CountSetBits`), the highest seen number and the window it
 //! bounds, all four ways the list scrolls, and the dex entry's height, weight and description as
-//! the entry stores them. Exact frame counts: three for each `ClearScreen`, three for the `Delay3`
-//! after the list is printed, three more before the data page's picture, and `HandleMenuInput`'s
-//! own three, which `MenuInput` keeps.
+//! the entry stores them. Every `ClearScreen`, `Delay3` and `GBPalWhiteOutWithDelay3` here is
+//! loading and not modelled, so each screen takes input in the frame it is drawn.
 //!
 //! The list is scrolled with a *dex number*; the data page needs the cartridge's *index*, which is
 //! what `PokedexToIndex` is for and what every table on that page is keyed by.
@@ -92,24 +91,12 @@ pub struct PokedexMenu {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Phase {
-    /// `ShowPokedexMenu`'s `ClearScreen`, which is a clear and a `Delay3`.
-    Clearing(u8),
-    /// `.loop`'s `Delay3`, after the seven rows are printed.
-    ListDrawn(u8),
     List,
     SideMenu,
-    /// `ShowPokedexDataInternal`'s `ClearScreen`.
-    DataClearing(u8),
-    /// Its `Delay3`, which stands between the page's words and its picture.
-    DataDrawn(u8),
     /// The description printing, which is instant: see `print_description`.
     DataPrinting,
     /// `.waitForButtonPress`.
     DataWaiting,
-    /// The `ClearScreen` the data page ends with.
-    DataLeaving(u8),
-    /// `.exitPokedex`'s `GBPalWhiteOutWithDelay3`.
-    Closing(u8),
 }
 
 impl PokedexMenu {
@@ -118,7 +105,7 @@ impl PokedexMenu {
             scroll: 0,
             max_seen: 0,
             input: Self::list_input(0, ROWS - 1),
-            phase: Phase::Clearing(3),
+            phase: Phase::List,
             list: None,
             dex: 1,
             printer: None,
@@ -187,7 +174,7 @@ impl PokedexMenu {
     }
 
     /// `HandlePokedexListMenu` from the top: the parts that do not change, then the window.
-    fn open_list(&mut self, ctx: &mut Ctx) {
+    fn open_list(&mut self, ctx: &mut Ctx) -> Transition {
         let text = |s: &str| poke_core::charmap::encode(s).expect("the dex's words encode");
         let ui = &mut ctx.screen.ui;
         ui.place(15, 8, &[text("─")[0]; 5]);
@@ -209,11 +196,11 @@ impl PokedexMenu {
             ui.place(16, 10 + 2 * row, &text(word));
         }
         self.max_seen = max_seen_mon(&seen);
-        self.redraw_list(ctx);
+        self.redraw_list(ctx)
     }
 
-    /// `.loop`: the window of seven, then the `Delay3` before the cursor takes input again.
-    fn redraw_list(&mut self, ctx: &mut Ctx) {
+    /// `.loop`: the window of seven, and the cursor taking input again in the same frame.
+    fn redraw_list(&mut self, ctx: &mut Ctx) -> Transition {
         // `ClearScreenArea` covers the names only: the numbers and the ball are rewritten in place.
         ctx.screen.ui.fill(4, 2, 10, 14, UiSurface::BLANK);
         let rows = if self.max_seen >= ROWS {
@@ -227,7 +214,46 @@ impl PokedexMenu {
         for row in 0..rows {
             self.print_entry(ctx, row);
         }
-        self.phase = Phase::ListDrawn(3);
+        self.input.call(ctx);
+        self.phase = Phase::List;
+        self.list_input_update(ctx)
+    }
+
+    fn list_input_update(&mut self, ctx: &mut Ctx) -> Transition {
+        let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
+        if keys.contains(Joypad::B) {
+            return self.close(ctx);
+        }
+        if keys.contains(Joypad::A) {
+            return self.open_side_menu(ctx);
+        }
+        self.scroll_by(keys);
+        self.redraw_list(ctx)
+    }
+
+    fn side_menu_update(&mut self, ctx: &mut Ctx) -> Transition {
+        let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
+        self.answers += 1;
+        if keys.contains(Joypad::B) {
+            // The column the side menu's cursor stood in is wiped before it leaves.
+            ctx.screen.ui.fill(15, 10, 1, 7, UiSurface::BLANK);
+            return self.exit_side_menu(SideExit::Back, ctx);
+        }
+        match Self::entry(self.input.current) {
+            SideMenuEntry::Data => {
+                ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
+                self.draw_data(ctx);
+                self.show_picture(ctx)
+            }
+            // The cry is the audio engine's, and it is the one row that does not leave.
+            SideMenuEntry::Cry => {
+                self.input.call(ctx);
+                self.side_menu_update(ctx)
+            }
+            // `LoadTownMap_Nest` is the town map's chunk; the row still leaves as it does.
+            SideMenuEntry::Area => self.exit_side_menu(SideExit::Shown, ctx),
+            SideMenuEntry::Quit => self.exit_side_menu(SideExit::Quit, ctx),
+        }
     }
 
     /// `.printPokemonLoop`: the number on the row above, then the ball and the name.
@@ -280,7 +306,7 @@ impl PokedexMenu {
         ctx.menu.last_item = 0;
         self.input.call(ctx);
         self.phase = Phase::SideMenu;
-        Transition::Stay
+        self.side_menu_update(ctx)
     }
 
     /// `.exitSideMenu`: the list's cursor comes back, and the column the cursor stood in is wiped.
@@ -295,25 +321,20 @@ impl PokedexMenu {
             SideExit::Quit => self.close(ctx),
             SideExit::Shown => {
                 Self::set_up_graphics(ctx);
-                self.open_list(ctx);
-                Transition::Stay
+                self.open_list(ctx)
             }
-            SideExit::Back => {
-                self.open_list(ctx);
-                Transition::Stay
-            }
+            SideExit::Back => self.open_list(ctx),
         }
     }
 
-    /// `.exitPokedex`, whose `GBPalWhiteOutWithDelay3` is the last three frames of the screen.
+    /// `.exitPokedex`.
     fn close(&mut self, ctx: &mut Ctx) -> Transition {
         ctx.pad.repeat_held = false;
         ctx.menu.last_item = 0;
-        self.phase = Phase::Closing(3);
-        Transition::Stay
+        Transition::Pop(Outcome::Done)
     }
 
-    /// `ShowPokedexDataInternal` up to its `Delay3`: the frame, the words and the number.
+    /// `ShowPokedexDataInternal` up to its picture: the frame, the words and the number.
     fn draw_data(&mut self, ctx: &mut Ctx) {
         let text = |s: &str| poke_core::charmap::encode(s).expect("the data page's words encode");
         let index = pokedex_to_index(self.dex);
@@ -336,12 +357,11 @@ impl PokedexMenu {
         ui.set(3, 8, text("<DOT>")[0]);
         let format = NumberFormat { digits: 3, leading_zeroes: true, left_align: false };
         print_number(ui, coord(4, 8) as usize, self.dex as u32, format);
-        self.phase = Phase::DataDrawn(3);
     }
 
-    /// After the `Delay3`: the picture, the cry, and — for a mon the player has owned — the height,
-    /// the weight and the description. An unowned page is the picture and the number alone.
-    fn show_picture(&mut self, ctx: &mut Ctx) {
+    /// The picture, the cry, and — for a mon the player has owned — the height, the weight and the
+    /// description. An unowned page is the picture and the number alone.
+    fn show_picture(&mut self, ctx: &mut Ctx) -> Transition {
         let species = species_of(self.dex).expect("a seen mon has a species");
         // `LoadFlippedFrontSpriteByMonIndex`: the tiles are mirrored within each byte, and the
         // columns are laid right to left, which is the other half of the flip.
@@ -355,7 +375,7 @@ impl PokedexMenu {
         // `PlayCry` is the audio engine's.
         if !is_set(&ctx.world.pokedex.owned, self.dex) {
             self.phase = Phase::DataWaiting;
-            return;
+            return self.wait_for_button(ctx);
         }
         let entry = DexEntry::of(pokedex_to_index(self.dex));
         let ui = &mut ctx.screen.ui;
@@ -366,7 +386,7 @@ impl PokedexMenu {
         let inches = print_number(ui, coord(15, 6) as usize, entry.inches as u32, zeroes);
         ui.set(inches % SCREEN_TILES_X, inches / SCREEN_TILES_X, poke_core::charmap::encode("″").unwrap()[0]);
         Self::print_weight(ui, entry.weight);
-        self.print_description(ctx, entry);
+        self.print_description(ctx, entry)
     }
 
     /// The weight, in tenths of a pound, with the decimal point pushed in afterwards: the last
@@ -384,10 +404,11 @@ impl PokedexMenu {
     /// The description, printed at (1, 11). `TextCommandProcessor` is asked to clear
     /// `BIT_TEXT_DELAY` here, so the whole entry lands in one frame rather than a letter at a time;
     /// that flag is not modelled, and `no_text_delay` is the same thing to a player.
-    fn print_description(&mut self, ctx: &mut Ctx, entry: DexEntry) {
+    fn print_description(&mut self, ctx: &mut Ctx, entry: DexEntry) -> Transition {
         ctx.world.no_text_delay = true;
         self.printer = Some(PlaceString::call(entry.description, coord(1, 11)));
         self.phase = Phase::DataPrinting;
+        self.update(ctx)
     }
 
     /// `.waitForButtonPress`, and what `ShowPokedexDataInternal` does once it has one: the screen
@@ -396,7 +417,7 @@ impl PokedexMenu {
         if ctx.pad.low_sensitivity(ctx.frame_counter).intersects(Joypad::A | Joypad::B) {
             ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
             ctx.screen.tiles.load_text_box_tiles();
-            self.phase = Phase::DataLeaving(3);
+            return self.exit_side_menu(SideExit::Shown, ctx);
         }
         Transition::Stay
     }
@@ -417,81 +438,17 @@ impl ModeUpdate for PokedexMenu {
         ctx.menu.last_item = 0;
         self.scroll = 0;
         self.input = Self::list_input(0, ROWS - 1);
-        self.phase = Phase::Clearing(3);
+    }
+
+    fn open(&mut self, ctx: &mut Ctx) -> Transition {
+        Self::set_up_graphics(ctx);
+        self.open_list(ctx)
     }
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
         match self.phase {
-            Phase::Clearing(frames) if frames > 1 => {
-                self.phase = Phase::Clearing(frames - 1);
-                Transition::Stay
-            }
-            Phase::Clearing(_) => {
-                Self::set_up_graphics(ctx);
-                self.open_list(ctx);
-                Transition::Stay
-            }
-            Phase::ListDrawn(frames) if frames > 1 => {
-                self.phase = Phase::ListDrawn(frames - 1);
-                Transition::Stay
-            }
-            Phase::ListDrawn(_) => {
-                self.input.call(ctx);
-                self.phase = Phase::List;
-                Transition::Stay
-            }
-            Phase::List => {
-                let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
-                if keys.contains(Joypad::B) {
-                    return self.close(ctx);
-                }
-                if keys.contains(Joypad::A) {
-                    return self.open_side_menu(ctx);
-                }
-                self.scroll_by(keys);
-                self.redraw_list(ctx);
-                Transition::Stay
-            }
-            Phase::SideMenu => {
-                let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
-                self.answers += 1;
-                if keys.contains(Joypad::B) {
-                    // The column the side menu's cursor stood in is wiped before it leaves.
-                    ctx.screen.ui.fill(15, 10, 1, 7, UiSurface::BLANK);
-                    return self.exit_side_menu(SideExit::Back, ctx);
-                }
-                match Self::entry(self.input.current) {
-                    SideMenuEntry::Data => {
-                        ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
-                        self.phase = Phase::DataClearing(3);
-                        Transition::Stay
-                    }
-                    // The cry is the audio engine's, and it is the one row that does not leave.
-                    SideMenuEntry::Cry => {
-                        self.input.call(ctx);
-                        Transition::Stay
-                    }
-                    // `LoadTownMap_Nest` is the town map's chunk; the row still leaves as it does.
-                    SideMenuEntry::Area => self.exit_side_menu(SideExit::Shown, ctx),
-                    SideMenuEntry::Quit => self.exit_side_menu(SideExit::Quit, ctx),
-                }
-            }
-            Phase::DataClearing(frames) if frames > 1 => {
-                self.phase = Phase::DataClearing(frames - 1);
-                Transition::Stay
-            }
-            Phase::DataClearing(_) => {
-                self.draw_data(ctx);
-                Transition::Stay
-            }
-            Phase::DataDrawn(frames) if frames > 1 => {
-                self.phase = Phase::DataDrawn(frames - 1);
-                Transition::Stay
-            }
-            Phase::DataDrawn(_) => {
-                self.show_picture(ctx);
-                Transition::Stay
-            }
+            Phase::List => self.list_input_update(ctx),
+            Phase::SideMenu => self.side_menu_update(ctx),
             Phase::DataPrinting => {
                 let mut printer = self.printer.take().expect("the description is printing");
                 match printer.update(ctx, &mut self.answered) {
@@ -510,16 +467,6 @@ impl ModeUpdate for PokedexMenu {
                 self.wait_for_button(ctx)
             }
             Phase::DataWaiting => self.wait_for_button(ctx),
-            Phase::DataLeaving(frames) if frames > 1 => {
-                self.phase = Phase::DataLeaving(frames - 1);
-                Transition::Stay
-            }
-            Phase::DataLeaving(_) => self.exit_side_menu(SideExit::Shown, ctx),
-            Phase::Closing(frames) if frames > 1 => {
-                self.phase = Phase::Closing(frames - 1);
-                Transition::Stay
-            }
-            Phase::Closing(_) => Transition::Pop(Outcome::Done),
         }
     }
 

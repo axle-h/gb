@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
 
 const ZERO: u8 = 0xF6;
@@ -57,27 +58,47 @@ pub struct BcdFormat {
     pub money_sign: bool,
 }
 
-/// `PrintBCDNumber` of `digits` at tile index `at`, returning where `hl` ends. Each tile it writes
+/// `PrintBCDNumber` of `digits` at tile index `at`, returning where `hl` ends. Each digit it writes
 /// is followed, on the cartridge, by a `PrintLetterDelay` that the caller's pacing supplies.
-pub fn print_bcd(ui: &mut UiSurface, mut at: usize, digits: &[u8], format: BcdFormat) -> usize {
-    let put = |ui: &mut UiSurface, at: &mut usize, tile: u8| {
-        ui.set(*at % SCREEN_TILES_X, *at / SCREEN_TILES_X, tile);
+pub fn print_bcd(ui: &mut UiSurface, at: usize, digits: &[u8], format: BcdFormat) -> usize {
+    let (writes, end) = bcd_writes(at, digits, format);
+    for write in writes {
+        ui.set(write.at % SCREEN_TILES_X, write.at / SCREEN_TILES_X, write.tile);
+    }
+    end
+}
+
+/// One tile `PrintBCDNumber` writes, and whether a `PrintLetterDelay` follows it: every digit does,
+/// and the `¥` does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BcdWrite {
+    pub at: usize,
+    pub tile: u8,
+    pub delayed: bool,
+}
+
+/// `PrintBCDNumber`'s writes in the order it makes them. A skipped zero advances `hl` without
+/// writing, so the tile underneath survives.
+pub fn bcd_writes(mut at: usize, digits: &[u8], format: BcdFormat) -> (Vec<BcdWrite>, usize) {
+    let mut writes = Vec::new();
+    let mut put = |at: &mut usize, tile: u8, delayed: bool| {
+        writes.push(BcdWrite { at: *at, tile, delayed });
         *at += 1;
     };
     let (mut skipping, mut money) = (format.skip_leading_zeroes, format.money_sign);
     if money && !skipping {
-        put(ui, &mut at, YEN);
+        put(&mut at, YEN, false);
     }
     for digit in digits.iter().flat_map(|&byte| [byte >> 4, byte & 0x0F]) {
         if digit != 0 && skipping {
             if money {
-                put(ui, &mut at, YEN);
+                put(&mut at, YEN, false);
                 money = false;
             }
             skipping = false;
         }
         if digit != 0 || !skipping {
-            put(ui, &mut at, ZERO.wrapping_add(digit));
+            put(&mut at, ZERO.wrapping_add(digit), true);
         } else if !format.left_align {
             at += 1;
         }
@@ -87,11 +108,11 @@ pub fn print_bcd(ui: &mut UiSurface, mut at: usize, digits: &[u8], format: BcdFo
             at -= 1;
         }
         if money {
-            put(ui, &mut at, YEN);
+            put(&mut at, YEN, false);
         }
-        put(ui, &mut at, ZERO);
+        put(&mut at, ZERO, true);
     }
-    at
+    (writes, at)
 }
 
 #[cfg(test)]

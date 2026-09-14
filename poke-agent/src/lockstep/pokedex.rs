@@ -14,8 +14,8 @@ use pokered::systems::pokedex::{front_pic_tiles, is_set, species_of, FLAG_BYTES}
 use pokered::world::World;
 use pokered::{Game, Input, Pacing};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
-use super::{breakpoint, cartridge_cursor_to, cartridge_until_polling, joypad, open_the_start_menu,
-            recreation_until_polling, tile_row, to_vblank};
+use super::{assert_late, breakpoint, cartridge_cursor_to, cartridge_until_polling, joypad, open_the_start_menu,
+            recreation_until_polling, tile_row, to_vblank, CURSOR, LIST_REDRAWN};
 
 
 /// `POKéDEX` is the first row, which the Celadon fixture has.
@@ -113,12 +113,16 @@ fn the_pokedex_list_shows_what_the_cartridge_shows_at_every_poll() {
     let presses = [J::DOWN, J::DOWN, J::DOWN, J::DOWN, J::DOWN, J::DOWN, J::DOWN, J::DOWN,
                    J::UP, J::UP, J::RIGHT, J::RIGHT, J::LEFT];
     for (step, button) in presses.into_iter().enumerate() {
+        // Left, Right and a step off either end of the window return from `HandleMenuInput`, and the
+        // list is printed again; anything else only moves the cursor.
+        let current = gb.core().mmu().read_pointer(&pokered_symbols::wCurrentMenuItem);
+        let redraws = matches!(button, J::LEFT | J::RIGHT) || (button == J::UP && current == 0)
+            || (button == J::DOWN && current == gb.core().mmu().read_pointer(&pokered_symbols::wMaxMenuItem));
         press(&mut gb, &mut game, button);
         let cartridge = cartridge_until_polling(&mut gb);
         let recreation = recreation_until_polling(&mut game, Decision::Pokedex);
         assert_eq!(cartridge_screen(&gb), recreation_screen(&game), "polling after press {step}");
-        assert!((0..=2).contains(&(cartridge as i64 - recreation as i64)),
-            "after press {step} the cartridge took {cartridge} frames and the recreation {recreation}");
+        assert_late(cartridge, recreation, if redraws { LIST_REDRAWN } else { CURSOR }, &format!("after press {step}"));
         assert_eq!(gb.core().mmu().read_pointer(&pokered_symbols::wListScrollOffset),
             recreation_scroll(&game), "the scroll after press {step}");
     }

@@ -1,5 +1,6 @@
-//! `DisplayListMenuID` for `ITEMLISTMENU`: a scrolling list of items and quantities, four rows at a
-//! time, with a cursor over three of them and `CANCEL` after the last.
+//! `DisplayListMenuID` for `ITEMLISTMENU` and `PRICEDITEMLISTMENU`: a scrolling list of items, four
+//! rows at a time, with a cursor over three of them and `CANCEL` after the last. An item list shows
+//! quantities and can be rearranged with SELECT; a priced one, the mart's, shows prices instead.
 
 use poke_core::item::{self, ItemId};
 use serde::{Deserialize, Serialize};
@@ -8,14 +9,22 @@ use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
 use crate::input::Joypad;
 use crate::mode::{Ctx, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::menu_input::{MenuInput, UNFILLED_CURSOR};
-use crate::systems::print_num::{print_number, NumberFormat};
+use crate::systems::print_num::{print_bcd, print_number, BcdFormat, NumberFormat};
+use crate::modes::menu_input::MenuExit;
+use poke_core::bag::BagItem;
 
 const TIMES: u8 = 0xF1;
 const DOWN_ARROW: u8 = 0xEE;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListMenu {
+    /// Quantities are 0 in a priced list, whose entries are ids alone.
     entries: Vec<(ItemId, u8)>,
+    kind: ListKind,
+    /// `wListPointer` is `wNumBagItems`: the list is read from the bag as it opens and a swap is
+    /// written back to it.
+    #[serde(default)]
+    bag: bool,
     /// `wListScrollOffset`.
     scroll: u8,
     input: MenuInput,
@@ -25,12 +34,16 @@ pub struct ListMenu {
     to_swap: u8,
 }
 
+/// `wListMenuID`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ListKind {
+    #[default]
+    Items,
+    Priced,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Phase {
-    /// The `DelayFrames 10` after drawing the box.
-    Opening(u8),
-    /// The `Delay3` after printing the entries.
-    Printed(u8),
     /// `HandleItemListSwapping`'s `DelayFrames 20`, which passes before the list is drawn again.
     Swapping(u8),
     Input,
@@ -42,7 +55,18 @@ impl ListMenu {
         let max = if entries.len() < 2 { 1 } else { 2 };
         let mut input = MenuInput::new(current, max, (5, 4), Joypad::A | Joypad::B | Joypad::SELECT);
         input.return_at_ends = true;
-        Self { entries, scroll, input, phase: Phase::Opening(10), to_swap: 0 }
+        Self { entries, kind: ListKind::Items, bag: false, scroll, input, phase: Phase::Input, to_swap: 0 }
+    }
+
+    /// The bag itself, as `StartMenu_Item` and the mart's SELL point `wListPointer` at it.
+    pub fn bag(current: u8, scroll: u8) -> Self {
+        Self { bag: true, ..Self::items(Vec::new(), current, scroll) }
+    }
+
+    /// A mart's stock, each with its price.
+    pub fn priced(items: Vec<ItemId>, current: u8, scroll: u8) -> Self {
+        let entries = items.into_iter().map(|item| (item, 0)).collect();
+        Self { kind: ListKind::Priced, ..Self::items(entries, current, scroll) }
     }
 
     pub fn len(&self) -> usize {
@@ -54,10 +78,13 @@ impl ListMenu {
         self.scroll as usize + self.input.current as usize
     }
 
-    /// `DisplayListMenuIDLoop`, up to its `Delay3`.
-    fn redraw(&mut self, ctx: &mut Ctx) {
+    /// `DisplayListMenuIDLoop`, into `HandleMenuInput` in the same frame: the `DelayFrames 10`
+    /// before it and the `Delay3` after printing are loading and not modelled.
+    fn redraw(&mut self, ctx: &mut Ctx) -> Transition {
         self.print_entries(&mut ctx.screen.ui);
-        self.phase = Phase::Printed(3);
+        self.input.call(ctx);
+        self.phase = Phase::Input;
+        self.input_update(ctx)
     }
 
     /// `PrintListMenuEntries`.
@@ -70,6 +97,14 @@ impl ListMenu {
                 return;
             };
             ui.place(at % SCREEN_TILES_X, at / SCREEN_TILES_X, &item::name(item));
+            if self.kind == ListKind::Priced {
+                // No mart stocks an HM, the one item `GetItemPrice` leaves the last price for.
+                let price = item::price(item).unwrap_or_default();
+                let format = BcdFormat { skip_leading_zeroes: true, left_align: false, money_sign: true };
+                print_bcd(ui, at + SCREEN_TILES_X + 5, &price, format);
+                at += 2 * SCREEN_TILES_X;
+                continue;
+            }
             if self.to_swap != 0 && self.scroll as usize + row == self.to_swap as usize - 1 {
                 ui.set(5, 4 + 2 * row, UNFILLED_CURSOR);
             }
@@ -87,20 +122,21 @@ impl ListMenu {
     /// swapped, and both go back to the loop without the twenty frames the real thing costs.
     fn select(&mut self, ctx: &mut Ctx) -> Transition {
         let chosen = self.selected();
-        if chosen >= self.entries.len() {
-            self.redraw(ctx);
-            return Transition::Stay;
+        if self.kind != ListKind::Items || chosen >= self.entries.len() {
+            return self.redraw(ctx);
         }
         let numbered = chosen as u8 + 1;
         if self.to_swap == 0 {
             self.to_swap = numbered;
         } else if self.to_swap == numbered {
-            self.redraw(ctx);
-            return Transition::Stay;
+            return self.redraw(ctx);
         } else {
             let first = self.to_swap as usize - 1;
             self.to_swap = 0;
             self.swap(first, chosen);
+            if self.bag {
+                ctx.world.bag.items = self.entries.iter().map(|&(id, quantity)| BagItem::new(id, quantity)).collect();
+            }
         }
         self.phase = Phase::Swapping(20);
         Transition::Stay
@@ -127,72 +163,79 @@ impl ListMenu {
         self.input.max = if self.entries.len() < 2 { 1 } else { 2 };
     }
 
+    fn input_update(&mut self, ctx: &mut Ctx) -> Transition {
+        let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
+        self.input.place_cursor(&mut ctx.screen.ui, ctx.menu);
+        if keys.contains(Joypad::A) {
+            ctx.menu.unfilled_cursor(&mut ctx.screen.ui);
+            let chosen = self.selected();
+            let outcome = if chosen < self.entries.len() { Outcome::Chosen(chosen as u8) } else { Outcome::Cancelled };
+            return self.close(ctx, outcome);
+        }
+        if keys.contains(Joypad::B) {
+            return self.close(ctx, Outcome::Cancelled);
+        }
+        if keys.contains(Joypad::SELECT) {
+            return self.select(ctx);
+        }
+        if keys.contains(Joypad::DOWN) {
+            if self.entries.len() >= self.scroll as usize + 3 {
+                self.scroll += 1;
+            }
+        } else if self.scroll > 0 {
+            self.scroll -= 1;
+        }
+        self.redraw(ctx)
+    }
+
     /// `ExitListMenu`, or the chosen entry's return; either way `hJoy7` and the text delay reset.
     fn close(&self, ctx: &mut Ctx, outcome: Outcome) -> Transition {
         ctx.pad.repeat_held = false;
         ctx.world.no_text_delay = false;
+        ctx.menu.chosen_item = self.input.current;
+        ctx.menu.exit_method = if outcome == Outcome::Cancelled { MenuExit::Cancelled } else { MenuExit::Chose };
+        ctx.menu.list_scroll = self.scroll;
         Transition::Pop(outcome)
     }
 }
 
+/// `RemoveItemFromInventory` on the bag, with what it does to the menus: a slot emptied puts
+/// `wListScrollOffset`, `wCurrentMenuItem`, `wBagSavedMenuItem` and `wSavedListScrollOffset` back
+/// to 0, so the list reopens at the top. True where that happened, for a caller keeping the last.
+pub fn remove_from_bag(ctx: &mut Ctx, slot: usize, quantity: u8) -> bool {
+    let before = ctx.world.bag.items.len();
+    ctx.world.bag.remove(slot, quantity);
+    let emptied = ctx.world.bag.items.len() != before;
+    if emptied {
+        ctx.menu.list_scroll = 0;
+        ctx.menu.bag_saved = 0;
+    }
+    emptied
+}
+
 impl ModeUpdate for ListMenu {
     fn enter(&mut self, ctx: &mut Ctx) {
+        if self.bag {
+            self.entries = ctx.world.bag.items.iter().map(|slot| (slot.id, slot.quantity)).collect();
+            self.input.max = if self.entries.len() < 2 { 1 } else { 2 };
+        }
         ctx.pad.repeat_held = true;
         ctx.world.no_text_delay = true;
         ctx.screen.ui.text_box_border(4, 2, 14, 9);
     }
 
+    fn open(&mut self, ctx: &mut Ctx) -> Transition {
+        self.redraw(ctx)
+    }
+
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
         match self.phase {
-            Phase::Opening(frames) | Phase::Printed(frames) if frames > 1 => {
-                self.phase = match self.phase {
-                    Phase::Opening(_) => Phase::Opening(frames - 1),
-                    _ => Phase::Printed(frames - 1),
-                };
-                Transition::Stay
-            }
-            Phase::Opening(_) => {
-                self.redraw(ctx);
-                Transition::Stay
-            }
-            Phase::Printed(_) => {
-                self.input.call(ctx);
-                self.phase = Phase::Input;
-                Transition::Stay
-            }
             Phase::Swapping(frames) if frames > 1 => {
                 self.phase = Phase::Swapping(frames - 1);
                 Transition::Stay
             }
-            Phase::Swapping(_) => {
-                self.redraw(ctx);
-                Transition::Stay
-            }
-            Phase::Input => {
-                let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
-                self.input.place_cursor(&mut ctx.screen.ui, ctx.menu);
-                if keys.contains(Joypad::A) {
-                    ctx.menu.unfilled_cursor(&mut ctx.screen.ui);
-                    let chosen = self.selected();
-                    let outcome = if chosen < self.entries.len() { Outcome::Chosen(chosen as u8) } else { Outcome::Cancelled };
-                    return self.close(ctx, outcome);
-                }
-                if keys.contains(Joypad::B) {
-                    return self.close(ctx, Outcome::Cancelled);
-                }
-                if keys.contains(Joypad::SELECT) {
-                    return self.select(ctx);
-                }
-                if keys.contains(Joypad::DOWN) {
-                    if self.entries.len() >= self.scroll as usize + 3 {
-                        self.scroll += 1;
-                    }
-                } else if self.scroll > 0 {
-                    self.scroll -= 1;
-                }
-                self.redraw(ctx);
-                Transition::Stay
-            }
+            Phase::Swapping(_) => self.redraw(ctx),
+            Phase::Input => self.input_update(ctx),
         }
     }
 
