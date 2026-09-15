@@ -216,6 +216,23 @@ impl LlmPolicy {
         }
     }
 
+    /// Cancel the turn in flight with no turn to replace it, keeping its events for the next one.
+    fn abandon_turn(&mut self) {
+        if self.pending.take().is_none() {
+            return;
+        }
+        self.handles.next_generation();
+        let carried = self.in_flight_events.len();
+        let mut events = std::mem::take(&mut self.in_flight_events);
+        events.append(&mut self.events);
+        self.events = events;
+        // The reports' marks index `events`, which now starts with what was carried back.
+        for report in self.battle_report.iter_mut().chain(self.finishing.iter_mut()) {
+            report.events_mark += carried;
+            report.events_end = report.events_end.map(|end| end + carried);
+        }
+    }
+
     /// Bump the generation — which is what cancels anything in flight — and send a fresh turn.
     fn start_turn(&mut self, kind: DecisionKind, context: TurnContext<'_>) {
         if self.pending.is_some() && !self.in_flight_events.is_empty() {
@@ -794,6 +811,14 @@ impl Policy for LlmPolicy {
             }
             // The one place `taken_over` is cleared, which scopes it to one fight.
             AgentEvent::BattleEnded => {
+                // A walk resumed after the battle asks nothing that would replace a battle turn
+                // still in flight, so its answer would decide the next battle's first turn.
+                if matches!(self.pending, Some((DecisionKind::Battle, _))) {
+                    self.abandon_turn();
+                }
+                if matches!(self.waiting, Some((DecisionKind::Battle, _))) {
+                    self.waiting = None;
+                }
                 self.finishing = self.battle_report.take();
                 // This event is pushed below, and is the report's last.
                 if let Some(report) = self.finishing.as_mut() {
@@ -1446,6 +1471,32 @@ mod tests {
         // …and it is the battle decision that lands, from a fresh `battle_options`.
         let action = rig.pump_battle(&mut policy, Duration::from_secs(2)).expect("the battle turn decides");
         assert_eq!(tools::battle_id(&action), "run");
+    }
+
+    /// A battle menu outlives the choice made on it, so a second battle turn can still be in flight
+    /// when the battle ends, and a walk resumed afterwards asks nothing that would replace it.
+    #[test]
+    fn a_battle_turn_answered_after_its_battle_does_not_decide_the_next_one() {
+        let release = Arc::new(AtomicBool::new(false));
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        rig.endpoint.replies.lock().unwrap()
+            .push_back(held(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]), &release));
+
+        rig.enter_battle();
+        assert!(rig.tick_battle(&mut policy).is_none(), "the battle turn has only just been asked");
+        rig.wait_for_requests(1, Duration::from_secs(2));
+
+        // The battle ends before the model answers, and the answer arrives anyway.
+        policy.on_event(&AgentEvent::BattleEnded);
+        std::thread::sleep(Duration::from_millis(50));
+        release.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(50));
+
+        // The next battle, a static Voltorb say, with no overworld turn in between.
+        rig.enter_battle();
+        assert!(rig.tick_battle(&mut policy).is_none(), "a battle that is over decided this one");
+        rig.wait_for_requests(2, Duration::from_secs(2));
+        assert_eq!(rig.requests().len(), 2, "the new battle is asked about afresh");
     }
 
     /// What the cancelled turn was told is told again by the turn that replaced it.
