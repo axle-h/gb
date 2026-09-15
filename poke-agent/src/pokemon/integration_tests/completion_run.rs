@@ -795,10 +795,13 @@ impl CompletionBrain {
         // is one the exploring returns to for ever. The Safari gate's workers stand behind the
         // prompt that asks whether you are leaving, always on the same tile, so approaching one
         // ends the visit every time it is tried.
+        // A walk taken up again after every battle is handed back in words of its own once the
+        // battles run out, and a floor with an encounter rate like the Power Plant's runs them out.
         if let Some((map, id, name, step)) = self.last_walk.take()
-            && let Some(said) = text.split(&format!("gave up on {name}")).nth(1)
+            && let Some(stopped) = text.split(&format!("gave up on {name}")).nth(1)
+                .map(|said| said.lines().next().unwrap_or("").trim().to_string())
+                .or_else(|| text.contains(&format!("`{id}` has been interrupted by a battle")).then(|| "battles".to_string()))
         {
-            let stopped = said.lines().next().unwrap_or("").trim();
             let tries = self.walks_given_up.entry(format!("{map}|{id}|{stopped}")).or_default();
             *tries += 1;
             if *tries <= Self::RETRIES_PER_PLACE {
@@ -2044,5 +2047,47 @@ fn completion_phase_earth_badge() {
                           to_the_earth_badge(), 300, Duration::from_secs(1800));
     let missing = missing_on(&mut played, &[Map::ViridianGym], &[Entry::Badge(7)]);
     cut(&mut played, "completion-earth");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// The Power Plant: Zapdos, and an Electrode standing where an item ball would.
+pub fn to_the_power_plant() -> Vec<Step> {
+    use Step::*;
+    vec![
+        Collect(false), Tidy,
+        // The robbed house's back door is the only way onto the half of Cerulean that Route 9
+        // opens off, which is how every phase before this one has reached that side.
+        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
+        GoTo("CeruleanTrashedHouse"), Take("CeruleanCity, arriving at (28, 10)"),
+        GoTo("Route9"), GoTo("Route10"), GoTo("PowerPlant"),
+        // Six Voltorb and two Electrode stand where item balls would, and the turn offers each as
+        // "pick up the Voltorb", which is the cartridge's own trick rather than ours. One is taken
+        // by name before the exploring walks into the rest: only a hunt records the way a Pokemon
+        // was come by, so an exploring that met one first would catch it and tell the ledger
+        // nothing. It is an Electrode because the floor's grass rolls Voltorb, and a hunt takes
+        // whichever of its species turns up first.
+        Hunt { species: "Electrode", row: "Electrode1", ball: "MasterBall", way: Way::PowerPlantBall,
+               on: "PowerPlant" },
+        // Zapdos is hunted rather than talked to. A talk is done the moment its row is chosen, and
+        // the walk to this one is interrupted by the floor's wilds over and over, so by the time it
+        // lands the step has moved on and the throw rides on the collecting arm instead, which a
+        // full box switches off for good. The collecting stays off all phase for the same reason:
+        // the floor's wilds answer no ledger entry, and catching them fills the box with Pokemon
+        // nothing asked for until the bird has nowhere to go.
+        Hunt { species: "Zapdos", row: "Zapdos", ball: "MasterBall",
+               way: Way::Legendary(Legend::Zapdos), on: "PowerPlant" },
+        Explore { maps: &["PowerPlant"], patience: 800 },
+        GoTo("Route10"),
+    ]
+}
+
+#[test]
+fn completion_phase_power_plant() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-earth.bin"), "completion-power-plant",
+                          to_the_power_plant(), 300, Duration::from_secs(1800));
+    let missing = missing_on(&mut played, &[Map::PowerPlant],
+        &[Entry::Way(Way::PowerPlantBall), Entry::Way(Way::Legendary(Legend::Zapdos))]);
+    cut(&mut played, "completion-power-plant");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
