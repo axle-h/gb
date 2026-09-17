@@ -83,5 +83,10 @@ cargo test --release --workspace --features slow-tests -- probe_ --ignored --noc
   that list is a backlog of blocked tests and a fuzzer is not one.
 - Every `#[ignore]` names its reason in a few words. The probes, the fixture cutters and the
   benchmarks are all `#[ignore]`d under `slow-tests`, because their pass/fail is not a signal.
+- A test whose pass/fail *is* a signal must never be `#[ignore]`d, whatever it costs: the attribute
+  hides it from the slow tier as well as the default one, and from both pre-push gates, which are
+  name filters. The thirteen `completion_phase_*` tests were ignored on the grounds that they are
+  slow, and three of them sat red on main for days with every gate green. Gate on the module's
+  feature instead, as `completion_run` and `soak` do.
 - `vendor/Blip_Buffer/gen_golden/build.sh` regenerates the resampler's golden vectors from the
   vendored C++, after `capture_golden_input` if the input needs refreshing.

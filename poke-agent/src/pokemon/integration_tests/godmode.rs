@@ -60,7 +60,7 @@ impl Intent {
 }
 
 /// Whether `description` names exactly this map, rather than one whose name starts the same way.
-fn names_map(description: &str, map: &str) -> bool {
+pub(crate) fn names_map(description: &str, map: &str) -> bool {
     description
         .split(|c: char| !c.is_ascii_alphanumeric())
         .any(|word| word == map)
