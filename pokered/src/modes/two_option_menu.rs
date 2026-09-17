@@ -5,6 +5,7 @@
 //! cartridge derives the second from the first, so this takes the corner alone.
 
 use serde::{Deserialize, Serialize};
+use crate::audio::data::sounds;
 use crate::command::Decision;
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
@@ -53,6 +54,9 @@ pub struct TwoOptionMenu {
     saved: Vec<u8>,
     chosen: u8,
     phase: Phase,
+    /// `NO_YES_MENU`'s pushed `wMiscFlags`: whether the button sound was already off.
+    #[serde(default)]
+    no_menu_button_sound: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,7 +73,7 @@ impl TwoOptionMenu {
         let (_, _, blank_line, _, _) = MENUS[id as usize];
         let top = ((at.0 + 1) as u8, (at.1 + 1 + blank_line as usize) as u8);
         let input = MenuInput::new(second_default as u8, 1, top, Joypad::A | Joypad::B);
-        Self { id, at, input, saved: Vec::new(), chosen: 0, phase: Phase::Input }
+        Self { id, at, input, saved: Vec::new(), chosen: 0, phase: Phase::Input, no_menu_button_sound: false }
     }
 
     /// `wTwoOptionMenuID` as the cartridge stores it: the id in the low bits with
@@ -134,6 +138,11 @@ impl ModeUpdate for TwoOptionMenu {
         ctx.screen.ui.place(self.at.0 + 2, top, &text(first));
         ctx.screen.ui.place(self.at.0 + 2, top + 2, &text(second));
         ctx.menu.last_item = 0;
+        if self.id == TwoOptionMenuId::NoYes {
+            // Its input runs silent, and only A, which is all it takes, plays the sound.
+            self.no_menu_button_sound = ctx.menu.no_menu_button_sound;
+            ctx.menu.no_menu_button_sound = true;
+        }
         self.input.call(ctx);
     }
 
@@ -154,10 +163,14 @@ impl ModeUpdate for TwoOptionMenu {
             Phase::Input => {
                 let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
                 let backed_out = keys.contains(Joypad::B);
-                if backed_out && self.id == TwoOptionMenuId::NoYes {
-                    // The one menu B cannot answer: it asks again.
-                    self.input.call(ctx);
-                    return self.update(ctx);
+                if self.id == TwoOptionMenuId::NoYes {
+                    if backed_out {
+                        // The one menu B cannot answer: it asks again.
+                        self.input.call(ctx);
+                        return self.update(ctx);
+                    }
+                    ctx.menu.no_menu_button_sound = self.no_menu_button_sound;
+                    ctx.audio.play_sound(sounds::SFX_PRESS_AB);
                 }
                 // B is not a refusal here, it picks the second option, which is the safe one.
                 self.chosen = if backed_out { 1 } else { self.input.current };
@@ -283,6 +296,40 @@ mod tests {
         }
         assert!(!game.modes().is_empty(), "B asks again");
         assert_eq!(answer(&mut game, Joypad::A), 0, "and NO is the first row here");
+    }
+
+    fn press_sound(game: &Game) -> bool {
+        game.audio().channel_sound_id(4) == crate::audio::data::sounds::SFX_PRESS_AB.0
+    }
+
+    /// `HandleMenuInput` plays `SFX_PRESS_AB` on A or B, unless `BIT_NO_MENU_BUTTON_SOUND` is set.
+    #[test]
+    fn a_and_b_leave_with_the_press_sound_unless_it_is_turned_off() {
+        for button in [Joypad::A, Joypad::B] {
+            let mut game = game();
+            until_waiting(&mut game);
+            game.frame(Input::Buttons(button));
+            assert!(press_sound(&game), "{button:?}");
+        }
+        let mut game = game();
+        game.menu_mut().no_menu_button_sound = true;
+        until_waiting(&mut game);
+        game.frame(Input::Buttons(Joypad::A));
+        assert!(!press_sound(&game));
+    }
+
+    /// `NO_YES_MENU` turns the sound off for its own input, so B, which it ignores, is silent, and
+    /// plays it itself once A answers, with the flag put back as it was.
+    #[test]
+    fn the_no_yes_menu_plays_the_press_sound_only_for_a() {
+        let mut game = game_at(TwoOptionMenuId::NoYes, YES_NO_AT, false);
+        until_waiting(&mut game);
+        game.frame(Input::Buttons(Joypad::B));
+        assert!(!press_sound(&game), "B is silent");
+        game.frame(Input::None);
+        game.frame(Input::Buttons(Joypad::A));
+        assert!(press_sound(&game), "A sounds");
+        assert!(!game.menu().no_menu_button_sound, "and the flag is back");
     }
 
     #[test]

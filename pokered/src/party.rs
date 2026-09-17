@@ -76,6 +76,10 @@ impl Pokedex {
         flag_action(&mut seen, Self::bit(species), FlagAction::Test) != 0
     }
 
+    pub fn set_seen(&mut self, species: PokemonSpecies) {
+        flag_action(&mut self.seen, Self::bit(species), FlagAction::Set);
+    }
+
     /// Owned is seen as well, which every caller that sets one sets both for.
     pub fn set_owned(&mut self, species: PokemonSpecies) {
         flag_action(&mut self.owned, Self::bit(species), FlagAction::Set);

@@ -132,7 +132,11 @@ fn description(script: DmgPointer) -> Vec<u8> {
 /// seven down the first column, then the next. `flipped` is `wSpriteFlipped`, which reverses the
 /// pixels within every byte; laying the columns out right to left is the caller's half of the flip.
 pub fn front_pic_tiles(species: PokemonSpecies, flipped: bool) -> Vec<[u8; TILE_BYTES]> {
-    let shades = front_pic_shades(species);
+    pic_tiles(&front_pic_shades(species), flipped)
+}
+
+/// Any picture's shades as those 49 tiles.
+pub fn pic_tiles(shades: &[u8; PIC_PX * PIC_PX], flipped: bool) -> Vec<[u8; TILE_BYTES]> {
     let mut tiles = vec![[0u8; TILE_BYTES]; PIC_TILES * PIC_TILES];
     for column in 0..PIC_TILES {
         for row in 0..PIC_TILES {

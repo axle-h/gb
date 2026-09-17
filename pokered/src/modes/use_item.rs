@@ -42,8 +42,8 @@ use crate::modes::party_menu::{PartyMenu, PartyMenuType};
 use crate::modes::text_box::TextBox;
 use crate::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
 use crate::systems::hp_bar::{HpBarAnimation, HpBarType};
-use crate::systems::item_use::{can_learn_tm, use_medicine, use_rare_candy, use_vitamin, vitamin_stat_name, ItemUse,
-                               Medicine, MedicineMessage};
+use crate::systems::item_use::{can_learn_tm, softboiled, softboiled_share, use_medicine, use_rare_candy, use_vitamin,
+                               vitamin_stat_name, ItemUse, Medicine, MedicineMessage};
 use crate::systems::pp::{restore_pp, use_pp_up, MAX_PP_UPS, pp_ups};
 use crate::systems::status_screen::{print_stats_box, StatsBox};
 
@@ -64,6 +64,8 @@ enum Flow {
     PpRestore,
     EvoStone,
     TmHm(PokemonMoveName),
+    /// `.softboiled`, whose giver pays a fifth of its max HP and is not offered as the target.
+    Softboiled { giver: u8 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +80,9 @@ pub struct UseItem {
     /// `wStatusFlags5`'s text-delay bit, which `RedrawPartyMenu_` pushes and pops.
     no_text_delay: bool,
     answered: u32,
+    /// Used from a battle's bag, where `ReloadMapData` does not put the text box tiles back.
+    #[serde(default)]
+    in_battle: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +92,8 @@ enum Phase {
     /// `PlaySoundWaitForCurrent`'s wait for the sound already playing.
     WaitForSound(Medicine),
     Bar(HpBarAnimation, MedicineMessage),
+    /// Softboiled's giver losing its share, which is animated before the target gains it.
+    GiverBar(HpBarAnimation, Medicine),
     /// `.showHealingItemMessage`'s `DelayFrames 50`, holding the message up before its press.
     Holding(u8),
     /// `WaitForTextScrollButtonPress`, and what follows the press.
@@ -151,7 +158,18 @@ impl UseItem {
             ItemUse::TmHm => Flow::TmHm(machine_move(item).expect("a machine teaches a move")),
             _ => return None,
         };
-        Some(Self { item, flow, slot, mon: 0, phase: Phase::Child(After::ChooseMon), no_text_delay: false, answered: 0 })
+        Some(Self { item, flow, slot, mon: 0, phase: Phase::Child(After::ChooseMon), no_text_delay: false, answered: 0, in_battle: false })
+    }
+
+    /// `.softboiled`, which asks for a target over the party menu already up.
+    pub fn softboiled(giver: u8) -> Self {
+        Self { item: ItemId::Potion, flow: Flow::Softboiled { giver }, slot: 0, mon: 0,
+            phase: Phase::Child(After::ChooseMon), no_text_delay: false, answered: 0, in_battle: false }
+    }
+
+    /// `new` for a battle's bag.
+    pub fn in_battle(item: ItemId, slot: u8) -> Option<Self> {
+        Self::new(item, slot).map(|flow| Self { in_battle: true, ..flow })
     }
 
     /// Presses answered at `WaitForTextScrollButtonPress`, so a driver can see its press land.
@@ -173,6 +191,8 @@ impl UseItem {
         let menu = match self.flow {
             Flow::EvoStone => PartyMenu::evo_stone(self.item),
             Flow::TmHm(mv) => PartyMenu::teaching(mv),
+            // `GoBackToPartyMenu`, over the list the field move was chosen from.
+            Flow::Softboiled { .. } => PartyMenu::again(PartyMenuType::UseItem),
             _ => PartyMenu::new(PartyMenuType::UseItem),
         };
         Transition::Push(Mode::PartyMenu(menu))
@@ -185,7 +205,9 @@ impl UseItem {
     /// `ItemUseMedicine.done` and `ItemUsePPRestore.itemNotUsed`: the palettes go white, which is
     /// not modelled, and out of battle the map's tiles come back behind the menus.
     fn finish(&self, ctx: &mut Ctx, result: u8) -> Transition {
-        ctx.screen.tiles.load_text_box_tiles();
+        if !self.in_battle {
+            ctx.screen.tiles.load_text_box_tiles();
+        }
         Transition::Pop(Outcome::Chosen(result))
     }
 
@@ -202,11 +224,35 @@ impl UseItem {
             Flow::Medicine => match use_medicine(self.item, party_mon) {
                 Medicine::NoEffect => self.text("_ItemUseNoEffectText", After::Finish { result: NOT_USED, remove: false }),
                 used => {
+                    // `.notFullHP` ends the alarm, which frees channel 5 and cuts off the press sound.
+                    if matches!(used, Medicine::Healed { .. }) {
+                        ctx.audio.end_low_health_alarm();
+                    }
                     self.remove_used_item(ctx);
                     self.phase = Phase::WaitForSound(used);
                     self.update(ctx)
                 }
             },
+            // `.getPartyMonDataAddress` starts `ItemUseMedicine` over where the giver picks itself.
+            Flow::Softboiled { giver } if giver == mon => self.choose_mon(),
+            Flow::Softboiled { giver } => {
+                let share = softboiled_share(&ctx.world.party[giver as usize].mon);
+                match softboiled(share, &mut ctx.world.party[mon as usize].mon) {
+                    Medicine::NoEffect => self.text("_ItemUseNoEffectText", After::Finish { result: NOT_USED, remove: false }),
+                    used => {
+                        ctx.audio.end_low_health_alarm();
+                        let paying = &mut ctx.world.party[giver as usize].mon;
+                        let (old, new) = (paying.mon.hp, paying.mon.hp - share);
+                        paying.mon.hp = new;
+                        let max = paying.stats[0];
+                        ctx.audio.play_sound(sounds::SFX_HEAL_HP);
+                        let at = (1 + 2 * giver as usize) * SCREEN_TILES_X + 4;
+                        let bar = HpBarAnimation::new(at, max, old, new, HpBarType::PartyMenu).expect("the HP moved");
+                        self.phase = Phase::GiverBar(bar, used);
+                        self.update(ctx)
+                    }
+                }
+            }
             Flow::Vitamin => {
                 let used = use_vitamin(self.item, party_mon);
                 ctx.world.text.strings.insert(TextBuffer::NameBuffer, nick);
@@ -221,13 +267,16 @@ impl UseItem {
             Flow::RareCandy => {
                 let used = use_rare_candy(party_mon);
                 let level = party_mon.level;
-                ctx.world.text.strings.insert(TextBuffer::NameBuffer, nick);
+                ctx.world.text.strings.insert(TextBuffer::NameBuffer, nick.clone());
                 if !used {
                     return self.text("_VitaminNoEffectText", After::Finish { result: USED, remove: false });
                 }
                 ctx.world.text.numbers.insert(TextNumber::CurEnemyLevel, level as u32);
                 // `RedrawPartyMenu`, not `DrawPartyMenu`: the list goes back over itself uncleared.
                 PartyMenu::redraw_entries(ctx);
+                // `.printItemUseMessage` names the mon again after the redraw, which has left the
+                // last one on the list in `wNameBuffer`.
+                ctx.world.text.strings.insert(TextBuffer::NameBuffer, nick);
                 self.no_text_delay = ctx.world.no_text_delay;
                 ctx.world.no_text_delay = true;
                 let script = decode(pokered_symbols::RareCandyText).expect("the Rare Candy's text is in the cartridge");
@@ -385,6 +434,14 @@ impl ModeUpdate for UseItem {
                     }
                     Medicine::NoEffect => unreachable!("no effect is a text, not a sound"),
                 }
+            }
+            Phase::GiverBar(mut bar, used) => {
+                if bar.update(&mut ctx.screen.ui) {
+                    self.phase = Phase::WaitForSound(used);
+                    return self.update(ctx);
+                }
+                self.phase = Phase::GiverBar(bar, used);
+                Transition::Stay
             }
             Phase::Bar(mut bar, message) => {
                 if bar.update(&mut ctx.screen.ui) {

@@ -87,6 +87,10 @@ pub struct PokedexMenu {
     /// How many times the side menu has answered. A driver needs it because `CRY` answers without
     /// leaving the menu, so nothing else about the dex changes when that row is chosen.
     answers: u32,
+    /// `ShowPokedexData` called from outside the dex, as a new catch's page is: no list behind it,
+    /// and the page closes the mode.
+    #[serde(default)]
+    page_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,7 +115,13 @@ impl PokedexMenu {
             printer: None,
             answered: 0,
             answers: 0,
+            page_only: false,
         }
+    }
+
+    /// `ShowPokedexData` for `dex`, from outside the dex.
+    pub fn data_page(dex: u8) -> Self {
+        Self { dex, page_only: true, phase: Phase::DataPrinting, ..Self::new() }
     }
 
     /// How many times the side menu has answered, which is how a driver sees its press land.
@@ -417,6 +427,10 @@ impl PokedexMenu {
         if ctx.pad.low_sensitivity(ctx.frame_counter).intersects(Joypad::A | Joypad::B) {
             ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
             ctx.screen.tiles.load_text_box_tiles();
+            if self.page_only {
+                ctx.menu.last_item = 0;
+                return Transition::Pop(Outcome::Done);
+            }
             return self.exit_side_menu(SideExit::Shown, ctx);
         }
         Transition::Stay
@@ -431,6 +445,10 @@ impl Default for PokedexMenu {
 
 impl ModeUpdate for PokedexMenu {
     fn enter(&mut self, ctx: &mut Ctx) {
+        if self.page_only {
+            ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
+            return;
+        }
         // `GBPalWhiteOut`, `ClearScreen` and `UpdateSprites`; the palettes and the sprites are
         // other chunks'. `hJoy7` is what gives the list its held-key repeat.
         ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
@@ -442,6 +460,10 @@ impl ModeUpdate for PokedexMenu {
 
     fn open(&mut self, ctx: &mut Ctx) -> Transition {
         Self::set_up_graphics(ctx);
+        if self.page_only {
+            self.draw_data(ctx);
+            return self.show_picture(ctx);
+        }
         self.open_list(ctx)
     }
 

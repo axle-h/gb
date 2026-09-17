@@ -224,6 +224,23 @@ fn heal_hp(item: u8, mon: &mut PartyMon) -> Medicine {
     Medicine::Healed { old, new, message }
 }
 
+/// `.softboiled`'s share: a fifth of the giver's max HP, which the giver pays and the target is
+/// healed by. The giver must have more than that left, so it never faints itself.
+pub fn softboiled_share(giver: &PartyMon) -> u16 {
+    giver.stats[0] / 5
+}
+
+/// `ItemUseMedicine` with `wPseudoItemID` set: a Potion whose amount is the share rather than 20.
+pub fn softboiled(share: u16, target: &mut PartyMon) -> Medicine {
+    let (old, max) = (target.mon.hp, target.stats[0]);
+    if old == 0 || old == max {
+        return Medicine::NoEffect;
+    }
+    let new = old.saturating_add(share).min(max);
+    target.mon.hp = new;
+    Medicine::Healed { old, new, message: MedicineMessage::Potion }
+}
+
 /// `VitaminStats`: the stat each vitamin raises, as the text names it.
 pub fn vitamin_stat_name(item: ItemId) -> &'static str {
     ["HEALTH", "ATTACK", "DEFENSE", "SPEED", "SPECIAL"][item as usize - ItemId::HpUp as usize]

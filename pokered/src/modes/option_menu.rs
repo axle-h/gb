@@ -157,12 +157,18 @@ impl ModeUpdate for OptionMenu {
         if keys.difference(Joypad::SELECT).is_empty() {
             return Transition::Stay;
         }
+        // `.exitMenu` plays the press sound.
         if keys.intersects(Joypad::B | Joypad::START) {
+            ctx.audio.play_sound(crate::audio::data::sounds::SFX_PRESS_AB);
             return Transition::Pop(Outcome::Done);
         }
         if keys.contains(Joypad::A) {
             // A does nothing anywhere but Cancel.
-            return if self.cursor.1 == CANCEL_Y { Transition::Pop(Outcome::Done) } else { Transition::Stay };
+            if self.cursor.1 != CANCEL_Y {
+                return Transition::Stay;
+            }
+            ctx.audio.play_sound(crate::audio::data::sounds::SFX_PRESS_AB);
+            return Transition::Pop(Outcome::Done);
         }
         if keys.contains(Joypad::DOWN) {
             let next = match self.cursor.1 {

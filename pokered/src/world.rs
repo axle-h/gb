@@ -1,8 +1,13 @@
 use std::collections::BTreeMap;
+use poke_core::item::ItemId;
+use poke_core::species::PokemonSpecies;
 use poke_core::text_script::{TextBuffer, TextMoney, TextNumber};
 use serde::{Deserialize, Serialize};
-use crate::party::{Named, PartyMon, Pokedex};
+use crate::party::{BoxMon, Named, PartyMon, Pokedex};
+use crate::systems::hall_of_fame::HallOfFameMon;
 use crate::systems::inventory::Inventory;
+use crate::systems::overworld::Location;
+use crate::systems::play_time::PlayTime;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct World {
@@ -20,9 +25,71 @@ pub struct World {
     pub bag: Inventory,
     /// `wPlayerMoney`, BCD, two digits to a byte.
     pub money: [u8; 3],
+    /// `wObtainedBadges`, bit 0 the Boulder Badge.
+    #[serde(default)]
+    pub badges: u8,
+    #[serde(default)]
+    pub play_time: PlayTime,
+    /// `wPlayerID`: a party mon with another OT gets boosted experience and may disobey.
+    #[serde(default)]
+    pub player_id: u16,
+    /// `sBox1`..`sBox12`: every PC box, each up to `MONS_PER_BOX` mons with their OT and nickname,
+    /// newest first. `wBoxCount`, `wBoxMons`, `wBoxMonOT` and `wBoxMonNicks` in WRAM are the
+    /// cartridge's working copy of `boxes[current_box]`, written back to its SRAM box when the box
+    /// is changed; a box missing from the list is an empty one.
+    #[serde(default)]
+    pub boxes: Vec<Vec<Named<BoxMon>>>,
+    /// `wCurrentBoxNum` without its `BIT_HAS_CHANGED_BOXES`, counting from 0.
+    #[serde(default)]
+    pub current_box: u8,
+    /// `wNumSafariBalls`.
+    #[serde(default)]
+    pub safari_balls: u8,
+    /// `wBoxItems`: the items in the player's PC. A new game makes it with `Inventory::pc`.
+    #[serde(default = "Inventory::default_pc")]
+    pub pc_items: Inventory,
+    /// `wNumHoFTeams`, which stops at 255 rather than wrapping.
+    #[serde(default)]
+    pub hall_of_fame_teams: u8,
+    /// `sHallOfFame`: the teams recorded, oldest first, at most `HOF_TEAM_CAPACITY`.
+    #[serde(default)]
+    pub hall_of_fame: Vec<Vec<HallOfFameMon>>,
+    /// `wLetterPrintingDelayFlags` with `BIT_FAST_TEXT_DELAY` clear: a printed letter waits one frame
+    /// whatever the text speed. The Hall of Fame clears the bit; `InitOptions` sets it.
+    #[serde(default)]
+    pub one_frame_letter_delay: bool,
+    /// `wPlayerCoins`, BCD, two digits to a byte.
+    #[serde(default)]
+    pub coins: [u8; 2],
+    /// `wDayCareInUse`, with `wDayCareMonName`, `wDayCareMonOT` and `wDayCareMon`.
+    #[serde(default)]
+    pub day_care: Option<Named<BoxMon>>,
+    /// `wObtainedHiddenItemsFlags`: a bit per entry of `HiddenItemCoords`.
+    #[serde(default)]
+    pub hidden_items: [u8; 14],
+    /// `wObtainedHiddenCoinsFlags`: a bit per entry of `HiddenCoinCoords`.
+    #[serde(default)]
+    pub hidden_coins: [u8; 2],
+    /// `wCompletedInGameTradeFlags`: a bit per `TRADE_FOR_*`.
+    #[serde(default)]
+    pub in_game_trades: u16,
+    /// `wStatusFlags4`'s `BIT_USED_POKECENTER`: the nurse has asked once and skips the question after.
+    #[serde(default)]
+    pub used_pokecenter: bool,
+    /// `wSafariSteps`.
+    #[serde(default)]
+    pub safari_steps: u16,
+    /// `wFossilItem` and `wFossilMon`: what the Cinnabar lab was given, and what it revives.
+    #[serde(default)]
+    pub fossil: Option<(ItemId, PokemonSpecies)>,
+    /// Every map's `w<Map>CurScript` and the script variables that outlive a pass.
+    #[serde(default)]
+    pub scripts: crate::scripts::ScriptState,
     /// `BIT_NO_TEXT_DELAY`.
     pub no_text_delay: bool,
     pub text: TextVars,
+    /// Where the player stands: the map, the square, the facing, and the map state a save keeps.
+    pub location: Location,
 }
 
 /// `NUM_EVENTS`: the event space, most of it unused.

@@ -202,6 +202,8 @@ impl Evolution {
     /// the old one shown. The `Delay3` after the sound is loading and not modelled.
     fn start_evolve_mon(&mut self, ctx: &mut Ctx) {
         ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, 12, UiSurface::BLANK);
+        crate::gfx::mon_icons::clear_sprites(&mut ctx.screen.sprites);
+        ctx.audio.end_low_health_alarm();
         ctx.audio.play_sound(SoundId::STOP_ALL_MUSIC);
         ctx.audio.play_sound(sounds::SFX_TINK);
         let (old, new) = self.species();

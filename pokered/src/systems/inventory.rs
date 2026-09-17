@@ -57,6 +57,10 @@ impl Inventory {
         Self { items, capacity: PC_ITEM_CAPACITY }
     }
 
+    pub fn default_pc() -> Self {
+        Self::pc(Vec::new())
+    }
+
     /// `AddItemToInventory_`, returning its carry. `quantity` is never capped on the way in, so a
     /// new slot can be made holding more than 99.
     ///

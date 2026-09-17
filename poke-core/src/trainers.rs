@@ -12,6 +12,12 @@ fn in_bank(address: u16) -> &'static [u8] {
 /// `(level, internal species id)`. A party is `level, species…, 0`, or `$FF, level, species…, 0`
 /// when levels differ.
 pub fn parties(class: u8) -> Vec<Vec<(u8, u8)>> {
+    party_data(class).into_iter().map(|(_, party)| party).collect()
+}
+
+/// `parties`, with whether each was written `$FF, level, species…`: only such a party can be given
+/// a special move.
+pub fn party_data(class: u8) -> Vec<(bool, Vec<(u8, u8)>)> {
     assert!((1..=NUM_TRAINERS).contains(&class), "trainer class {class}");
     let pointers = rom_slice(pokered_symbols::TrainerDataPointers);
     let at = |class: u8| u16::from_le_bytes([pointers[(class as usize - 1) * 2], pointers[(class as usize - 1) * 2 + 1]]);
@@ -24,9 +30,9 @@ pub fn parties(class: u8) -> Vec<Vec<(u8, u8)>> {
         let body_end = rest.iter().skip(1).position(|&b| b == 0).map(|p| p + 1).unwrap_or(rest.len());
         let body = &rest[1..body_end];
         parties.push(if first == 0xFF {
-            body.chunks_exact(2).map(|pair| (pair[0], pair[1])).collect()
+            (true, body.chunks_exact(2).map(|pair| (pair[0], pair[1])).collect())
         } else {
-            body.iter().map(|&species| (first, species)).collect()
+            (false, body.iter().map(|&species| (first, species)).collect())
         });
         rest = &rest[(body_end + 1).min(rest.len())..];
         if class == NUM_TRAINERS && parties.len() == LAST_CLASS_PARTIES {
@@ -54,6 +60,28 @@ pub fn move_choices(class: u8) -> Vec<u8> {
         .to_vec()
 }
 
+/// `LoneMoves`: for a gym leader, `(index of the party mon from 0, move)`, looked up by
+/// `wLoneAttackNo` from 1.
+pub fn lone_moves() -> [(u8, u8); 8] {
+    let bytes = rom_slice(pokered_symbols::LoneMoves);
+    std::array::from_fn(|i| (bytes[i * 2], bytes[i * 2 + 1]))
+}
+
+/// `TeamMoves`: `(trainer class, move)` for the Elite Four.
+pub fn team_moves() -> Vec<(u8, u8)> {
+    rom_slice(pokered_symbols::TeamMoves).chunks(2)
+        .take_while(|row| row[0] != 0xFF)
+        .map(|row| (row[0], row[1]))
+        .collect()
+}
+
+/// `TrainerAIPointers`: how many times a class's AI may act for each mon, and the routine's
+/// address in the AI's bank.
+pub fn ai_pointer(class: u8) -> (u8, u16) {
+    let row = &rom_slice(pokered_symbols::TrainerAIPointers)[(class as usize - 1) * 3..][..3];
+    (row[0], u16::from_le_bytes([row[1], row[2]]))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::species::PokemonSpecies;
@@ -78,6 +106,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn brock_s_onix_bides_and_lorelei_s_fifth_mon_blizzards() {
+        use crate::move_name::PokemonMoveName as M;
+        assert_eq!(lone_moves()[0], (1, M::Bide as u8));
+        assert_eq!(team_moves(), [(44, M::Blizzard as u8), (33, M::Fissure as u8), (46, M::Toxic as u8), (47, M::Barrier as u8)]);
+        assert_eq!(ai_pointer(34), (5, pokered_symbols::BrockAI.address));
     }
 
     #[test]
