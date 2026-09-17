@@ -418,17 +418,22 @@ fn party_is_fresh(state: &GameState) -> bool {
         && p.moves.iter().flatten().all(|m| m.pp == m.name.metadata().pp))
 }
 
+/// Whether `ItemUseBall` refuses every throw with "The POKéMON BOX is full!": it checks the open
+/// box only, and only once the party is full too.
+pub(crate) fn no_room_for_a_catch(state: &GameState) -> bool {
+    state.pokemon.len() >= 6 && state.boxed_pokemon.len() >= crate::pokemon::postgame::pc_box::BOX_CAPACITY
+}
+
 pub(crate) fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
     let battle_state = state.battle.as_ref()?;
+    let no_room = no_room_for_a_catch(state);
 
     // Safari Zone battles have their own menu (no FIGHT/PKMN/ITEM).
     if battle_state.battle_type == BattleType::Safari {
-        return Some(vec![
-            BattleAction::SafariBall,
-            BattleAction::SafariBait,
-            BattleAction::SafariRock,
-            BattleAction::Run,
-        ]);
+        return Some([BattleAction::SafariBall, BattleAction::SafariBait, BattleAction::SafariRock, BattleAction::Run]
+            .into_iter()
+            .filter(|action| !(no_room && *action == BattleAction::SafariBall))
+            .collect());
     }
 
     // A ghost battle offers only `Run`, the one thing the cartridge will do.
@@ -452,6 +457,9 @@ pub(crate) fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
     let party_order: Vec<usize> = party_order.collect();
     for (i, item) in state.bag.iter().enumerate() {
         let slot = i as u8;
+        if no_room && crate::pokemon::item_use::is_ball(item.id) {
+            continue;
+        }
         let helps = |member: usize| state.pokemon.get(member).and_then(|mon| {
             crate::pokemon::item_use::helps_in_battle(item.id, mon.current_hp, mon.stats.hp, mon.status)
         });

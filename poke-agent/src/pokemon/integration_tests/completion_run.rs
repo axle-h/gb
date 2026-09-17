@@ -2091,3 +2091,65 @@ fn completion_phase_power_plant() {
     cut(&mut played, "completion-power-plant");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
+
+/// Victory Road: Route 22's gate and Route 23's badge checks, the three Strength floors, Moltres on
+/// the second of them, and out onto the plateau.
+pub fn to_victory_road() -> Vec<Step> {
+    use Step::*;
+    const ROAD: &[&str] = &["VictoryRoad1F", "VictoryRoad2F", "VictoryRoad3F"];
+    vec![
+        Collect(false), Tidy,
+        Field(r#"{"move":"fly","map":"ViridianCity"}"#), GoTo("ViridianCity"),
+        // The phases before filled the party and the box, and a full box refuses every ball, so the
+        // bird would be met with nothing to throw.
+        GoTo("ViridianPokecenter"), AtPc(Pc::ChangeBox(3)), GoTo("ViridianCity"),
+        GoTo("Route22"), Explore { maps: &["Route22"], patience: 300 },
+        GoTo("Route22Gate"), Clear(&[]),
+        GoTo("Route23"), Explore { maps: &["Route23"], patience: 300 },
+        GoTo("VictoryRoad1F"),
+        // Four Strength goals and a hole across three floors, in the order the way up needs them.
+        Repeat("switch at (17, 13)"), Explore { maps: &["VictoryRoad1F"], patience: 400 },
+        GoTo("VictoryRoad2F"),
+        Repeat("switch at (1, 16)"),
+        // 1F's north pocket is only reached down 2F's west ladder, and its two balls stand on a ledge
+        // behind a boulder that serves no switch. Shoved all the way along, it ends beside the TM on
+        // the square the Rare Candy is taken from, so the floor is left and re-entered to put it
+        // back, and the second pass lifts it out of the row instead.
+        Take("VictoryRoad1F, arriving at (1, 1)"),
+        Take("boulder at (14, 2) one square left"), Take("boulder at (13, 2) one square left"),
+        Take("boulder at (12, 2) one square left"), Take("boulder at (11, 2) one square left"),
+        // The floors' pickups fill the bag, and a full bag refuses a ball in silence.
+        Tidy, Talk("TMSkyAttack"),
+        Take("VictoryRoad2F, arriving at (0, 8)"), Take("VictoryRoad1F, arriving at (1, 1)"),
+        Take("boulder at (14, 2) one square left"), Take("boulder at (13, 2) one square left"),
+        Take("boulder at (12, 2) one square left"), Take("boulder at (11, 2) one square up"),
+        Talk("RareCandy"), GoTo("VictoryRoad2F"),
+        GoTo("VictoryRoad3F"),
+        // Moltres is on 2F's north strip, and 3F's (2, 0) ladder is the only way onto it.
+        Take("VictoryRoad2F, arriving at (1, 1)"),
+        Hunt { species: "Moltres", row: "Moltres", ball: "MasterBall",
+               way: Way::Legendary(Legend::Moltres), on: "VictoryRoad2F" },
+        GoTo("VictoryRoad3F"),
+        Repeat("switch at (3, 5)"),
+        Repeat("hole at (23, 15)"),
+        Take("VictoryRoad2F, arriving at (22, 16)"),
+        Repeat("switch at (9, 16)"),
+        Take("VictoryRoad3F, arriving at (27, 15)"),
+        Take("VictoryRoad2F, arriving at (27, 7)"),
+        Explore { maps: ROAD, patience: 1200 },
+        GoTo("Route23"), GoTo("IndigoPlateau"), GoTo("IndigoPlateauLobby"), Clear(&[]),
+    ]
+}
+
+#[test]
+fn completion_phase_victory_road() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-power-plant.bin"), "completion-victory-road",
+                          to_victory_road(), 600, Duration::from_secs(3000));
+    let missing = missing_on(&mut played, &[
+        Map::Route22, Map::Route22Gate, Map::Route23, Map::VictoryRoad1F, Map::VictoryRoad2F,
+        Map::VictoryRoad3F, Map::IndigoPlateau, Map::IndigoPlateauLobby,
+    ], &[Entry::Way(Way::Legendary(Legend::Moltres)), Entry::Way(Way::PcChangeBox)]);
+    cut(&mut played, "completion-victory-road");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}

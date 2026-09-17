@@ -137,7 +137,6 @@ impl HuntProgress {
 /// What the gate charges per trip.
 pub const ENTRY_FEE: u32 = 500;
 
-const MONS_PER_BOX: usize = 20;
 
 /// Species in `targets` not owned yet.
 pub fn wanted(state: &GameState, targets: &[PokemonSpecies]) -> Vec<PokemonSpecies> {
@@ -175,7 +174,7 @@ pub fn pick(
     }
     // A full party and a full box make `ItemUseBall` refuse with a text box, which reads as a miss
     // and would spend the trip's balls on nothing.
-    if state.pokemon.len() >= 6 && state.boxed_pokemon.len() >= MONS_PER_BOX {
+    if crate::pokemon::policy::no_room_for_a_catch(state) {
         println!("[safari] party and box {} are both full — no room for a catch, stopping",
             state.current_box + 1);
         return Hunt::Done;
