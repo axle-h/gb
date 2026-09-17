@@ -721,6 +721,13 @@ pub fn situation(
                                    at a PC or deposit or release a Pokémon there.\n",
                                   state.current_box + 1));
         }
+        if stood_on_the_map(state, battle.enemy.species) {
+            out.push_str(&format!(
+                "⚠️ This {} is the one that was standing on the floor, and the game holds exactly \
+                 one of it. Whatever ends this battle other than a ball hides that object for good: \
+                 run from it or knock it out and it is gone for the rest of the run.\n",
+                battle.enemy.species));
+        }
         if battle.enemy_trapping {
             // Every option still looks available, but a move chosen is replaced with "cannot move".
             out.push_str("⚠️ You are trapped (Wrap/Bind/Fire Spin): a move will not execute this \
@@ -782,6 +789,17 @@ pub fn situation(
 
     out.push_str(&format!("\n{}\n", contract(kind)));
     out
+}
+
+/// Whether the enemy is the object that was standing on the floor: a legendary, a Snorlax, a Power
+/// Plant Voltorb. The cartridge hides such an object once its battle is over however it ended, so
+/// there is no second go at one. The tell is the sprite being faced rather than the species alone,
+/// because the floor an object stands on often rolls the same species in an ordinary encounter.
+fn stood_on_the_map(state: &GameState, enemy: crate::pokemon::species::PokemonSpecies) -> bool {
+    use crate::pokemon::tile::MetaTile;
+    let Some((_, MetaTile::Sprite(name))) = state.map.tile_in_front() else { return false };
+    // A map with two of a species numbers them: `Voltorb 1`.
+    name.trim_end_matches(|c: char| c.is_ascii_digit() || c == ' ') == enemy.to_string()
 }
 
 /// The nickname, and the species too when they differ.
@@ -1235,6 +1253,37 @@ mod tests {
         state.boxed_pokemon.pop();
         assert_eq!(balls(&state), 1);
         assert!(!battle_turn(&state).contains("both full"));
+    }
+
+    /// A static encounter is the one of its kind in the game, and the game hides the object
+    /// whatever ends the battle, so the turn has to say so before the model runs.
+    #[test]
+    fn a_battle_with_the_thing_that_was_standing_there_says_it_is_the_only_one() {
+        use crate::pokemon::battle::{BattleState, BattleType};
+        use crate::pokemon::species::PokemonSpecies;
+        use crate::pokemon::tile::MetaTile;
+        let battle_turn = |state: &GameState| situation(DecisionKind::Battle, state, &ApiSnapshot::default(),
+                                                        &[], &[], TurnContext::None, &[]);
+        let mut state = state_from(include_bytes!("../pokemon/data/postgame-game-corner.bin"));
+        let mine = state.pokemon.get(0).expect("a party").summary();
+        let mut foe = mine;
+        foe.species = PokemonSpecies::Mewtwo;
+        state.battle = Some(BattleState {
+            battle_type: BattleType::Wild, player: mine, enemy: foe, active_party_slot: 0,
+            enemy_trapping: false, enemy_catch_rate: 3,
+        });
+        assert!(!battle_turn(&state).contains("standing on the floor"), "an ordinary wild battle");
+
+        // The same battle, with the thing itself in front of the player.
+        let (at, _) = state.map.tile_in_front().expect("a tile in front");
+        let width = state.map.width;
+        let faced = &mut state.map.meta_tiles[at.x as usize + at.y as usize * width];
+        *faced = MetaTile::Sprite("Mewtwo");
+        assert!(battle_turn(&state).contains("standing on the floor"), "{}", battle_turn(&state));
+
+        // Someone else standing there has nothing to do with the enemy.
+        state.map.meta_tiles[at.x as usize + at.y as usize * width] = MetaTile::Sprite("Gambler");
+        assert!(!battle_turn(&state).contains("standing on the floor"));
     }
 
     #[test]
