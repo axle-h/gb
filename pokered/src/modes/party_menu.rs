@@ -1,25 +1,31 @@
-//! `DisplayPartyMenu` and `RedrawPartyMenu_`: six two-row entries and a cursor down the left.
+//! `DisplayPartyMenu` and `RedrawPartyMenu_`: six two-row entries, each with its mon's icon, and a
+//! cursor down the left.
 //!
-//! The mon icons are not drawn: they are OAM sprites out of a bank this chunk does not own. Their
-//! absence costs nothing in timing, because `AnimatePartyMon` ends in one `DelayFrame` and the
-//! cursor loop polls once a frame either way; what is missing is the picture, not the cadence.
+//! `AnimatePartyMon` runs once before every read of the pad and ends in the loop's one
+//! `DelayFrame`, so the selected icon's animation is the menu's frame clock. Its speed is the mon's
+//! HP bar colour, one frame longer on a DMG than on an SGB; this is a DMG.
 
 use poke_core::item::ItemId;
 use poke_core::move_name::PokemonMoveName;
+use poke_core::text_script::TextBuffer;
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
+use crate::gfx::mon_icons::{animate_party_mon, clear_sprites, load_mon_party_sprite_gfx, write_mon_party_sprite_oam};
+use crate::gfx::sgb::PaletteCommand;
 use crate::gfx::text_boxes::TextBoxId;
 use crate::modes::place_string::ligature;
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
 use crate::mode::{Ctx, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::menu_input::{MenuInput, UNFILLED_CURSOR};
-use crate::systems::hp_bar::{draw_hp, HpBarType};
+use crate::systems::hp_bar::{draw_hp, HpBarColour, HpBarType};
 use crate::systems::item_use::{can_learn_tm, evolves_with};
 use crate::systems::print_num::{print_number, NumberFormat};
 
 /// `<LV>`, the two-tile ":L" the level is printed after.
 const LEVEL: u8 = 0x6E;
+/// `wOnSGB`, which only the icons' speed reads here.
+const ON_SGB: bool = false;
 /// The first entry's name, and two rows to the next.
 const NAME_X: usize = 3;
 const STATUS_X: usize = 17;
@@ -182,12 +188,17 @@ impl PartyMenu {
     /// `RedrawPartyMenu_`'s loop: a name, a status, a bar and a level, two rows apart; for a machine
     /// or a stone, `ABLE` or `NOT ABLE` where the status and the bar would be.
     fn draw_rows(&self, ctx: &mut Ctx) {
+        ctx.screen.sgb.init_party_menu_blk_packet();
         let rows: Vec<(Vec<u8>, u8, u16, u16, u8)> = ctx.world.party.iter()
             .map(|held| (held.nick.clone(), held.mon.mon.status, held.mon.mon.hp, held.mon.stats[0], held.mon.level))
             .collect();
         for (row, (nick, status, hp, max_hp, level)) in rows.into_iter().enumerate() {
             let y = row * 2;
+            // `GetPartyMonName` per row, which leaves the last one drawn in `wNameBuffer`: that is
+            // the name `_UsedStrengthText` prints, since `.strength` names no mon of its own.
+            ctx.world.text.strings.insert(TextBuffer::NameBuffer, nick.clone());
             ctx.screen.ui.place(NAME_X, y, &nick);
+            write_mon_party_sprite_oam(&mut ctx.screen.sprites, row, ctx.world.party[row].mon.mon.species);
             // `RedrawPartyMenu_` draws this, but only on a pass that also redraws the list, and the
             // only state that enables it is the one that skips the list. No path reaches it.
             if self.to_swap as usize == row + 1 {
@@ -209,9 +220,21 @@ impl PartyMenu {
                 let bytes = poke_core::charmap::encode(text).expect("a status encodes");
                 ctx.screen.ui.place(STATUS_X, y, &bytes);
             }
-            draw_hp(&mut ctx.screen.ui, (y + 1) * SCREEN_TILES_X + BAR_X, hp, max_hp, true, HpBarType::PartyMenu);
+            let colour = draw_hp(&mut ctx.screen.ui, (y + 1) * SCREEN_TILES_X + BAR_X, hp, max_hp, true, HpBarType::PartyMenu);
+            // `SetPartyMenuHPBarColor`.
+            ctx.menu.party_hp_bar_colours[row] = Some(colour);
+            ctx.screen.sgb.run(&PaletteCommand::PartyMenuHpBars { which: row, colour });
             Self::print_level(&mut ctx.screen.ui, LEVEL_X, y, level);
         }
+        ctx.screen.sgb.run(&PaletteCommand::PartyMenu);
+    }
+
+    /// `HandleMenuInput_`'s `AnimatePartyMon`, which `wPartyMenuAnimMonEnabled` turns on here.
+    fn animate(&mut self, ctx: &mut Ctx) {
+        let party: Vec<_> = ctx.world.party.iter().map(|held| held.mon.mon.species).collect();
+        let current = self.input.current;
+        let colour = ctx.menu.party_hp_bar_colours.get(current as usize).copied().flatten().unwrap_or(HpBarColour::Green);
+        animate_party_mon(&mut ctx.screen.sprites, &mut self.input.anim_counter, current, colour, &party, ON_SGB);
     }
 }
 
@@ -244,7 +267,12 @@ impl PartyMenu {
 impl ModeUpdate for PartyMenu {
     fn enter(&mut self, ctx: &mut Ctx) {
         if self.cold {
+            clear_sprites(&mut ctx.screen.sprites);
             ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
+            load_mon_party_sprite_gfx(&mut ctx.screen.tiles);
+        } else if self.kind != PartyMenuType::SwapMons {
+            // `RedrawPartyMenu_`: the `▷` a choice left goes before the cursor saves what is behind it.
+            Self::erase_cursors(&mut ctx.screen.ui);
         }
         ctx.screen.tiles.load_hp_bar_and_status_tiles();
         let party = ctx.world.party.len();
@@ -269,6 +297,7 @@ impl ModeUpdate for PartyMenu {
     }
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
+        self.animate(ctx);
         let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
         ctx.menu.party_and_bills = self.input.current;
         if self.to_swap != 0 {

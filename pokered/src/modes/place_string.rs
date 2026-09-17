@@ -73,7 +73,7 @@ impl LetterDelay {
         if ctx.pacing == Pacing::Instant || ctx.world.no_text_delay {
             return None;
         }
-        *ctx.frame_counter = ctx.world.options.text_speed as u8;
+        *ctx.frame_counter = if ctx.world.one_frame_letter_delay { 1 } else { ctx.world.options.text_speed as u8 };
         Some(Self::check_buttons(ctx))
     }
 
@@ -287,6 +287,8 @@ impl PlaceString {
 
     fn answer(&mut self, ctx: &mut Ctx, pause: Pause, answered: &mut u32) -> Option<Printed> {
         *answered += 1;
+        // `ManualTextScroll` plays it after the press.
+        ctx.audio.play_sound(crate::audio::data::sounds::SFX_PRESS_AB);
         match pause {
             // `PromptText` falls into `DoneText`, which ends the whole text.
             Pause::Prompt => {

@@ -36,6 +36,14 @@ pub struct TextBox {
     phase: Phase,
     /// Prompts answered so far, so a driver can see its press land.
     answered: u32,
+    /// `PrintText_NoCreatingTextBox`: printed over whatever is there, with no `MESSAGE_BOX` drawn.
+    #[serde(default)]
+    no_box: bool,
+    /// Printing with `hAutoBGTransferEnabled` off. Until `enter` this is the screen to keep showing;
+    /// from then on it is the surface the text is drawn on, swapped in for each step and left on
+    /// the screen when the text ends.
+    #[serde(default)]
+    off_screen: Option<UiSurface>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,7 +69,19 @@ impl TextBox {
     }
 
     pub fn script(commands: Vec<TextCommand>) -> Self {
-        Self { commands, index: 0, dest: FIRST_LINE, printer: None, phase: Phase::Running, answered: 0 }
+        Self { commands, index: 0, dest: FIRST_LINE, printer: None, phase: Phase::Running, answered: 0, no_box: false, off_screen: None }
+    }
+
+    /// `PrintText_NoCreatingTextBox`: `DisplayTextID`'s own, which draws its box itself unless
+    /// `BIT_NO_AUTO_TEXT_BOX` says not to.
+    pub fn without_box(commands: Vec<TextCommand>) -> Self {
+        Self { no_box: true, ..Self::script(commands) }
+    }
+
+    /// Printed with the background transfer off: `shown` stays on the screen, the letters keep their
+    /// delays, and the text appears whole in the frame it ends.
+    pub fn off_screen(self, shown: UiSurface) -> Self {
+        Self { off_screen: Some(shown), ..self }
     }
 
     pub fn answered(&self) -> u32 {
@@ -208,6 +228,7 @@ impl TextBox {
         };
         if ctx.pad.low_sensitivity(ctx.frame_counter).intersects(Joypad::A | Joypad::B) {
             self.answered += 1;
+            ctx.audio.play_sound(sounds::SFX_PRESS_AB);
             if arrow {
                 PlaceString::put(&mut ctx.screen.ui, ARROW, UiSurface::BLANK);
             }
@@ -223,36 +244,8 @@ impl TextBox {
         Transition::Stay
     }
 
-    /// One `…` of `TX_DOTS`, which waits ten frames unless A or B is held.
-    fn dot(&mut self, ctx: &mut Ctx, left: u8) -> Transition {
-        PlaceString::put(&mut ctx.screen.ui, self.dest, DOTS);
-        self.dest += 1;
-        ctx.pad.poll();
-        let held = ctx.pad.held.intersects(Joypad::A | Joypad::B);
-        let frames = if held { 0 } else { self.delay(ctx, 10) };
-        self.phase = match (left - 1, frames) {
-            (0, 0) => return self.run(ctx),
-            // The wait after the last one is `Pausing`: frames, and then the next command.
-            (0, frames) => Phase::Pausing(frames),
-            (left, frames) => Phase::Dotting { left, frames },
-        };
-        Transition::Stay
-    }
-}
-
-impl ModeUpdate for TextBox {
-    /// `DisplayTextBoxID` with `MESSAGE_BOX`.
-    fn enter(&mut self, ctx: &mut Ctx) {
-        TextBoxId::MessageBox.draw(&mut ctx.screen.ui);
-    }
-
-    /// `PrintText`'s `Delay3` after drawing the box is loading and not modelled, so the first
-    /// command runs in the frame the box goes up.
-    fn open(&mut self, ctx: &mut Ctx) -> Transition {
-        self.run(ctx)
-    }
-
-    fn update(&mut self, ctx: &mut Ctx) -> Transition {
+    /// A frame of whatever the box is doing.
+    fn step(&mut self, ctx: &mut Ctx) -> Transition {
         match self.phase {
             Phase::Running => self.run(ctx),
             Phase::Waiting { .. } => self.wait(ctx),
@@ -276,6 +269,56 @@ impl ModeUpdate for TextBox {
             }
             Phase::Dotting { left, .. } => self.dot(ctx, left),
         }
+    }
+
+    /// `step` drawn on the off-screen surface when there is one, which is shown once the text ends.
+    fn drawn(&mut self, ctx: &mut Ctx, step: impl FnOnce(&mut Self, &mut Ctx) -> Transition) -> Transition {
+        let Some(mut surface) = self.off_screen.take() else { return step(self, ctx) };
+        std::mem::swap(&mut ctx.screen.ui, &mut surface);
+        let transition = step(self, ctx);
+        if !matches!(transition, Transition::Pop(_)) {
+            std::mem::swap(&mut ctx.screen.ui, &mut surface);
+            self.off_screen = Some(surface);
+        }
+        transition
+    }
+
+    /// One `…` of `TX_DOTS`, which waits ten frames unless A or B is held.
+    fn dot(&mut self, ctx: &mut Ctx, left: u8) -> Transition {
+        PlaceString::put(&mut ctx.screen.ui, self.dest, DOTS);
+        self.dest += 1;
+        ctx.pad.poll();
+        let held = ctx.pad.held.intersects(Joypad::A | Joypad::B);
+        let frames = if held { 0 } else { self.delay(ctx, 10) };
+        self.phase = match (left - 1, frames) {
+            (0, 0) => return self.run(ctx),
+            // The wait after the last one is `Pausing`: frames, and then the next command.
+            (0, frames) => Phase::Pausing(frames),
+            (left, frames) => Phase::Dotting { left, frames },
+        };
+        Transition::Stay
+    }
+}
+
+impl ModeUpdate for TextBox {
+    /// `DisplayTextBoxID` with `MESSAGE_BOX`.
+    fn enter(&mut self, ctx: &mut Ctx) {
+        if !self.no_box {
+            TextBoxId::MessageBox.draw(&mut ctx.screen.ui);
+        }
+        if let Some(shown) = &mut self.off_screen {
+            std::mem::swap(&mut ctx.screen.ui, shown);
+        }
+    }
+
+    /// `PrintText`'s `Delay3` after drawing the box is loading and not modelled, so the first
+    /// command runs in the frame the box goes up.
+    fn open(&mut self, ctx: &mut Ctx) -> Transition {
+        self.drawn(ctx, Self::run)
+    }
+
+    fn update(&mut self, ctx: &mut Ctx) -> Transition {
+        self.drawn(ctx, Self::step)
     }
 
     fn status(&self) -> Status {
@@ -579,4 +622,34 @@ mod tests {
             assert_eq!(whole.ui(), restored.ui(), "frame {frame}");
         }
     }
+
+    /// Printed with the background transfer off: the letters take as long, the screen keeps what
+    /// was on it, and the whole text lands in the frame the box closes.
+    #[test]
+    fn an_off_screen_text_is_only_seen_once_it_is_done() {
+        let world = World { player_name: encode("RED").unwrap(), ..World::default() };
+        let mut game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.screen_mut().ui.set(0, 0, 0x31);
+        let shown = game.ui().clone();
+        game.push(Mode::TextBox(TextBox::new(encode("AB@").unwrap()).off_screen(shown)));
+        let frames = frames_until(&mut game, |g| {
+            assert!(g.modes().is_empty() || row(g, 14).is_empty(), "the letters are on the screen");
+            g.modes().is_empty()
+        });
+        assert_eq!(frames, 6, "the same frames as a text drawn on the screen");
+        assert_eq!(row(&game, 14), "AB");
+        assert_eq!(game.ui().get(0, 0), 0x31, "and the screen it was drawn off is still under it");
+    }
+
+    #[test]
+    fn a_text_without_its_box_prints_over_what_is_on_the_screen() {
+        let world = World { player_name: encode("RED").unwrap(), ..World::default() };
+        let mut game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.screen_mut().ui.set(0, 12, 0x31);
+        game.push(Mode::TextBox(TextBox::without_box(vec![TextCommand::Text(encode("AB@").unwrap())])));
+        frames_until(&mut game, |g| g.modes().is_empty());
+        assert_eq!(row(&game, 14), "AB");
+        assert_eq!(game.ui().get(0, 12), 0x31, "no border drawn over the corner");
+    }
+
 }

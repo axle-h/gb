@@ -17,7 +17,12 @@ const BASE_FRONTPIC: usize = 11;
 
 /// One Pokémon's front sprite as shade indices, row-major; the palette is the caller's.
 pub fn front_pic_shades(species: PokemonSpecies) -> [u8; PIC_PX * PIC_PX] {
-    let Pic { width, height, low, high } = decompress(front_pic(species));
+    pic_shades(front_pic(species))
+}
+
+/// Any compressed pic, a trainer's or the player's as well as a Pokémon's, decompressed the same way.
+pub fn pic_shades(data: &'static [u8]) -> [u8; PIC_PX * PIC_PX] {
+    let Pic { width, height, low, high } = decompress(data);
     let low = align_centred(&low, width, height);
     let high = align_centred(&high, width, height);
 

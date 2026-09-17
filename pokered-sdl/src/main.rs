@@ -1,33 +1,24 @@
-//! Until the game boots on its own, this sets a scene by hand: Pallet Town, then a text box, the
-//! bag, the start menu, a yes/no, the party, the naming screen and a mon's field moves, over and
-//! over.
+//! Until the game boots on its own, this sets a scene by hand: the player outside Red's house in
+//! Pallet Town, free to walk, read signs, talk and open the start menu.
 
 use std::time::{Duration, Instant};
+use poke_core::bag::BagItem;
 use poke_core::charmap::encode;
 use poke_core::item::ItemId;
 use poke_core::map::Map;
-use poke_core::map_header::MapHeader;
-use poke_core::move_name::PokemonMoveName;
 use poke_core::species::PokemonSpecies;
+use poke_core::sprite::SpriteFacing;
 use poke_core::symbols::pokered_events::EVENT_GOT_POKEDEX;
 use pokered::gfx::colour::ColourMode;
 use pokered::gfx::compose::{HEIGHT, WIDTH};
-use pokered::gfx::layers::MapLayer;
-use pokered::gfx::ui::{SCREEN_TILES_X, SCREEN_TILES_Y};
 use pokered::input::Joypad;
 use pokered::mode::Mode;
-use pokered::modes::list_menu::ListMenu;
-use pokered::modes::start_menu::StartMenu;
-use pokered::modes::text_box::TextBox;
-use pokered::modes::field_move_menu::FieldMoveMenu;
-use pokered::modes::naming_screen::{NamingScreen, NamingScreenType};
-use pokered::modes::party_menu::{PartyMenu, PartyMenuType};
-use pokered::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
+use pokered::modes::overworld::Overworld;
 use pokered::party::Named;
-use pokered::systems::add_mon::{new_party_mon, Origin};
-use pokered::systems::field_moves::field_moves;
 use pokered::rng::GameRng;
-use pokered::systems::map_data::{camera, tile_block_map, MAP_BORDER};
+use pokered::systems::add_mon::{new_party_mon, Origin};
+use pokered::systems::inventory::Inventory;
+use pokered::systems::overworld::Location;
 use pokered::world::World;
 use pokered::{Game, Input, Pacing};
 use sdl2::event::Event;
@@ -49,41 +40,12 @@ fn scene() -> Game {
             Named { mon, ot: encode("RED").unwrap(), nick: encode(nick).unwrap() }
         })
         .collect();
+    world.bag = Inventory::bag(vec![BagItem::new(ItemId::Potion, 5), BagItem::new(ItemId::PokeBall, 10)]);
+    world.location = Location { map: Map::PalletTown, x: 5, y: 6, facing: SpriteFacing::Down, ..Location::default() };
     let mut game = Game::new(world, GameRng::from_entropy(), Pacing::Faithful);
-    let header = MapHeader::read(Map::PalletTown).expect("Pallet Town has a header");
-    let screen = game.screen_mut();
-    screen.tiles.load_tileset(header.tileset);
-    screen.tiles.load_text_box_tiles();
-    screen.tiles.load_font();
-    screen.tiles.animation.kind = 2;
-    screen.map = MapLayer {
-        tileset: Some(header.tileset),
-        blocks_wide: header.width as usize + 2 * MAP_BORDER,
-        blocks: tile_block_map(Map::PalletTown).unwrap(),
-        camera: camera(5, 6),
-    };
+    game.screen_mut().tiles.load_font();
+    game.push(Mode::Overworld(Overworld::new()));
     game
-}
-
-fn next_mode(shown: usize) -> Mode {
-    match shown % 7 {
-        0 => Mode::TextBox(TextBox::new(encode("Hello, <PLAYER>!<LINE>This is Pallet<CONT>Town, recreated.<PROMPT>").unwrap())),
-        1 => Mode::ListMenu(ListMenu::items(vec![
-            (ItemId::Potion, 5), (ItemId::PokeBall, 10), (ItemId::Antidote, 2),
-            (ItemId::TownMap, 1), (ItemId::Hm01Cut, 1), (ItemId::Repel, 3),
-        ], 0, 0)),
-        // OPTION is the one row that opens a screen; the other five are still to be recreated.
-        2 => Mode::StartMenu(StartMenu::new()),
-        // Drawn over the town and taken back down again, which is the part worth watching.
-        3 => Mode::TwoOptionMenu(TwoOptionMenu::new(TwoOptionMenuId::YesNo, (14, 7), false)),
-        4 => Mode::PartyMenu(PartyMenu::new(PartyMenuType::Normal)),
-        // START or A on ED hands the name back; B rubs a letter out.
-        5 => Mode::NamingScreen(NamingScreen::new(NamingScreenType::Player, None)),
-        // Two field moves, so the box is both taller and wider than its empty form.
-        _ => Mode::FieldMoveMenu(FieldMoveMenu::new(field_moves([
-            PokemonMoveName::Cut as u8, PokemonMoveName::Strength as u8, 0, 0,
-        ]))),
-    }
 }
 
 fn buttons(keys: &sdl2::keyboard::KeyboardState) -> Joypad {
@@ -109,7 +71,6 @@ fn main() -> Result<(), String> {
     let mut events = sdl.event_pump()?;
 
     let mut game = scene();
-    let mut shown = 0;
     let mut saved: Option<Vec<u8>> = None;
     let mut next = Instant::now();
     'running: loop {
@@ -124,9 +85,7 @@ fn main() -> Result<(), String> {
             }
         }
         if game.modes().is_empty() {
-            game.screen_mut().ui.uncover(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y);
-            game.push(next_mode(shown));
-            shown += 1;
+            game.push(Mode::Overworld(Overworld::new()));
         }
         game.frame(Input::Buttons(buttons(&events.keyboard_state())));
 
@@ -154,17 +113,15 @@ mod tests {
     fn dump_scene() {
         let dir = std::env::var("POKERED_DUMP").unwrap();
         let mut game = scene();
-        for shown in 0..7 {
-            game.screen_mut().ui.uncover(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y);
-            game.push(next_mode(shown));
-            for _ in 0..120 {
+        let walk = [Joypad::UP, Joypad::RIGHT, Joypad::START, Joypad::B];
+        for (shown, &button) in walk.iter().enumerate() {
+            for _ in 0..20 {
+                game.frame(Input::Buttons(button));
+            }
+            for _ in 0..60 {
                 game.frame(Input::None);
             }
             std::fs::write(format!("{dir}/scene-{shown}.rgb"), ColourMode::Dmg.rgb(game.screen())).unwrap();
-            while !game.modes().is_empty() {
-                game.frame(Input::Buttons(Joypad::B));
-                game.frame(Input::None);
-            }
         }
     }
 }

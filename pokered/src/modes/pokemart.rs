@@ -20,6 +20,7 @@ use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::buy_sell_quit::BuySellQuitMenu;
 use crate::modes::list_menu::{remove_from_bag, ListMenu};
 use crate::modes::menu_input::MenuExit;
+use crate::modes::pc::update_sprites;
 use crate::modes::quantity_menu::{Price, QuantityMenu};
 use crate::modes::text_box::TextBox;
 use crate::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
@@ -106,8 +107,10 @@ impl Pokemart {
         }
     }
 
-    fn text(&mut self, label: &str, after: After) -> Transition {
+    /// `PrintText`, whose `UpdateSprites` follows the box.
+    fn text(&mut self, label: &str, after: After, ctx: &mut Ctx) -> Transition {
         self.phase = Phase::Child(after);
+        update_sprites(ctx);
         let script = far_text(label).expect("the mart's texts are in the cartridge");
         Transition::Push(Mode::TextBox(TextBox::script(script)))
     }
@@ -116,21 +119,25 @@ impl Pokemart {
     fn main_menu(&mut self, ctx: &mut Ctx) -> Transition {
         ctx.menu.list_scroll = 0;
         money_box(&mut ctx.screen.ui, &ctx.world.money);
+        update_sprites(ctx);
         self.phase = Phase::Child(After::Menu);
         Transition::Push(Mode::BuySellQuitMenu(BuySellQuitMenu::new()))
     }
 
+    /// `LoadScreenTilesFromBuffer1` and the money box, whose `DisplayTextBoxID` updates the sprites,
+    /// as the list drawn next does.
     fn restore_screen(&self, ctx: &mut Ctx) {
         if let Some(saved) = &self.saved {
             ctx.screen.ui = saved.clone();
         }
         money_box(&mut ctx.screen.ui, &ctx.world.money);
+        update_sprites(ctx);
     }
 
     /// `.returnToMainPokemartMenu`.
     fn return_to_main_menu(&mut self, ctx: &mut Ctx) -> Transition {
         self.restore_screen(ctx);
-        self.text("_PokemartAnythingElseText", After::Then(Then::MainMenu))
+        self.text("_PokemartAnythingElseText", After::Then(Then::MainMenu), ctx)
     }
 
     fn buy_loop(&mut self, ctx: &mut Ctx) -> Transition {
@@ -154,8 +161,10 @@ impl Pokemart {
         }
     }
 
-    fn yes_no(&mut self, after: After) -> Transition {
+    /// `DisplayTwoOptionMenu`, which updates the sprites as it draws and as it restores.
+    fn yes_no(&mut self, after: After, ctx: &mut Ctx) -> Transition {
         self.phase = Phase::Child(after);
+        update_sprites(ctx);
         Transition::Push(Mode::TwoOptionMenu(TwoOptionMenu::new(TwoOptionMenuId::YesNo, YES_NO_AT, false)))
     }
 
@@ -177,7 +186,8 @@ impl Pokemart {
 impl ModeUpdate for Pokemart {
     fn open(&mut self, ctx: &mut Ctx) -> Transition {
         self.saved_scroll = ctx.menu.list_scroll;
-        self.text("_PokemartGreetingText", After::Greeting)
+        update_sprites(ctx);
+        self.text("_PokemartGreetingText", After::Greeting, ctx)
     }
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
@@ -196,7 +206,7 @@ impl ModeUpdate for Pokemart {
                     return Transition::Stay;
                 }
                 match paid {
-                    Paid::Bought => self.text("_PokemartBoughtItemText", After::Then(Then::BuyLoop)),
+                    Paid::Bought => self.text("_PokemartBoughtItemText", After::Then(Then::BuyLoop), ctx),
                     Paid::Sold => self.sell_loop(ctx),
                 }
             }
@@ -205,16 +215,21 @@ impl ModeUpdate for Pokemart {
 
     fn resume(&mut self, outcome: Outcome, ctx: &mut Ctx) -> Transition {
         let Phase::Child(after) = self.phase else { return Transition::Stay };
+        if matches!(after, After::BuyConfirm | After::SellConfirm) {
+            // `TwoOptionMenu_RestoreScreenTiles`.
+            update_sprites(ctx);
+        }
         match after {
             After::Greeting => self.main_menu(ctx),
             After::Menu => match (ctx.menu.exit_method, ctx.menu.chosen_item) {
-                (MenuExit::Chose, BUY) => self.text("_PokemartBuyingGreetingText", After::ThenSave(Then::BuyLoop)),
+                (MenuExit::Chose, BUY) => self.text("_PokemartBuyingGreetingText", After::ThenSave(Then::BuyLoop), ctx),
                 (MenuExit::Chose, SELL) if ctx.world.bag.items.is_empty() =>
-                    self.text("_PokemartItemBagEmptyText", After::ThenSave(Then::ReturnToMainMenu)),
-                (MenuExit::Chose, SELL) => self.text("_PokemonSellingGreetingText", After::ThenSave(Then::SellLoop)),
-                _ => self.text("_PokemartThankYouText", After::Goodbye),
+                    self.text("_PokemartItemBagEmptyText", After::ThenSave(Then::ReturnToMainMenu), ctx),
+                (MenuExit::Chose, SELL) => self.text("_PokemonSellingGreetingText", After::ThenSave(Then::SellLoop), ctx),
+                _ => self.text("_PokemartThankYouText", After::Goodbye, ctx),
             },
             After::Goodbye => {
+                update_sprites(ctx);
                 ctx.menu.list_scroll = self.saved_scroll;
                 Transition::Pop(Outcome::Done)
             }
@@ -235,20 +250,20 @@ impl ModeUpdate for Pokemart {
                 Outcome::Chosen(quantity) => {
                     self.priced(ctx, quantity, false);
                     ctx.world.text.strings.insert(TextBuffer::StringBuffer, item::name(self.item));
-                    self.text("_PokemartTellBuyPriceText", After::BuyPrice)
+                    self.text("_PokemartTellBuyPriceText", After::BuyPrice, ctx)
                 }
                 _ => self.buy_loop(ctx),
             },
-            After::BuyPrice => self.yes_no(After::BuyConfirm),
+            After::BuyPrice => self.yes_no(After::BuyConfirm, ctx),
             After::BuyConfirm => {
                 if outcome != Outcome::Chosen(0) {
                     return self.buy_loop(ctx);
                 }
                 if !crate::systems::money::has_enough(&ctx.world.money, &self.total) {
-                    return self.text("_PokemartNotEnoughMoneyText", After::Then(Then::ReturnToMainMenu));
+                    return self.text("_PokemartNotEnoughMoneyText", After::Then(Then::ReturnToMainMenu), ctx);
                 }
                 if !ctx.world.bag.add(self.item, self.quantity) {
-                    return self.text("_PokemartItemBagFullText", After::Then(Then::ReturnToMainMenu));
+                    return self.text("_PokemartItemBagFullText", After::Then(Then::ReturnToMainMenu), ctx);
                 }
                 // `SubtractAmountPaidFromMoney_` redraws the money box over the list's corner.
                 subtract_paid(&mut ctx.world.money, &self.total);
@@ -262,7 +277,7 @@ impl ModeUpdate for Pokemart {
                     let held = ctx.world.bag.items[slot as usize];
                     self.item = held.id;
                     if !Inventory::may_toss(self.item) {
-                        return self.text("_PokemartUnsellableItemText", After::Then(Then::ReturnToMainMenu));
+                        return self.text("_PokemartUnsellableItemText", After::Then(Then::ReturnToMainMenu), ctx);
                     }
                     self.quantity(After::SellQuantity, held.quantity, true)
                 }
@@ -271,11 +286,11 @@ impl ModeUpdate for Pokemart {
             After::SellQuantity => match outcome {
                 Outcome::Chosen(quantity) => {
                     self.priced(ctx, quantity, true);
-                    self.text("_PokemartTellSellPriceText", After::SellPrice)
+                    self.text("_PokemartTellSellPriceText", After::SellPrice, ctx)
                 }
                 _ => self.sell_loop(ctx),
             },
-            After::SellPrice => self.yes_no(After::SellConfirm),
+            After::SellPrice => self.yes_no(After::SellConfirm, ctx),
             After::SellConfirm => {
                 if outcome != Outcome::Chosen(0) {
                     return self.sell_loop(ctx);
@@ -362,6 +377,35 @@ mod tests {
         answer(game, Decision::Quantity, Command::ChooseQuantity(quantity));
         read_on_to(game, Decision::TwoOption);
         answer(game, Decision::TwoOption, Command::ChooseOption(0));
+    }
+
+    #[test]
+    fn the_stock_hides_the_player_under_its_box() {
+        use poke_core::map::Map;
+        use poke_core::sprite::SpriteFacing;
+        use crate::modes::overworld::Overworld;
+        use crate::systems::overworld::Location;
+        let world = World {
+            player_name: encode("RED").unwrap(),
+            location: Location { map: Map::PewterMart, x: 2, y: 5, facing: SpriteFacing::Left, last_map: Map::PewterCity,
+                ..Location::default() },
+            ..World::default()
+        };
+        let mut game = Game::new(world, GameRng::seeded(9), Pacing::Faithful);
+        game.push(Mode::Overworld(Overworld::new()));
+        assert_eq!(settle(&mut game), Decision::Overworld);
+        let player = |game: &Game| match &game.modes()[0] {
+            Mode::Overworld(overworld) => overworld.sprites()[0].image_index,
+            _ => unreachable!(),
+        };
+        for _ in 0..4 {
+            game.frame(Input::Buttons(Joypad::A));
+        }
+        read_on_to(&mut game, Decision::BuySellQuit);
+        assert_ne!(player(&game), 0xFF, "the menu is clear of the player");
+        answer(&mut game, Decision::BuySellQuit, Command::ChooseOption(BUY));
+        assert_eq!(settle(&mut game), Decision::List);
+        assert_eq!(player(&game), 0xFF, "the list covers the player's square");
     }
 
     #[test]

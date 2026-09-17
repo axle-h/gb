@@ -26,6 +26,8 @@ pub struct TilesetEntry {
     pub talking_over: [u8; 3],
     /// The tile id wild encounters happen on, or `0xFF` for a tileset with no grass.
     pub grass_tile: u8,
+    /// `hTileAnimations`: 0 still, 1 water, 2 water and flowers.
+    pub animation: u8,
 }
 
 const TILESET_ENTRY_SIZE: u16 = 12;
@@ -40,6 +42,7 @@ pub fn tileset_entry(tileset: TileSetId) -> TilesetEntry {
         coll: le(5),
         talking_over: [row[7], row[8], row[9]],
         grass_tile: row[10],
+        animation: row[11],
     }
 }
 

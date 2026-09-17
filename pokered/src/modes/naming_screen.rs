@@ -8,10 +8,12 @@ use poke_core::species::PokemonSpecies;
 use poke_core::text_script::TextBuffer;
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
+use crate::gfx::mon_icons::{animate_party_mon, clear_sprites, load_mon_party_sprite_gfx, write_mon_party_sprite_oam};
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
 use crate::mode::{Ctx, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::menu_input::{put, tile_at};
+use crate::systems::hp_bar::HpBarColour;
 
 /// `$76` and `$77`: the underscore, and the raised one under the next letter.
 const UNDERSCORE: u8 = 0x76;
@@ -19,6 +21,11 @@ const RAISED: u8 = 0x77;
 const CURSOR: u8 = 0xED;
 /// A leftover from the Japanese version, blank in English.
 const JAPANESE_NO: u8 = 0xC9;
+/// `wOnSGB`, which only changes how fast the icon bobs.
+const ON_SGB: bool = false;
+/// `AnimatePartyMon_ForceSpeed1` takes the yellow speed whatever the mon's HP bar says, and slot 0
+/// whatever the grid cursor is on: it saves `wCurrentMenuItem` around the call.
+const ICON_COLOUR: HpBarColour = HpBarColour::Yellow;
 
 /// The grid is five rows of nine, every other column, with the case switch on a sixth row.
 const GRID_ROWS: u8 = 5;
@@ -74,6 +81,8 @@ pub struct NamingScreen {
     /// Whether the input loop has run since the screen was drawn, which is when it takes a press:
     /// `AnimatePartyMon_ForceSpeed1` waits a frame before every read of the pad.
     polling: bool,
+    /// `wAnimCounter`, which the icon bobs on.
+    anim_counter: u8,
 }
 
 impl NamingScreen {
@@ -87,6 +96,7 @@ impl NamingScreen {
             lower_case: false,
             submit: false,
             polling: false,
+            anim_counter: 0,
         }
     }
 
@@ -185,7 +195,7 @@ impl NamingScreen {
         ctx.menu.last_item = self.row;
     }
 
-    /// `PrintNamingText`, and the sprite the nickname screen shows beside it.
+    /// `PrintNamingText`: the words above the grid.
     fn print_header(&self, ui: &mut UiSurface) {
         let text = |s: &str| poke_core::charmap::encode(s).expect("the header encodes");
         match self.kind {
@@ -263,14 +273,26 @@ impl NamingScreen {
         if self.name.len() < self.kind.limit() {
             // The letter is read off the screen, one tile right of the cursor.
             self.name.push(tile_at(&ctx.screen.ui, self.cursor_at() + 1));
+            // `.addLetter` sounds only for a letter actually added.
+            ctx.audio.play_sound(crate::audio::data::sounds::SFX_PRESS_AB);
         }
         Return::Name
+    }
+
+    /// `.inputLoop`'s `AnimatePartyMon_ForceSpeed1`, which runs whatever the screen is naming; only
+    /// a nickname screen has an icon in OAM for it to move.
+    fn animate(&mut self, ctx: &mut Ctx) {
+        let party: Vec<_> = self.species.into_iter().collect();
+        animate_party_mon(&mut ctx.screen.sprites, &mut self.anim_counter, 0, ICON_COLOUR, &party, ON_SGB);
     }
 
     /// `.ABStartReturnPoint` onwards: the name, the underscores and the cursor.
     fn redraw(&mut self, ctx: &mut Ctx) -> Transition {
         if self.submit {
             ctx.world.text.strings.insert(TextBuffer::StringBuffer, self.name.clone());
+            // `.submitNickname`'s `ClearSprites`, and `wAnimCounter` back to zero for the next screen.
+            clear_sprites(&mut ctx.screen.sprites);
+            self.anim_counter = 0;
             return Transition::Pop(Outcome::Done);
         }
         self.print_name(ctx);
@@ -284,8 +306,14 @@ impl ModeUpdate for NamingScreen {
         ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
         ctx.screen.tiles.load_hp_bar_and_status_tiles();
         ctx.screen.tiles.load_ed_tile();
+        load_mon_party_sprite_gfx(&mut ctx.screen.tiles);
         ctx.screen.ui.text_box_border(0, 4, 18, 9);
         self.print_header(&mut ctx.screen.ui);
+        // `PrintNamingText` writes the icon as OAM slot 0, `hPartyMonIndex` forced to zero.
+        if let Some(species) = self.species {
+            write_mon_party_sprite_oam(&mut ctx.screen.sprites, 0, species);
+        }
+        self.anim_counter = 0;
         ctx.menu.last_item = self.row;
         self.print_alphabet(&mut ctx.screen.ui);
     }
@@ -298,6 +326,7 @@ impl ModeUpdate for NamingScreen {
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
         self.polling = true;
+        self.animate(ctx);
         let keys = ctx.pad.low_sensitivity(ctx.frame_counter);
         if keys.is_empty() {
             return Transition::Stay;
@@ -471,6 +500,51 @@ mod tests {
         }
         until_waiting(&mut game);
         assert_eq!(screen(&game).name().len(), 10, "three more than a trainer gets");
+    }
+
+    /// `PrintNamingText` writes the icon at OAM slot 0 whatever the grid cursor is doing.
+    #[test]
+    fn a_nickname_screen_shows_the_mon_s_icon_and_a_trainer_s_does_not() {
+        let mut game = start(NamingScreenType::Mon);
+        until_waiting(&mut game);
+        let icon = crate::gfx::mon_icons::icon_tile(PokemonSpecies::Pidgey);
+        let objects = &game.screen().sprites[..4];
+        assert_eq!(objects.iter().map(|o| (o.y, o.x)).collect::<Vec<_>>(),
+                   [(16, 16), (16, 24), (24, 16), (24, 24)], "four objects in the top-left corner");
+        assert_eq!(objects.iter().map(|o| o.tile).collect::<Vec<_>>(), [icon, icon, icon + 2, icon + 2]);
+        assert!(game.screen().sprites[4..].iter().all(|o| o.tile == 0), "and nothing else in OAM");
+
+        let mut game = start(NamingScreenType::Player);
+        until_waiting(&mut game);
+        assert!(game.screen().sprites.iter().all(|o| o.tile == 0), "a trainer's name has no icon");
+    }
+
+    /// `AnimatePartyMon_ForceSpeed1` takes the yellow speed rather than the mon's own, so the icon
+    /// bobs every 17 frames however healthy the mon is.
+    #[test]
+    fn the_icon_bobs_at_the_forced_yellow_speed() {
+        let mut game = start(NamingScreenType::Mon);
+        until_waiting(&mut game);
+        let icon = crate::gfx::mon_icons::icon_tile(PokemonSpecies::Pidgey);
+        let mut tiles = vec![];
+        for _ in 0..34 {
+            game.frame(Input::None);
+            tiles.push(game.screen().sprites[0].tile);
+        }
+        assert_eq!(tiles.iter().filter(|&&tile| tile == icon).count(), 17, "{tiles:?}");
+        assert_eq!(tiles.iter().filter(|&&tile| tile == icon + 0x40).count(), 17, "ICONOFFSET, frame two");
+    }
+
+    #[test]
+    fn handing_the_name_back_takes_the_icon_down() {
+        let mut game = start(NamingScreenType::Mon);
+        tap(&mut game, Joypad::START);
+        for _ in 0..5 {
+            game.frame(Input::None);
+        }
+        assert!(game.modes().is_empty());
+        assert!(game.screen().sprites.iter().all(|o| *o == crate::gfx::layers::Object::default()),
+                "`.submitNickname`'s ClearSprites");
     }
 
     #[test]
