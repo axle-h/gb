@@ -2216,3 +2216,48 @@ fn completion_phase_hall_of_fame() {
     cut(&mut played, "completion-hall-of-fame");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
+
+/// Cerulean Cave, which the guard opens to a Champion: its three floors, a paced encounter on a
+/// cave floor, and Mewtwo at the bottom.
+pub fn to_mewtwo() -> Vec<Step> {
+    use Step::*;
+    const CAVE: &[&str] = &["CeruleanCave1F", "CeruleanCave2F", "CeruleanCaveB1F"];
+    const UPPER: &[&str] = &["CeruleanCave1F", "CeruleanCave2F"];
+    vec![
+        Collect(false),
+        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
+        // The cave stands on the water of Cerulean's north west pocket, and the city proper cannot
+        // reach it: the way in is down from Nugget Bridge.
+        GoTo("Route24"), Take("CeruleanCity"),
+        GoTo("CeruleanCave1F"),
+        // A cave floor is one of the two places an encounter has to be paced for.
+        Hunt { species: "*", row: "Pace", ball: "MasterBall", way: Way::WildOnACaveFloor, on: "CeruleanCave1F" },
+        // The two upper floors first, which is where the way down is: 1F's ladder to B1F stands
+        // behind an elevation boundary and is reached by way of 2F. Mewtwo is on the floor below,
+        // so an exploring cannot walk up to it here, and one that did would start the battle and
+        // hide it for the rest of the game by running.
+        Explore { maps: UPPER, patience: 600 },
+        GoTo("CeruleanCaveB1F"),
+        Hunt { species: "Mewtwo", row: "Mewtwo", ball: "MasterBall", way: Way::Legendary(Legend::Mewtwo),
+               on: "CeruleanCaveB1F" },
+        Explore { maps: CAVE, patience: 400 },
+        GoTo("CeruleanCave1F"), Clear(&[]), GoTo("CeruleanCave2F"), Clear(&[]),
+        GoTo("CeruleanCaveB1F"), Clear(&[]),
+        // Fly is refused underground, so the way out is walked; the pocket it comes out in is
+        // Cerulean's own map, and the flight from there lands at the Pokémon Centre.
+        GoTo("CeruleanCity"), Tidy,
+    ]
+}
+
+#[test]
+fn completion_phase_mewtwo() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-hall-of-fame.bin"), "completion-mewtwo",
+                          to_mewtwo(), 600, Duration::from_secs(3000));
+    let missing = missing_on(&mut played, &[
+        Map::CeruleanCave1F, Map::CeruleanCave2F, Map::CeruleanCaveB1F,
+    ], &[Entry::Way(Way::Legendary(Legend::Mewtwo)), Entry::Way(Way::WildOnACaveFloor)]);
+    cut(&mut played, "completion-mewtwo");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
