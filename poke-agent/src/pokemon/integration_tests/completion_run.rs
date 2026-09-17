@@ -14,6 +14,8 @@ use crate::pokemon::integration_tests::completion::{checklist, Entry, Ledger, Le
 use crate::pokemon::integration_tests::godmode::{names_map, Intent};
 use crate::pokemon::integration_tests::llm_harness::{Brain, Call, LlmRun, Reply, TurnRequest};
 use crate::pokemon::item::ItemId;
+use crate::pokemon::PokemonApiTrait;
+use crate::pokemon::symbols::DmgPointerRead;
 
 /// Trainers are fought by the script; a wild battle is the brain's, because only it knows what the
 /// run is hunting.
@@ -1181,7 +1183,34 @@ pub fn play(fixture: &'static [u8], name: &'static str, steps: Vec<Step>, game_m
     }
 
     let started = std::time::Instant::now();
+    // The ceremony, the credits, the save and the title screen it resets to are the cartridge
+    // playing to itself: the agent stops at the Hall of Fame and a deployed run ends there, so the
+    // buttons that see a run into the postgame are the harness's own, as `drive_out_of_hall_of_fame`
+    // presses them. Mash, a tick on and a tick off, so every press is a fresh rising edge.
+    // A phase that starts from a won game is past it, so the ceremony is over before it began.
+    let mut ceremony: Option<bool> = None;
+    let mut mash = 0u32;
     run.tick_until(wall, |run| {
+        if ceremony != Some(false) {
+            let map = run.map_if_readable();
+            let mut api = run.fixture().api();
+            let won = api.mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wNumHoFTeams) > 0;
+            // WRAM is cleared by the reset, so the counter reads zero again until the save is
+            // loaded: what says the ceremony is over is a playable overworld somewhere else.
+            let playable = api.game_mode() == Some(crate::pokemon::encoding::GameMode::Overworld)
+                && map.is_some_and(|map| map != crate::pokemon::map::Map::HallOfFame);
+            match ceremony {
+                None if won && !playable => ceremony = Some(true),
+                None if won => ceremony = Some(false),
+                Some(true) if playable => { ceremony = Some(false); api.release_all_buttons() }
+                Some(true) => {
+                    mash += 1;
+                    if mash % 2 == 0 { api.press_button(gb::joypad::JoypadButton::A) }
+                    else { api.release_all_buttons() }
+                }
+                _ => {}
+            }
+        }
         if let Ok(state) = run.fixture().try_game_state() {
             ledger.lock().expect("not poisoned").observe(&state, run.fixture().gb.core().mmu());
             // Master Balls for every catch outside the Safari Zone, as the legendary legs have.
@@ -2151,5 +2180,39 @@ fn completion_phase_victory_road() {
         Map::VictoryRoad3F, Map::IndigoPlateau, Map::IndigoPlateauLobby,
     ], &[Entry::Way(Way::Legendary(Legend::Moltres)), Entry::Way(Way::PcChangeBox)]);
     cut(&mut played, "completion-victory-road");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// The Elite Four, the Champion, and the ceremony that follows: the four rooms in the one order the
+/// cartridge allows, the rival, and the run handed back in Pallet Town once the game has saved.
+pub fn to_the_hall_of_fame() -> Vec<Step> {
+    use Step::*;
+    vec![
+        Collect(false),
+        // Nothing can be bought or healed once the first door shuts behind the run.
+        GoTo("IndigoPlateauLobby"), Talk("Nurse"),
+        GoTo("LoreleisRoom"), Talk("Lorelei"),
+        GoTo("BrunosRoom"), Talk("Bruno"),
+        GoTo("AgathasRoom"), Talk("Agatha"),
+        GoTo("LancesRoom"), Talk("Lance"),
+        // The door is the last decision: the rival, Oak, the Hall of Fame, the credits and the
+        // reset ask for nothing but the button the harness presses, so no turn is ever taken in the
+        // Champion's room and arriving there cannot be what ends a step. The save comes back in
+        // Pallet Town.
+        Take("ChampionsRoom"),
+        GoTo("PalletTown"),
+    ]
+}
+
+#[test]
+fn completion_phase_hall_of_fame() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-victory-road.bin"), "completion-hall-of-fame",
+                          to_the_hall_of_fame(), 300, Duration::from_secs(1800));
+    let missing = missing_on(&mut played, &[
+        Map::IndigoPlateauLobby, Map::LoreleisRoom, Map::BrunosRoom, Map::AgathasRoom,
+        Map::LancesRoom, Map::ChampionsRoom, Map::HallOfFame,
+    ], &[Entry::HallOfFame]);
+    cut(&mut played, "completion-hall-of-fame");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
