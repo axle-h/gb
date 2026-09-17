@@ -1274,18 +1274,26 @@ impl MetaTileMap {
             let (reach, came) = self.push_search();
 
             // One row per target, naming the goal rather than the shove.
-            let targets = self.strength_switches.iter().map(|at| (*at, false))
-                .chain(self.holes.iter().map(|at| (*at, true)));
-            for (at, hole) in targets {
+            let targets: Vec<(Point8, bool)> = self.strength_switches.iter().map(|at| (*at, false))
+                .chain(self.holes.iter().map(|at| (*at, true))).collect();
+            // Every solve tried below, kept so the shove rows can ask the same question for free.
+            let mut solved: std::collections::HashMap<(Point8, Point8), bool> = std::collections::HashMap::new();
+            let mut solvable = Vec::new();
+            for &(at, hole) in &targets {
                 // A boulder already sits on it.
                 if self.boulders().contains(&at) { continue }
                 // Reachable by any boulder at all?
                 if self.solve_boulder_push(at).is_none() { continue }
+                solvable.push(at);
                 // Then the nearest boulder that can do it.
                 let mut candidates = self.boulders();
                 candidates.sort_by_key(|b| (b.x as i32 - at.x as i32).abs() + (b.y as i32 - at.y as i32).abs());
                 let Some((which, plan)) = candidates.into_iter()
-                    .find_map(|b| self.solve_boulder_push_for(b, at).map(|plan| (b, plan)))
+                    .find_map(|b| {
+                        let plan = self.solve_boulder_push_for(b, at);
+                        solved.insert((b, at), plan.is_some());
+                        plan.map(|plan| (b, plan))
+                    })
                     else { continue };
                 let Some((boulder, push)) = plan.into_iter().next() else { continue };
                 let Some(stand) = self.step(boulder, opposite_dir(push)) else { continue };
@@ -1302,12 +1310,16 @@ impl MetaTileMap {
                     destination: stand, tile: MetaTile::BoulderGoal { boulder: which, at, hole }, route });
             }
 
-            // A map with nothing to aim at: the shove is the whole action, one row per way a
-            // boulder will actually go. Gated on there being no target at all, so no floor that
-            // has one ever offers a bare shove beside its goal.
-            if self.strength_switches.is_empty() && self.holes.is_empty() {
+            // A boulder with nothing to aim at is only in the way, so the shove is the whole
+            // action, one row per way it will actually go. A boulder that is on a target, or could
+            // be pushed onto one, is the puzzle's and gets its goal row alone.
+            let mut spoken_for = |boulder: Point8| targets.iter().any(|(at, _)| *at == boulder)
+                || solvable.iter().any(|&at| *solved.entry((boulder, at))
+                    .or_insert_with(|| self.solve_boulder_push_for(boulder, at).is_some()));
+            let spare: Vec<Point8> = self.boulders().into_iter().filter(|&b| !spoken_for(b)).collect();
+            if !spare.is_empty() {
                 for (boulder, push, stand) in self.boulder_pushes_within(&reach) {
-                    if !reach.contains(&stand) { continue }
+                    if !spare.contains(&boulder) || !reach.contains(&stand) { continue }
                     let mut route = reconstruct(stand, &came);
                     if route.is_empty() {
                         let facing: JoypadButton = facing_button(self.player_direction);
@@ -2061,6 +2073,33 @@ mod boulder_solver_tests {
             "the switch is reachable, so its goal row stands");
         assert!(!actions.iter().any(|a| matches!(a.tile, MetaTile::BoulderPush { .. })),
             "a map with something to aim at never offers the shove on its own");
+    }
+
+    /// A floor with a switch still offers the shove for a boulder no target can use, and only for it.
+    #[test]
+    fn a_boulder_that_can_reach_no_target_is_a_shove_beside_the_goal() {
+        let (mut map, _) = from_ascii(&[
+            "#######",
+            "#....##",
+            "#P1S.##",
+            "#....##",
+            "####.##",
+            "####2##",
+            "####.##",
+            "#######",
+        ]);
+        map.can_strength = true;
+        let actions = map.actions();
+        assert!(actions.iter().any(|a| matches!(a.tile,
+            MetaTile::BoulderGoal { boulder: Point8 { x: 2, y: 2 }, .. })), "the puzzle's goal row stands");
+        let shoves: Vec<(Point8, JoypadButton)> = actions.iter()
+            .filter_map(|action| match action.tile {
+                MetaTile::BoulderPush { boulder, dir } => Some((boulder, dir)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shoves, vec![(Point8 { x: 4, y: 5 }, JoypadButton::Down)],
+            "the corridor's boulder can only go down, and the puzzle's boulder is never a bare shove");
     }
 
     #[test]

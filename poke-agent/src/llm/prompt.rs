@@ -575,26 +575,35 @@ pub fn situation(
             let boulder_shoves = rows.iter()
                 .filter(|action| matches!(action.tile,
                     crate::pokemon::tile::MetaTile::BoulderPush { .. })).count();
+            let targets = !state.map.strength_switches.is_empty() || !state.map.holes.is_empty();
+            // Said beside the goal rows, where a shove row would otherwise read as one of them.
+            let spare = " A boulder that cannot be pushed onto any switch or into any hole from \
+                where it is standing is only in the way, so its rows are single shoves instead: one \
+                row per way it will go, one square, to get it out of the way.";
             out.push_str(&match (known, badged) {
                 // Nothing on this map to aim at, so a row is one shove rather than a whole job.
-                (true, true) if boulder_shoves > 0 => " There is no switch and no hole on this map \
-                    to aim a boulder at, so each boulder row below is one shove of one boulder one \
-                    square, to get it out of the way. Leaving the map and coming back puts every \
-                    boulder on it back where it started.".to_string(),
+                (true, true) if boulder_shoves > 0 && !targets => " There is no switch and no hole \
+                    on this map to aim a boulder at, so each boulder row below is one shove of one \
+                    boulder one square, to get it out of the way. Leaving the map and coming back \
+                    puts every boulder on it back where it started.".to_string(),
+                (true, true) if boulder_shoves > 0 && boulder_goals == 0 => format!(" No boulder here \
+                    can be pushed onto a switch or into a hole from where it is standing, so there \
+                    are no goal rows.{spare} Leaving the map and coming back puts every boulder on it \
+                    back where it started."),
                 // Zero rows is not "every legal shove is below".
                 (true, true) if boulder_goals == 0 => " There are no boulder rows in the menu below. \
                     A boulder row is a whole job rather than a shove, and one is offered only when \
                     the pushes that finish it can be worked out from where the boulders are \
                     standing; none of these has one. Leaving the map and coming back puts every \
                     boulder on it back where it started.".to_string(),
-                (true, true) => " Every boulder that can be pushed onto a switch or into a hole from \
+                (true, true) => format!(" Every boulder that can be pushed onto a switch or into a hole from \
                     where it is standing is a row in the menu below, one row per target, and the row \
                     names the boulder it will use. Choosing one does the whole job: it walks over, \
                     arms Strength for you, and keeps pushing until that boulder is on that target, \
                     however many shoves and however much walking round that takes. A target no \
                     boulder can reach is not offered rather than failing quietly. Leaving the map \
                     and coming back puts every boulder on it back where it started, which is how a \
-                    puzzle that went wrong is undone.".to_string(),
+                    puzzle that went wrong is undone.{}", if boulder_shoves > 0 { spare } else { "" }),
                 (false, true) => format!(
                     " No Pokémon in your party knows Strength, so there are no boulder actions in \
                      the menu below. {} You have the {}, so a Pokémon taught HM04 is all this needs.",
@@ -705,6 +714,12 @@ pub fn situation(
             out.push_str("⚠️ This is a GHOST: no move, ball or switch does anything here until you \
                           are carrying the Silph Scope (it is in the Rocket Hideout, under the Game \
                           Corner in Celadon). Running always works. Nothing is broken.\n");
+        }
+        if crate::pokemon::policy::no_room_for_a_catch(state) {
+            out.push_str(&format!("⚠️ Your party and PC box {} are both full, so the game refuses to \
+                                   throw any ball and none is offered. To catch again, `change_box` \
+                                   at a PC or deposit or release a Pokémon there.\n",
+                                  state.current_box + 1));
         }
         if battle.enemy_trapping {
             // Every option still looks available, but a move chosen is replaced with "cannot move".
@@ -1188,6 +1203,38 @@ mod tests {
     fn overworld_turn(state: &GameState, menu: &[MenuItem]) -> String {
         situation(DecisionKind::Overworld, state, &ApiSnapshot::default(), &[], menu,
                   TurnContext::None, &[])
+    }
+
+    #[test]
+    fn a_ball_the_box_has_no_room_for_is_not_offered_and_the_turn_says_why() {
+        use crate::pokemon::battle::BattleAction;
+        use crate::pokemon::policy::battle_options;
+        use crate::pokemon::postgame::pc_box::{BoxedPokemon, BOX_CAPACITY};
+        let balls = |state: &GameState| battle_options(state).expect("a battle").iter()
+            .filter(|action| matches!(action, BattleAction::UseItem { item, .. } if crate::pokemon::item_use::is_ball(item.id)))
+            .count();
+        let battle_turn = |state: &GameState| situation(DecisionKind::Battle, state, &ApiSnapshot::default(),
+                                                        &[], &[], TurnContext::None, &[]);
+
+        let mut state = crate::llm::battle_script::scenarios::catchable_wild();
+        assert_eq!(balls(&state), 1, "the scenario has room and a ball");
+        let lead = state.pokemon.get(0).expect("a lead").clone();
+        while state.pokemon.len() < 6 {
+            state.pokemon.push(lead.clone()).expect("room in the party");
+        }
+        assert_eq!(balls(&state), 1, "a full party still sends a catch to the box");
+        let boxed = BoxedPokemon {
+            species: lead.species, nickname: "BOXED".into(), trainer_name: "AI".into(), level: 5,
+            current_hp: 20, status: lead.status, moves: [None; 4],
+        };
+        state.boxed_pokemon = vec![boxed; BOX_CAPACITY];
+        state.current_box = 2;
+        assert_eq!(balls(&state), 0, "the game refuses every throw with the box full too");
+        assert!(battle_turn(&state).contains("PC box 3 are both full"), "{}", battle_turn(&state));
+
+        state.boxed_pokemon.pop();
+        assert_eq!(balls(&state), 1);
+        assert!(!battle_turn(&state).contains("both full"));
     }
 
     #[test]

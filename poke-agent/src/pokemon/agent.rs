@@ -1272,6 +1272,14 @@ impl PokemonAgent {
                 AgentState::Battle(_) => {}
                 // The nickname screen after a catch runs while `wIsInBattle` is still 1.
                 AgentState::NamingPokemon { .. } => {}
+                // A one-shove row lives on the agent rather than in the state, and a battle that
+                // cuts it short is reported like any walk it interrupts, so it can be taken up again.
+                AgentState::PushingBoulder { .. } if self.boulder_push_row.is_some() => {
+                    let row = self.boulder_push_row.take().expect("just checked");
+                    self.abort_overworld(row, OverworldActionAbortedReason::Battle, None);
+                    self.event(AgentEvent::BattleStarted);
+                    self.set_battle_state(BattleState::default());
+                }
                 // Every state that carries a walk.
                 _ if self.state.open_overworld_action().is_some() => {
                     let d = self.state.open_overworld_action().expect("just checked");
@@ -3827,6 +3835,30 @@ mod tests {
         assert_eq!(say(ItemId::MasterBall), "threw a MasterBall at Pidgey");
         assert_eq!(say(ItemId::SuperPotion), "used SuperPotion on BULBASAUR");
         assert_eq!(say(ItemId::XAttack), "used XAttack on BULBASAUR", "an X item acts on your own side");
+    }
+
+    /// A battle that cuts a one-shove row short reports it given up, as it does a walk, and leaves
+    /// no row behind to claim somebody else's shove later.
+    #[test]
+    fn a_shove_a_battle_interrupts_is_given_up_rather_than_forgotten() {
+        use crate::pokemon::encoding::GameMode;
+        use crate::pokemon::policy::RandomPolicy;
+        use gb::joypad::JoypadButton;
+        let boulder = Point8 { x: 14, y: 2 };
+        let row = MetaTile::BoulderPush { boulder, dir: JoypadButton::Left };
+        let mut agent = PokemonAgent::new(Box::new(RandomPolicy::seeded(0)));
+        agent.boulder_push_row = Some(row);
+        agent.set_state(AgentState::PushingBoulder { boulder, dir: JoypadButton::Left, armed: true });
+        agent.drain_events();
+
+        agent.assert_battle_state(GameMode::WildBattle);
+
+        let events = agent.drain_events();
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::OverworldActionAborted {
+            destination, reason: OverworldActionAbortedReason::Battle, .. } if *destination == row)), "{events:?}");
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::BattleStarted)), "{events:?}");
+        assert!(agent.boulder_push_row.is_none());
+        assert!(matches!(agent.state, AgentState::Battle(_)));
     }
 
     /// An abandoned walk says why, and where when it knows.
