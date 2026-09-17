@@ -2261,3 +2261,47 @@ fn completion_phase_mewtwo() {
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
 
+
+
+/// The eastern routes, which nothing before this has walked: Routes 13, 14 and 15 and their thirty
+/// trainers, walked down from Lavender to Fuchsia.
+pub fn to_the_eastern_routes() -> Vec<Step> {
+    use Step::*;
+    // The gates are part of their routes: a route read from the pocket the run stood in looks
+    // finished while the half beyond its gate building has never been seen.
+    const EAST: &[&str] = &["Route12", "Route12Gate1F", "Route12Gate2F", "Route13", "Route14",
+                            "Route15", "Route15Gate1F", "Route15Gate2F"];
+    vec![
+        Collect(false),
+        // Walked from the Lavender end, which is the way the ledges run: Route 15's north lane
+        // holds a trainer and the TM Rage, and coming up from Fuchsia reaches neither.
+        Field(r#"{"move":"fly","map":"LavenderTown"}"#), GoTo("LavenderTown"),
+        GoTo("Route12"),
+        Explore { maps: EAST, patience: 1200 },
+        // And back up from the other end: the lanes are one way, so each direction reaches a half
+        // the other cannot, and Route 15's two halves are the gate building's two doors.
+        Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"), GoTo("Route15"),
+        Explore { maps: EAST, patience: 1200 },
+        // Route 15's north strip is entered from Route 14 and left by a ledge, so neither
+        // exploring stands on it: the walk west across it is the only way its trainer and its TM
+        // are ever offered.
+        // Route 15's north strip, with a trainer and the TM Rage on it, is walled off from the rest
+        // of the route and opens only onto Route 14 -- and the Route 14 side of it is a pocket of
+        // three tiles behind a tree. Nothing reaches it that does not cut that tree.
+        GoTo("Route14"), Take("cut down the tree at (4, 42)"),
+        Take("Route15"), Clear(&[]),
+        Tidy,
+    ]
+}
+
+#[test]
+fn completion_phase_eastern_routes() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-mewtwo.bin"), "completion-east",
+                          to_the_eastern_routes(), 900, Duration::from_secs(3600));
+    let missing = missing_on(&mut played, &[
+        Map::Route13, Map::Route14, Map::Route15, Map::Route15Gate1F, Map::Route15Gate2F,
+    ], &[]);
+    cut(&mut played, "completion-east");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
