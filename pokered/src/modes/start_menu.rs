@@ -7,13 +7,17 @@
 use poke_core::symbols::pokered_events::EVENT_GOT_POKEDEX;
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
+use crate::gfx::mon_icons::clear_sprites;
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
 use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::menu_input::MenuInput;
 use crate::modes::item_menu::ItemMenu;
 use crate::modes::option_menu::OptionMenu;
+use crate::modes::pokedex::PokedexMenu;
 use crate::modes::pokemon_menu::PokemonMenu;
+use crate::modes::save_menu::SaveMenu;
+use crate::modes::trainer_card::TrainerCard;
 
 /// The entries in the order `.displayMenuItem` dispatches them, which is the order they are drawn
 /// when the player has the Pokédex. Without it `POKéDEX` is missing and every row moves up one.
@@ -152,17 +156,39 @@ impl ModeUpdate for StartMenu {
                 ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
                 Transition::Push(Mode::OptionMenu(OptionMenu::new()))
             }
-            // The other five screens are their own chunks; the choice is answered rather than run.
+            Some(StartMenuEntry::SaveReset) => Transition::Push(Mode::SaveMenu(SaveMenu::new())),
+            Some(StartMenuEntry::Pokedex) => Transition::Push(Mode::Pokedex(PokedexMenu::new())),
             Some(StartMenuEntry::Pokemon) => Transition::Push(Mode::PokemonMenu(PokemonMenu::new())),
             Some(StartMenuEntry::Item) => Transition::Push(Mode::ItemMenu(ItemMenu::new())),
-            Some(&entry) if entry != StartMenuEntry::Exit => Transition::Pop(Outcome::Chosen(entry as u8)),
+            Some(StartMenuEntry::TrainerInfo) => Transition::Push(Mode::TrainerCard(TrainerCard::new())),
             _ => self.close(ctx),
         }
     }
 
-    fn resume(&mut self, _outcome: Outcome, ctx: &mut Ctx) -> Transition {
+    fn resume(&mut self, outcome: Outcome, ctx: &mut Ctx) -> Transition {
         if let Some(saved) = self.saved.take() {
             ctx.screen.ui = saved;
+        }
+        let entry = self.entries.get(self.input.current as usize).copied();
+        // `StartMenu_SaveReset` ends at `HoldTextDisplayOpen` and `CloseTextDisplay` rather than
+        // `RedisplayStartMenu`: saving, or declining to, closes the menu.
+        if entry == Some(StartMenuEntry::SaveReset) {
+            ctx.pad.poll();
+            return Transition::Pop(Outcome::Done);
+        }
+        // `RestoreScreenTilesAndReloadTilePatterns`, on the way out of the party's screens, takes the
+        // mon icons down.
+        if entry == Some(StartMenuEntry::Pokemon) {
+            clear_sprites(&mut ctx.screen.sprites);
+        }
+        // An item or a field move that was used answers with what it was and closes the menu for the
+        // overworld under it: `CloseStartMenu`, or `.goBackToMap`.
+        if let Outcome::Chosen(_) = outcome
+            && matches!(entry, Some(StartMenuEntry::Pokemon | StartMenuEntry::Item))
+        {
+            ctx.pad.poll();
+            ctx.screen.tiles.load_text_box_tiles();
+            return Transition::Pop(outcome);
         }
         ctx.screen.tiles.load_text_box_tiles();
         self.redisplay(ctx);
@@ -295,6 +321,23 @@ mod tests {
     }
 
     #[test]
+    fn the_dex_row_opens_the_pokedex_and_closing_it_redraws_the_menu() {
+        let mut game = game(true);
+        until_waiting(&mut game);
+        assert_eq!(cursor_row(&game), Some(2), "POKéDEX");
+        press(&mut game, Joypad::A);
+        for _ in 0..20 {
+            game.frame(Input::None);
+        }
+        assert!(matches!(game.modes().last(), Some(Mode::Pokedex(_))), "{:?}", game.modes().len());
+        press(&mut game, Joypad::B);
+        until_waiting(&mut game);
+        assert!(matches!(game.modes().last(), Some(Mode::StartMenu(_))));
+        assert_eq!(label(&game, 2), encode("POKéDEX").unwrap(), "the menu is back");
+        assert_eq!(cursor_row(&game), Some(2), "on the row it left from");
+    }
+
+    #[test]
     fn b_closes_the_menu_and_it_reopens_where_it_closed() {
         let mut game = game(true);
         until_waiting(&mut game);
@@ -311,14 +354,29 @@ mod tests {
     fn a_command_walks_to_the_row_it_names() {
         let mut game = game(true);
         until_waiting(&mut game);
-        let command = Command::ChooseStartMenuEntry(StartMenuEntry::TrainerInfo);
+        let command = Command::ChooseStartMenuEntry(StartMenuEntry::SaveReset);
         assert_eq!(game.frame(Input::Command(command.clone())).reply, Some(Reply::Accepted));
         let mut events = vec![];
         for _ in 0..60 {
             events.extend(game.frame(Input::None).events);
         }
         assert_eq!(events, [Event::CommandDone(command)]);
-        assert!(game.modes().is_empty(), "TRAINER INFO is another chunk's, so the choice is answered");
+        assert!(matches!(game.modes()[..2], [Mode::StartMenu(_), Mode::SaveMenu(_)]), "{:?}", game.modes().len());
+    }
+
+    #[test]
+    fn the_player_s_row_opens_the_trainer_card_and_putting_it_away_redraws_the_menu() {
+        let mut game = game(true);
+        until_waiting(&mut game);
+        game.frame(Input::Command(Command::ChooseStartMenuEntry(StartMenuEntry::TrainerInfo)));
+        for _ in 0..20 {
+            game.frame(Input::None);
+        }
+        assert!(matches!(game.modes().last(), Some(Mode::TrainerCard(_))));
+        press(&mut game, Joypad::A);
+        until_waiting(&mut game);
+        assert_eq!(label(&game, 8), encode("RED").unwrap(), "the menu is back");
+        assert_eq!(cursor_row(&game), Some(8), "on the player's row");
     }
 
     #[test]

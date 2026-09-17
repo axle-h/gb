@@ -2,14 +2,20 @@
 //! tier-1 fixtures for `pokered`.
 
 mod audio;
+mod battle;
+mod battle_anims;
+mod encounters;
+mod events;
 mod experience;
 mod field_moves;
 mod hp_bar;
 mod items;
 mod math;
+mod overworld;
 mod palettes;
 mod pokedex;
 mod pokemon;
+mod slots;
 mod stats;
 mod status_screen;
 

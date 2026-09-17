@@ -1,20 +1,30 @@
 //! The recreation and the emulator fed the same buttons and compared.
 
 mod audio;
+mod battle;
+mod battle_animations;
+mod events;
 mod evolution;
 mod field_move_menu;
 mod item_menu;
 mod learn_move;
 mod list_menu;
+mod main_menu;
+mod movie;
 mod naming_screen;
+mod overworld;
 mod party_menu;
+mod pc;
 mod pokedex;
 mod pokemart;
+mod save;
 mod screen;
+mod scripts;
 mod start_menu;
 mod status_screen;
 mod synth;
 mod text_box;
+mod trainer_card;
 mod two_option_menu;
 
 use gb::game_boy::{Breakpoint, GameBoy, Stop};

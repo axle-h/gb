@@ -6,6 +6,7 @@ pub mod mode;
 pub mod modes;
 pub mod party;
 pub mod rng;
+pub mod scripts;
 pub mod sequence;
 pub mod systems;
 pub mod world;
@@ -23,6 +24,7 @@ use gfx::Screen;
 use input::{Joypad, Pad};
 use mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
 use modes::menu_input::CursorMemory;
+use modes::movie::Movie;
 use rng::GameRng;
 use world::World;
 
@@ -55,6 +57,9 @@ pub struct Frame {
     /// This frame's register writes, for the host to play. The game holds no audio backend, so a
     /// save carries no oscillator state.
     pub audio: Vec<Write>,
+    /// The game's own save, written this frame: what the SAVE menu, a box change and the Hall of
+    /// Fame hand the host to keep. `Game::save`'s bytes.
+    pub save: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +75,9 @@ pub struct Game {
     menu: CursorMemory,
     audio: AudioEngine,
     executor: Option<Executor>,
+    /// Whose save file the host has, for `CheckPreviousSaveFile`.
+    #[serde(default)]
+    saved_player_id: Option<u16>,
     #[serde(skip)]
     pacing: Pacing,
 }
@@ -91,8 +99,25 @@ impl Game {
             // `PlayMusic` carries the bank its song lives in, so whatever plays first corrects this.
             audio: AudioEngine::new(AudioBank::One),
             executor: None,
+            saved_player_id: None,
             pacing,
         }
+    }
+
+    /// Power on: the splash, the intro and the title screen, then the main menu into a new game, or
+    /// into `save` when there is one to continue.
+    pub fn power_on(save: Option<World>, rng: GameRng, pacing: Pacing) -> Self {
+        let saved_player_id = save.as_ref().map(|world| world.player_id);
+        let mut game = Self::new(save.unwrap_or_default(), rng, pacing);
+        game.saved_player_id = saved_player_id;
+        game.push(Mode::Movie(Movie::power_on(saved_player_id.is_some())));
+        game
+    }
+
+    /// Whose save file the host holds. `power_on` takes it from the save it is given, a save the
+    /// game writes replaces it, and a host with no file says `None`.
+    pub fn set_saved_player_id(&mut self, id: Option<u16>) {
+        self.saved_player_id = id;
     }
 
     pub fn world(&self) -> &World {
@@ -168,17 +193,24 @@ impl Game {
         self.pad.input = buttons;
         self.screen.tiles.update_moving_bg_tiles();
         let audio = self.audio.frame();
+        self.world.play_time.track();
         self.frame_counter = self.frame_counter.saturating_sub(1);
         self.frames += 1;
 
-        self.with_ctx(&mut events, |modes, ctx| {
+        let save_game = self.with_ctx(&mut events, |modes, ctx| {
             if let Some(top) = modes.last_mut() {
                 let transition = top.update(ctx);
                 apply(modes, transition, ctx);
             }
         });
+        // `SaveGameData`. The save is taken after the frame's transitions, so it holds the screen the
+        // player is looking at, and it becomes the file the next `CheckPreviousSaveFile` sees.
+        let save = save_game.then(|| {
+            self.saved_player_id = Some(self.world.player_id);
+            self.save()
+        });
 
-        Frame { events, status: self.status(), reply, audio }
+        Frame { events, status: self.status(), reply, audio, save }
     }
 
     pub fn status(&self) -> Status {
@@ -202,10 +234,17 @@ impl Game {
         }
     }
 
-    fn with_ctx(&mut self, events: &mut Vec<Event>, f: impl FnOnce(&mut Vec<Mode>, &mut Ctx)) {
-        let Self { world, modes, rng, pad, frame_counter, screen, menu, audio, pacing, .. } = self;
-        let mut ctx = Ctx { world, pad, rng, screen, menu, audio, frame_counter, events, pacing: *pacing };
+    fn with_ctx(&mut self, events: &mut Vec<Event>, f: impl FnOnce(&mut Vec<Mode>, &mut Ctx)) -> bool {
+        let Self { world, modes, rng, pad, frame_counter, screen, menu, audio, pacing, saved_player_id, .. } = self;
+        let mut ctx = Ctx { world, pad, rng, screen, menu, audio, frame_counter, events, pacing: *pacing,
+                            update_sprites: false, save_game: false, saved_player_id: *saved_player_id };
         f(modes, &mut ctx);
+        if ctx.update_sprites
+            && let Some(Mode::Overworld(overworld)) = modes.iter_mut().rev().find(|mode| matches!(mode, Mode::Overworld(_)))
+        {
+            overworld.update_sprites_under(&mut ctx);
+        }
+        ctx.save_game
     }
 
     pub fn save(&self) -> Vec<u8> {

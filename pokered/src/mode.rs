@@ -6,24 +6,36 @@ use crate::audio::engine::AudioEngine;
 use crate::command::Decision;
 use crate::gfx::Screen;
 use crate::input::Pad;
+use crate::modes::battle::BattleMode;
 use crate::modes::buy_sell_quit::BuySellQuitMenu;
+use crate::modes::cursor_menu::CursorMenu;
 use crate::modes::evolution::Evolution;
 use crate::modes::field_move_menu::FieldMoveMenu;
 use crate::modes::item_menu::ItemMenu;
 use crate::modes::learn_move::LearnMove;
 use crate::modes::list_menu::ListMenu;
+use crate::modes::main_menu::MainMenu;
 use crate::modes::menu_input::CursorMemory;
 use crate::modes::move_selection_menu::MoveSelectionMenu;
+use crate::modes::movie::Movie;
 use crate::modes::naming_screen::NamingScreen;
 use crate::modes::option_menu::OptionMenu;
+use crate::modes::overworld::Overworld;
 use crate::modes::party_menu::PartyMenu;
+use crate::modes::pc::PcMenu;
+use crate::modes::pc::bills_pc::BillsPc;
+use crate::modes::pc::players_pc::PlayerPc;
 use crate::modes::pokedex::PokedexMenu;
 use crate::modes::pokemart::Pokemart;
+use crate::modes::save_menu::SaveMenu;
+use crate::modes::slots::SlotMachine;
 use crate::modes::pokemon_menu::PokemonMenu;
 use crate::modes::quantity_menu::QuantityMenu;
 use crate::modes::start_menu::StartMenu;
 use crate::modes::status_screen::StatusScreen;
 use crate::modes::text_box::TextBox;
+use crate::modes::town_map::TownMap;
+use crate::modes::trainer_card::TrainerCard;
 use crate::modes::two_option_menu::TwoOptionMenu;
 use crate::modes::use_item::UseItem;
 use crate::rng::GameRng;
@@ -41,6 +53,15 @@ pub struct Ctx<'a> {
     pub audio: &'a mut AudioEngine,
     pub events: &'a mut Vec<Event>,
     pub pacing: Pacing,
+    /// `UpdateSprites`, asked for by a mode drawn over the overworld: the overworld under it runs it
+    /// once the frame's transitions have applied.
+    pub update_sprites: bool,
+    /// `SaveGameData`: the save menu, a box change or a script asking the game to write itself out.
+    /// `Game::frame` serialises once the frame's transitions have applied and hands the host the bytes.
+    pub save_game: bool,
+    /// The player id in the host's save file, if it has one. `CheckPreviousSaveFile` is its only
+    /// reader: the SAVE menu warns before writing over a playthrough that is not this one.
+    pub saved_player_id: Option<u16>,
 }
 
 pub enum Transition {
@@ -88,6 +109,7 @@ pub enum Mode {
     OptionMenu(OptionMenu),
     TwoOptionMenu(TwoOptionMenu),
     BuySellQuitMenu(BuySellQuitMenu),
+    CursorMenu(CursorMenu),
     PartyMenu(PartyMenu),
     NamingScreen(NamingScreen),
     FieldMoveMenu(FieldMoveMenu),
@@ -101,6 +123,17 @@ pub enum Mode {
     UseItem(UseItem),
     MoveSelectionMenu(MoveSelectionMenu),
     Pokemart(Pokemart),
+    TrainerCard(TrainerCard),
+    TownMap(TownMap),
+    SlotMachine(SlotMachine),
+    MainMenu(MainMenu),
+    SaveMenu(SaveMenu),
+    PcMenu(PcMenu),
+    PlayerPc(PlayerPc),
+    BillsPc(BillsPc),
+    Overworld(Overworld),
+    Battle(BattleMode),
+    Movie(Movie),
 }
 
 macro_rules! each_mode {
@@ -112,6 +145,7 @@ macro_rules! each_mode {
             Mode::OptionMenu($inner) => $body,
             Mode::TwoOptionMenu($inner) => $body,
             Mode::BuySellQuitMenu($inner) => $body,
+            Mode::CursorMenu($inner) => $body,
             Mode::PartyMenu($inner) => $body,
             Mode::NamingScreen($inner) => $body,
             Mode::FieldMoveMenu($inner) => $body,
@@ -125,6 +159,17 @@ macro_rules! each_mode {
             Mode::UseItem($inner) => $body,
             Mode::MoveSelectionMenu($inner) => $body,
             Mode::Pokemart($inner) => $body,
+            Mode::TrainerCard($inner) => $body,
+            Mode::TownMap($inner) => $body,
+            Mode::SlotMachine($inner) => $body,
+            Mode::MainMenu($inner) => $body,
+            Mode::SaveMenu($inner) => $body,
+            Mode::PcMenu($inner) => $body,
+            Mode::PlayerPc($inner) => $body,
+            Mode::BillsPc($inner) => $body,
+            Mode::Overworld($inner) => $body,
+            Mode::Battle($inner) => $body,
+            Mode::Movie($inner) => $body,
         }
     };
 }

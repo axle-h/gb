@@ -225,6 +225,11 @@ impl SgbState {
         }
     }
 
+    /// `InitPartyMenuBlkPacket`, which the party menu runs before patching a bar a mon.
+    pub fn init_party_menu_blk_packet(&mut self) {
+        self.party_menu = packets::transfer(pokered_symbols::BlkPacket_PartyMenu);
+    }
+
     /// `UpdatePartyMenuBlkPacket`. Green, yellow and red are palettes 1, 2 and 3 of the party
     /// menu's own `PAL_SET`, and each is written as both the inside and the line colour.
     fn update_party_menu_blk_packet(&mut self, which: usize, colour: HpBarColour) {

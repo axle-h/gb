@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use crate::gfx::colour::Source;
 use crate::gfx::layers::Object;
 use crate::gfx::tiles::pixel;
-use crate::gfx::ui::SCREEN_TILES_X;
+use crate::gfx::ui::{SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::gfx::Screen;
 
 pub const WIDTH: usize = 160;
@@ -31,11 +31,21 @@ fn apply(palette: u8, colour: u8) -> u8 {
 impl Screen {
     /// The background's colour index at a screen pixel: the UI where it covers, else the map.
     fn background(&self, x: usize, y: usize) -> u8 {
+        if let Some(window) = &self.window
+            && y >= window.y as usize
+            && x + 7 >= window.x as usize
+        {
+            let (wx, wy) = (x + 7 - window.x as usize, y - window.y as usize);
+            return pixel(self.tiles.bg(window.tiles.get(wx / 8, wy / 8)), wx % 8, wy % 8);
+        }
         let scx = self.effects.line_scx.as_ref().map_or(self.effects.scx, |lines| lines[y]);
         let bx = (x + scx as usize) & 0xFF;
         let by = (y + self.effects.scy as usize) & 0xFF;
+        if let Some(map) = &self.background {
+            return pixel(self.tiles.bg(map.get(bx / 8, by / 8)), bx % 8, by % 8);
+        }
         let (column, row) = (bx / 8, by / 8);
-        let tile = if column < SCREEN_TILES_X && row < crate::gfx::ui::SCREEN_TILES_Y {
+        let tile = if column < SCREEN_TILES_X && row < SCREEN_TILES_Y {
             self.ui.cover(column, row)
         } else {
             None

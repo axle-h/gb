@@ -1,15 +1,19 @@
 //! An accepted command is carried out by pressing buttons into the same modes a player's go to.
 
+use poke_core::item::ItemId;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use crate::mode::{Mode, ModeUpdate, Status};
+use crate::modes::battle::BattleDriver;
 use crate::modes::naming_screen::NamingScreen;
+use crate::modes::overworld::OverworldDriver;
 use crate::modes::start_menu::StartMenuEntry;
+use crate::systems::overworld::Direction;
 use crate::world::World;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
-    /// Answer a text box's `▼`.
+    /// Answer a text box's `▼`, or press A at the title screen.
     Advance,
     /// Pick a list menu's entry, by its index in the whole list.
     ChooseListEntry(u8),
@@ -33,6 +37,23 @@ pub enum Command {
     /// Count up or down to a quantity and take it.
     ChooseQuantity(u8),
     CancelQuantity,
+    /// Walk a square that way, turning first if the player faces elsewhere. Refused if something
+    /// is in the way; a ledge or a warp is not in the way.
+    Step(Direction),
+    /// Turn to face that way without moving.
+    Face(Direction),
+    /// Press A at what is in front: a sign, or a sprite to talk to.
+    Interact,
+    /// Press START in the overworld.
+    OpenStartMenu,
+    /// Use the move in this slot, from the battle menu or the move menu.
+    Fight(u8),
+    /// RUN from the battle menu.
+    Run,
+    /// Send out the party mon in this slot: PKMN and SWITCH, or the choice after a faint.
+    SwitchPokemon(u8),
+    /// Use a bag item in battle, on a party slot where it asks for one.
+    UseItem { item: ItemId, target: Option<u8> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +85,35 @@ pub enum Decision {
     Quantity,
     /// A mon's moves, as the PP items ask for one; `ChooseOption` answers.
     MoveMenu,
+    /// The trainer card, which `Advance` puts away.
+    TrainerCard,
+    /// The town map from the bag, walked with UP and DOWN and left with `CancelOption`.
+    TownMap,
+    /// The town map FLY opens: a row per town visited, `ChooseOption` flies there and
+    /// `CancelOption` backs out.
+    FlyDestination,
+    /// `CONTINUE`, `NEW GAME` and `OPTION`, which `ChooseOption` answers.
+    MainMenu,
+    /// The save's summary under the main menu: `Advance` takes it, `CancelOption` goes back.
+    ContinueGame,
+    /// FIGHT, PKMN, ITEM and RUN.
+    BattleMenu,
+    /// The battle's move menu, with the move's type and PP beside it.
+    BattleMoves,
+    /// The enemy's moves, one to be copied by the player's Mimic; `ChooseOption` answers, and B does
+    /// nothing.
+    MimicMove,
+    /// SWITCH, STATS and CANCEL, for a party mon chosen in battle.
+    SwitchStatsCancel,
+    /// The title screen, cycling its mons until `Advance` presses A.
+    TitleScreen,
+    /// Oak's list of names, `NEW NAME` and three presets, which `ChooseOption` answers.
+    IntroNameMenu,
+    /// A menu an event draws for itself: the vending machine, the prize vendor, the fossils, Bill's
+    /// list, the link cable help, the PC's menus. `ChooseOption` answers by row, `CancelOption` backs out with B.
+    CursorMenu,
+    /// The overworld, with the player free to move.
+    Overworld,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,7 +151,9 @@ enum Driver {
     List { target: Option<u8>, released: bool },
     StartMenu { target: Option<u8>, released: bool },
     Options { released: bool },
-    Option { target: u8, from: Decision, released: bool },
+    /// `chosen` is the stack's depth when A was pressed: a menu that answers by popping to another
+    /// of the same kind, as a PC's LOG OFF does, cannot otherwise be told from the one asked.
+    Option { target: u8, from: Decision, released: bool, #[serde(default)] chosen: Option<usize> },
     /// The grid is walked a letter at a time, so the target is kept and the next press worked out
     /// against whatever is typed so far.
     Name { target: Vec<u8>, released: bool },
@@ -115,6 +167,10 @@ enum Driver {
     /// B on a polling frame; the menu has taken it by the next.
     Cancel { from: Decision, pressed: bool },
     Quantity { target: Option<u8>, released: bool },
+    /// The overworld's own, which knows when a step or a turn has been taken.
+    Overworld(OverworldDriver),
+    /// The battle's own, which walks its menus to a move, a mon or an item.
+    Battle(BattleDriver),
 }
 
 impl Executor {
@@ -127,6 +183,16 @@ impl Executor {
                     Driver::Advance { answered: screen.answered(), pressed: false },
                 Some(Mode::UseItem(flow)) if flow.status() == Status::Waiting(Decision::Text) =>
                     Driver::Advance { answered: flow.answered(), pressed: false },
+                Some(Mode::Overworld(overworld)) if overworld.status() == Status::Waiting(Decision::Text) =>
+                    Driver::Advance { answered: overworld.answered(), pressed: false },
+                Some(Mode::TrainerCard(card)) if card.status() == Status::Waiting(Decision::TrainerCard) =>
+                    Driver::Advance { answered: card.answered(), pressed: false },
+                Some(Mode::MainMenu(menu)) if menu.status() == Status::Waiting(Decision::ContinueGame) =>
+                    Driver::Advance { answered: menu.answered(), pressed: false },
+                Some(Mode::Battle(battle)) if battle.status() == Status::Waiting(Decision::Text) =>
+                    Driver::Advance { answered: battle.answered(), pressed: false },
+                Some(Mode::Movie(movie)) if movie.status() == Status::Waiting(Decision::TitleScreen) =>
+                    Driver::Advance { answered: movie.answered(), pressed: false },
                 _ => return Err(Refusal::Invalid("no text box is waiting".into())),
             },
             Command::ChooseListEntry(_) | Command::CancelList => match modes.last() {
@@ -168,6 +234,15 @@ impl Executor {
                     Some(Mode::MoveSelectionMenu(menu)) if menu.status() == Status::Waiting(Decision::MoveMenu) =>
                         menu.rows() as usize,
                     Some(Mode::Pokedex(dex)) if dex.status() == Status::Waiting(Decision::PokedexSideMenu) => 4,
+                    Some(Mode::MainMenu(menu)) if menu.status() == Status::Waiting(Decision::MainMenu) =>
+                        menu.rows() as usize,
+                    Some(Mode::Movie(movie)) if movie.status() == Status::Waiting(Decision::IntroNameMenu) => 4,
+                    Some(Mode::CursorMenu(menu)) if menu.status() == Status::Waiting(Decision::CursorMenu) =>
+                        menu.rows() as usize,
+                    Some(Mode::TownMap(map)) if map.status() == Status::Waiting(Decision::FlyDestination) =>
+                        map.rows() as usize,
+                    Some(Mode::Battle(battle)) if battle.status() == Status::Waiting(Decision::MimicMove) =>
+                        battle.mimic_rows() as usize,
                     _ => return Err(Refusal::Invalid("no menu of options is waiting".into())),
                 };
                 if *row as usize >= rows {
@@ -182,7 +257,7 @@ impl Executor {
                     },
                     Some(top) => {
                         let Status::Waiting(from) = top.status() else { unreachable!("only a waiting menu has rows") };
-                        Driver::Option { target: *row, from, released: true }
+                        Driver::Option { target: *row, from, released: true, chosen: None }
                     }
                     None => unreachable!("a menu was matched above"),
                 }
@@ -225,7 +300,9 @@ impl Executor {
                 _ => return Err(Refusal::Invalid("the Pokédex is not open".into())),
             },
             Command::CancelOption => match modes.last().map(|mode| mode.status()) {
-                Some(Status::Waiting(from @ (Decision::PartyMenu | Decision::UseToss | Decision::MoveMenu))) =>
+                Some(Status::Waiting(from @ (Decision::PartyMenu | Decision::UseToss | Decision::MoveMenu | Decision::ContinueGame
+                                              | Decision::BattleMoves | Decision::SwitchStatsCancel | Decision::CursorMenu
+                                              | Decision::TownMap | Decision::FlyDestination))) =>
                     Driver::Cancel { from, pressed: false },
                 _ => return Err(Refusal::Invalid("no menu that B backs out of is waiting".into())),
             },
@@ -250,17 +327,33 @@ impl Executor {
                     Driver::Options { released: true },
                 _ => return Err(Refusal::Invalid("the option screen is not open".into())),
             },
+            Command::Step(_) | Command::Face(_) | Command::Interact | Command::OpenStartMenu => match modes.last() {
+                Some(Mode::Overworld(overworld)) => Driver::Overworld(match &command {
+                    Command::Step(direction) => OverworldDriver::step(*direction, overworld, world)?,
+                    Command::Face(direction) => OverworldDriver::face(*direction, overworld, world)?,
+                    Command::Interact => OverworldDriver::interact(overworld, world)?,
+                    _ => OverworldDriver::open_start_menu(overworld, world)?,
+                }),
+                _ => return Err(Refusal::Invalid("the overworld is not on top".into())),
+            },
+            Command::Fight(_) | Command::Run | Command::SwitchPokemon(_) | Command::UseItem { .. } =>
+                Driver::Battle(BattleDriver::accept(&command, modes, world)?),
         };
         Ok(Self { command, driver })
     }
 
-    pub fn drive(&mut self, modes: &[Mode], _world: &World) -> Drive {
+    pub fn drive(&mut self, modes: &[Mode], world: &World) -> Drive {
         match &mut self.driver {
             Driver::Advance { answered, pressed } => {
                 let (count, status, decision) = match modes.last() {
                     Some(Mode::TextBox(text)) => (text.answered(), text.status(), Decision::Text),
                     Some(Mode::StatusScreen(screen)) => (screen.answered(), screen.status(), Decision::StatusScreen),
                     Some(Mode::UseItem(flow)) => (flow.answered(), flow.status(), Decision::Text),
+                    Some(Mode::Overworld(overworld)) => (overworld.answered(), overworld.status(), Decision::Text),
+                    Some(Mode::TrainerCard(card)) => (card.answered(), card.status(), Decision::TrainerCard),
+                    Some(Mode::MainMenu(menu)) => (menu.answered(), menu.status(), Decision::ContinueGame),
+                    Some(Mode::Battle(battle)) => (battle.answered(), battle.status(), Decision::Text),
+                    Some(Mode::Movie(movie)) => (movie.answered(), movie.status(), Decision::TitleScreen),
                     _ => return Drive::Done,
                 };
                 if count != *answered || (*pressed && status != Status::Waiting(decision)) {
@@ -303,7 +396,10 @@ impl Executor {
                 }
                 _ => Drive::Done,
             },
-            Driver::Option { target, from, released } => {
+            Driver::Option { target, from, released, chosen } => {
+                if chosen.is_some_and(|depth| depth != modes.len()) {
+                    return Drive::Done;
+                }
                 let (kind, status, selected) = match modes.last() {
                     Some(Mode::TwoOptionMenu(menu)) => (Decision::TwoOption, menu.status(), menu.selected()),
                     Some(Mode::BuySellQuitMenu(menu)) => (Decision::BuySellQuit, menu.status(), menu.selected()),
@@ -312,6 +408,23 @@ impl Executor {
                     Some(Mode::LearnMove(learn)) => (Decision::ForgetMove, learn.status(), learn.selected()),
                     Some(Mode::ItemMenu(menu)) => (Decision::UseToss, menu.status(), menu.selected()),
                     Some(Mode::MoveSelectionMenu(menu)) => (Decision::MoveMenu, menu.status(), menu.selected()),
+                    Some(Mode::CursorMenu(menu)) => (Decision::CursorMenu, menu.status(), menu.selected()),
+                    Some(Mode::TownMap(map)) => (Decision::FlyDestination, map.status(), map.selected()),
+                    // The main menu stays up after a choice, so which of its screens is waiting says
+                    // whether the choice has answered.
+                    Some(Mode::MainMenu(menu)) => match menu.status() {
+                        Status::Waiting(decision) => (decision, menu.status(), menu.selected()),
+                        status => (Decision::MainMenu, status, menu.selected()),
+                    },
+                    Some(Mode::Movie(movie)) => match movie.status() {
+                        Status::Waiting(decision) => (decision, movie.status(), movie.selected()),
+                        status => (Decision::IntroNameMenu, status, movie.selected()),
+                    },
+                    // The battle stays up after the choice, so the same holds for Mimic's menu.
+                    Some(Mode::Battle(battle)) => match battle.status() {
+                        Status::Waiting(decision) => (decision, battle.status(), battle.selected()),
+                        status => (Decision::MimicMove, status, battle.selected()),
+                    },
                     _ => return Drive::Done,
                 };
                 // A different menu of options is up, so the one asked has answered and led to it.
@@ -319,16 +432,20 @@ impl Executor {
                     return Drive::Done;
                 }
                 let waiting = status == Status::Waiting(kind);
-                if !waiting || !*released {
+                if !waiting || !*released || chosen.is_some() {
                     *released = true;
                     return Drive::Press(Joypad::empty());
                 }
                 *released = false;
-                Drive::Press(match (*target).cmp(&selected) {
+                let button = match (*target).cmp(&selected) {
                     std::cmp::Ordering::Less => Joypad::UP,
                     std::cmp::Ordering::Greater => Joypad::DOWN,
                     std::cmp::Ordering::Equal => Joypad::A,
-                })
+                };
+                if button == Joypad::A {
+                    *chosen = Some(modes.len());
+                }
+                Drive::Press(button)
             }
             Driver::Name { target, released } => match modes.last() {
                 Some(Mode::NamingScreen(screen)) => {
@@ -410,6 +527,8 @@ impl Executor {
                 }
                 _ => Drive::Done,
             },
+            Driver::Overworld(driver) => driver.drive(modes, world),
+            Driver::Battle(driver) => driver.drive(modes, world),
         }
     }
 }

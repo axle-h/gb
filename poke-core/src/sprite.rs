@@ -12,7 +12,7 @@ pub struct Sprite {
 }
 
 /// Which way an overworld sprite is facing — `wSpriteStateData1 + 9`.
-#[derive(Debug, Copy, Clone, Default, Eq, PartialEq, strum_macros::Display, strum_macros::FromRepr)]
+#[derive(Debug, Copy, Clone, Default, Eq, PartialEq, strum_macros::Display, strum_macros::FromRepr, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum SpriteFacing {
     #[default]

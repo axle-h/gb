@@ -288,6 +288,32 @@ impl AudioEngine {
         self.play_sound(sound.id);
     }
 
+    /// `PlayDefaultMusicCommon` for a map's own song, from `CompareMapMusicBankWithCurrentBank`:
+    /// nothing if it is already playing in its bank, else the fade (`frames` a step, 0 for none)
+    /// and `PlaySound`. A fade keeps the old bank playing until it reaches silence.
+    pub fn play_map_music(&mut self, sound: Sound, frames: u8) {
+        if self.bank == sound.bank {
+            self.saved_bank = self.bank;
+            if self.last_music_sound_id == sound.id.0 {
+                return;
+            }
+        } else {
+            if frames == 0 {
+                self.bank = sound.bank;
+            }
+            self.saved_bank = sound.bank;
+        }
+        self.audio_fade_out_control = frames;
+        self.last_music_sound_id = sound.id.0;
+        self.new_sound_id = sound.id.0;
+        self.play_sound(sound.id);
+    }
+
+    /// `wChannelSoundIDs`: the sound a channel is playing, 0 for none.
+    pub fn channel_sound_id(&self, channel: usize) -> u8 {
+        self.channels[channel].sound_id
+    }
+
     /// `PlaySound`: what every caller in the game reaches for. A sound effect plays at once; music
     /// waits for a fade-out that is already running to finish, and is what plays when it does.
     pub fn play_sound(&mut self, id: SoundId) {
@@ -316,13 +342,32 @@ impl AudioEngine {
         self.engine_play_sound(id);
     }
 
-    /// `PlayCry`: `GetCryData` picks the base cry and sets the two modifiers, then it is an
-    /// ordinary sound. `index` is the cartridge's internal species index, one-based.
+    /// `PlayCry` without its wait: `GetCryData`, then an ordinary sound. `index` is the
+    /// cartridge's internal species index, one-based.
     pub fn play_cry(&mut self, index: u8) {
+        let sound = self.get_cry_data(index);
+        self.play_sound(sound);
+    }
+
+    /// `GetCryData`: the species' base cry, with its two modifiers written for the `PlaySound` that
+    /// follows. A cry move's animation reads them back and adds its own.
+    pub fn get_cry_data(&mut self, index: u8) -> SoundId {
         let cry = Cry::of_species_index(index);
-        self.frequency_modifier = cry.frequency_modifier;
-        self.tempo_modifier = cry.tempo_modifier;
-        self.play_sound(cry.sound);
+        self.set_modifiers(cry.frequency_modifier, cry.tempo_modifier);
+        cry.sound
+    }
+
+    /// `wFrequencyModifier` and `wTempoModifier`, as a caller writes them before `PlaySound`. They
+    /// bend a cry in every bank and, in `AUDIO_2`, any battle sound effect too, so a battle sound
+    /// plays at whatever the last writer left: the trainer-appeared sound sets `$00`/`$80`, the
+    /// faint fall `$00`/`$00`, the damage sounds and move sounds their own.
+    pub fn set_modifiers(&mut self, frequency: u8, tempo: u8) {
+        self.frequency_modifier = frequency;
+        self.tempo_modifier = tempo;
+    }
+
+    pub fn modifiers(&self) -> (u8, u8) {
+        (self.frequency_modifier, self.tempo_modifier)
     }
 
     /// `WaitForSoundToFinish`'s condition: channels 5, 6 and 8 are quiet, channel 7 not being
@@ -334,10 +379,29 @@ impl AudioEngine {
         [CHAN5, CHAN5 + 1, CHAN8].iter().all(|&c| self.channels[c].sound_id == 0)
     }
 
-    /// `wLowHealthAlarm`. Setting it arms the alarm on the next tick of `AUDIO_2`; clearing it asks
-    /// for the silencing tone, which is what `DISABLE_LOW_HEALTH_ALARM` means.
+    /// `wLowHealthAlarm`. On is `set BIT_LOW_HEALTH_ALARM`, which keeps the timer and arms the
+    /// alarm on the next tick of `AUDIO_2`; off is `DISABLE_LOW_HEALTH_ALARM`, which asks that tick
+    /// for the silencing tone.
     pub fn set_low_health_alarm(&mut self, on: bool) {
-        self.low_health_alarm = if on { 1 << BIT_LOW_HEALTH_ALARM } else { DISABLE_LOW_HEALTH_ALARM };
+        if on {
+            self.low_health_alarm |= 1 << BIT_LOW_HEALTH_ALARM;
+        } else {
+            self.low_health_alarm = DISABLE_LOW_HEALTH_ALARM;
+        }
+    }
+
+    /// `EndLowHealthAlarm`, and `EndOfBattle`'s own copy of it: the byte and channel 5 zeroed at
+    /// once, with no silencing tone, so the last tone sounds on until the music's next note on
+    /// channel 1 replaces it. `DrawPlayerHUDAndHPBar`'s `.fainted` does the same only when
+    /// [`AudioEngine::low_health_alarm_on`].
+    pub fn end_low_health_alarm(&mut self) {
+        self.low_health_alarm = 0;
+        self.channels[CHAN5].sound_id = 0;
+    }
+
+    /// `bit BIT_LOW_HEALTH_ALARM, [wLowHealthAlarm]`, which `DISABLE_LOW_HEALTH_ALARM` also passes.
+    pub fn low_health_alarm_on(&self) -> bool {
+        self.low_health_alarm & 1 << BIT_LOW_HEALTH_ALARM != 0
     }
 
     /// `wAudioFadeOutControl`: how many frames each step of the fade lasts. The sound it is given
@@ -346,9 +410,79 @@ impl AudioEngine {
         self.audio_fade_out_control = frames;
     }
 
+    /// `StopMusic` up to its wait: `wAudioFadeOutControl` to `frames` and `SFX_STOP_ALL_MUSIC` given to
+    /// the fade, so the volume steps down every `frames` frames and everything stops at silence.
+    pub fn stop_music(&mut self, frames: u8) {
+        self.audio_fade_out_control = frames;
+        self.new_sound_id = SoundId::STOP_ALL_MUSIC.0;
+        self.play_sound(SoundId::STOP_ALL_MUSIC);
+    }
+
+    /// `Music_Cities1AlternateTempo`'s fade: `wAudioFadeOutCounterReloadValue` and
+    /// `wAudioFadeOutCounter` to `frames`, and `wAudioFadeOutControl` to `$ff`, which plays nothing
+    /// once the volume reaches zero.
+    pub fn fade_out_to_silence(&mut self, frames: u8) {
+        self.audio_fade_out_counter_reload_value = frames;
+        self.audio_fade_out_counter = frames;
+        self.audio_fade_out_control = SoundId::STOP_ALL_MUSIC.0;
+    }
+
+    /// `wAudioFadeOutControl`, which a caller waits on to reach zero.
+    pub fn fading_out(&self) -> bool {
+        self.audio_fade_out_control != 0
+    }
+
+    /// `wAudioFadeOutCounterReloadValue` and `wLastMusicSoundID`: the frames a step of the last fade
+    /// took, and the song the default music last asked for.
+    pub fn music_state(&self) -> (u8, u8) {
+        (self.audio_fade_out_counter_reload_value, self.last_music_sound_id)
+    }
+
+    /// `wAudioROMBank` and `wAudioSavedROMBank`, as a caller sets them before a sound out of another bank.
+    pub fn set_bank(&mut self, bank: AudioBank) {
+        self.bank = bank;
+        self.saved_bank = bank;
+    }
+
+    /// `wNewSoundID` then `PlaySound`: a sound a fade already under way is handed, or that stops the music.
+    pub fn play_new_sound(&mut self, id: SoundId) {
+        self.new_sound_id = id.0;
+        self.play_sound(id);
+    }
+
+    /// `wAudioFadeOutCounterReloadValue`, `wAudioFadeOutCounter` and `wAudioFadeOutControl` written
+    /// together, as the Hall of Fame fades: a step every `frames`, then `then` plays at silence.
+    pub fn fade_out_then(&mut self, frames: u8, then: SoundId) {
+        self.audio_fade_out_counter_reload_value = frames;
+        self.audio_fade_out_counter = frames;
+        self.audio_fade_out_control = then.0;
+    }
+
+    /// `wLastMusicSoundID`, which `DisplayPokemonCenterDialogue_` sets to the map's song before it
+    /// starts that song again after the healing jingle.
+    pub fn set_last_music_sound_id(&mut self, id: SoundId) {
+        self.last_music_sound_id = id.0;
+    }
+
+    /// `StopAllSounds`: back to the first bank with nothing playing.
+    pub fn stop_all_sounds(&mut self) {
+        self.bank = AudioBank::One;
+        self.saved_bank = AudioBank::One;
+        self.audio_fade_out_control = 0;
+        self.new_sound_id = 0;
+        self.last_music_sound_id = 0;
+        self.play_sound(SoundId::STOP_ALL_MUSIC);
+    }
+
     /// `rAUDVOL` written from outside the engine, as the status screen turns the music down with.
     pub fn set_master_volume(&mut self, value: u8) {
         self.write_register(0xFF24, value);
+    }
+
+    /// `rAUD1SWEEP` written from outside the engine, as `DoBallTossSpecialEffects` sweeps channel 1
+    /// while the ghost Marowak dodges the ball.
+    pub fn set_sweep(&mut self, value: u8) {
+        self.write_register(R_AUD1SWEEP, value);
     }
 
     /// `AudioN_OverwriteChannelPointer`: `Music_RivalAlternateStart` and the Poké Flute start a
@@ -422,13 +556,6 @@ impl AudioEngine {
         if c < CHAN5 && self.channels[c + CHAN5].sound_id != 0 {
             return;
         }
-        // AUDIO_2 only: while the alarm is on it owns channel 5 outright.
-        if self.bank == AudioBank::Two
-            && c == CHAN5
-            && self.low_health_alarm & 1 << BIT_LOW_HEALTH_ALARM != 0
-        {
-            return;
-        }
         if self.channels[c].test(BIT_ROTATE_DUTY_CYCLE) {
             self.apply_duty_cycle_pattern(c);
         }
@@ -477,6 +604,11 @@ impl AudioEngine {
         self.channels[c].vibrato_delay_counter = self.channels[c].vibrato_delay_counter_reload_value;
         self.channels[c].res(BIT_PITCH_SLIDE_ON);
         self.channels[c].res(BIT_PITCH_SLIDE_DECREASING);
+        // AUDIO_2 only: while the alarm is on, channel 5 reads no further. A note already sounding
+        // there counts down and keeps its effects; the next one waits, the counter parked at 1.
+        if self.bank == AudioBank::Two && c == CHAN5 && self.low_health_alarm_on() {
+            return;
+        }
         self.sound_ret(c);
     }
 
@@ -1272,6 +1404,83 @@ pub struct TraceInput {
     pub id: SoundId,
 }
 
+/// One thing the game does to the engine between two frames, for a harvested sequence of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Cue {
+    /// `PlayMusic`.
+    Music(Sound),
+    /// `PlaySound`.
+    Sound(SoundId),
+    /// `PlayCry` up to its wait: `GetCryData` and `PlaySound`.
+    Cry(u8),
+    /// `set BIT_LOW_HEALTH_ALARM` or `DISABLE_LOW_HEALTH_ALARM`.
+    LowHealthAlarm(bool),
+    /// `EndLowHealthAlarm`.
+    EndLowHealthAlarm,
+    /// `wFrequencyModifier` and `wTempoModifier`.
+    Modifiers(u8, u8),
+    /// `StopMusic` up to its wait.
+    StopMusic(u8),
+    /// `Music_Cities1AlternateTempo`'s fade to silence.
+    FadeOutToSilence(u8),
+    /// `StopAllSounds`.
+    StopAllSounds,
+    /// This many VBlanks.
+    Frames(u16),
+}
+
+/// A sequence of cues from a silenced engine in `bank`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CueInput {
+    pub bank: AudioBank,
+    pub cues: Vec<Cue>,
+}
+
+/// What a sequence of cues did, a frame at a time.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CueTrace {
+    /// [`encode_writes`] for each frame. Writes a cue makes between frames belong to the next one.
+    pub writes: Vec<String>,
+    /// `WaitForSoundToFinish`'s condition after each frame, `1` where it would return.
+    pub finished: String,
+}
+
+impl CueTrace {
+    pub fn push(&mut self, writes: String, finished: bool) {
+        self.writes.push(writes);
+        self.finished.push(if finished { '1' } else { '0' });
+    }
+}
+
+impl CueInput {
+    pub fn play(&self) -> CueTrace {
+        let mut engine = AudioEngine::new(self.bank);
+        engine.engine_play_sound(SoundId::STOP_ALL_MUSIC);
+        engine.take_writes();
+        let mut trace = CueTrace::default();
+        for &cue in &self.cues {
+            match cue {
+                Cue::Music(sound) => engine.play_music(sound),
+                Cue::Sound(id) => engine.play_sound(id),
+                Cue::Cry(index) => engine.play_cry(index),
+                Cue::LowHealthAlarm(on) => engine.set_low_health_alarm(on),
+                Cue::EndLowHealthAlarm => engine.end_low_health_alarm(),
+                Cue::Modifiers(frequency, tempo) => engine.set_modifiers(frequency, tempo),
+                Cue::StopMusic(frames) => engine.stop_music(frames),
+                Cue::FadeOutToSilence(frames) => engine.fade_out_to_silence(frames),
+                Cue::StopAllSounds => engine.stop_all_sounds(),
+                Cue::Frames(n) => {
+                    for _ in 0..n {
+                        let writes = encode_writes(&engine.frame());
+                        trace.push(writes, engine.sound_finished());
+                    }
+                }
+            }
+        }
+        trace
+    }
+}
+
 /// One frame of writes as hex, two characters of register and two of byte. The register is named
 /// by its low byte, which is unique across the sound registers, and the byte is the one the
 /// hardware keeps, so a trace says nothing about bits the hardware throws away.
@@ -1406,6 +1615,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Songs, cries, sound effects, the low health alarm and the modifiers, in the order the game's
+    /// callers put them, against the cartridge's home routines and `VBlank`.
+    #[test]
+    fn every_harvested_cue_sequence_replays() {
+        let jsonl = include_str!("../../fixtures/audio/cues.jsonl");
+        let cases = crate::fixtures::cases::<CueInput, CueTrace>(jsonl);
+        for (input, expected, _) in cases {
+            let actual = input.play();
+            for (frame, (actual, expected)) in actual.writes.iter().zip(&expected.writes).enumerate() {
+                assert_eq!(actual, expected, "{input:?}, frame {frame}");
+            }
+            assert_eq!(actual, expected, "{input:?}");
+        }
+    }
+
+    /// While the alarm holds channel 5 the channel reads no further, so whatever lies past the end
+    /// of the cry it last played is never executed.
+    #[test]
+    fn the_alarm_parks_channel_5_on_its_next_note() {
+        let mut engine = AudioEngine::new(AudioBank::Two);
+        engine.play_music(sounds::MUSIC_WILD_BATTLE);
+        engine.play_cry(0x24);
+        (0..80).for_each(|_| { engine.frame(); });
+        engine.set_low_health_alarm(true);
+        let parked = engine.channels[CHAN5].command_pointer;
+        (0..40).for_each(|_| { engine.frame(); });
+        assert_eq!(engine.channels[CHAN5].command_pointer, parked);
+        assert_eq!(engine.channels[CHAN5].sound_id, CRY_SFX_END.0);
     }
 
     /// A sound effect claims its music channel's hardware, and the music channel goes quiet until

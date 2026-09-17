@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 use strum::IntoEnumIterator;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord, strum_macros::Display, strum_macros::FromRepr, strum_macros::EnumIter, Default)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord, strum_macros::Display, strum_macros::FromRepr, strum_macros::EnumIter, Default, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum Map {
     #[default]

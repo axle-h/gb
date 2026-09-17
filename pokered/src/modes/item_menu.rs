@@ -11,10 +11,16 @@
 //! and the bag reopens. Out of battle the balls, the X items, Guard Spec, Dire Hit, X Accuracy and the
 //! Poké Doll are all "not the time", and Oak's Parcel is "not yours to use".
 //!
+//! The Bicycle is ridden or put away from here (`ItemUseBicycle`), except on Cycling Road; getting on
+//! or off closes the start menu, answering `Outcome::Chosen(BICYCLE)`. The Surfboard goes onto the
+//! water or off it and reopens the bag, the overworld taking the step once the menu is closed.
+//!
 //! An item whose effect is another chunk's is answered rather than run: the bag closes with
 //! `Outcome::Chosen(item id)` and the start menu comes back. Each has one arm in `use_item`.
 
 use poke_core::item::{self, ItemId};
+use poke_core::map_header::MapHeader;
+use poke_core::symbols::DmgPointer;
 use poke_core::text_script::{far_text, TextBuffer};
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
@@ -24,9 +30,12 @@ use crate::input::Joypad;
 use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::list_menu::{remove_from_bag, ListMenu};
 use crate::modes::menu_input::MenuInput;
+use crate::modes::overworld::bike_surf::{item_use_bicycle, item_use_surfboard, Used};
+use crate::modes::overworld::escape::{arm_escape_warp, escape_rope_allowed};
 use crate::modes::pokedex::PokedexMenu;
 use crate::modes::quantity_menu::QuantityMenu;
 use crate::modes::text_box::TextBox;
+use crate::modes::town_map::TownMap;
 use crate::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
 use crate::modes::use_item::{UseItem, NO_MENU};
 use crate::systems::inventory::Inventory;
@@ -52,7 +61,14 @@ enum Phase {
     /// A child mode is up, and this is what it was put up for.
     Child(After),
     UseToss,
+    /// `PlayDefaultMusic`'s `WaitForSoundToFinish`, then its song and the text.
+    Music { text: Option<DmgPointer>, after: After },
+    /// `ItemUseEscapeRope`'s `DelayFrames 30` with the map back on screen.
+    Delay(u8),
 }
+
+/// `ItemUseEscapeRope`'s `DelayFrames 30`.
+const ESCAPE_ROPE_FRAMES: u8 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum After {
@@ -65,6 +81,8 @@ enum After {
     /// `IsItOKToTossItemText`, with the count chosen.
     AskToss(u8),
     ConfirmToss(u8),
+    /// `CloseStartMenu`.
+    CloseMenu,
 }
 
 impl ItemMenu {
@@ -103,6 +121,32 @@ impl ItemMenu {
         Transition::Push(Mode::TextBox(TextBox::script(script)))
     }
 
+    fn text_at(&mut self, text: DmgPointer, after: After) -> Transition {
+        self.phase = Phase::Child(after);
+        Transition::Push(Mode::TextBox(TextBox::script(poke_core::text_script::decode(text).expect("the item's text decodes"))))
+    }
+
+    fn after(&mut self, ctx: &mut Ctx, after: After) -> Transition {
+        match after {
+            After::CloseMenu => Transition::Pop(Outcome::Chosen(self.item as u8)),
+            _ => self.menu_loop(ctx),
+        }
+    }
+
+    /// What `ItemUseBicycle` or `ItemUseSurfboard` came to: the song and the text, then the start
+    /// menu closed where `closes` and the item worked, else the bag again.
+    fn used(&mut self, ctx: &mut Ctx, used: Used, closes: bool) -> Transition {
+        let after = if closes && used.result { After::CloseMenu } else { After::MenuLoop };
+        if used.music {
+            self.phase = Phase::Music { text: used.text, after };
+            return self.update(ctx);
+        }
+        match used.text {
+            Some(text) => self.text_at(text, after),
+            None => self.after(ctx, after),
+        }
+    }
+
     /// Another chunk's effect: the bag answers with the item and closes.
     fn elsewhere(&self) -> Transition {
         Transition::Pop(Outcome::Chosen(self.item as u8))
@@ -117,9 +161,7 @@ impl ItemMenu {
         }
         ctx.menu.unfilled_cursor(&mut ctx.screen.ui);
         if self.item == ItemId::Bicycle {
-            // `ItemUseBicycle`, and the refusal to get off where the bike is forced, are the
-            // overworld's.
-            return self.elsewhere();
+            return self.use_or_toss(ctx);
         }
         TextBoxId::UseToss.draw(&mut ctx.screen.ui);
         self.input = MenuInput::new(0, 1, (14, 11), Joypad::A | Joypad::B);
@@ -134,18 +176,28 @@ impl ItemMenu {
         let name = item::name(self.item);
         ctx.world.text.strings.insert(TextBuffer::NameBuffer, name.clone());
         ctx.world.text.strings.insert(TextBuffer::StringBuffer, name);
+        if self.item == ItemId::Bicycle {
+            if ctx.world.location.always_on_bike {
+                return self.text("_CannotGetOffHereText", After::MenuLoop);
+            }
+            let used = item_use_bicycle(ctx);
+            return self.used(ctx, used, true);
+        }
         if self.input.current == TOSS {
             return self.toss(ctx);
+        }
+        if self.item == ItemId::EscapeRope {
+            return self.escape_rope(ctx);
         }
         let party_menu_path = self.item as u8 >= ItemId::Hm01Cut as u8 || item::opens_party_menu(self.item);
         if !party_menu_path && item::closes_menu(self.item) {
             return self.elsewhere();
         }
-        self.use_item(party_menu_path)
+        self.use_item(ctx, party_menu_path)
     }
 
     /// `UseItem`, one arm per routine `ItemUsePtrTable` names.
-    fn use_item(&mut self, party_menu_path: bool) -> Transition {
+    fn use_item(&mut self, ctx: &mut Ctx, party_menu_path: bool) -> Transition {
         let after = if party_menu_path { After::PartyMenuPath } else { After::MenuLoop };
         match ItemUse::of(self.item) {
             ItemUse::Medicine | ItemUse::Vitamin | ItemUse::RareCandy | ItemUse::PpUp | ItemUse::PpRestore
@@ -164,12 +216,33 @@ impl ItemMenu {
                 self.phase = Phase::Child(after);
                 Transition::Push(Mode::Pokedex(PokedexMenu::new()))
             }
+            ItemUse::Surfboard => {
+                let used = item_use_surfboard(ctx);
+                self.used(ctx, used, false)
+            }
+            ItemUse::TownMap => {
+                self.phase = Phase::Child(After::MenuLoop);
+                Transition::Push(Mode::TownMap(TownMap::item()))
+            }
             // The overworld's and the battle's.
-            ItemUse::TownMap | ItemUse::Bicycle | ItemUse::Surfboard | ItemUse::Bait | ItemUse::Rock
-            | ItemUse::EscapeRope | ItemUse::Repel | ItemUse::SuperRepel | ItemUse::MaxRepel | ItemUse::CardKey
+            ItemUse::Bicycle | ItemUse::Bait | ItemUse::Rock | ItemUse::EscapeRope | ItemUse::Repel | ItemUse::SuperRepel | ItemUse::MaxRepel | ItemUse::CardKey
             | ItemUse::PokeFlute | ItemUse::CoinCase | ItemUse::OldRod | ItemUse::GoodRod | ItemUse::SuperRod
             | ItemUse::Itemfinder => self.elsewhere(),
         }
+    }
+
+    /// `ItemUseEscapeRope`: the escape warp armed, the map back on screen for thirty frames, and
+    /// then the rope spent and the start menu closed. A map it does not work on says so and the bag
+    /// comes back.
+    fn escape_rope(&mut self, ctx: &mut Ctx) -> Transition {
+        let tileset = MapHeader::read(ctx.world.location.map).expect("the player stands on a map with a header").tileset;
+        if !escape_rope_allowed(ctx.world.location.map, tileset) {
+            return self.text("_ItemUseNotTimeText", After::MenuLoop);
+        }
+        arm_escape_warp(ctx);
+        ctx.screen.ui.uncover(0, 0, crate::gfx::ui::SCREEN_TILES_X, crate::gfx::ui::SCREEN_TILES_Y);
+        self.phase = Phase::Delay(ESCAPE_ROPE_FRAMES);
+        Transition::Stay
     }
 
     /// `.tossItem`: how many, unless `TossItem_` is going to refuse it anyway.
@@ -201,6 +274,22 @@ impl ModeUpdate for ItemMenu {
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
         match self.phase {
             Phase::Child(_) => Transition::Stay,
+            Phase::Music { .. } if !ctx.audio.sound_finished() => Transition::Stay,
+            Phase::Music { text, after } => {
+                crate::modes::overworld::play_default_music(ctx);
+                match text {
+                    Some(text) => self.text_at(text, after),
+                    None => self.after(ctx, after),
+                }
+            }
+            Phase::Delay(1) => {
+                remove_from_bag(ctx, self.slot as usize, 1);
+                Transition::Pop(Outcome::Chosen(self.item as u8))
+            }
+            Phase::Delay(frames) => {
+                self.phase = Phase::Delay(frames - 1);
+                Transition::Stay
+            }
             Phase::UseToss => {
                 let Some(keys) = self.input.update(ctx) else { return Transition::Stay };
                 ctx.menu.unfilled_cursor(&mut ctx.screen.ui);
@@ -227,6 +316,7 @@ impl ModeUpdate for ItemMenu {
             // `GBPalWhiteOutWithDelay3` and `RestoreScreenTilesAndReloadTilePatterns`, whose delays
             // are loading and not modelled.
             (After::PartyMenuPath, _) => {
+                crate::gfx::mon_icons::clear_sprites(&mut ctx.screen.sprites);
                 if let Some(saved) = &self.saved {
                     ctx.screen.ui = saved.clone();
                 }
@@ -244,6 +334,7 @@ impl ModeUpdate for ItemMenu {
                 self.text("_ThrewAwayItemText", After::MenuLoop)
             }
             (After::ConfirmToss(_), _) => self.menu_loop(ctx),
+            (After::CloseMenu, _) => self.after(ctx, After::CloseMenu),
         }
     }
 
@@ -388,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn a_nugget_is_not_the_time_and_an_escape_rope_is_answered_for_its_chunk() {
+    fn a_nugget_is_not_the_time_and_the_bag_comes_back() {
         let mut game = game(&[(ItemId::Nugget, 1), (ItemId::EscapeRope, 1)], 10);
         answer(&mut game, Decision::List, Command::ChooseListEntry(0));
         answer(&mut game, Decision::UseToss, Command::ChooseOption(0));
@@ -397,9 +488,47 @@ mod tests {
         while settle(&mut game) == Decision::Text {
             answer(&mut game, Decision::Text, Command::Advance);
         }
-        answer(&mut game, Decision::List, Command::ChooseListEntry(1));
+        assert_eq!(settle(&mut game), Decision::List, "the bag again");
+    }
+
+    /// Red's bedroom has a tileset of its own, so the rope wants a cave, a building or a tower.
+    #[test]
+    fn an_escape_rope_underground_arms_the_warp_and_is_spent() {
+        let mut game = game(&[(ItemId::EscapeRope, 1)], 10);
+        let mut world = game.world().clone();
+        world.location.map = poke_core::map::Map::MtMoon1F;
+        game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::ItemMenu(ItemMenu::new()));
+        answer(&mut game, Decision::List, Command::ChooseListEntry(0));
         answer(&mut game, Decision::UseToss, Command::ChooseOption(0));
-        assert!(game.modes().is_empty(), "the bag closed with the item for whoever uses it");
+        for _ in 0..ESCAPE_ROPE_FRAMES as u32 + 2 {
+            if game.modes().is_empty() {
+                break;
+            }
+            game.frame(Input::None);
+        }
+        assert!(game.modes().is_empty(), "the start menu closes behind the rope");
+        assert_eq!(game.world().bag.quantity_of(ItemId::EscapeRope), 0, "and the rope is spent");
+        assert!(game.world().location.escape_warp);
+        assert_eq!(game.world().location.fly_warp, Some(game.world().location.last_blackout_map));
+    }
+
+    #[test]
+    fn an_escape_rope_out_in_the_open_is_not_the_time_and_the_bag_comes_back() {
+        let mut game = game(&[(ItemId::EscapeRope, 1)], 10);
+        let mut world = game.world().clone();
+        world.location.map = poke_core::map::Map::PalletTown;
+        game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::ItemMenu(ItemMenu::new()));
+        answer(&mut game, Decision::List, Command::ChooseListEntry(0));
+        answer(&mut game, Decision::UseToss, Command::ChooseOption(0));
+        assert_eq!(settle(&mut game), Decision::Text);
+        while settle(&mut game) == Decision::Text {
+            answer(&mut game, Decision::Text, Command::Advance);
+        }
+        assert_eq!(settle(&mut game), Decision::List, "the bag again");
+        assert_eq!(game.world().bag.quantity_of(ItemId::EscapeRope), 1, "and no rope spent");
+        assert!(!game.world().location.escape_warp);
     }
 
     #[test]
@@ -451,6 +580,57 @@ mod tests {
     }
 
     /// A party of one mon of `species` at `level`, knowing only its first move, and a bag.
+    fn bike_at(map: poke_core::map::Map) -> Game {
+        let mut game = game(&[(ItemId::Bicycle, 1)], 10);
+        let mut world = game.world().clone();
+        world.location.map = map;
+        game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::ItemMenu(ItemMenu::new()));
+        game
+    }
+
+    #[test]
+    fn the_bicycle_is_got_on_and_off_and_closes_the_menu_each_time() {
+        use crate::systems::overworld::location::{BIKING, WALKING};
+        let mut game = bike_at(poke_core::map::Map::PalletTown);
+        answer(&mut game, Decision::List, Command::ChooseListEntry(0));
+        assert_eq!(settle(&mut game), Decision::Text);
+        assert_eq!(text_row(&game, 14), encode("RED got on the").unwrap());
+        assert_eq!(game.world().location.walk_bike_surf, BIKING);
+        assert!(game.ui().cover(10, 4).is_none(), "the map is back over the bag");
+        game.frame(Input::Command(Command::Advance));
+        for _ in 0..100 {
+            game.frame(Input::None);
+        }
+        assert!(game.modes().is_empty(), "the bag closed with the item");
+
+        game.push(Mode::ItemMenu(ItemMenu::new()));
+        answer(&mut game, Decision::List, Command::ChooseListEntry(0));
+        assert_eq!(settle(&mut game), Decision::Text);
+        assert_eq!(text_row(&game, 14), encode("RED got off").unwrap());
+        assert_eq!(game.world().location.walk_bike_surf, WALKING);
+    }
+
+    #[test]
+    fn no_cycling_indoors_and_no_getting_off_on_cycling_road() {
+        let mut game = bike_at(poke_core::map::Map::RedsHouse1F);
+        answer(&mut game, Decision::List, Command::ChooseListEntry(0));
+        assert_eq!(settle(&mut game), Decision::Text);
+        assert_eq!(text_row(&game, 14), encode("No cycling").unwrap());
+        answer(&mut game, Decision::Text, Command::Advance);
+        assert_eq!(settle(&mut game), Decision::List);
+
+        let mut game = bike_at(poke_core::map::Map::Route17);
+        let mut world = game.world().clone();
+        world.location.always_on_bike = true;
+        world.location.walk_bike_surf = crate::systems::overworld::location::BIKING;
+        game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::ItemMenu(ItemMenu::new()));
+        answer(&mut game, Decision::List, Command::ChooseListEntry(0));
+        assert_eq!(settle(&mut game), Decision::Text);
+        assert_eq!(text_row(&game, 14), encode("You can't get off").unwrap());
+    }
+
     fn party_of(species: PokemonSpecies, level: u8, bag: &[(ItemId, u8)]) -> Game {
         let mut mon = new_party_mon(species, level, 0, &Origin::Trainer, &mut GameRng::tape(vec![]));
         mon.mon.moves = [mon.mon.moves[0], None, None, None];

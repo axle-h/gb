@@ -1,10 +1,14 @@
 //! `HandleMenuInput` and `PlaceMenuCursor`, which every cursor menu runs inside its own mode.
+//! A watched press of A or B plays `SFX_PRESS_AB` as it returns, which is what a caller that waits
+//! for the next sound waits out.
 
 use serde::{Deserialize, Serialize};
+use crate::audio::data::sounds;
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
 use crate::input::Joypad;
 use crate::mode::Ctx;
 use crate::modes::blink::ArrowBlink;
+use crate::systems::hp_bar::HpBarColour;
 
 const CURSOR: u8 = 0xED;
 pub const UNFILLED_CURSOR: u8 = 0xEC;
@@ -51,6 +55,14 @@ pub struct CursorMemory {
     /// the mart zeroes it and puts it back.
     #[serde(default)]
     pub list_scroll: u8,
+    /// `wPartyMenuHPBarColors`, which `AnimatePartyMon` picks its speed from. Only a party menu
+    /// with HP bars writes it, so the TM and stone menus animate at whatever the last one left.
+    #[serde(default)]
+    pub party_hp_bar_colours: [Option<HpBarColour>; 6],
+    /// `wMiscFlags`' `BIT_NO_MENU_BUTTON_SOUND`: A and B leave a menu without `SFX_PRESS_AB`. The
+    /// PC sets it for its menus and `NO_YES_MENU` for its own input, playing the sound itself.
+    #[serde(default)]
+    pub no_menu_button_sound: bool,
 }
 
 impl CursorMemory {
@@ -105,11 +117,16 @@ pub struct MenuInput {
     #[serde(default)]
     polled: bool,
     blink: Option<ArrowBlink>,
+    /// `wAnimCounter`, which `.loop1` zeroes every time it places the cursor, for whichever menu
+    /// runs `AnimatePartyMon` inside the loop.
+    #[serde(default)]
+    pub anim_counter: u8,
 }
 
 impl MenuInput {
     pub fn new(current: u8, max: u8, top: (u8, u8), watched: Joypad) -> Self {
-        Self { current, max, top, watched, return_at_ends: false, wrapping: false, single_spaced: false, polled: false, blink: None }
+        Self { current, max, top, watched, return_at_ends: false, wrapping: false, single_spaced: false, polled: false, blink: None,
+               anim_counter: 0 }
     }
 
     pub fn is_polling(&self) -> bool {
@@ -121,6 +138,7 @@ impl MenuInput {
     pub fn call(&mut self, ctx: &mut Ctx) {
         self.blink = (ctx.screen.ui.get(ARROW.0, ARROW.1) == DOWN_ARROW).then(ArrowBlink::default);
         self.polled = false;
+        self.anim_counter = 0;
         self.place_cursor(&mut ctx.screen.ui, ctx.menu);
     }
 
@@ -153,10 +171,14 @@ impl MenuInput {
             }
         }
         if keys.intersects(self.watched) || (stopped_at_an_end && self.return_at_ends) {
+            if keys.intersects(Joypad::A | Joypad::B) && !ctx.menu.no_menu_button_sound {
+                ctx.audio.play_sound(sounds::SFX_PRESS_AB);
+            }
             self.wrapping = false;
             return Some(keys);
         }
         // Back to `.loop1`, whose `Delay3` is not modelled: the cursor moves in the frame the key lands.
+        self.anim_counter = 0;
         self.place_cursor(&mut ctx.screen.ui, ctx.menu);
         None
     }

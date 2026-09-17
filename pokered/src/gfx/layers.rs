@@ -70,3 +70,33 @@ impl Default for Effects {
         Self { bgp: 0b11100100, obp0: 0b11010000, obp1: 0b11100100, scx: 0, scy: 0, line_scx: None }
     }
 }
+
+/// A background map at the hardware's size, 32 by 32 tiles: `vBGMap0` or `vBGMap1`, for a screen
+/// that scrolls past the 20 by 18 the UI surface covers or keeps a second picture for the window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TileMap(Vec<u8>);
+
+impl TileMap {
+    pub const SIZE: usize = 32;
+
+    pub fn filled(tile: u8) -> Self {
+        Self(vec![tile; Self::SIZE * Self::SIZE])
+    }
+
+    /// Wrapping, as the scroll does.
+    pub fn get(&self, x: usize, y: usize) -> u8 {
+        self.0[(y % Self::SIZE) * Self::SIZE + x % Self::SIZE]
+    }
+
+    pub fn set(&mut self, x: usize, y: usize, tile: u8) {
+        self.0[(y % Self::SIZE) * Self::SIZE + x % Self::SIZE] = tile;
+    }
+}
+
+/// `rWX`, `rWY` and the map the window shows, over the background and under the objects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Window {
+    pub x: u8,
+    pub y: u8,
+    pub tiles: TileMap,
+}
