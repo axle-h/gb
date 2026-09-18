@@ -10,7 +10,8 @@ use poke_core::species::PokemonSpecies;
 use poke_core::sprite::SpriteFacing;
 use poke_core::symbols::pokered_events::*;
 use poke_core::symbols::pokered_map_scripts::{TEXT_GAMECORNERPRIZEROOM_PRIZE_VENDOR_1,
-    TEXT_POKEMONMANSION1F_SWITCH, TEXT_POKEMONMANSIONB1F_SWITCH};
+    TEXT_POKEMONMANSION1F_SWITCH, TEXT_POKEMONMANSION2F_SWITCH, TEXT_POKEMONMANSION3F_SWITCH,
+    TEXT_POKEMONMANSIONB1F_SWITCH};
 use poke_core::symbols::pokered_local_labels::GiveFossilToCinnabarLab as lab;
 use poke_core::symbols::{pokered_symbols as sym, DmgPointer};
 use poke_core::text_script::{TextBuffer, TextNumber};
@@ -233,15 +234,15 @@ pub(super) fn hidden_event(s: &mut Script, event: HiddenEvent) -> Flow {
         return start_slot_machine(s, event);
     }
     // A switch is only a switch from below it; the wall it moves is its map's own business.
-    if f == sym::Mansion1Script_Switches || f == sym::Mansion4Script_Switches {
+    let switches = [(sym::Mansion1Script_Switches, TEXT_POKEMONMANSION1F_SWITCH),
+        (sym::Mansion2Script_Switches, TEXT_POKEMONMANSION2F_SWITCH),
+        (sym::Mansion3Script_Switches, TEXT_POKEMONMANSION3F_SWITCH),
+        (sym::Mansion4Script_Switches, TEXT_POKEMONMANSIONB1F_SWITCH)];
+    if let Some(&(_, text)) = switches.iter().find(|&&(at, _)| at == f) {
         if !up {
             return Flow::Return;
         }
         s.clear_joy_held();
-        let text = match f == sym::Mansion1Script_Switches {
-            true => TEXT_POKEMONMANSION1F_SWITCH,
-            false => TEXT_POKEMONMANSIONB1F_SWITCH,
-        };
         return s.display_text_id(text).ret();
     }
     // The Cable Club's Game Boys are a non-goal.

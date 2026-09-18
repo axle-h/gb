@@ -104,6 +104,7 @@ pub(super) fn seed_screen(gb: &GameBoy, game: &mut Game) {
             (view as usize % blocks_wide) as i32 * 32 + x_half as i32 * 16,
             (view as usize / blocks_wide) as i32 * 32 + y_half as i32 * 16,
         ),
+        overrides: Vec::new(),
     };
     for (y, row) in (0..18).map(|y| super::tile_row(gb, y)).enumerate() {
         for (x, &tile) in row.iter().enumerate() {

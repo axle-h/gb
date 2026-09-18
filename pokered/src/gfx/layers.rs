@@ -14,6 +14,10 @@ pub struct MapLayer {
     pub blocks_wide: usize,
     pub blocks: Vec<u8>,
     pub camera: (i32, i32),
+    /// Background tiles a script wrote over the blocks' own, as `(row, column, tile)` in the
+    /// buffer's tiles, sorted: what the screen keeps showing until the map is loaded again.
+    #[serde(default)]
+    pub overrides: Vec<(i32, i32, u8)>,
 }
 
 impl MapLayer {
@@ -22,6 +26,11 @@ impl MapLayer {
         let tileset = self.tileset?;
         if x < 0 || y < 0 || self.blocks_wide == 0 {
             return None;
+        }
+        if !self.overrides.is_empty()
+            && let Ok(at) = self.overrides.binary_search_by_key(&(y / 8, x / 8), |&(row, column, _)| (row, column))
+        {
+            return Some(self.overrides[at].2);
         }
         let (bx, by) = ((x / BLOCK_PX) as usize, (y / BLOCK_PX) as usize);
         if bx >= self.blocks_wide {

@@ -12,8 +12,9 @@ use super::{text_at, Flow, Script};
 
 /// The block a card key door is drawn as while it is still shut.
 const CLOSED_DOOR: u8 = 0x54;
-/// `SilphCo2FGateCallbackScript.GateCoordinates`, in blocks.
+/// `SilphCo2FGateCallbackScript.GateCoordinates`, in blocks, and the event each gate has.
 const GATES: [(u8, u8); 2] = [(2, 2), (2, 5)];
+const DOORS: [u16; 2] = [EVENT_SILPH_CO_2_UNLOCKED_DOOR1, EVENT_SILPH_CO_2_UNLOCKED_DOOR2];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
@@ -29,40 +30,12 @@ pub enum Label {
 }
 
 pub fn script(rt: &mut Script) -> Flow {
-    gate_callback(rt);
+    // `SilphCo2FGateCallbackScript`.
+    super::silph_co::gate_callback(rt, &GATES, &DOORS, CLOSED_DOOR);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().silph_co_2f.cur_script;
     let index = rt.execute_cur_map_script_in_table(index, sym::SilphCo2TrainerHeaders);
     rt.trainer_script(index).then(Label::StoreCurScript)
-}
-
-/// `SilphCo2F_SetCardKeyDoorYScript`: `hUnlockedSilphCoDoors`, which is where in this floor's gate
-/// list the door a card key has just opened is, counted from one, and zero for none of them. The
-/// coordinate is cleared by the match, so no other floor opens a gate at the same square.
-pub(super) fn unlocked_door(rt: &mut Script, gates: &[(u8, u8)]) -> u8 {
-    let Some(index) = gates.iter().position(|&gate| gate == rt.card_key_door()) else {
-        return 0;
-    };
-    rt.clear_card_key_door();
-    index as u8 + 1
-}
-
-/// `SilphCo2FGateCallbackScript`: the two gates are redrawn shut on every load, so a door opened on
-/// one visit is the only one that stays open.
-fn gate_callback(rt: &mut Script) {
-    if !rt.check_and_reset_cur_map_loaded(1) {
-        return;
-    }
-    match unlocked_door(rt, &GATES) {
-        0 => {}
-        1 => rt.set_event(EVENT_SILPH_CO_2_UNLOCKED_DOOR1),
-        _ => rt.set_event(EVENT_SILPH_CO_2_UNLOCKED_DOOR2),
-    }
-    for (event, (x, y)) in [(EVENT_SILPH_CO_2_UNLOCKED_DOOR1, GATES[0]), (EVENT_SILPH_CO_2_UNLOCKED_DOOR2, GATES[1])] {
-        if !rt.check_event(event) {
-            rt.replace_tile_block(x, y, CLOSED_DOOR);
-        }
-    }
 }
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {

@@ -107,10 +107,15 @@ pub mod route22;
 pub mod route3;
 pub mod route18_gate_1f;
 pub mod seafoam_islands_b3f;
+pub mod silph_co;
 pub mod silph_co_1f;
 pub mod silph_co_2f;
 pub mod silph_co_3f;
+pub mod silph_co_4f;
+pub mod silph_co_5f;
+pub mod silph_co_6f;
 pub mod silph_co_11f;
+pub mod silph_co_elevator;
 pub mod ss_anne_2f;
 pub mod ss_anne_captains_room;
 pub mod seafoam_islands_b4f;
@@ -126,6 +131,75 @@ pub mod viridian_forest;
 pub mod viridian_gym;
 pub mod viridian_mart;
 pub mod wardens_house;
+pub mod reds_house_1f;
+pub mod blues_house;
+pub mod viridian_nickname_house;
+pub mod route2_gate;
+pub mod route2_trade_house;
+pub mod digletts_cave_route2;
+pub mod route22_gate;
+pub mod pewter_mart;
+pub mod pewter_nidoran_house;
+pub mod pewter_pokecenter;
+pub mod cerulean_trade_house;
+pub mod cerulean_trashed_house;
+pub mod cerulean_badge_house;
+pub mod bike_shop;
+pub mod mt_moon_pokecenter;
+pub mod vermilion_pidgey_house;
+pub mod vermilion_old_rod_house;
+pub mod pokemon_fan_club;
+pub mod vermilion_dock;
+pub mod ss_anne_kitchen;
+pub mod ss_anne_bow;
+pub mod ss_anne_1f_rooms;
+pub mod ss_anne_b1f_rooms;
+pub mod ss_anne_2f_rooms;
+pub mod digletts_cave_route11;
+pub mod route11_gate_2f;
+pub mod route12;
+pub mod route12_gate_2f;
+pub mod route12_super_rod_house;
+pub mod route13;
+pub mod route14;
+pub mod route15;
+pub mod route15_gate_2f;
+pub mod route16;
+pub mod route16_fly_house;
+pub mod route17;
+pub mod route18;
+pub mod route18_gate_2f;
+pub mod route19;
+pub mod route20;
+pub mod route21;
+pub mod seafoam_islands;
+pub mod seafoam_islands_1f;
+pub mod seafoam_islands_b1f;
+pub mod seafoam_islands_b2f;
+pub mod snorlax;
+pub mod fighting_dojo;
+pub mod copycats_house_1f;
+pub mod copycats_house_2f;
+pub mod saffron_pidgey_house;
+pub mod mr_psychics_house;
+pub mod silph_co_7f;
+pub mod silph_co_8f;
+pub mod silph_co_9f;
+pub mod silph_co_10f;
+pub mod celadon_mart_elevator;
+pub mod rocket_hideout_elevator;
+pub mod pokemon_mansion_2f;
+pub mod pokemon_mansion_3f;
+pub mod cinnabar_lab_trade_room;
+pub mod cinnabar_lab_metronome_room;
+pub mod fuchsia_good_rod_house;
+pub mod museum_1f;
+pub mod power_plant;
+pub mod cerulean_cave_b1f;
+pub mod route23;
+pub mod underground_path_route6;
+pub mod underground_path_route7;
+pub mod underground_path_route8;
 
 #[cfg(test)]
 mod tests;
@@ -263,7 +337,11 @@ maps! {
     SilphCo1F => silph_co_1f,
     SilphCo2F => silph_co_2f,
     SilphCo3F => silph_co_3f,
+    SilphCo4F => silph_co_4f,
+    SilphCo5F => silph_co_5f,
+    SilphCo6F => silph_co_6f,
     SilphCo11F => silph_co_11f,
+    SilphCoElevator => silph_co_elevator,
     SSAnne2F => ss_anne_2f,
     SSAnneCaptainsRoom => ss_anne_captains_room,
     SeafoamIslandsB4F => seafoam_islands_b4f,
@@ -279,6 +357,73 @@ maps! {
     ViridianGym => viridian_gym,
     ViridianMart => viridian_mart,
     WardensHouse => wardens_house,
+    RedsHouse1F => reds_house_1f,
+    BluesHouse => blues_house,
+    ViridianNicknameHouse => viridian_nickname_house,
+    Route2Gate => route2_gate,
+    Route2TradeHouse => route2_trade_house,
+    DiglettsCaveRoute2 => digletts_cave_route2,
+    Route22Gate => route22_gate,
+    PewterMart => pewter_mart,
+    PewterNidoranHouse => pewter_nidoran_house,
+    PewterPokecenter => pewter_pokecenter,
+    CeruleanTradeHouse => cerulean_trade_house,
+    CeruleanTrashedHouse => cerulean_trashed_house,
+    CeruleanBadgeHouse => cerulean_badge_house,
+    BikeShop => bike_shop,
+    MtMoonPokecenter => mt_moon_pokecenter,
+    VermilionPidgeyHouse => vermilion_pidgey_house,
+    VermilionOldRodHouse => vermilion_old_rod_house,
+    PokemonFanClub => pokemon_fan_club,
+    VermilionDock => vermilion_dock,
+    SSAnneKitchen => ss_anne_kitchen,
+    SSAnneBow => ss_anne_bow,
+    SSAnne1FRooms => ss_anne_1f_rooms,
+    SSAnneB1FRooms => ss_anne_b1f_rooms,
+    SSAnne2FRooms => ss_anne_2f_rooms,
+    DiglettsCaveRoute11 => digletts_cave_route11,
+    Route11Gate2F => route11_gate_2f,
+    Route12 => route12,
+    Route12Gate2F => route12_gate_2f,
+    Route12SuperRodHouse => route12_super_rod_house,
+    Route13 => route13,
+    Route14 => route14,
+    Route15 => route15,
+    Route15Gate2F => route15_gate_2f,
+    Route16 => route16,
+    Route16FlyHouse => route16_fly_house,
+    Route17 => route17,
+    Route18 => route18,
+    Route18Gate2F => route18_gate_2f,
+    Route19 => route19,
+    Route20 => route20,
+    Route21 => route21,
+    SeafoamIslands1F => seafoam_islands_1f,
+    SeafoamIslandsB1F => seafoam_islands_b1f,
+    SeafoamIslandsB2F => seafoam_islands_b2f,
+    FightingDojo => fighting_dojo,
+    CopycatsHouse1F => copycats_house_1f,
+    CopycatsHouse2F => copycats_house_2f,
+    SaffronPidgeyHouse => saffron_pidgey_house,
+    MrPsychicsHouse => mr_psychics_house,
+    SilphCo7F => silph_co_7f,
+    SilphCo8F => silph_co_8f,
+    SilphCo9F => silph_co_9f,
+    SilphCo10F => silph_co_10f,
+    CeladonMartElevator => celadon_mart_elevator,
+    RocketHideoutElevator => rocket_hideout_elevator,
+    PokemonMansion2F => pokemon_mansion_2f,
+    PokemonMansion3F => pokemon_mansion_3f,
+    CinnabarLabTradeRoom => cinnabar_lab_trade_room,
+    CinnabarLabMetronomeRoom => cinnabar_lab_metronome_room,
+    FuchsiaGoodRodHouse => fuchsia_good_rod_house,
+    Museum1F => museum_1f,
+    PowerPlant => power_plant,
+    CeruleanCaveB1F => cerulean_cave_b1f,
+    Route23 => route23,
+    UndergroundPathRoute6 => underground_path_route6,
+    UndergroundPathRoute7 => underground_path_route7,
+    UndergroundPathRoute8 => underground_path_route8,
 }
 
 impl From<crate::modes::overworld::events::Label> for Code {
@@ -309,6 +454,19 @@ pub struct ScriptState {
     /// `wStatusFlags1`'s `BIT_GAVE_SAFFRON_GUARDS_DRINK`: one drink opens all four Saffron gates.
     #[serde(default)]
     pub gave_saffron_guards_drink: bool,
+    /// `wStatusFlags4`'s `BIT_GOT_LAPRAS`: the Silph worker parts with his Lapras once, whatever
+    /// becomes of it afterwards.
+    #[serde(default)]
+    pub got_lapras: bool,
+    /// `wStatusFlags1`'s `BIT_GOT_OLD_ROD`.
+    #[serde(default)]
+    pub got_old_rod: bool,
+    /// `wStatusFlags1`'s `BIT_GOT_GOOD_ROD`.
+    #[serde(default)]
+    pub got_good_rod: bool,
+    /// `wStatusFlags1`'s `BIT_GOT_SUPER_ROD`.
+    #[serde(default)]
+    pub got_super_rod: bool,
     /// `wFirstLockTrashCanIndex` and `wSecondLockTrashCanIndex`: the Vermilion Gym's two locks.
     #[serde(default)]
     pub trash_cans: [u8; 2],

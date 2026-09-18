@@ -15,17 +15,24 @@
 //! or off closes the start menu, answering `Outcome::Chosen(BICYCLE)`. The Surfboard goes onto the
 //! water or off it and reopens the bag, the overworld taking the step once the menu is closed.
 //!
+//! The Poké Flute is played from here too (`ItemUsePokeFlute`), over the map rather than the bag: a
+//! Snorlax the player is standing beside is woken, and its road's own script fights it.
+//!
 //! An item whose effect is another chunk's is answered rather than run: the bag closes with
 //! `Outcome::Chosen(item id)` and the start menu comes back. Each has one arm in `use_item`.
 
 use poke_core::item::{self, ItemId};
+use poke_core::map::Map;
 use poke_core::map_header::MapHeader;
-use poke_core::symbols::DmgPointer;
+use poke_core::symbols::pokered_events::{EVENT_BEAT_ROUTE12_SNORLAX, EVENT_BEAT_ROUTE16_SNORLAX,
+    EVENT_FIGHT_ROUTE12_SNORLAX, EVENT_FIGHT_ROUTE16_SNORLAX};
+use poke_core::symbols::{pokered_symbols, DmgPointer};
 use poke_core::text_script::{far_text, TextBuffer};
 use serde::{Deserialize, Serialize};
+use crate::audio::data::{sounds, AudioBank, Sound, SoundId};
 use crate::command::Decision;
 use crate::gfx::text_boxes::TextBoxId;
-use crate::gfx::ui::UiSurface;
+use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
 use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::list_menu::{remove_from_bag, ListMenu};
@@ -65,6 +72,8 @@ enum Phase {
     Music { text: Option<DmgPointer>, after: After },
     /// `ItemUseEscapeRope`'s `DelayFrames 30` with the map back on screen.
     Delay(u8),
+    /// `PlayedFluteHadEffectText`'s `text_asm`: the tune on channel 3, waited out.
+    Flute,
 }
 
 /// `ItemUseEscapeRope`'s `DelayFrames 30`.
@@ -83,6 +92,25 @@ enum After {
     ConfirmToss(u8),
     /// `CloseStartMenu`.
     CloseMenu,
+    /// `PlayedFluteHadEffectText` is closed: the tune plays next.
+    Flute,
+}
+
+/// `wChannelSoundIDs + CHAN3`, which the flute's header claims and `ItemUsePokeFlute` waits on.
+const FLUTE_CHANNEL: usize = 2;
+
+/// `ItemUsePokeFlute`'s map test: the event of the Snorlax the player is standing next to, if one is
+/// left to wake. `Route12SnorlaxFluteCoords` and `Route16SnorlaxFluteCoords`.
+fn snorlax_to_wake(ctx: &Ctx) -> Option<u16> {
+    const ROUTE_12: [(u8, u8); 4] = [(9, 62), (10, 61), (10, 63), (11, 62)];
+    const ROUTE_16: [(u8, u8); 2] = [(27, 10), (25, 10)];
+    let (coords, beat, fight) = match ctx.world.location.map {
+        Map::Route12 => (&ROUTE_12[..], EVENT_BEAT_ROUTE12_SNORLAX, EVENT_FIGHT_ROUTE12_SNORLAX),
+        Map::Route16 => (&ROUTE_16[..], EVENT_BEAT_ROUTE16_SNORLAX, EVENT_FIGHT_ROUTE16_SNORLAX),
+        _ => return None,
+    };
+    let here = (ctx.world.location.x, ctx.world.location.y);
+    (!ctx.world.events.is_set(beat) && coords.contains(&here)).then_some(fight)
 }
 
 impl ItemMenu {
@@ -189,6 +217,9 @@ impl ItemMenu {
         if self.item == ItemId::EscapeRope {
             return self.escape_rope(ctx);
         }
+        if self.item == ItemId::PokeFlute {
+            return self.poke_flute(ctx);
+        }
         let party_menu_path = self.item as u8 >= ItemId::Hm01Cut as u8 || item::opens_party_menu(self.item);
         if !party_menu_path && item::closes_menu(self.item) {
             return self.elsewhere();
@@ -245,6 +276,16 @@ impl ItemMenu {
         Transition::Stay
     }
 
+    /// `ItemUsePokeFlute` out of battle: the tune played over the map rather than the bag, and a
+    /// Snorlax standing beside the player woken, which its road's own script then fights.
+    fn poke_flute(&mut self, ctx: &mut Ctx) -> Transition {
+        ctx.screen.ui.uncover(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y);
+        if snorlax_to_wake(ctx).is_none() {
+            return self.text("_PlayedFluteNoEffectText", After::CloseMenu);
+        }
+        self.text_at(pokered_symbols::PlayedFluteHadEffectText, After::Flute)
+    }
+
     /// `.tossItem`: how many, unless `TossItem_` is going to refuse it anyway.
     fn toss(&mut self, ctx: &mut Ctx) -> Transition {
         if !Inventory::may_toss(self.item) {
@@ -281,6 +322,15 @@ impl ModeUpdate for ItemMenu {
                     Some(text) => self.text_at(text, after),
                     None => self.after(ctx, after),
                 }
+            }
+            Phase::Flute if ctx.pacing != crate::Pacing::Instant
+                && ctx.audio.channel_sound_id(FLUTE_CHANNEL) == sounds::SFX_POKEFLUTE.0 => Transition::Stay,
+            Phase::Flute => {
+                crate::modes::overworld::play_default_music(ctx);
+                if let Some(event) = snorlax_to_wake(ctx) {
+                    ctx.world.events.set(event);
+                }
+                Transition::Pop(Outcome::Chosen(self.item as u8))
             }
             Phase::Delay(1) => {
                 remove_from_bag(ctx, self.slot as usize, 1);
@@ -334,6 +384,12 @@ impl ModeUpdate for ItemMenu {
                 self.text("_ThrewAwayItemText", After::MenuLoop)
             }
             (After::ConfirmToss(_), _) => self.menu_loop(ctx),
+            (After::Flute, _) => {
+                ctx.audio.play_sound(SoundId::STOP_ALL_MUSIC);
+                ctx.audio.play_music(Sound { bank: AudioBank::One, id: sounds::SFX_POKEFLUTE });
+                self.phase = Phase::Flute;
+                Transition::Stay
+            }
             (After::CloseMenu, _) => self.after(ctx, After::CloseMenu),
         }
     }

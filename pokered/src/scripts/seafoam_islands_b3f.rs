@@ -11,11 +11,17 @@ use poke_core::symbols::pokered_symbols::RLEList_ForcedSurfingStrongCurrentNearS
 use poke_core::symbols::pokered_toggles::{TOGGLE_SEAFOAM_ISLANDS_B3F_BOULDER_1, TOGGLE_SEAFOAM_ISLANDS_B3F_BOULDER_2,
     TOGGLE_SEAFOAM_ISLANDS_B4F_BOULDER_1, TOGGLE_SEAFOAM_ISLANDS_B4F_BOULDER_2};
 use serde::{Deserialize, Serialize};
+use super::seafoam_islands::{boulders_and_holes, Floor};
 use super::{Flow, Script};
 
-/// `Seafoam4HolesCoords`, as (x, y): the floor's own two holes, which a boulder or the player falls
-/// down. They are named for the floor below, which is where the boulder lands.
-const HOLES: [(u8, u8); 2] = [(3, 16), (6, 16)];
+/// `Seafoam4HolesCoords`: the floor's own two holes, which a boulder or the player falls down.
+const FLOOR: Floor = Floor {
+    holes: [(3, 16), (6, 16)],
+    down_hole: [EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE, EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE],
+    hide: [TOGGLE_SEAFOAM_ISLANDS_B3F_BOULDER_1, TOGGLE_SEAFOAM_ISLANDS_B3F_BOULDER_2],
+    show: [TOGGLE_SEAFOAM_ISLANDS_B4F_BOULDER_1, TOGGLE_SEAFOAM_ISLANDS_B4F_BOULDER_2],
+    below: Map::SeafoamIslandsB4F,
+};
 /// The square at the foot of the steps, where the current takes over.
 const NEAR_STEPS: (u8, u8) = (15, 8);
 
@@ -30,21 +36,7 @@ pub enum Label {}
 
 pub fn script(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
-    if rt.check_and_reset_pushed_boulder() {
-        let Some(hole) = rt.check_boulder_coords(&HOLES) else {
-            return Flow::Return;
-        };
-        let (event, hide, show) = if hole == 0 {
-            (EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE, TOGGLE_SEAFOAM_ISLANDS_B3F_BOULDER_1, TOGGLE_SEAFOAM_ISLANDS_B4F_BOULDER_1)
-        } else {
-            (EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE, TOGGLE_SEAFOAM_ISLANDS_B3F_BOULDER_2, TOGGLE_SEAFOAM_ISLANDS_B4F_BOULDER_2)
-        };
-        rt.set_event(event);
-        rt.hide_object(hide);
-        rt.show_object(show);
-    } else if let Some(which) = rt.are_player_coords_in_array(&HOLES) {
-        // `IsPlayerOnDungeonWarp`: the fall is taken before the map's own script runs.
-        rt.fall_down_hole(Map::SeafoamIslandsB4F, which);
+    if !boulders_and_holes(rt, &FLOOR) {
         return Flow::Return;
     }
     run_current_map_script(rt)
