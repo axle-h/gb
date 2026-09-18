@@ -126,7 +126,7 @@ pub enum Entry {
 pub enum Check {
     /// Stood on the map.
     Visited(Map),
-    /// A flag byte and mask in RAM, which the game never clears once set.
+    /// A flag byte and mask in RAM, done once it has been seen set.
     Flag { address: u16, mask: u8 },
     /// A toggle that starts set: done once it has been seen clear and is set again.
     Toggled { address: u16, mask: u8 },
@@ -351,7 +351,7 @@ pub fn ways() -> Vec<Way> {
         .collect()
 }
 
-/// What a run has done, folded in tick by tick; flags are read at the end because they stay set.
+/// What a run has done, folded in tick by tick.
 #[derive(Debug, Default, Clone)]
 pub struct Ledger {
     visited: BTreeSet<Map>,
@@ -359,15 +359,27 @@ pub struct Ledger {
     observed: HashSet<Entry>,
     /// Every [`Check::Toggled`] in the list, and whether it has been seen clear yet.
     toggled: Vec<(u16, u8, bool)>,
+    /// Every [`Check::Flag`] in the list, and whether it has been seen set yet. Nearly all of them
+    /// stay set for the rest of the game, but the Hall of Fame clears the Indigo Plateau's events
+    /// before it saves, so the four Elite Four trainers are beaten and then unbeaten a moment later.
+    flagged: Vec<(u16, u8, bool)>,
 }
 
 impl Ledger {
     pub fn new(list: &[Item]) -> Self {
-        let toggled = list.iter().filter_map(|item| match item.check {
-            Check::Toggled { address, mask } => Some((address, mask, false)),
-            _ => None,
-        }).collect();
-        Self { toggled, ..Self::default() }
+        let of = |wanted: fn(&Check) -> Option<(u16, u8)>| -> Vec<(u16, u8, bool)> {
+            let mut flags: Vec<(u16, u8, bool)> = list.iter()
+                .filter_map(|item| wanted(&item.check).map(|(address, mask)| (address, mask, false)))
+                .collect();
+            flags.sort_unstable();
+            flags.dedup();
+            flags
+        };
+        Self {
+            toggled: of(|check| match *check { Check::Toggled { address, mask } => Some((address, mask)), _ => None }),
+            flagged: of(|check| match *check { Check::Flag { address, mask } => Some((address, mask)), _ => None }),
+            ..Self::default()
+        }
     }
 
     /// Fold one tick's game state in.
@@ -376,6 +388,9 @@ impl Ledger {
         self.held.extend(state.bag.iter().map(|item| item.id as u8));
         for (address, mask, seen_clear) in self.toggled.iter_mut() {
             *seen_clear |= mmu.read(*address) & *mask == 0;
+        }
+        for (address, mask, seen_set) in self.flagged.iter_mut() {
+            *seen_set |= mmu.read(*address) & *mask != 0;
         }
     }
 
@@ -387,7 +402,8 @@ impl Ledger {
     pub fn done(&self, item: &Item, mmu: &MMU, state: &GameState) -> bool {
         match &item.check {
             Check::Visited(map) => self.visited.contains(map),
-            Check::Flag { address, mask } => mmu.read(*address) & mask != 0,
+            Check::Flag { address, mask } => mmu.read(*address) & mask != 0
+                || self.flagged.iter().any(|&(a, m, seen_set)| (a, m) == (*address, *mask) && seen_set),
             Check::Toggled { address, mask } => mmu.read(*address) & mask != 0
                 && self.toggled.iter().any(|&(a, m, seen_clear)| (a, m) == (*address, *mask) && seen_clear),
             Check::Held(ids) => ids.iter().any(|id| self.held.contains(id)),
@@ -477,5 +493,28 @@ mod tests {
         assert!(!missing.contains(&Entry::Map(Map::RedsHouse2F)), "the map stood on was not ticked off");
         assert!(!missing.contains(&Entry::CinnabarQuiz), "an observed entry was not ticked off");
         assert!(missing.contains(&Entry::Map(Map::PalletTown)), "a map never stood on was ticked off");
+    }
+
+    /// The Hall of Fame clears the Indigo Plateau's events before it saves, so a run that beats the
+    /// Elite Four ends holding no flag that says so.
+    #[test]
+    fn a_trainer_the_game_unbeats_stays_beaten() {
+        use gb::ram::RAM;
+        let mut fixture = TestFixture::new(
+            include_bytes!("../data/start-of-game-state.bin"), Duration::from_secs(10), vec![]);
+        let state = fixture.game_state();
+        let list = super::checklist(fixture.gb.core().mmu());
+        let lorelei = Entry::Trainer { map: Map::LoreleisRoom, index: 0 };
+        let item = list.iter().find(|item| item.entry == lorelei).expect("Lorelei is a trainer header");
+        let Check::Flag { address, mask } = item.check else { panic!("a trainer is a flag") };
+
+        let mut ledger = Ledger::new(&list);
+        fixture.gb.core_mut().mmu_mut().write(address, mask);
+        ledger.observe(&state, fixture.gb.core().mmu());
+        fixture.gb.core_mut().mmu_mut().write(address, 0);
+        assert!(ledger.done(item, fixture.gb.core().mmu(), &state), "{lorelei:?} was unbeaten by the reset");
+
+        let ledger = Ledger::new(&list);
+        assert!(!ledger.done(item, fixture.gb.core().mmu(), &state), "a flag never seen set reads as done");
     }
 }

@@ -14,6 +14,8 @@ use crate::pokemon::integration_tests::completion::{checklist, Entry, Ledger, Le
 use crate::pokemon::integration_tests::godmode::{names_map, Intent};
 use crate::pokemon::integration_tests::llm_harness::{Brain, Call, LlmRun, Reply, TurnRequest};
 use crate::pokemon::item::ItemId;
+use crate::pokemon::PokemonApiTrait;
+use crate::pokemon::symbols::DmgPointerRead;
 
 /// Trainers are fought by the script; a wild battle is the brain's, because only it knows what the
 /// run is hunting.
@@ -1181,7 +1183,34 @@ pub fn play(fixture: &'static [u8], name: &'static str, steps: Vec<Step>, game_m
     }
 
     let started = std::time::Instant::now();
+    // The ceremony, the credits, the save and the title screen it resets to are the cartridge
+    // playing to itself: the agent stops at the Hall of Fame and a deployed run ends there, so the
+    // buttons that see a run into the postgame are the harness's own, as `drive_out_of_hall_of_fame`
+    // presses them. Mash, a tick on and a tick off, so every press is a fresh rising edge.
+    // A phase that starts from a won game is past it, so the ceremony is over before it began.
+    let mut ceremony: Option<bool> = None;
+    let mut mash = 0u32;
     run.tick_until(wall, |run| {
+        if ceremony != Some(false) {
+            let map = run.map_if_readable();
+            let mut api = run.fixture().api();
+            let won = api.mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wNumHoFTeams) > 0;
+            // WRAM is cleared by the reset, so the counter reads zero again until the save is
+            // loaded: what says the ceremony is over is a playable overworld somewhere else.
+            let playable = api.game_mode() == Some(crate::pokemon::encoding::GameMode::Overworld)
+                && map.is_some_and(|map| map != crate::pokemon::map::Map::HallOfFame);
+            match ceremony {
+                None if won && !playable => ceremony = Some(true),
+                None if won => ceremony = Some(false),
+                Some(true) if playable => { ceremony = Some(false); api.release_all_buttons() }
+                Some(true) => {
+                    mash += 1;
+                    if mash % 2 == 0 { api.press_button(gb::joypad::JoypadButton::A) }
+                    else { api.release_all_buttons() }
+                }
+                _ => {}
+            }
+        }
         if let Ok(state) = run.fixture().try_game_state() {
             ledger.lock().expect("not poisoned").observe(&state, run.fixture().gb.core().mmu());
             // Master Balls for every catch outside the Safari Zone, as the legendary legs have.
@@ -2089,5 +2118,190 @@ fn completion_phase_power_plant() {
     let missing = missing_on(&mut played, &[Map::PowerPlant],
         &[Entry::Way(Way::PowerPlantBall), Entry::Way(Way::Legendary(Legend::Zapdos))]);
     cut(&mut played, "completion-power-plant");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// Victory Road: Route 22's gate and Route 23's badge checks, the three Strength floors, Moltres on
+/// the second of them, and out onto the plateau.
+pub fn to_victory_road() -> Vec<Step> {
+    use Step::*;
+    const ROAD: &[&str] = &["VictoryRoad1F", "VictoryRoad2F", "VictoryRoad3F"];
+    vec![
+        Collect(false), Tidy,
+        Field(r#"{"move":"fly","map":"ViridianCity"}"#), GoTo("ViridianCity"),
+        // The phases before filled the party and the box, and a full box refuses every ball, so the
+        // bird would be met with nothing to throw.
+        GoTo("ViridianPokecenter"), AtPc(Pc::ChangeBox(3)), GoTo("ViridianCity"),
+        GoTo("Route22"), Explore { maps: &["Route22"], patience: 300 },
+        GoTo("Route22Gate"), Clear(&[]),
+        GoTo("Route23"), Explore { maps: &["Route23"], patience: 300 },
+        GoTo("VictoryRoad1F"),
+        // Four Strength goals and a hole across three floors, in the order the way up needs them.
+        Repeat("switch at (17, 13)"), Explore { maps: &["VictoryRoad1F"], patience: 400 },
+        GoTo("VictoryRoad2F"),
+        Repeat("switch at (1, 16)"),
+        // 1F's north pocket is only reached down 2F's west ladder, and its two balls stand on a ledge
+        // behind a boulder that serves no switch. Shoved all the way along, it ends beside the TM on
+        // the square the Rare Candy is taken from, so the floor is left and re-entered to put it
+        // back, and the second pass lifts it out of the row instead.
+        Take("VictoryRoad1F, arriving at (1, 1)"),
+        Take("boulder at (14, 2) one square left"), Take("boulder at (13, 2) one square left"),
+        Take("boulder at (12, 2) one square left"), Take("boulder at (11, 2) one square left"),
+        // The floors' pickups fill the bag, and a full bag refuses a ball in silence.
+        Tidy, Talk("TMSkyAttack"),
+        Take("VictoryRoad2F, arriving at (0, 8)"), Take("VictoryRoad1F, arriving at (1, 1)"),
+        Take("boulder at (14, 2) one square left"), Take("boulder at (13, 2) one square left"),
+        Take("boulder at (12, 2) one square left"), Take("boulder at (11, 2) one square up"),
+        Talk("RareCandy"), GoTo("VictoryRoad2F"),
+        GoTo("VictoryRoad3F"),
+        // Moltres is on 2F's north strip, and 3F's (2, 0) ladder is the only way onto it.
+        Take("VictoryRoad2F, arriving at (1, 1)"),
+        Hunt { species: "Moltres", row: "Moltres", ball: "MasterBall",
+               way: Way::Legendary(Legend::Moltres), on: "VictoryRoad2F" },
+        GoTo("VictoryRoad3F"),
+        Repeat("switch at (3, 5)"),
+        Repeat("hole at (23, 15)"),
+        Take("VictoryRoad2F, arriving at (22, 16)"),
+        Repeat("switch at (9, 16)"),
+        Take("VictoryRoad3F, arriving at (27, 15)"),
+        Take("VictoryRoad2F, arriving at (27, 7)"),
+        Explore { maps: ROAD, patience: 1200 },
+        GoTo("Route23"), GoTo("IndigoPlateau"), GoTo("IndigoPlateauLobby"), Clear(&[]),
+    ]
+}
+
+#[test]
+fn completion_phase_victory_road() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-power-plant.bin"), "completion-victory-road",
+                          to_victory_road(), 600, Duration::from_secs(3000));
+    let missing = missing_on(&mut played, &[
+        Map::Route22, Map::Route22Gate, Map::Route23, Map::VictoryRoad1F, Map::VictoryRoad2F,
+        Map::VictoryRoad3F, Map::IndigoPlateau, Map::IndigoPlateauLobby,
+    ], &[Entry::Way(Way::Legendary(Legend::Moltres)), Entry::Way(Way::PcChangeBox)]);
+    cut(&mut played, "completion-victory-road");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// The Elite Four, the Champion, and the ceremony that follows: the four rooms in the one order the
+/// cartridge allows, the rival, and the run handed back in Pallet Town once the game has saved.
+pub fn to_the_hall_of_fame() -> Vec<Step> {
+    use Step::*;
+    vec![
+        Collect(false),
+        // Nothing can be bought or healed once the first door shuts behind the run.
+        GoTo("IndigoPlateauLobby"), Talk("Nurse"),
+        GoTo("LoreleisRoom"), Talk("Lorelei"),
+        GoTo("BrunosRoom"), Talk("Bruno"),
+        GoTo("AgathasRoom"), Talk("Agatha"),
+        GoTo("LancesRoom"), Talk("Lance"),
+        // The door is the last decision: the rival, Oak, the Hall of Fame, the credits and the
+        // reset ask for nothing but the button the harness presses, so no turn is ever taken in the
+        // Champion's room and arriving there cannot be what ends a step. The save comes back in
+        // Pallet Town.
+        Take("ChampionsRoom"),
+        GoTo("PalletTown"),
+    ]
+}
+
+#[test]
+fn completion_phase_hall_of_fame() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-victory-road.bin"), "completion-hall-of-fame",
+                          to_the_hall_of_fame(), 300, Duration::from_secs(1800));
+    let missing = missing_on(&mut played, &[
+        Map::IndigoPlateauLobby, Map::LoreleisRoom, Map::BrunosRoom, Map::AgathasRoom,
+        Map::LancesRoom, Map::ChampionsRoom, Map::HallOfFame,
+    ], &[Entry::HallOfFame]);
+    cut(&mut played, "completion-hall-of-fame");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// Cerulean Cave, which the guard opens to a Champion: its three floors, a paced encounter on a
+/// cave floor, and Mewtwo at the bottom.
+pub fn to_mewtwo() -> Vec<Step> {
+    use Step::*;
+    const CAVE: &[&str] = &["CeruleanCave1F", "CeruleanCave2F", "CeruleanCaveB1F"];
+    const UPPER: &[&str] = &["CeruleanCave1F", "CeruleanCave2F"];
+    vec![
+        Collect(false),
+        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
+        // The cave stands on the water of Cerulean's north west pocket, and the city proper cannot
+        // reach it: the way in is down from Nugget Bridge.
+        GoTo("Route24"), Take("CeruleanCity"),
+        GoTo("CeruleanCave1F"),
+        // A cave floor is one of the two places an encounter has to be paced for.
+        Hunt { species: "*", row: "Pace", ball: "MasterBall", way: Way::WildOnACaveFloor, on: "CeruleanCave1F" },
+        // The two upper floors first, which is where the way down is: 1F's ladder to B1F stands
+        // behind an elevation boundary and is reached by way of 2F. Mewtwo is on the floor below,
+        // so an exploring cannot walk up to it here, and one that did would start the battle and
+        // hide it for the rest of the game by running.
+        Explore { maps: UPPER, patience: 600 },
+        GoTo("CeruleanCaveB1F"),
+        Hunt { species: "Mewtwo", row: "Mewtwo", ball: "MasterBall", way: Way::Legendary(Legend::Mewtwo),
+               on: "CeruleanCaveB1F" },
+        Explore { maps: CAVE, patience: 400 },
+        GoTo("CeruleanCave1F"), Clear(&[]), GoTo("CeruleanCave2F"), Clear(&[]),
+        GoTo("CeruleanCaveB1F"), Clear(&[]),
+        // Fly is refused underground, so the way out is walked; the pocket it comes out in is
+        // Cerulean's own map, and the flight from there lands at the Pokémon Centre.
+        GoTo("CeruleanCity"), Tidy,
+    ]
+}
+
+#[test]
+fn completion_phase_mewtwo() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-hall-of-fame.bin"), "completion-mewtwo",
+                          to_mewtwo(), 600, Duration::from_secs(3000));
+    let missing = missing_on(&mut played, &[
+        Map::CeruleanCave1F, Map::CeruleanCave2F, Map::CeruleanCaveB1F,
+    ], &[Entry::Way(Way::Legendary(Legend::Mewtwo)), Entry::Way(Way::WildOnACaveFloor)]);
+    cut(&mut played, "completion-mewtwo");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+
+
+/// The eastern routes, which nothing before this has walked: Routes 13, 14 and 15 and their thirty
+/// trainers, walked down from Lavender to Fuchsia.
+pub fn to_the_eastern_routes() -> Vec<Step> {
+    use Step::*;
+    // The gates are part of their routes: a route read from the pocket the run stood in looks
+    // finished while the half beyond its gate building has never been seen.
+    const EAST: &[&str] = &["Route12", "Route12Gate1F", "Route12Gate2F", "Route13", "Route14",
+                            "Route15", "Route15Gate1F", "Route15Gate2F"];
+    vec![
+        Collect(false),
+        // Walked from the Lavender end, which is the way the ledges run: Route 15's north lane
+        // holds a trainer and the TM Rage, and coming up from Fuchsia reaches neither.
+        Field(r#"{"move":"fly","map":"LavenderTown"}"#), GoTo("LavenderTown"),
+        GoTo("Route12"),
+        Explore { maps: EAST, patience: 1200 },
+        // And back up from the other end: the lanes are one way, so each direction reaches a half
+        // the other cannot, and Route 15's two halves are the gate building's two doors.
+        Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"), GoTo("Route15"),
+        Explore { maps: EAST, patience: 1200 },
+        // Route 15's north strip is entered from Route 14 and left by a ledge, so neither
+        // exploring stands on it: the walk west across it is the only way its trainer and its TM
+        // are ever offered.
+        // Route 15's north strip, with a trainer and the TM Rage on it, is walled off from the rest
+        // of the route and opens only onto Route 14 -- and the Route 14 side of it is a pocket of
+        // three tiles behind a tree. Nothing reaches it that does not cut that tree.
+        GoTo("Route14"), Take("cut down the tree at (4, 42)"),
+        Take("Route15"), Clear(&[]),
+        Tidy,
+    ]
+}
+
+#[test]
+fn completion_phase_eastern_routes() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-mewtwo.bin"), "completion-east",
+                          to_the_eastern_routes(), 900, Duration::from_secs(3600));
+    let missing = missing_on(&mut played, &[
+        Map::Route13, Map::Route14, Map::Route15, Map::Route15Gate1F, Map::Route15Gate2F,
+    ], &[]);
+    cut(&mut played, "completion-east");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
