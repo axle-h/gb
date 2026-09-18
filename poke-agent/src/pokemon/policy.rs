@@ -3363,7 +3363,7 @@ impl Policy for DeterministicPolicy {
                 println!("[policy] grind: {:?} is {:?} — curing it with a {cure:?} rather than walking to a Centre",
                     mon.species, mon.status);
                 return Some(FieldMove::UseBagItem { item: cure,
-                    target: crate::pokemon::postgame::items::UseTarget::Party { slot } });
+                    target: crate::pokemon::postgame::items::UseTarget::Party { slot, evolve: true } });
             }
         }
         if let Some(&PolicyStep::UseFlash { slot }) = self.queue.front() {

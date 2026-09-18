@@ -95,10 +95,17 @@ pub enum Step {
     Coins(u16),
     /// Buy this Pokémon prize; the nickname prompt that follows is the proof.
     Prize(&'static str),
-    /// Use the stone `item` on the first party member of `species`; done once it has evolved.
+    /// Use the stone or Rare Candy `item` on the first party member of `species`; done once it has
+    /// evolved.
     Evolve { item: &'static str, species: &'static str },
     /// From here on, throw a Master Ball at every wild species not caught yet, or stop.
     Collect(bool),
+    /// Feed the first party member of `species` a Rare Candy and stop the evolution it starts; done
+    /// once it has gained the level and kept its species.
+    KeepFromEvolving(&'static str),
+    /// Pace the Safari Zone's grass until the game ends on its step count, throwing bait at the
+    /// first thing met, a rock at the next, and running from each.
+    Safari,
 }
 
 /// One `pc_pokemon` operation, on the first Pokémon of a species.
@@ -297,6 +304,8 @@ pub struct CompletionBrain {
     quiz_pending: bool,
     /// The party slot a stone was used on.
     evolving: Option<u8>,
+    /// The party slot and level a Rare Candy was fed to, its evolution to be stopped.
+    kept_from_evolving: Option<(u8, u8)>,
     /// The party's size when a Day Care call was sent.
     day_care_sent: Option<usize>,
     /// Pickups that failed, per map and row.
@@ -332,7 +341,7 @@ impl CompletionBrain {
             ran: Default::default(), running_at: 0, came: Came::Given, named: 0, party_was_full: false,
             graph: Default::default(), travelled: Default::default(), offered: HashSet::new(), barren: 0,
             last_walk: None, here: String::new(), pockets: Default::default(), pocket_edges: Default::default(), left_by: None,
-            exploring: 0, explore_idle: 0, explored_maps: HashSet::new(), explore_cut: HashSet::new(), tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), walks_given_up: Default::default(), day_care_sent: None, used_on: false, prize_pending: false, quiz_pending: false, evolving: None, repeated: (String::new(), 0), ledger,
+            exploring: 0, explore_idle: 0, explored_maps: HashSet::new(), explore_cut: HashSet::new(), tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), walks_given_up: Default::default(), day_care_sent: None, used_on: false, prize_pending: false, quiz_pending: false, evolving: None, kept_from_evolving: None, repeated: (String::new(), 0), ledger,
             stuck: Arc::new(Mutex::new(None)), turns: Arc::new(Mutex::new(0)),
         }
     }
@@ -367,6 +376,16 @@ impl CompletionBrain {
         // The game draws this message over itself, so only the part that always survives is matched.
         if situation.contains("BOX is full") {
             self.box_full = true;
+        }
+        if matches!(self.steps.get(self.at), Some(Step::Safari)) {
+            let ledger = self.ledger.lock().expect("not poisoned");
+            let action = if !ledger.has_seen(&Entry::Way(Way::SafariBait)) { "bait" }
+                else if !ledger.has_seen(&Entry::Way(Way::SafariRock)) { "rock" }
+                else { "run" };
+            drop(ledger);
+            if ids.iter().any(|id| id == action) {
+                return choose(action);
+            }
         }
         let new = !self.caught.contains(&plain(&foe));
         let (hunted, ball) = match self.steps.get(self.at) {
@@ -459,6 +478,10 @@ impl CompletionBrain {
         }
         match self.orders.pop_front() {
             Some((item, quantity)) => {
+                // `buy_item` refuses more than three chained kinds, and the mart closes after one call.
+                if self.orders.len() > 3 {
+                    self.stuck(format!("step {}: more kinds than one buy_item takes: {:?}", self.at, self.orders));
+                }
                 let then: Vec<serde_json::Value> = self.orders.drain(..)
                     .map(|(item, quantity)| serde_json::json!({ "item": item, "quantity": quantity }))
                     .collect();
@@ -910,6 +933,13 @@ impl CompletionBrain {
                 }
                 Step::Wait => { self.at += 1; return Reply::Calls(vec![Call::wait(1)]) }
                 Step::Collect(on) => { self.collecting = *on; self.at += 1; continue }
+                Step::Safari => {
+                    if self.ledger.lock().expect("not poisoned").has_seen(&Entry::Way(Way::SafariOutOfSteps)) {
+                        self.at += 1;
+                        continue;
+                    }
+                    rows.iter().map(|(id, _)| id).find(|id| id.ends_with(":Grass")).cloned()
+                }
                 Step::Coins(target) => {
                     let coins: u16 = text.split("Coins: ").nth(1)
                         .and_then(|rest| rest.split_whitespace().next())
@@ -958,7 +988,7 @@ impl CompletionBrain {
                             return Reply::Calls(vec![Call::wait(10)]);
                         }
                         self.evolving = None;
-                        self.saw(Way::EvolvedByStone);
+                        self.saw(if *item == "RareCandy" { Way::EvolvedByRareCandy } else { Way::EvolvedByStone });
                         self.at += 1;
                         continue;
                     }
@@ -999,7 +1029,43 @@ impl CompletionBrain {
                     self.day_care_sent = Some(party);
                     return Reply::call("use_field_move", arguments);
                 }
-                Step::Tidy => { self.at += 1; continue }
+                // Reached partway through a turn, after a step that needed no row of its own.
+                Step::KeepFromEvolving(species) => {
+                    let line = |slot: u8| text.split("### Party").nth(1).and_then(|party| party.lines()
+                        .find(|line| line.starts_with(&format!("{slot}. "))).map(str::to_string));
+                    let level = |line: &str| line.split(" Lv").nth(1)
+                        .and_then(|rest| rest.split_whitespace().next()).and_then(|n| n.parse::<u8>().ok());
+                    let kind = |line: &str| line.split(" Lv").next()
+                        .and_then(|name| name.rsplit(" the ").next()).map(str::to_string);
+                    if let Some((slot, before)) = self.kept_from_evolving {
+                        let now = line(slot).unwrap_or_default();
+                        if !kind(&now).is_some_and(|kind| same_species(&kind, species))
+                            || !level(&now).is_some_and(|level| level > before)
+                        {
+                            self.stuck(format!("step {}: the {species} in slot {slot} was not kept from evolving: {now}", self.at + 1));
+                            return Reply::Calls(vec![Call::wait(10)]);
+                        }
+                        self.kept_from_evolving = None;
+                        self.saw(Way::EvolutionCancelled);
+                        self.at += 1;
+                        continue;
+                    }
+                    let Some(slot) = party_slot_of(&text, species) else {
+                        self.stuck(format!("step {}: no {species} in the party to feed", self.at + 1));
+                        return Reply::Calls(vec![Call::wait(10)]);
+                    };
+                    self.kept_from_evolving = Some((slot, line(slot).and_then(|line| level(&line)).unwrap_or(0)));
+                    return Reply::call("use_field_move", serde_json::json!({
+                        "move": "use_item", "item": "RareCandy", "slot": slot, "evolve": false, "summary": "a level, not an evolution" }));
+                }
+                Step::Tidy => {
+                    self.tidying.get_or_insert(None);
+                    self.at += 1;
+                    match self.tidy(request) {
+                        Some(reply) => return reply,
+                        None => continue,
+                    }
+                }
                 Step::Teach { item, species } => {
                     let Some(slot) = party_slot_of(&text, species) else {
                         self.stuck(format!("step {}: no {species} in the party to teach {item} to", self.at + 1));
@@ -1064,7 +1130,7 @@ impl CompletionBrain {
                             }
                         }
                         Step::Hunt { .. } | Step::Train { .. } | Step::Clear(_) | Step::GoTo(_) | Step::Explore { .. }
-                        | Step::TrashCans | Step::Coins(_) => {}
+                        | Step::TrashCans | Step::Coins(_) | Step::Safari => {}
                         Step::Trade(_) => self.at += 1,
                         // A hop toward the row is not the row.
                         Step::Take(fragment) => {
@@ -1112,6 +1178,16 @@ impl Brain for CompletionBrain {
         // flag is set by the right answer and by beating the trainer behind it alike.
         if std::mem::take(&mut self.quiz_pending) && !request.is_battle() {
             self.saw_entry(Entry::CinnabarQuiz);
+        }
+        // The Safari game's own words for what it did, which only the moment shows.
+        if request.location().is_some_and(|map| map.starts_with("SafariZone")) {
+            let said = request.situation();
+            for (words, way) in [("some BAIT", Way::SafariBait), ("a ROCK", Way::SafariRock),
+                                 ("Got away safely", Way::SafariRun), ("Time's up", Way::SafariOutOfSteps)] {
+                if said.contains(words) {
+                    self.saw(way);
+                }
+            }
         }
         // Whatever kind of turn it arrives on: a walk resumed after a battle asks nothing between.
         if let Some(Step::Train { until, way, .. }) = self.steps.get(self.at).cloned()
@@ -1546,10 +1622,12 @@ pub fn to_the_rainbow_badge() -> Vec<Step> {
         AtPc(Pc::Deposit("Magikarp")), AtPc(Pc::Deposit("Magikarp")), AtPc(Pc::ChangeBox(2)),
         GoTo("CeladonCity"), Explore { maps: &["CeladonCity"], patience: 200 },
         GoTo("CeladonMart1F"), Clear(&[]),
+        // One `buy_item` takes four kinds at most, and the clerk says goodbye after it.
         GoTo("CeladonMart2F"), Tidy, Talk("Clerk2"),
-        Buy(&[("Tm32DoubleTeam", 1), ("Tm33Reflect", 1), ("Tm02RazorWind", 1), ("Tm07HornDrill", 1),
-              ("Tm37EggBomb", 1), ("Tm01MegaPunch", 1), ("Tm05MegaKick", 1), ("Tm09TakeDown", 1),
-              ("Tm17Submission", 1)]),
+        Buy(&[("Tm32DoubleTeam", 1), ("Tm33Reflect", 1), ("Tm02RazorWind", 1), ("Tm07HornDrill", 1)]),
+        Tidy, Talk("Clerk2"),
+        Buy(&[("Tm37EggBomb", 1), ("Tm01MegaPunch", 1), ("Tm05MegaKick", 1), ("Tm09TakeDown", 1)]),
+        Tidy, Talk("Clerk2"), Buy(&[("Tm17Submission", 1)]),
         Tidy, Clear(&[]),
         GoTo("CeladonMart3F"), Clear(&[]),
         GoTo("CeladonMart4F"), Talk("Clerk"),
@@ -2000,10 +2078,8 @@ fn completion_phase_volcano_badge() {
     ], &[Entry::Badge(6), Entry::CinnabarQuiz, Entry::Way(Way::RevivedFossil),
          Entry::KeyItem(vec![ItemId::SecretKey as u8])]);
     cut(&mut played, "completion-volcano");
-    // 3F's east half, and 2F's, are pockets this phase never opens: of 2F's three staircases only
-    // the one at (25, 14) lands on the scientist's side, and it is offered in none of the parities
-    // these steps leave the floor in, pressing 2F's own switch included. Left for whichever phase
-    // walks the Mansion again, and for the whole-run ledger if none does.
+    // 3F's scientist stands behind a block only the switch on opens, and this phase leaves the
+    // switch off; the Cinnabar errands phase comes back for him.
     let later = [Entry::Trainer { map: Map::PokemonMansion3F, index: 1 }];
     let missing: Vec<Entry> = missing.into_iter().filter(|entry| !later.contains(entry)).collect();
     assert!(missing.is_empty(), "the phase left {missing:?}");
@@ -2303,5 +2379,222 @@ fn completion_phase_eastern_routes() {
         Map::Route13, Map::Route14, Map::Route15, Map::Route15Gate1F, Map::Route15Gate2F,
     ], &[]);
     cut(&mut played, "completion-east");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// Fuchsia's loose ends: the PC sorted for the errands ahead, Route 15's Venonat, two Nidoran from
+/// the Safari Zone, a Safari game played to the end of its steps, and the Good Rod.
+pub fn to_the_safari_game() -> Vec<Step> {
+    use Step::*;
+    let mut steps = vec![
+        Collect(false), Tidy,
+        // For the Cinnabar lab's Tangela, in the grass the eastern routes ended beside. The party is
+        // still full, so it goes to the box.
+        Hunt { species: "Venonat", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "Route15" },
+        Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"), GoTo("FuchsiaPokecenter"),
+        // The trades ahead need party room, and the bag is full of key items nothing needs again.
+        AtPc(Pc::Deposit("Geodude")), AtPc(Pc::Deposit("MrMime")), AtPc(Pc::Deposit("Flareon")),
+    ];
+    // A Fish row casts the best rod in the bag, so the Super Rod waits in the PC for the Good Rod.
+    for item in ["TownMap", "SSTicket", "OldRod", "CoinCase", "LiftKey", "SilphScope", "PokeFlute",
+                 "CardKey", "SecretKey", "SuperRod"] {
+        steps.push(Field(Box::leak(format!(r#"{{"move":"pc_items","op":"deposit","item":"{item}"}}"#).into_boxed_str())));
+    }
+    steps.extend([
+        GoTo("FuchsiaCity"), GoTo("SafariZoneGate"), GoTo("SafariZoneCenter"),
+        // One for the underground trade, and one a Rare Candy makes the Nidorino Route 11 wants.
+        Hunt { species: "NidoranMale", row: "Grass", ball: "MasterBall", way: Way::SafariCatch, on: "SafariZoneCenter" },
+        Hunt { species: "NidoranMale", row: "Grass", ball: "MasterBall", way: Way::SafariCatch, on: "SafariZoneCenter" },
+        Safari,
+        GoTo("FuchsiaCity"),
+        // Fuchsia's own water is not in reach of a cast, and Route 19's beach is the next map south.
+        Hunt { species: "Poliwag", row: "Fish", ball: "MasterBall", way: Way::GoodRod, on: "Route19" },
+    ]);
+    steps
+}
+
+#[test]
+fn completion_phase_safari_game() {
+    let mut played = play(include_bytes!("../data/completion-east.bin"), "completion-safari",
+                          to_the_safari_game(), 600, Duration::from_secs(3000));
+    let missing = missing_on(&mut played, &[], &[
+        Entry::Way(Way::SafariCatch), Entry::Way(Way::SafariBait), Entry::Way(Way::SafariRock),
+        Entry::Way(Way::SafariRun), Entry::Way(Way::SafariOutOfSteps), Entry::Way(Way::GoodRod),
+    ]);
+    cut(&mut played, "completion-safari");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// The north's loose ends: the gifts a full bag refused in Viridian and at Route 2's gate, Pikachu
+/// in the forest and the stone that makes it the Raichu Cinnabar wants, the Old Amber from the
+/// museum's back room, a Nidorino by Rare Candy, then Cerulean's trade, the Day Care, the trade
+/// under Route 5, Route 4's last trainer and a Slowbro fished from Cerulean Cave.
+pub fn to_the_north_errands() -> Vec<Step> {
+    use Step::*;
+    vec![
+        Collect(false), Tidy,
+        Field(r#"{"move":"fly","map":"ViridianCity"}"#), GoTo("ViridianCity"),
+        GoTo("ViridianPokecenter"), AtPc(Pc::Deposit("Poliwag")), GoTo("ViridianCity"),
+        Talk("Fisher"),
+        GoTo("ViridianGym"), Talk("Giovanni"), GoTo("ViridianCity"),
+        // Level 22 from the Safari Zone, so one candy is the level-up that evolves it.
+        Evolve { item: "RareCandy", species: "NidoranMale" },
+        GoTo("Route2"), GoTo("Route2Gate"), Talk("OaksAide"),
+        GoTo("Route2"), GoTo("ViridianForestSouthGate"), GoTo("ViridianForest"),
+        Hunt { species: "Pikachu", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "ViridianForest" },
+        Evolve { item: "ThunderStone", species: "Pikachu" },
+        GoTo("ViridianForestNorthGate"), GoTo("Route2"), GoTo("PewterCity"),
+        // The scientist with the amber stands in the back room, behind the counter from the front,
+        // and its door is behind a tree.
+        Take("cut down the tree at (26, 4)"), Take("Museum1F, arriving at (16, 7)"), Talk("Scientist2"), GoTo("PewterCity"),
+        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
+        GoTo("CeruleanPokecenter"), AtPc(Pc::Deposit("Raichu")),
+        Field(r#"{"move":"pc_items","op":"withdraw","item":"SuperRod"}"#), GoTo("CeruleanCity"),
+        // Route 10's water is in the Super Rod's Poliwhirl group, and Route 9 is reached from the
+        // terrace behind the robbed house.
+        GoTo("CeruleanTrashedHouse"), Take("CeruleanCity, arriving at (28, 10)"),
+        GoTo("Route9"), GoTo("Route10"),
+        Hunt { species: "Poliwhirl", row: "Fish", ball: "MasterBall", way: Way::SuperRod, on: "Route10" },
+        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
+        GoTo("CeruleanTradeHouse"), Trade("Gambler"), GoTo("CeruleanCity"),
+        GoTo("CeruleanPokecenter"), AtPc(Pc::Deposit("Jynx")), GoTo("CeruleanCity"),
+        // The tree on the main terrace is the way down to Route 5 and the Day Care.
+        // Route 5's ledges drop only south, so the Day Care comes before the path's pocket below it.
+        Take("cut down the tree"), GoTo("Route5"),
+        GoTo("Daycare"), DayCare(None), GoTo("Route5"),
+        GoTo("UndergroundPathRoute5"), Trade("LittleGirl"), GoTo("Route5"),
+        GoTo("Route5Gate"), GoTo("Route5"),
+        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
+        GoTo("CeruleanPokecenter"), AtPc(Pc::Deposit("NidoranFemale")), AtPc(Pc::Deposit("Squirtle")),
+        GoTo("CeruleanCity"),
+        // Cerulean's north west corner is reached only down from Nugget Bridge, and Route 4's far
+        // half and Cerulean Cave both open off it.
+        GoTo("Route24"), Take("CeruleanCity"), GoTo("Route4"), Talk("CooltrainerFemale2"),
+        GoTo("CeruleanCity"), GoTo("CeruleanCave1F"),
+        Hunt { species: "Slowbro", row: "Fish", ball: "MasterBall", way: Way::SuperRod, on: "CeruleanCave1F" },
+        GoTo("CeruleanCity"),
+    ]
+}
+
+#[test]
+fn completion_phase_north_errands() {
+    use crate::pokemon::map::Map;
+    let mut played = play(include_bytes!("../data/completion-safari.bin"), "completion-north",
+                          to_the_north_errands(), 600, Duration::from_secs(3000));
+    let missing = missing_on(&mut played, &[Map::Route5Gate], &[
+        Entry::Trainer { map: Map::Route4, index: 0 },
+        Entry::Machine(ItemId::Tm42DreamEater as u8), Entry::Machine(ItemId::Tm27Fissure as u8),
+        Entry::Machine(ItemId::Hm05Flash as u8), Entry::KeyItem(vec![ItemId::OldAmber as u8]),
+        Entry::Trade(crate::pokemon::species::PokemonSpecies::Poliwhirl),
+        Entry::Trade(crate::pokemon::species::PokemonSpecies::NidoranMale),
+        Entry::Way(Way::EvolvedByRareCandy), Entry::Way(Way::DayCareWithdrawn), Entry::Way(Way::SuperRod),
+    ]);
+    cut(&mut played, "completion-north");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// The middle of the map: Lt. Surge's machine, Saffron's two unwalked gates, Route 11's trade and
+/// its aide, Celadon's TM41, the Copycat's Poké Doll, and the Slowbro trade over Route 18.
+pub fn to_the_middle_errands() -> Vec<Step> {
+    use Step::*;
+    vec![
+        Collect(false), Tidy,
+        Field(r#"{"move":"fly","map":"VermilionCity"}"#), GoTo("VermilionCity"),
+        GoTo("VermilionGym"), Talk("LtSurge"), GoTo("VermilionCity"),
+        // Walking through the gate comes out on Route 6's strip under Saffron, so the way back is flown.
+        GoTo("Route6"), GoTo("Route6Gate"), GoTo("Route6"),
+        Field(r#"{"move":"fly","map":"VermilionCity"}"#), GoTo("VermilionCity"),
+        GoTo("Route11"), GoTo("Route11Gate1F"), GoTo("Route11Gate2F"), Trade("Youngster"), Talk("OaksAide"),
+        GoTo("Route11Gate1F"), GoTo("Route11"),
+        Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"), Talk("Gramps3"),
+        GoTo("CeladonMart1F"), GoTo("CeladonMart2F"), GoTo("CeladonMart3F"), GoTo("CeladonMart4F"),
+        Talk("Clerk"), Buy(&[("PokeDoll", 1)]),
+        GoTo("CeladonMart3F"), GoTo("CeladonMart2F"), GoTo("CeladonMart1F"), GoTo("CeladonCity"),
+        Field(r#"{"move":"fly","map":"SaffronCity"}"#), GoTo("SaffronCity"),
+        GoTo("CopycatsHouse1F"), GoTo("CopycatsHouse2F"), Talk("Copycat"),
+        GoTo("CopycatsHouse1F"), GoTo("SaffronCity"),
+        Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"),
+        GoTo("Route18"), GoTo("Route18Gate1F"), GoTo("Route18Gate2F"), Trade("Youngster"),
+        // The stairs down come out on the gate's west door, the cycling road's side.
+        GoTo("Route18Gate1F"), GoTo("Route18"),
+        Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"),
+    ]
+}
+
+#[test]
+fn completion_phase_middle_errands() {
+    use crate::pokemon::map::Map;
+    use crate::pokemon::species::PokemonSpecies;
+    let mut played = play(include_bytes!("../data/completion-north.bin"), "completion-middle",
+                          to_the_middle_errands(), 600, Duration::from_secs(3000));
+    let missing = missing_on(&mut played, &[Map::Route6Gate, Map::Route11Gate1F, Map::Route11Gate2F], &[
+        Entry::Machine(ItemId::Tm24Thunderbolt as u8), Entry::Machine(ItemId::Tm41Softboiled as u8),
+        Entry::Machine(ItemId::Tm31Mimic as u8), Entry::KeyItem(vec![ItemId::Itemfinder as u8]),
+        Entry::Trade(PokemonSpecies::Nidorino), Entry::Trade(PokemonSpecies::Slowbro),
+    ]);
+    cut(&mut played, "completion-middle");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// Cinnabar's loose ends and the last aide: a catch while surfing, the Mansion's Ponyta, the lab's
+/// three trades, the Old Amber revived, the machines the Metronome scientist and Blaine held back
+/// for want of bag room, and the Exp. All over Route 15, which wants fifty species owned.
+pub fn to_the_cinnabar_errands() -> Vec<Step> {
+    use Step::*;
+    vec![
+        Collect(false), Tidy,
+        GoTo("Route19"),
+        Hunt { species: "Tentacool", row: "PaceOnWater", ball: "MasterBall", way: Way::WildWhileSurfing, on: "Route19" },
+        Field(r#"{"move":"fly","map":"CinnabarIsland"}"#), GoTo("CinnabarIsland"),
+        GoTo("CinnabarPokecenter"),
+        AtPc(Pc::Deposit("Nidorina")), AtPc(Pc::Deposit("Lickitung")), AtPc(Pc::Deposit("Tentacool")),
+        AtPc(Pc::Withdraw("Venonat")), AtPc(Pc::Withdraw("Raichu")),
+        // The gym's door is locked to anyone not carrying the key, Blaine beaten or not.
+        Field(r#"{"move":"pc_items","op":"withdraw","item":"SecretKey"}"#),
+        GoTo("CinnabarIsland"),
+        GoTo("PokemonMansion1F"),
+        Hunt { species: "Ponyta", row: "Pace", ball: "MasterBall", way: Way::WildOnACaveFloor, on: "PokemonMansion1F" },
+        // 3F's scientist stands beyond a block the switch swaps: `ReplaceTileBlock` takes Y before X,
+        // so the block is steps (14, 10) to (15, 11), the wall between the floor's middle corridor and
+        // him, and it opens with the switch on. The corridor is reached from the (6, 1) staircase,
+        // which the switch on shuts at 2F's end, so the switch is 3F's own, pressed once there and
+        // once more before going back down.
+        GoTo("PokemonMansion2F"), Take("PokemonMansion3F, arriving at (6, 1)"),
+        Talk("Statue1"), Talk("Scientist"), Talk("Statue1"),
+        Take("PokemonMansion2F, arriving at (6, 1)"), GoTo("PokemonMansion1F"),
+        GoTo("CinnabarIsland"),
+        GoTo("CinnabarLab"), GoTo("CinnabarLabTradeRoom"), Trade("Gramps"), Trade("Beauty"),
+        GoTo("CinnabarLab"), GoTo("CinnabarLabMetronomeRoom"), Talk("Scientist1"),
+        GoTo("CinnabarLab"), GoTo("CinnabarLabFossilRoom"), Trade("Scientist2"),
+        // As with the fossil, the Pokemon is handed over only after a walk out of the room and back.
+        Talk("Scientist1"),
+        GoTo("CinnabarLab"), GoTo("CinnabarIsland"),
+        GoTo("CinnabarLab"), GoTo("CinnabarLabFossilRoom"), Talk("Scientist1"),
+        GoTo("CinnabarLab"), GoTo("CinnabarIsland"),
+        GoTo("CinnabarGym"), Talk("Blaine"), GoTo("CinnabarIsland"),
+        Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"),
+        // The machines this phase collected filled the bag again.
+        Tidy,
+        GoTo("Route15"), GoTo("Route15Gate1F"), GoTo("Route15Gate2F"), Talk("OaksAide"),
+        GoTo("Route15Gate1F"),
+        // The traded Seel arrives at 34, its evolution level, so the next one it gains evolves it.
+        KeepFromEvolving("Seel"),
+    ]
+}
+
+#[test]
+fn completion_phase_cinnabar_errands() {
+    use crate::pokemon::species::PokemonSpecies;
+    let mut played = play(include_bytes!("../data/completion-middle.bin"), "completion-cinnabar-errands",
+                          to_the_cinnabar_errands(), 600, Duration::from_secs(3000));
+    let missing = missing_on(&mut played, &[], &[
+        Entry::Way(Way::WildWhileSurfing), Entry::Way(Way::RevivedOldAmber),
+        Entry::Trade(PokemonSpecies::Ponyta), Entry::Trade(PokemonSpecies::Raichu),
+        Entry::Trade(PokemonSpecies::Venonat),
+        Entry::Machine(ItemId::Tm35Metronome as u8), Entry::Machine(ItemId::Tm38FireBlast as u8),
+        Entry::KeyItem(vec![ItemId::ExpAll as u8]), Entry::Way(Way::EvolutionCancelled),
+        Entry::Trainer { map: crate::pokemon::map::Map::PokemonMansion3F, index: 1 },
+    ]);
+    cut(&mut played, "completion-cinnabar-errands");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
