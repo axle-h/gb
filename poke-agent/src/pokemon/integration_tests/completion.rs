@@ -265,11 +265,13 @@ pub fn checklist(mmu: &MMU) -> Vec<Item> {
         push(Entry::Machine(id), Check::Held(vec![id]));
     }
 
-    let key_flags = mmu.rom_data_from_rom_pointer(&pokered_symbols::KeyItemFlags, 15).to_vec();
+    // The table ends at the last ordinary item, and what follows it in the ROM is other data: read
+    // past it, stray bits make lift buttons key items no run can hold.
+    let last = ItemId::MaxElixer as u8;
+    let key_flags = mmu.rom_data_from_rom_pointer(&pokered_symbols::KeyItemFlags, (last as usize).div_ceil(8)).to_vec();
     let exclusive = |id: u8| EXCLUSIVE.iter().find(|pair| pair.iter().any(|item| *item as u8 == id));
     let mut paired = BTreeSet::new();
-    // The table stops at the last ordinary item; the ids after it are floors and machines.
-    for id in 1..=(key_flags.len() * 8) as u8 {
+    for id in 1..=last {
         let flagged = key_flags[(id as usize - 1) / 8] & (1 << ((id - 1) % 8)) != 0;
         let Some(item) = ItemId::from_repr(id) else { continue };
         let badge = (ItemId::BoulderBadge as u8..=ItemId::EarthBadge as u8).contains(&id);
@@ -399,10 +401,6 @@ impl Ledger {
         self.observed.insert(entry);
     }
 
-    pub fn has_seen(&self, entry: &Entry) -> bool {
-        self.observed.contains(entry)
-    }
-
     pub fn done(&self, item: &Item, mmu: &MMU, state: &GameState) -> bool {
         match &item.check {
             Check::Visited(map) => self.visited.contains(map),
@@ -462,6 +460,7 @@ mod tests {
             assert!(keys.iter().any(|ids| ids.contains(&(wanted as u8))), "{wanted:?} is not a key item here");
         }
         assert!(keys.iter().any(|ids| ids.len() == 2), "the fossil choice is one entry with two arms");
+        assert!(keys.iter().flatten().all(|id| *id <= ItemId::MaxElixer as u8), "a floor or a machine is a key item: {keys:?}");
         assert_eq!(count(&list, |e| matches!(e, Entry::Way(_))), ways().len());
     }
 

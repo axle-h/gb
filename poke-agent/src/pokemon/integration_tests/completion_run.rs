@@ -112,6 +112,8 @@ pub enum Step {
 #[derive(Debug, Clone, Copy)]
 pub enum Pc {
     Deposit(&'static str),
+    /// Whoever is in this party slot, for a slot that holds whatever the collecting last caught.
+    DepositSlot(u8),
     Withdraw(&'static str),
     Release(&'static str),
     ChangeBox(u8),
@@ -120,7 +122,7 @@ pub enum Pc {
 impl Pc {
     fn way(self) -> Way {
         match self {
-            Pc::Deposit(_) => Way::PcDeposit,
+            Pc::Deposit(_) | Pc::DepositSlot(_) => Way::PcDeposit,
             Pc::Withdraw(_) => Way::PcWithdraw,
             Pc::Release(_) => Way::PcRelease,
             Pc::ChangeBox(_) => Way::PcChangeBox,
@@ -302,6 +304,9 @@ pub struct CompletionBrain {
     prize_pending: bool,
     /// A quiz machine was answered and the turn that says whether it was right not yet seen.
     quiz_pending: bool,
+    /// The Safari game's actions this brain has seen, which [`Step::Safari`] plays through. Not the
+    /// ledger: an earlier visit that ran out of steps would end the step before it began.
+    safari_seen: HashSet<Way>,
     /// The party slot a stone was used on.
     evolving: Option<u8>,
     /// The party slot and level a Rare Candy was fed to, its evolution to be stopped.
@@ -341,7 +346,7 @@ impl CompletionBrain {
             ran: Default::default(), running_at: 0, came: Came::Given, named: 0, party_was_full: false,
             graph: Default::default(), travelled: Default::default(), offered: HashSet::new(), barren: 0,
             last_walk: None, here: String::new(), pockets: Default::default(), pocket_edges: Default::default(), left_by: None,
-            exploring: 0, explore_idle: 0, explored_maps: HashSet::new(), explore_cut: HashSet::new(), tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), walks_given_up: Default::default(), day_care_sent: None, used_on: false, prize_pending: false, quiz_pending: false, evolving: None, kept_from_evolving: None, repeated: (String::new(), 0), ledger,
+            exploring: 0, explore_idle: 0, explored_maps: HashSet::new(), explore_cut: HashSet::new(), tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), walks_given_up: Default::default(), day_care_sent: None, used_on: false, prize_pending: false, quiz_pending: false, safari_seen: HashSet::new(), evolving: None, kept_from_evolving: None, repeated: (String::new(), 0), ledger,
             stuck: Arc::new(Mutex::new(None)), turns: Arc::new(Mutex::new(0)),
         }
     }
@@ -378,11 +383,9 @@ impl CompletionBrain {
             self.box_full = true;
         }
         if matches!(self.steps.get(self.at), Some(Step::Safari)) {
-            let ledger = self.ledger.lock().expect("not poisoned");
-            let action = if !ledger.has_seen(&Entry::Way(Way::SafariBait)) { "bait" }
-                else if !ledger.has_seen(&Entry::Way(Way::SafariRock)) { "rock" }
+            let action = if !self.safari_seen.contains(&Way::SafariBait) { "bait" }
+                else if !self.safari_seen.contains(&Way::SafariRock) { "rock" }
                 else { "run" };
-            drop(ledger);
             if ids.iter().any(|id| id == action) {
                 return choose(action);
             }
@@ -715,6 +718,7 @@ impl CompletionBrain {
         use crate::pokemon::postgame::pc_box::PcBoxOp;
         let op_sent = match op {
             Pc::Deposit(species) => party_slot_of(text, species).map(|slot| PcBoxOp::Deposit { slot }),
+            Pc::DepositSlot(slot) => Some(PcBoxOp::Deposit { slot }),
             Pc::ChangeBox(n) => Some(PcBoxOp::ChangeBox { n: n - 1 }),
             Pc::Withdraw(species) | Pc::Release(species) => {
                 // On its own, so the turn carries on with the answer rather than ending.
@@ -934,7 +938,7 @@ impl CompletionBrain {
                 Step::Wait => { self.at += 1; return Reply::Calls(vec![Call::wait(1)]) }
                 Step::Collect(on) => { self.collecting = *on; self.at += 1; continue }
                 Step::Safari => {
-                    if self.ledger.lock().expect("not poisoned").has_seen(&Entry::Way(Way::SafariOutOfSteps)) {
+                    if self.safari_seen.contains(&Way::SafariOutOfSteps) {
                         self.at += 1;
                         continue;
                     }
@@ -1186,6 +1190,7 @@ impl Brain for CompletionBrain {
                                  ("Got away safely", Way::SafariRun), ("Time's up", Way::SafariOutOfSteps)] {
                 if said.contains(words) {
                     self.saw(way);
+                    self.safari_seen.insert(way);
                 }
             }
         }
@@ -1239,13 +1244,20 @@ pub struct Played {
 
 /// Play `steps` from `fixture`, feeding the ledger every tick, and fail with the stuck report.
 pub fn play(fixture: &'static [u8], name: &'static str, steps: Vec<Step>, game_minutes: u64, wall: Duration) -> Played {
+    play_phases(fixture, name, vec![steps], game_minutes, wall)
+}
+
+/// [`play`] for several phases back to back in one run, each with a brain of its own as it has
+/// when played from its fixture, and one ledger across them all.
+pub fn play_phases(fixture: &'static [u8], name: &'static str, phases: Vec<Vec<Step>>, game_minutes: u64, wall: Duration) -> Played {
     let ledger = Arc::new(Mutex::new(Ledger::default()));
-    let brain = CompletionBrain::new(steps, Arc::clone(&ledger));
+    let total: usize = phases.iter().map(Vec::len).sum();
+    let mut phases: VecDeque<Vec<Step>> = phases.into();
+    let brain = CompletionBrain::new(phases.pop_front().expect("at least one phase"), Arc::clone(&ledger));
     let (stuck, turns) = (Arc::clone(&brain.stuck), Arc::clone(&brain.turns));
-    let total = brain.steps.len();
     let done = Arc::new(Mutex::new(false));
     let finished = Arc::clone(&done);
-    let brain = FinishFlag { brain, finished };
+    let brain = FinishFlag { brain, phases, phase: 1, finished };
     let mut run = LlmRun::builder(fixture)
         .named(name)
         .game_time(Duration::from_mins(game_minutes))
@@ -1319,9 +1331,12 @@ pub fn play(fixture: &'static [u8], name: &'static str, steps: Vec<Step>, game_m
     Played { run, ledger }
 }
 
-/// The brain, with a flag the driver reads to know every step has been taken.
+/// The brain, handed the next phase's steps as each finishes, with a flag the driver reads to know
+/// every step of the last has been taken.
 struct FinishFlag {
     brain: CompletionBrain,
+    phases: VecDeque<Vec<Step>>,
+    phase: usize,
     finished: Arc<Mutex<bool>>,
 }
 
@@ -1334,7 +1349,18 @@ impl Brain for FinishFlag {
                      request.location().unwrap_or_default(), self.brain.steps[step]);
         }
         if self.brain.finished() {
-            *self.finished.lock().expect("not poisoned") = true;
+            match self.phases.pop_front() {
+                Some(steps) => {
+                    self.phase += 1;
+                    println!("[completion] phase {} of {}, from {}", self.phase, self.phase + self.phases.len(),
+                             request.location().unwrap_or_default());
+                    let mut next = CompletionBrain::new(steps, Arc::clone(&self.brain.ledger));
+                    next.stuck = Arc::clone(&self.brain.stuck);
+                    next.turns = Arc::clone(&self.brain.turns);
+                    self.brain = next;
+                }
+                None => *self.finished.lock().expect("not poisoned") = true,
+            }
         }
         reply
     }
@@ -1951,18 +1977,19 @@ pub fn to_surf() -> Vec<Step> {
     ]
 }
 
+/// What the game will not hand over, named so that it is out of reach for a reason somebody can
+/// read. The Safari Zone's Nugget stands on an island and `TilePairCollisionsWater` refuses the
+/// step from its banks, so nothing routes to it and Surf is no help.
+fn out_of_reach() -> [Entry; 1] {
+    [Entry::ItemBall { map: crate::pokemon::map::Map::SafariZoneCenter, object: 1, item: ItemId::Nugget as u8 }]
+}
+
 #[test]
 fn completion_phase_surf() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-soul.bin"), "completion-surf",
                           to_surf(), 1200, Duration::from_secs(5400));
-    // Named here rather than left off the map list, so that what is out of reach is out of reach
-    // for a reason somebody can read. The zone's Nugget stands on an island and
-    // `TilePairCollisionsWater` refuses the step from its banks, so nothing routes to it and Surf
-    // is no help.
-    let out_of_reach = [
-        Entry::ItemBall { map: Map::SafariZoneCenter, object: 1, item: ItemId::Nugget as u8 },
-    ];
+    let out_of_reach = out_of_reach();
     let missing = missing_on(&mut played, &[
         Map::SafariZoneGate, Map::SafariZoneCenter, Map::SafariZoneEast, Map::SafariZoneNorth,
         Map::SafariZoneWest, Map::SafariZoneCenterRestHouse, Map::SafariZoneEastRestHouse,
@@ -2160,6 +2187,9 @@ pub fn to_the_power_plant() -> Vec<Step> {
     use Step::*;
     vec![
         Collect(false), Tidy,
+        // Two catches to make, and a full box refuses every ball: a static met with nothing to
+        // throw is run from, which hides it for good.
+        GoTo("ViridianPokecenter"), AtPc(Pc::ChangeBox(3)), GoTo("ViridianCity"),
         // The robbed house's back door is the only way onto the half of Cerulean that Route 9
         // opens off, which is how every phase before this one has reached that side.
         Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
@@ -2207,7 +2237,7 @@ pub fn to_victory_road() -> Vec<Step> {
         Field(r#"{"move":"fly","map":"ViridianCity"}"#), GoTo("ViridianCity"),
         // The phases before filled the party and the box, and a full box refuses every ball, so the
         // bird would be met with nothing to throw.
-        GoTo("ViridianPokecenter"), AtPc(Pc::ChangeBox(3)), GoTo("ViridianCity"),
+        GoTo("ViridianPokecenter"), AtPc(Pc::ChangeBox(4)), GoTo("ViridianCity"),
         GoTo("Route22"), Explore { maps: &["Route22"], patience: 300 },
         GoTo("Route22Gate"), Clear(&[]),
         GoTo("Route23"), Explore { maps: &["Route23"], patience: 300 },
@@ -2393,7 +2423,8 @@ pub fn to_the_safari_game() -> Vec<Step> {
         Hunt { species: "Venonat", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "Route15" },
         Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"), GoTo("FuchsiaPokecenter"),
         // The trades ahead need party room, and the bag is full of key items nothing needs again.
-        AtPc(Pc::Deposit("Geodude")), AtPc(Pc::Deposit("MrMime")), AtPc(Pc::Deposit("Flareon")),
+        // Slot 3 is whatever the collecting caught last, which depends on the encounters met.
+        AtPc(Pc::DepositSlot(3)), AtPc(Pc::Deposit("MrMime")), AtPc(Pc::Deposit("Flareon")),
     ];
     // A Fish row casts the best rod in the bag, so the Super Rod waits in the PC for the Good Rod.
     for item in ["TownMap", "SSTicket", "OldRod", "CoinCase", "LiftKey", "SilphScope", "PokeFlute",
@@ -2597,4 +2628,28 @@ fn completion_phase_cinnabar_errands() {
     ]);
     cut(&mut played, "completion-cinnabar-errands");
     assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// Every phase above, back to back in one run from the fresh save, and the whole ledger asserted:
+/// each phase green from its own fixture proves every entry reachable, and only this proves one run
+/// reaches them all.
+#[test]
+fn completion_run() {
+    let phases = vec![
+        to_the_boulder_badge(), to_bill(), to_the_thunder_badge(), to_celadon(), to_the_rainbow_badge(),
+        to_the_poke_flute(), to_the_marsh_badge(), to_the_soul_badge(), to_surf(), to_the_volcano_badge(),
+        to_seafoam(), to_the_earth_badge(), to_the_power_plant(), to_victory_road(), to_the_hall_of_fame(),
+        to_mewtwo(), to_the_eastern_routes(), to_the_safari_game(), to_the_north_errands(),
+        to_the_middle_errands(), to_the_cinnabar_errands(),
+    ];
+    let mut played = play_phases(include_bytes!("../data/start-of-game-state.bin"), "completion-run",
+                                 phases, 10_800, Duration::from_secs(4 * 3600));
+    let state = played.run.fixture().game_state();
+    let list = checklist(played.run.fixture().gb.core().mmu());
+    let mmu = played.run.fixture().gb.core().mmu();
+    let excused = out_of_reach();
+    let missing: Vec<Entry> = played.ledger.lock().expect("not poisoned").missing(&list, mmu, &state)
+        .into_iter().filter(|entry| !excused.contains(entry)).collect();
+    println!("[completion-run] {} of {} entries met", list.len() - missing.len() - excused.len(), list.len());
+    assert!(missing.is_empty(), "the run left {} entries: {missing:?}", missing.len());
 }
