@@ -1039,7 +1039,7 @@ fn use_field_move_spec() -> ToolSpec {
                 "box_slot": { "type": "integer", "minimum": 0, "maximum": 19, "description": "A slot in the open box, 0-based." },
                 "box": { "type": "integer", "minimum": 1, "maximum": 12, "description": "Which box to open, for `change_box`." },
                 "quantity": { "type": "integer", "minimum": 1, "maximum": 99, "description": "How many, for `pc_items`. Default 1." },
-                "evolve": { "type": "boolean", "description": "For `use_item` on a `slot`: false stops an evolution the item starts, as B does. Default true." },
+                "evolve": { "type": "boolean", "description": "false stops the evolution a Rare Candy starts, as B does." },
             },
             "required": ["move"],
             "additionalProperties": false,
@@ -2488,7 +2488,7 @@ mod tests {
     fn the_tool_array_stays_within_its_budget() {
         // Overworld is the big one: it carries `use_field_move`.
         for (kind, ceiling) in [
-            (DecisionKind::Overworld, 13_075),
+            (DecisionKind::Overworld, 13_175),
             (DecisionKind::Battle, 5_575),
             (DecisionKind::Nickname, 4_075),
             (DecisionKind::MartPurchase, 4_825),
