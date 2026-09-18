@@ -559,6 +559,10 @@ mod tests {
 
         for raw in 1u8..=0xFA {
             let Some(item) = ItemId::from_repr(raw) else { continue };
+            // An elevator's floor is never in a bag, and the bit array stops before it.
+            if item.is_floor() {
+                continue;
+            }
             // From `HM01` up `IsKeyItem_` falls through to `IsItemHM`, whatever bits follow the table.
             let expected = if raw >= ItemId::Hm01Cut as u8 { false } else { is_key_in_rom(raw) };
             assert_eq!(item.is_key_item(), expected, "{item:?} (${raw:02x}) key-item flag");

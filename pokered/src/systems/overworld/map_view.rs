@@ -19,6 +19,9 @@ pub struct MapView {
     pub view: u16,
     pub x_block: u8,
     pub y_block: u8,
+    /// [`MapLayer::overrides`], which a load of the blocks clears.
+    #[serde(default)]
+    pub tile_overrides: Vec<(i32, i32, u8)>,
 }
 
 /// `SURROUNDING_WIDTH` and `SURROUNDING_HEIGHT`, in tiles.
@@ -46,7 +49,8 @@ impl MapView {
     }
 
     pub fn layer(&self) -> MapLayer {
-        MapLayer { tileset: Some(self.tileset), blocks_wide: self.stride() as usize, blocks: self.blocks.clone(), camera: self.camera() }
+        MapLayer { tileset: Some(self.tileset), blocks_wide: self.stride() as usize, blocks: self.blocks.clone(), camera: self.camera(),
+            overrides: self.tile_overrides.clone() }
     }
 
     /// `LoadCurrentMapView`: the tile the view puts at screen cell `(column, row)`. Past the end of
@@ -123,6 +127,7 @@ mod tests {
             view: MapView::view_from_address(warp.view),
             x_block: warp.x & 1,
             y_block: warp.y & 1,
+            tile_overrides: Vec::new(),
         }
     }
 
@@ -154,6 +159,7 @@ mod tests {
                 view: 7 + width + (width + 6) * (y >> 1) as u16 + (x >> 1) as u16,
                 x_block: x & 1,
                 y_block: y & 1,
+                tile_overrides: Vec::new(),
             };
             let tiles = view.tile_map();
             let front = in_front(&tiles, x, y, SpriteFacing::from_repr(facing).unwrap());

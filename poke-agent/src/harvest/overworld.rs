@@ -454,6 +454,7 @@ fn recreated_view(map: u8, x: u8, y: u8) -> MapView {
         view: 7 + width + (width + 6) * (y >> 1) as u16 + (x >> 1) as u16,
         x_block: x & 1,
         y_block: y & 1,
+        tile_overrides: Vec::new(),
     }
 }
 

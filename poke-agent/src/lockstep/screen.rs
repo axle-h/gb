@@ -45,6 +45,7 @@ fn screen_from(gb: &GameBoy) -> Screen {
             (view as usize % blocks_wide) as i32 * 32 + x_half as i32 * 16,
             (view as usize / blocks_wide) as i32 * 32 + y_half as i32 * 16,
         ),
+        overrides: Vec::new(),
     };
 
     screen.sprites = (0..40u16).map(|i| {

@@ -101,8 +101,13 @@ impl ListMenu {
 
     /// `SPECIALLISTMENU` from the top, the elevator's floors.
     pub fn special(items: Vec<ItemId>) -> Self {
+        Self::special_at(items, 0, 0)
+    }
+
+    /// `SPECIALLISTMENU` reopened where the caller's `current` and `scroll` left it.
+    pub fn special_at(items: Vec<ItemId>, current: u8, scroll: u8) -> Self {
         let entries = items.into_iter().map(|item| (item, 0)).collect();
-        Self { kind: ListKind::Special, ..Self::items(entries, 0, 0) }
+        Self { kind: ListKind::Special, ..Self::items(entries, current, scroll) }
     }
 
     /// `PCPOKEMONLISTMENU` over the party or a box: each nickname with the level to print under it,
