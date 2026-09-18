@@ -85,6 +85,22 @@ pub enum ItemId {
     MaxEther = 0x51,
     Elixer = 0x52,
     MaxElixer = 0x53,
+    // An elevator's buttons are item ids, so that its floor list is an item list and its names are
+    // in `ItemNames` beside the items' own.
+    FloorB2F = 0x54,
+    FloorB1F = 0x55,
+    Floor1F = 0x56,
+    Floor2F = 0x57,
+    Floor3F = 0x58,
+    Floor4F = 0x59,
+    Floor5F = 0x5A,
+    Floor6F = 0x5B,
+    Floor7F = 0x5C,
+    Floor8F = 0x5D,
+    Floor9F = 0x5E,
+    Floor10F = 0x5F,
+    Floor11F = 0x60,
+    FloorB4F = 0x61,
     // Field-move HMs (item ids $C4–$C8).
     Hm01Cut = 0xC4,
     Hm02Fly = 0xC5,
@@ -172,6 +188,13 @@ impl ItemId {
     /// they are reusable and one-per-cartridge.
     pub const fn is_hm(self) -> bool {
         (self as u8) >= Self::Hm01Cut as u8 && (self as u8) <= Self::Hm05Flash as u8
+    }
+
+    /// An elevator's button, which is an item id only so that its floor list is an item list. It is
+    /// never in a bag, has no price and no key-item flag, so anything walking the item ids to find
+    /// what a player can hold skips it.
+    pub const fn is_floor(self) -> bool {
+        (self as u8) >= Self::FloorB2F as u8 && (self as u8) <= Self::FloorB4F as u8
     }
 }
 /// `GetItemName`: charmap bytes, unterminated.

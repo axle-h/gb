@@ -24,9 +24,11 @@ const PLAYER_DIR_LEFT: u8 = 2;
 const END: u8 = 0xFF;
 const PAD_CTRL_PAD: Joypad = Joypad::UP.union(Joypad::DOWN).union(Joypad::LEFT).union(Joypad::RIGHT);
 
-/// The block this floor's one card key door is drawn as while it is shut, and where it stands.
+/// The block this floor's one card key door is drawn as while it is shut, where it stands, and the
+/// event that remembers it.
 const CLOSED_DOOR: u8 = 0x20;
 const GATES: [(u8, u8); 1] = [(3, 6)];
+const DOORS: [u16; 1] = [EVENT_SILPH_CO_11_UNLOCKED_DOOR];
 
 /// `SilphCo11FDefaultScript.PlayerCoordsArray`: the square below Giovanni's three steps and the
 /// square east of it. `wCoordIndex` counts from one, so the first of these is the one the cartridge
@@ -80,7 +82,8 @@ pub enum Label {
 }
 
 pub fn script(rt: &mut Script) -> Flow {
-    gate_callback(rt);
+    // `SilphCo11FGateCallbackScript`.
+    super::silph_co::gate_callback(rt, &GATES, &DOORS, CLOSED_DOOR);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().silph_co_11f.cur_script;
     let index = rt.execute_cur_map_script_in_table(index, sym::SilphCo11TrainerHeaders);
@@ -92,19 +95,6 @@ pub fn script(rt: &mut Script) -> Flow {
         _ => return rt.trainer_script(index).then(Label::StoreCurScript),
     };
     Flow::Call(entry, Label::StoreCurScript.into())
-}
-
-/// `SilphCo11FGateCallbackScript`: one gate, and one event that remembers it.
-fn gate_callback(rt: &mut Script) {
-    if !rt.check_and_reset_cur_map_loaded(1) {
-        return;
-    }
-    if super::silph_co_2f::unlocked_door(rt, &GATES) != 0 {
-        rt.set_event(EVENT_SILPH_CO_11_UNLOCKED_DOOR);
-    }
-    if !rt.check_event(EVENT_SILPH_CO_11_UNLOCKED_DOOR) {
-        rt.replace_tile_block(GATES[0].0, GATES[0].1, CLOSED_DOOR);
-    }
 }
 
 /// `SilphCo11FSetCurScript`.

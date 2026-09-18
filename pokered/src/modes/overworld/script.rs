@@ -721,6 +721,11 @@ impl Script<'_, '_> {
         self.ctx.world.bag.quantity_of(item) != 0
     }
 
+    /// `GetQuantityOfItemInBag`.
+    pub fn get_quantity_of_item_in_bag(&self, item: ItemId) -> u8 {
+        self.ctx.world.bag.quantity_of(item)
+    }
+
     /// `wWalkBikeSurfState` and its copy, then `ForceBikeOrSurf`.
     pub fn force_bike_or_surf(&mut self, state: u8) -> Then {
         self.ctx.world.location.walk_bike_surf = state;
@@ -747,6 +752,11 @@ impl Script<'_, '_> {
             1 => Routine::DisplayEnemyTrainerTextAndStartBattle,
             _ => Routine::EndTrainerBattle,
         })
+    }
+
+    /// `EndTrainerBattle`, for a map whose script table is not a trainer table's.
+    pub fn end_trainer_battle(&self) -> Then {
+        Then::call(Routine::EndTrainerBattle)
     }
 
     /// `EnableAutoTextBoxDrawing`.
@@ -848,6 +858,26 @@ impl Script<'_, '_> {
         Then::block(Block::Sound)
     }
 
+    /// `PlaySound` with `wNewSoundID` written first, as a caller starting music does.
+    pub fn play_new_sound(&mut self, sound: SoundId) {
+        self.ctx.audio.play_new_sound(sound);
+    }
+
+    /// `wMapMusicSoundID`: the current map's song.
+    pub fn map_music_sound_id(&self) -> SoundId {
+        SoundId(poke_core::map_objects::map_song(self.ctx.world.location.map).0)
+    }
+
+    /// `wChannelSoundIDs + channel`: what the channel is playing, 0 for nothing.
+    pub fn channel_sound_id(&self, channel: usize) -> u8 {
+        self.ctx.audio.channel_sound_id(channel)
+    }
+
+    /// A busy wait on `wChannelSoundIDs`: until `channel` is no longer playing `sound`.
+    pub fn wait_while_channel_plays(&mut self, channel: usize, sound: SoundId) -> Then {
+        Then::block(Block::ChannelPlaying { channel, id: sound.0 })
+    }
+
     // ---- Frames ----
 
     /// `DelayFrames`.
@@ -873,7 +903,19 @@ impl Script<'_, '_> {
         Then::block(Block::PrintText(commands))
     }
 
+    /// The text a `text_asm` returns in `hl`, which the text engine prints on in the box already up
+    /// rather than drawing a new one.
+    pub fn print_text_from_asm(&mut self, commands: Vec<TextCommand>) -> Then {
+        Then::block(Block::Mode(Box::new(Mode::TextBox(TextBox::without_box(commands)))))
+    }
+
     /// `YesNoChoice`; [`Script::chose_yes`] reads the answer.
+    /// `WaitForTextScrollButtonPress`: the text already on the screen is held until a button is
+    /// pressed, with no `▼` of its own.
+    pub fn wait_for_text_scroll_button_press(&mut self) -> Then {
+        Then::block(Block::TextScrollButton)
+    }
+
     pub fn yes_no_choice(&mut self) -> Then {
         Then::block(Block::Mode(Box::new(Mode::TwoOptionMenu(TwoOptionMenu::new(TwoOptionMenuId::YesNo, (14, 7), false)))))
     }
@@ -906,6 +948,11 @@ impl Script<'_, '_> {
         self.ow.rt.added_to_party
     }
 
+    /// `GivePokemon`'s carry: the mon went into the party or a box.
+    pub fn gave_pokemon(&self) -> bool {
+        self.ow.rt.gave_pokemon
+    }
+
     /// `bit BIT_CUR_MAP_LOADED_n` then `res`: whether the map has been loaded since the script last
     /// asked, `n` being 1 or 2.
     pub fn check_and_reset_cur_map_loaded(&mut self, n: usize) -> bool {
@@ -915,6 +962,23 @@ impl Script<'_, '_> {
     /// `set BIT_CUR_MAP_LOADED_n`: what a script sets to have the next pass run its own load code.
     pub fn set_cur_map_loaded(&mut self, n: usize) {
         self.ow.rt.cur_map_loaded[n - 1] = true;
+    }
+
+    /// A background tile written at screen cell `(column, row)` over what the blocks draw there,
+    /// staying with the map as the view moves until the map is loaded again.
+    pub fn overwrite_bg_tile(&mut self, column: u8, row: u8, tile: u8) {
+        let (x, y) = self.ow.view.camera();
+        let at = (y / 8 + row as i32, x / 8 + column as i32);
+        let overrides = &mut self.ow.view.tile_overrides;
+        match overrides.binary_search_by_key(&at, |&(row, column, _)| (row, column)) {
+            Ok(index) => overrides[index].2 = tile,
+            Err(index) => overrides.insert(index, (at.0, at.1, tile)),
+        }
+    }
+
+    /// `LoadCurrentMapView`'s tile at screen cell `(column, row)`: what `wTileMap` holds there.
+    pub fn map_view_tile(&self, column: usize, row: usize) -> u8 {
+        self.ow.view.tile(column, row)
     }
 
     /// `ReplaceTileBlock`: block `(x, y)` of the map, counted in blocks, becomes `block`. The screen
@@ -1161,6 +1225,12 @@ impl Script<'_, '_> {
         self.ow.rt.battle_result
     }
 
+    /// `wTrainerHeaderFlagBit`: the sprite slot of whichever trainer `CheckFightingMapTrainers`
+    /// engaged, and zero when none of them did.
+    pub fn trainer_header_flag_bit(&self) -> u8 {
+        self.ow.rt.trainer_header_flag_bit
+    }
+
     /// `BIT_TALKED_TO_TRAINER`, which a trainer's own text sets and the battle clears.
     pub fn talked_to_trainer(&self) -> bool {
         self.ow.rt.talked_to_trainer
@@ -1224,6 +1294,80 @@ impl Script<'_, '_> {
     /// `set BIT_GAVE_SAFFRON_GUARDS_DRINK`.
     pub fn set_gave_saffron_guards_drink(&mut self) {
         self.ctx.world.scripts.gave_saffron_guards_drink = true;
+    }
+
+    /// `BIT_GOT_OLD_ROD`.
+    pub fn got_old_rod(&self) -> bool {
+        self.ctx.world.scripts.got_old_rod
+    }
+
+    /// `BIT_GOT_GOOD_ROD`.
+    pub fn got_good_rod(&self) -> bool {
+        self.ctx.world.scripts.got_good_rod
+    }
+
+    /// `BIT_GOT_SUPER_ROD`.
+    pub fn got_super_rod(&self) -> bool {
+        self.ctx.world.scripts.got_super_rod
+    }
+
+    /// `wDestinationWarpID`, left from the warp the player came in by.
+    pub fn destination_warp_id(&self) -> u8 {
+        self.ow.standing.destination_warp
+    }
+
+    /// `dec [wNumberOfWarps]`: the map's last warp leads nowhere until the map is loaded again.
+    pub fn decrement_number_of_warps(&mut self) {
+        self.ow.warps.pop();
+    }
+
+    /// `wWarpedFromWhichWarp` and `wWarpedFromWhichMap`: the warp of the map the player came in
+    /// through.
+    pub fn warped_from(&self) -> (u8, u8) {
+        self.ow.warped_from
+    }
+
+    /// One `wWarpEntries` entry's destination, which only an elevator rewrites.
+    pub fn set_warp_destination(&mut self, index: usize, warp: u8, map: u8) {
+        let door = &mut self.ow.warps[index];
+        door.destination_warp = warp;
+        door.destination_map = map;
+    }
+
+    /// `wUpdateSpritesEnabled`: off, OAM stays as a script writes it.
+    pub fn set_update_sprites_enabled(&mut self, enabled: bool) {
+        self.ow.rt.sprites_frozen = !enabled;
+    }
+
+    /// `wSpritePlayerStateData1ImageIndex`.
+    pub fn set_player_image_index(&mut self, index: u8) {
+        self.ow.sprites[0].image_index = index;
+    }
+
+    /// `LoadPlayerSpriteGraphics`.
+    pub fn load_player_sprite_graphics(&mut self) {
+        crate::systems::overworld::sprites::load_player_sprite_graphics(&mut self.ctx.screen.tiles,
+            &mut self.ctx.world.location, self.ow.view.tileset);
+    }
+
+    /// The screen as the hardware holds it, for a script that draws on it by hand.
+    pub fn screen(&mut self) -> &mut crate::gfx::Screen {
+        &mut self.ctx.screen
+    }
+
+    /// `set BIT_GOT_OLD_ROD`.
+    pub fn set_got_old_rod(&mut self) {
+        self.ctx.world.scripts.got_old_rod = true;
+    }
+
+    /// `set BIT_GOT_GOOD_ROD`.
+    pub fn set_got_good_rod(&mut self) {
+        self.ctx.world.scripts.got_good_rod = true;
+    }
+
+    /// `set BIT_GOT_SUPER_ROD`.
+    pub fn set_got_super_rod(&mut self) {
+        self.ctx.world.scripts.got_super_rod = true;
     }
 
     // ---- The Game Corner's money and coins, which only its own people hand out ----
@@ -1318,6 +1462,46 @@ impl Script<'_, '_> {
         Then::block(Block::Mode(Box::new(Mode::CursorMenu(menu))))
     }
 
+    /// `BikeShopClerkText`'s menu: `BICYCLE` and `CANCEL` with the price, in a box
+    /// of their own at the top of the screen. The cursor waits in [`Script::handle_menu_input`].
+    pub fn bike_shop_menu(&mut self) {
+        self.ctx.screen.ui.text_box_border(0, 0, 15, 4);
+        self.update_sprites();
+        let ui = &mut self.ctx.screen.ui;
+        ui.place(2, 2, &poke_core::charmap::encode("BICYCLE").expect("charmap"));
+        ui.place(2, 4, &poke_core::charmap::encode("CANCEL").expect("charmap"));
+        ui.place(8, 3, &poke_core::charmap::encode("¥1000000").expect("charmap"));
+    }
+
+    /// `HandleMenuInput` watching A and B over a menu the caller has drawn, with `wCurrentMenuItem`
+    /// and `wLastMenuItem` zeroed first.
+    pub fn handle_menu_input(&mut self, max: u8, top: (u8, u8)) -> Then {
+        self.ctx.menu.last_item = 0;
+        Then::block(Block::Mode(Box::new(Mode::CursorMenu(CursorMenu::new(0, max, top)))))
+    }
+
+    /// `BIT_NO_TEXT_DELAY`.
+    pub fn set_no_text_delay(&mut self, on: bool) {
+        self.ctx.world.no_text_delay = on;
+    }
+
+    /// `DisplayListMenuID` with `SPECIALLISTMENU` over `items`, opened at the caller's
+    /// `wCurrentMenuItem` and `wListScrollOffset`; [`Script::chosen_row`] reads the entry.
+    pub fn display_special_list_menu(&mut self, items: Vec<ItemId>, current: u8, scroll: u8) -> Then {
+        let list = crate::modes::list_menu::ListMenu::special_at(items, current, scroll);
+        Then::block(Block::Mode(Box::new(Mode::ListMenu(list))))
+    }
+
+    /// `wCurrentMenuItem` and `wListScrollOffset` as the last list left them.
+    pub fn list_menu_position(&self) -> (u8, u8) {
+        (self.ctx.menu.chosen_item, self.ctx.menu.list_scroll)
+    }
+
+    /// `wListScrollOffset`.
+    pub fn set_list_scroll_offset(&mut self, scroll: u8) {
+        self.ctx.menu.list_scroll = scroll;
+    }
+
     /// `wCurrentMenuItem` as a cursor menu left it, `None` where the player backed out of it.
     pub fn chosen_row(&self) -> Option<u8> {
         match self.ow.rt.outcome {
@@ -1370,6 +1554,12 @@ impl Script<'_, '_> {
         }
         self.ctx.world.party[slot as usize].nick = typed;
         true
+    }
+
+    /// `wNameBuffer`, which a `text_ram` in the text about to be printed reads.
+    pub fn set_name_buffer(&mut self, name: &str) {
+        let name = poke_core::charmap::encode(name).expect("a name buffer's string");
+        self.ctx.world.text.strings.insert(TextBuffer::NameBuffer, name);
     }
 
     /// `LoadGymLeaderAndCityName`, which a gym runs on its first pass so its statue can read them.

@@ -286,7 +286,7 @@ fn a_machine_prize_is_refused_to_a_full_bag() {
     run.fixture().api().debug_set_coins(9000);
     // Every kind the bag has room for, so the machine would be a twenty-first.
     let fillers = (1..=255u8).filter_map(ItemId::from_repr)
-        .filter(|id| !id.is_key_item() && !id.is_hm() && *id != ItemId::Tm50Substitute);
+        .filter(|id| !id.is_key_item() && !id.is_hm() && !id.is_floor() && *id != ItemId::Tm50Substitute);
     for filler in fillers {
         if run.fixture().game_state().bag.len() >= crate::pokemon::bag::Bag::MAX_ITEMS { break }
         if !run.fixture().game_state().bag.contains(&filler) {

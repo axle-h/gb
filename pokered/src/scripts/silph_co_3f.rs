@@ -13,8 +13,9 @@ use super::{text_at, Flow, Script};
 /// The block a card key door is drawn as while it is still shut. The third floor's is not the
 /// second floor's, because the two floors are tiled differently.
 const CLOSED_DOOR: u8 = 0x5F;
-/// `SilphCo3FGateCallbackScript.GateCoordinates`, in blocks.
+/// `SilphCo3FGateCallbackScript.GateCoordinates`, in blocks, and the event each gate has.
 const GATES: [(u8, u8); 2] = [(4, 4), (8, 4)];
+const DOORS: [u16; 2] = [EVENT_SILPH_CO_3_UNLOCKED_DOOR1, EVENT_SILPH_CO_3_UNLOCKED_DOOR2];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
@@ -29,28 +30,12 @@ pub enum Label {
 }
 
 pub fn script(rt: &mut Script) -> Flow {
-    gate_callback(rt);
+    // `SilphCo3FGateCallbackScript`.
+    super::silph_co::gate_callback(rt, &GATES, &DOORS, CLOSED_DOOR);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().silph_co_3f.cur_script;
     let index = rt.execute_cur_map_script_in_table(index, sym::SilphCo3TrainerHeaders);
     rt.trainer_script(index).then(Label::StoreCurScript)
-}
-
-/// `SilphCo3FGateCallbackScript`.
-fn gate_callback(rt: &mut Script) {
-    if !rt.check_and_reset_cur_map_loaded(1) {
-        return;
-    }
-    match super::silph_co_2f::unlocked_door(rt, &GATES) {
-        0 => {}
-        1 => rt.set_event(EVENT_SILPH_CO_3_UNLOCKED_DOOR1),
-        _ => rt.set_event(EVENT_SILPH_CO_3_UNLOCKED_DOOR2),
-    }
-    for (event, (x, y)) in [(EVENT_SILPH_CO_3_UNLOCKED_DOOR1, GATES[0]), (EVENT_SILPH_CO_3_UNLOCKED_DOOR2, GATES[1])] {
-        if !rt.check_event(event) {
-            rt.replace_tile_block(x, y, CLOSED_DOOR);
-        }
-    }
 }
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {

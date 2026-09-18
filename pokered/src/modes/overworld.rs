@@ -171,6 +171,10 @@ pub struct Overworld {
     map_pal_offset: u8,
     /// `hWarpDestinationMap`.
     warp_destination_map: u8,
+    /// `wWarpedFromWhichWarp` and `wWarpedFromWhichMap`: which warp of which map the player last
+    /// came through, which is how an elevator points its own doors back the way they came.
+    #[serde(default)]
+    warped_from: (u8, u8),
     /// The fixture's sprites, which `enter` keeps rather than loading the map's own.
     keep_sprites: bool,
     /// The last body found no button pressed with nothing under way, so a press now is a new decision.
@@ -227,6 +231,7 @@ impl Overworld {
             no_face_player: false,
             map_pal_offset: 0,
             warp_destination_map: 0,
+            warped_from: (0, 0),
             keep_sprites: false,
             polled: false,
             answered: 0,
@@ -378,6 +383,9 @@ impl Overworld {
         if ctx.screen.map.blocks != self.view.blocks {
             ctx.screen.map.blocks = self.view.blocks.clone();
         }
+        if ctx.screen.map.overrides != self.view.tile_overrides {
+            ctx.screen.map.overrides = self.view.tile_overrides.clone();
+        }
         ctx.screen.map.camera = (x, y);
     }
 
@@ -480,6 +488,7 @@ impl Overworld {
         sprites::init_map_sprites(&mut self.sprites, &mut self.sprite_set, location.map, location.x, location.y,
             self.num_sprites, self.font_loaded, &mut ctx.screen.tiles);
         self.view.blocks = tile_block_map(location.map).expect("the map has blocks");
+        self.view.tile_overrides.clear();
         ctx.screen.tiles.load_tileset(self.view.tileset);
         self.set_pal_overworld(ctx);
         sprites::load_player_sprite_graphics(&mut ctx.screen.tiles, &mut ctx.world.location, self.view.tileset);
@@ -1015,15 +1024,15 @@ impl Overworld {
                 self.standing.standing_on_warp = false;
             }
             if warps {
-                return self.warp_found(ctx, warp);
+                return self.warp_found_at(ctx, warp, index);
             }
             if self.extra_warp_check(ctx) {
                 if self.rt.forced_warp {
-                    return self.warp_found(ctx, warp);
+                    return self.warp_found_at(ctx, warp, index);
                 }
                 ctx.pad.poll();
                 if ctx.pad.held.intersects(PAD_CTRL_PAD) {
-                    return self.warp_found(ctx, warp);
+                    return self.warp_found_at(ctx, warp, index);
                 }
             }
         }
@@ -1033,10 +1042,17 @@ impl Overworld {
     /// `CheckWarpsCollision`: walking into a wall from a warp that takes the player that way.
     fn check_warps_collision(&mut self, ctx: &mut Ctx) -> Transition {
         let location = &ctx.world.location;
-        match self.warps.iter().copied().find(|warp| warp.y == location.y && warp.x == location.x) {
-            Some(warp) => self.warp_found(ctx, warp),
+        match self.warps.iter().position(|warp| warp.y == location.y && warp.x == location.x) {
+            Some(index) => self.warp_found_at(ctx, self.warps[index], index),
             None => self.overworld_loop(),
         }
+    }
+
+    /// `WarpFound2`'s `wWarpedFromWhichWarp`, which only a warp the player walked through has: the
+    /// warps a script or the Safari Zone takes leave whatever the last one left.
+    fn warp_found_at(&mut self, ctx: &mut Ctx, warp: Warp, index: usize) -> Transition {
+        self.warped_from = (index as u8, ctx.world.location.map as u8);
+        self.warp_found(ctx, warp)
     }
 
     /// `WarpFound1` and `WarpFound2`, up to the fade that ends in `EnterMap`.
@@ -1145,6 +1161,7 @@ impl Overworld {
         sprites::init_map_sprites(&mut self.sprites, &mut self.sprite_set, location.map, location.x, location.y,
             self.num_sprites, self.font_loaded, &mut ctx.screen.tiles);
         self.view.blocks = tile_block_map(location.map).expect("the map has blocks");
+        self.view.tile_overrides.clear();
         self.phase = Phase::Loop(0);
         Transition::Stay
     }

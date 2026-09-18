@@ -331,9 +331,9 @@ mod harvest {
     use super::super::{write_fixture, Case};
     use super::*;
 
-    /// Every item the cartridge has a row for, machines included.
+    /// Every item the cartridge has a row for, machines included but not an elevator's floors.
     fn every_item() -> Vec<ItemId> {
-        (1..=u8::MAX).filter_map(ItemId::from_repr).collect()
+        (1..=u8::MAX).filter_map(ItemId::from_repr).filter(|id| !id.is_floor()).collect()
     }
 
     fn an_item(rng: &mut StdRng) -> ItemId {
