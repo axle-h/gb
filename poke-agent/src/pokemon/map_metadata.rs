@@ -278,15 +278,19 @@ impl MapMetadata {
 }
 
 impl MapMetadata {
-    /// Pokémon Mansion 3F's floor holes as warps to 1F, the only way to 1F's right side and the B1F
-    /// stairs.
+    /// Pokémon Mansion 3F's floor holes as warps, landing where `DungeonWarpData` puts them: two to
+    /// 1F, the only way to its right side and the B1F stairs, and the third to 2F.
     pub fn apply_mansion_holes(&self, result: &mut [MetaTile]) {
         if self.map != Map::PokemonMansion3F { return; }
         let w = self.dimensions().full_width();
-        for (x, y) in [(16usize, 14usize), (17, 14), (19, 14)] {
+        for ((x, y), to_map, to_position) in [
+            ((16usize, 14usize), Map::PokemonMansion1F, Point8 { x: 16, y: 14 }),
+            ((17, 14), Map::PokemonMansion1F, Point8 { x: 16, y: 14 }),
+            ((19, 14), Map::PokemonMansion2F, Point8 { x: 18, y: 14 }),
+        ] {
             let idx = x + y * w;
             if idx < result.len() {
-                result[idx] = MetaTile::Warp { to_map: Map::PokemonMansion1F, to_position: Point8 { x: 16, y: 14 } };
+                result[idx] = MetaTile::Warp { to_map, to_position };
             }
         }
     }
@@ -397,6 +401,8 @@ struct WarpGateSpec {
     at: Point8,
     /// Live once all these `(wEventFlags byte, bit mask)` pairs are set.
     live_when_all_set: &'static [(u16, u8)],
+    /// And only while this is in the bag.
+    live_while_held: Option<crate::pokemon::item::ItemId>,
 }
 
 /// The warps a map's own script cancels. Kept tiny: withholding a real door is how a floor loses
@@ -405,8 +411,14 @@ fn map_warp_gate_specs(map: Map) -> &'static [WarpGateSpec] {
     match map {
         // The two staircases out of B4F's east pocket.
         Map::SeafoamIslandsB4F => &[
-            WarpGateSpec { at: Point8 { x: 20, y: 17 }, live_when_all_set: &[(313, 0x01), (313, 0x02)] },
-            WarpGateSpec { at: Point8 { x: 21, y: 17 }, live_when_all_set: &[(313, 0x01), (313, 0x02)] },
+            WarpGateSpec { at: Point8 { x: 20, y: 17 }, live_when_all_set: &[(313, 0x01), (313, 0x02)], live_while_held: None },
+            WarpGateSpec { at: Point8 { x: 21, y: 17 }, live_when_all_set: &[(313, 0x01), (313, 0x02)], live_while_held: None },
+        ],
+        // `CinnabarIslandDefaultScript` turns the player back from the gym's door, Blaine beaten or
+        // not, whenever the Secret Key is not in the bag: a key left in the PC locks it again.
+        Map::CinnabarIsland => &[
+            WarpGateSpec { at: Point8 { x: 18, y: 3 }, live_when_all_set: &[],
+                           live_while_held: Some(crate::pokemon::item::ItemId::SecretKey) },
         ],
         _ => &[],
     }
@@ -443,7 +455,8 @@ pub(crate) fn script_cancelled_warps(mmu: &MMU, map: Map) -> Vec<Point8> {
     let base = pokered_symbols::wEventFlags.address;
     map_warp_gate_specs(map).iter().filter_map(|spec| {
         let live = spec.live_when_all_set.iter()
-            .all(|&(byte, bit)| mmu.read(base + byte) & bit != 0);
+            .all(|&(byte, bit)| mmu.read(base + byte) & bit != 0)
+            && spec.live_while_held.is_none_or(|item| mmu.read_bag().contains(&item));
         (!live).then_some(spec.at)
     }).collect()
 }

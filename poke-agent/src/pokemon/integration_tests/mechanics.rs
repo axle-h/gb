@@ -96,6 +96,46 @@ fn a_lifts_doors_lead_to_the_floor_it_was_entered_from() {
             "the lift was entered from B4F and its doors say {doors:?}");
 }
 
+/// Cinnabar's gym door turns the player back whenever the Secret Key is not in the bag, Blaine
+/// beaten or not, so it is a row only while the key is held.
+#[test]
+fn the_cinnabar_gym_door_is_a_row_only_while_the_secret_key_is_held() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/completion-volcano.bin"), Duration::from_secs(10), vec![]);
+    let gym = |state: &GameState| state.map.actions().iter()
+        .any(|action| matches!(action.tile, MetaTile::Warp { to_map: Map::CinnabarGym, .. }));
+
+    let held = fixture.game_state();
+    assert_eq!(held.map.map, Map::CinnabarIsland);
+    assert!(gym(&held), "the door is a row while the key is in the bag");
+
+    fixture.api().debug_take_item(ItemId::SecretKey).expect("the fixture holds the Secret Key");
+    assert!(!gym(&fixture.game_state()), "a door the script turns the player back from is not a row");
+}
+
+/// Mansion 3F's holes are numbered by its script in `.holeCoords` order, and `DungeonWarpList` pairs
+/// each number with the map it lands on: the third drops to 2F, not 1F.
+#[test]
+fn the_mansion_holes_land_where_the_cartridge_sends_them() {
+    use crate::pokemon::map_metadata::MapMetadataReader;
+    use crate::pokemon::symbols::pokered_symbols;
+    let gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+    let mmu = gb.core().mmu();
+    let metadata = mmu.read_map_metadata(Map::PokemonMansion3F).expect("3F reads");
+    let width = metadata.dimensions().full_width();
+    let mut tiles = vec![MetaTile::Empty; width * metadata.dimensions().full_height()];
+    metadata.apply_mansion_holes(&mut tiles);
+
+    let list = mmu.rom_data_from_rom_pointer(&pokered_symbols::DungeonWarpList, 2 * 16).to_vec();
+    let landings: Vec<(u8, u8)> = list.chunks(2).take_while(|entry| entry[0] != 0xFF)
+        .map(|entry| (entry[0], entry[1])).collect();
+    for (number, (x, y)) in [(16usize, 14usize), (17, 14), (19, 14)].into_iter().enumerate() {
+        let MetaTile::Warp { to_map, .. } = tiles[x + y * width] else { panic!("({x}, {y}) is not a hole") };
+        assert!(landings.contains(&(to_map as u8, number as u8 + 1)),
+            "hole {} at ({x}, {y}) lands on {to_map:?}, which `DungeonWarpList` does not say", number + 1);
+    }
+}
+
 /// A text box in answer to an A press is the interaction landing, not a failure.
 #[test]
 fn talking_to_a_sprite_is_a_success_not_an_abort() {

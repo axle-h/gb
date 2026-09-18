@@ -223,6 +223,33 @@ fn a_pokemon_is_boarded_at_the_day_care_and_collected() {
     assert!(!seen.lock().expect("not poisoned").was_stuck, "the watchdog fired at the Day Care");
 }
 
+/// A Rare Candy's level-up can start an evolution, and a model can let it run or stop it as B does.
+#[test]
+fn a_rare_candy_evolution_runs_or_is_stopped_as_the_model_says() {
+    use crate::pokemon::species::PokemonSpecies;
+    const SAFARI: &[u8] = include_bytes!("../data/completion-safari.bin");
+    for (evolve, becomes) in [(false, PokemonSpecies::NidoranMale), (true, PokemonSpecies::Nidorino)] {
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let brain = walk_in_then(&["Route19"], vec![field_move(serde_json::json!({
+            "move": "use_item", "item": "RareCandy", "slot": 3, "evolve": evolve }))], Arc::clone(&seen));
+        let mut run = LlmRun::builder(SAFARI)
+            .named("rare-candy")
+            .game_time(Duration::from_secs(10 * 60))
+            .start(Box::new(brain));
+        let before = run.fixture().game_state().pokemon[3].clone();
+        assert_eq!((before.species, before.level), (PokemonSpecies::NidoranMale, 22),
+            "slot 3 should be the Safari Zone's Nidoran, a level short of what evolves it");
+
+        let fed = run.tick_until(PATIENCE, |run| {
+            let state = run.fixture().game_state();
+            state.mode == crate::pokemon::encoding::GameMode::Overworld && state.pokemon[3].level > before.level
+        });
+        assert!(fed, "the Rare Candy was never used (evolve: {evolve})");
+        assert_eq!(run.fixture().game_state().pokemon[3].species, becomes, "evolve: {evolve}");
+        assert!(!seen.lock().expect("not poisoned").was_stuck, "the watchdog fired feeding a Rare Candy");
+    }
+}
+
 /// A prize is bought with coins, by a call a model can make.
 #[test]
 fn a_prize_is_bought_at_the_game_corner() {

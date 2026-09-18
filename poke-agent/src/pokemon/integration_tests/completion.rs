@@ -399,6 +399,10 @@ impl Ledger {
         self.observed.insert(entry);
     }
 
+    pub fn has_seen(&self, entry: &Entry) -> bool {
+        self.observed.contains(entry)
+    }
+
     pub fn done(&self, item: &Item, mmu: &MMU, state: &GameState) -> bool {
         match &item.check {
             Check::Visited(map) => self.visited.contains(map),

@@ -140,7 +140,7 @@ pub enum FieldMoveRequest {
     /// Use an evolution stone from the bag on a party member.
     Evolve { stone: ItemId, slot: u8 },
     /// Use a bag item on `target` if given (the Poké Flute on Snorlax), else the player or `slot`.
-    UseItem { item: ItemId, target: Option<Point8>, slot: Option<u8> },
+    UseItem { item: ItemId, target: Option<Point8>, slot: Option<u8>, evolve: bool },
     /// Throw an item away to free one of the bag's 20 slots.
     TossItem { item: ItemId },
     /// Rearrange the party so `slot` leads.
@@ -265,7 +265,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
                 .ok_or_else(|| format!("Slot {slot} is empty."))?;
             FieldMove::EvolveWithStone { stone: held(*stone)?, target_slot: slot, evolve_from }
         }
-        FieldMoveRequest::UseItem { item, target: None, slot } => {
+        FieldMoveRequest::UseItem { item, target: None, slot, evolve } => {
             let item = held(*item)?;
             if let Some(refusal) = crate::pokemon::item_use::field_use_refusal(item) {
                 return Err(refusal);
@@ -273,6 +273,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             let target = match slot {
                 Some(slot) => crate::pokemon::postgame::items::UseTarget::Party {
                     slot: party_slot(*slot)?,
+                    evolve: *evolve,
                 },
                 None => crate::pokemon::postgame::items::UseTarget::Nothing,
             };
@@ -283,7 +284,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             FieldMove::UseBagItem { item, target }
         }
         // A `slot` beside a `target` is ignored: an item that takes a target takes no party member.
-        FieldMoveRequest::UseItem { item, target: Some(target), slot: _ } => {
+        FieldMoveRequest::UseItem { item, target: Some(target), .. } => {
             // As `Teach`'s gate, for an item the game will not use at all.
             let item = held(*item)?;
             if let Some(refusal) = crate::pokemon::item_use::field_use_refusal(item) {
@@ -1038,6 +1039,7 @@ fn use_field_move_spec() -> ToolSpec {
                 "box_slot": { "type": "integer", "minimum": 0, "maximum": 19, "description": "A slot in the open box, 0-based." },
                 "box": { "type": "integer", "minimum": 1, "maximum": 12, "description": "Which box to open, for `change_box`." },
                 "quantity": { "type": "integer", "minimum": 1, "maximum": 99, "description": "How many, for `pc_items`. Default 1." },
+                "evolve": { "type": "boolean", "description": "For `use_item` on a `slot`: false stops an evolution the item starts, as B does. Default true." },
             },
             "required": ["move"],
             "additionalProperties": false,
@@ -1530,6 +1532,11 @@ fn field_move_arguments(arguments: &Value) -> Result<FieldMoveRequest, String> {
             slot: match arguments.get("slot") {
                 Some(Value::Null) | None => None,
                 Some(_) => Some(slot()?),
+            },
+            evolve: match arguments.get("evolve") {
+                Some(Value::Null) | None => true,
+                Some(Value::Bool(evolve)) => *evolve,
+                Some(other) => return Err(format!("`evolve` is true or false, not {other}.")),
             },
         }),
         "toss_item" => Ok(FieldMoveRequest::TossItem { item: item("item")? }),
@@ -3168,15 +3175,15 @@ mod tests {
         );
         assert_eq!(
             request(r#"{"move":"use_item","item":"PokeFlute","target":{"x":12,"y":9}}"#),
-            FieldMoveRequest::UseItem { item: ItemId::PokeFlute, target: Some(Point8 { x: 12, y: 9 }), slot: None },
+            FieldMoveRequest::UseItem { item: ItemId::PokeFlute, target: Some(Point8 { x: 12, y: 9 }), slot: None, evolve: true },
         );
         assert_eq!(
             request(r#"{"move":"use_item","item":"Bicycle"}"#),
-            FieldMoveRequest::UseItem { item: ItemId::Bicycle, target: None, slot: None },
+            FieldMoveRequest::UseItem { item: ItemId::Bicycle, target: None, slot: None, evolve: true },
         );
         assert_eq!(
             request(r#"{"move":"use_item","item":"Potion","slot":1}"#),
-            FieldMoveRequest::UseItem { item: ItemId::Potion, target: None, slot: Some(1) },
+            FieldMoveRequest::UseItem { item: ItemId::Potion, target: None, slot: Some(1), evolve: true },
         );
         assert_eq!(request(r#"{"move":"reorder_party","slot":3}"#), FieldMoveRequest::ReorderParty { slot: 3 });
 
@@ -3358,7 +3365,7 @@ mod tests {
         };
         let at = Point8 { x: 8, y: 4 };
         let complaint = |state: &GameState, item: ItemId| {
-            match resolve_field_move(state, &FieldMoveRequest::UseItem { item, target: Some(at), slot: None }) {
+            match resolve_field_move(state, &FieldMoveRequest::UseItem { item, target: Some(at), slot: None, evolve: true }) {
                 Err(complaint) => complaint,
                 Ok(resolved) => panic!("{item} should not have resolved to {resolved:?}"),
             }
@@ -3380,7 +3387,7 @@ mod tests {
         // Not "refuse every key item": the Poké Flute is one, and the scripted route uses it.
         assert!(ItemId::PokeFlute.is_key_item(), "the point of the case");
         assert_eq!(
-            resolve_field_move(&holding(ItemId::PokeFlute), &FieldMoveRequest::UseItem { item: ItemId::PokeFlute, target: Some(at), slot: None }),
+            resolve_field_move(&holding(ItemId::PokeFlute), &FieldMoveRequest::UseItem { item: ItemId::PokeFlute, target: Some(at), slot: None, evolve: true }),
             Ok(FieldMove::UseFieldItem { item: ItemId::PokeFlute, target: at }),
         );
 
@@ -3424,7 +3431,7 @@ mod tests {
         assert!(outdoors.bag.iter().any(|item| item.id == ItemId::Bicycle),
             "the fixture has to be carrying the bike or this proves nothing");
 
-        let ride = FieldMoveRequest::UseItem { item: ItemId::Bicycle, target: None, slot: None };
+        let ride = FieldMoveRequest::UseItem { item: ItemId::Bicycle, target: None, slot: None, evolve: true };
         assert_eq!(resolve_field_move(&outdoors, &ride).expect("a bike outdoors is a legal call"),
                    FieldMove::UseBagItem { item: ItemId::Bicycle, target: UseTarget::Nothing });
 
@@ -3447,7 +3454,7 @@ mod tests {
         assert!(state.bag.iter().any(|item| item.id == ItemId::Bicycle), "and carrying the bike");
         assert!(crate::pokemon::postgame::items::bike_riding_allowed(&state), "on a map that allows it");
 
-        let ride = FieldMoveRequest::UseItem { item: ItemId::Bicycle, target: None, slot: None };
+        let ride = FieldMoveRequest::UseItem { item: ItemId::Bicycle, target: None, slot: None, evolve: true };
         let refusal = resolve_field_move(&state, &ride).expect_err("a bike on water is refused");
         assert!(refusal.contains("surfing"), "{refusal}");
     }
@@ -3458,7 +3465,7 @@ mod tests {
         let mut state = fixture_state();
         state.bag.push(BagItem { id: ItemId::PokeFlute, quantity: 1 }).expect("room in the bag");
         let flute = |target| resolve_field_move(&state, &FieldMoveRequest::UseItem {
-            item: ItemId::PokeFlute, target: Some(target), slot: None });
+            item: ItemId::PokeFlute, target: Some(target), slot: None, evolve: true });
 
         // Oak's lab: the rival stands on (8, 4) and (7, 5) is bare floor beneath the player.
         let empty = flute(Point8 { x: 7, y: 5 }).expect_err("open ground is not a target");

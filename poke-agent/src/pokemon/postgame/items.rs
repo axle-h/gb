@@ -18,7 +18,8 @@ use crate::pokemon::{GameState, PokemonApi, PokemonApiTrait};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UseTarget {
     Nothing,
-    Party { slot: u8 },
+    /// `evolve` false stops an evolution the use starts, as B does: a Rare Candy's level-up.
+    Party { slot: u8, evolve: bool },
     Move { slot: u8, move_index: u8 },
 }
 
@@ -26,8 +27,12 @@ impl UseTarget {
     pub const fn slot(self) -> Option<u8> {
         match self {
             Self::Nothing => None,
-            Self::Party { slot } | Self::Move { slot, .. } => Some(slot),
+            Self::Party { slot, .. } | Self::Move { slot, .. } => Some(slot),
         }
+    }
+
+    const fn evolves(self) -> bool {
+        !matches!(self, Self::Party { evolve: false, .. })
     }
 }
 
@@ -296,6 +301,10 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: BagItemState)
 
     let button = if game_mode == GameMode::Overworld {
         JoypadButton::Start
+    } else if !s.target.evolves() && text.contains("is evolving") {
+        // Ahead of the party menu, whose geometry the evolution screen leaves standing.
+        // `Evolution_CheckForCancel` reads a fresh B press on every frame of the animation.
+        JoypadButton::B
     } else if (top_x, top_y) == START_MENU_ORIGIN {
         // Asked of `start_menu_row` rather than assumed, though the Pokédex is owned here.
         nav(current, start_menu_row(api, StartMenuRow::Item))
@@ -371,7 +380,7 @@ pub mod battle_status2 {
 
 impl PolicyStep {
     pub const fn use_medicine(item: ItemId, slot: u8) -> Self {
-        Self::UseBagItem { item, target: UseTarget::Party { slot } }
+        Self::UseBagItem { item, target: UseTarget::Party { slot, evolve: true } }
     }
 
     pub const fn use_pp_restore(item: ItemId, slot: u8, move_index: u8) -> Self {
