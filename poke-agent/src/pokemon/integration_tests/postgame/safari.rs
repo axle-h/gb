@@ -156,3 +156,24 @@ fn runs_the_step_budget_down_and_is_ejected() {
     println!("ejected and back in Fuchsia · ¥{} · dex owned {}",
         ejected.money, ejected.pokedex_owned.species().len());
 }
+
+/// The Nugget stands on an island in the centre's pond, and `TilePairCollisionsWater` refuses the
+/// step from every bank onto that water, so no walk reaches it. Surf is what would make the island
+/// look reachable, so the party here can surf and has the badge for it, and still no row is offered.
+#[test]
+fn the_safari_zones_island_nugget_is_never_offered() {
+    use crate::pokemon::move_name::PokemonMoveName;
+    use crate::pokemon::tile::MetaTile;
+
+    let mut fixture = TestFixture::new(
+        include_bytes!("../../data/soak-safari-zone.bin"), Duration::from_secs(1), vec![]);
+    fixture.api().debug_set_badges(crate::pokemon::badge::Badge::all());
+    fixture.api().debug_teach_move(0, 0, PokemonMoveName::Surf).unwrap();
+    let state = fixture.game_state();
+    assert_eq!(state.map.map, Map::SafariZoneCenter);
+    assert!(state.map.sprites.iter().any(|sprite| sprite.name == "Nugget" && !sprite.hidden),
+            "the Nugget is still lying there");
+    let rows: Vec<MetaTile> = state.map.actions().into_iter().map(|action| action.tile).collect();
+    assert!(rows.iter().any(|tile| matches!(tile, MetaTile::Warp { .. })), "the zone's own exits are offered: {rows:?}");
+    assert!(!rows.iter().any(|tile| matches!(tile, MetaTile::Sprite("Nugget"))), "the island's Nugget is a row: {rows:?}");
+}
