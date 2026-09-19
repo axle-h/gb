@@ -1035,3 +1035,240 @@ fn probe_the_cartridge_s_frames() {
         println!("{frame}: {}{row}", stack.join(" < "));
     }
 }
+
+impl Cartridge {
+    /// A cartridge already running, compared at its polls for as long as the caller asks: nothing it
+    /// runs returns to `back`.
+    fn running(gb: GameBoy) -> Self {
+        Self { gb, tape: vec![], back: (Breakpoint::new(0, 0), 0), ended: false, seams: SEAMS.to_vec(), lcd: None }
+    }
+
+    /// A held until `DisplayTextID` is entered, as `scripts.rs`'s `Action::Talk` holds it, taping on
+    /// the way, and let go for a frame.
+    fn talk(&mut self) {
+        let (random, talk) = (breakpoint(sym::Random), breakpoint(sym::DisplayTextID));
+        self.gb.hold_buttons(joypad(Joypad::A));
+        loop {
+            let (stop, _) = self.gb.run_until(&[random, talk], MachineCycles::PER_FRAME * 600);
+            assert!(matches!(stop, Stop::Breakpoint(_)), "the cartridge never talked: {stop:?}");
+            if stop == Stop::Breakpoint(talk) {
+                break;
+            }
+            let caller = self.gb.return_address();
+            let (stop, _) = self.gb.run_to_return(MachineCycles::PER_FRAME * 10);
+            assert!(matches!(stop, Stop::Returned { .. }));
+            if !is_vblank_caller(caller) {
+                self.tape.push(self.gb.core().registers().a);
+            }
+        }
+        self.gb.hold_buttons(JoypadButtonState::default());
+        self.run(false);
+    }
+}
+
+/// The recreation's side of `Cartridge::talk`: A until something opens over the overworld.
+fn recreation_talk(game: &mut Game) {
+    for _ in 0..600 {
+        game.frame(Input::Buttons(Joypad::A));
+        if game.modes().len() > 1 {
+            return;
+        }
+    }
+    panic!("the recreation never talked");
+}
+
+/// Where both start in front of a gym leader: the recreation's world and overworld as the cartridge
+/// stands, and what the recreation's `Game` needs besides.
+struct GymStart {
+    world: pokered::world::World,
+    overworld: pokered::modes::overworld::Overworld,
+    /// `wBattleAndStartSavedMenuItem`, `wPartyAndBillsPCSavedMenuItem`, `wBagSavedMenuItem` and
+    /// `wListScrollOffset`.
+    menus: [u8; 4],
+    /// The sound effect channels' note delay counters.
+    sfx_note_delays: [u8; 4],
+}
+
+/// The sound effect channels, as `scripts.rs` seeds them.
+const SFX_CHANNELS: [usize; 4] = [4, 5, 6, 7];
+
+impl GymStart {
+    fn game(&self, tape: Vec<u8>) -> Game {
+        let mut game = Game::new(self.world.clone(), GameRng::tape(tape), Pacing::Faithful);
+        let menu = game.menu_mut();
+        [menu.battle_and_start, menu.party_and_bills, menu.bag_saved, menu.list_scroll] = self.menus;
+        // `scripts.rs`'s `seed_sfx_note_delays`: an idle sound effect channel keeps the counter its last
+        // sound left, which decides whether the next one gets the channel.
+        let mut engine = serde_json::to_value(game.audio()).expect("the engine serialises");
+        for (c, counter) in SFX_CHANNELS.into_iter().zip(self.sfx_note_delays) {
+            if game.audio().channel_sound_id(c) == 0 {
+                engine["channels"][c]["note_delay_counter"] = counter.into();
+            }
+        }
+        *game.audio_mut() = serde_json::from_value(engine).expect("the engine deserialises");
+        game.push(Mode::Overworld(self.overworld.clone()));
+        game
+    }
+}
+
+/// `pewter-gym.bin`, which stands below BROCK with his badge won, made to forget it as `scripts.rs`'s
+/// badge test does, and run to its first overworld poll in the SET style. The recreation's start is
+/// taken there as `scripts.rs`'s `Cartridge::start` takes it; those few lines are copied from it.
+fn in_front_of_brock() -> (Cartridge, GymStart) {
+    use poke_core::symbols::pokered_events::{EVENT_BEAT_BROCK, EVENT_GOT_TM34};
+    use pokered::modes::overworld::{Overworld, Standing};
+    use pokered::systems::overworld::sprites::SpriteState;
+    let mut walker = super::scripts::Cartridge::from_state(include_bytes!("../pokemon/data/pewter-gym.bin"));
+    let options = walker.read(sym::wOptions.address);
+    walker.write(sym::wOptions.address, options | 1 << 6);
+    while walker.to_poll().0 != super::scripts::Kind::Overworld {}
+    for i in 0..walker.read(sym::wPartyCount.address) as u16 {
+        let mon = PARTY_STRUCT * i;
+        for byte in 0..2 {
+            let max = walker.read(sym::wPartyMon1MaxHP.address + mon + byte);
+            walker.write(sym::wPartyMon1HP.address + mon + byte, max);
+        }
+        walker.write(sym::wPartyMon1Status.address + mon, 0);
+    }
+    for event in [EVENT_BEAT_BROCK, EVENT_GOT_TM34] {
+        let at = sym::wEventFlags.address + event / 8;
+        let flags = walker.read(at);
+        walker.write(at, flags & !(1 << (event % 8)));
+    }
+    let badges = walker.read(sym::wObtainedBadges.address);
+    walker.write(sym::wObtainedBadges.address, badges & !1);
+
+    let gb = &walker.gb;
+    let mmu = gb.core().mmu();
+    let sprites = std::array::from_fn(|slot| {
+        let at = slot as u16 * 16;
+        let data1 = mmu.read_slice(sym::wSpriteStateData1.address + at, 16);
+        let data2 = mmu.read_slice(sym::wSpriteStateData2.address + at, 16);
+        let map_data = if slot == 0 { [0, 0] } else {
+            let entry = sym::wMapSpriteData.address + (slot as u16 - 1) * 2;
+            [mmu.read(entry), mmu.read(entry + 1)]
+        };
+        SpriteState::from_bytes(&data1, &data2, map_data)
+    });
+    let standing = Standing {
+        player_direction: mmu.read_pointer(&sym::wPlayerDirection),
+        moving_direction: mmu.read_pointer(&sym::wPlayerMovingDirection),
+        last_stop_direction: mmu.read_pointer(&sym::wPlayerLastStopDirection),
+        check_for_180_degree_turn: mmu.read_pointer(&sym::wCheckFor180DegreeTurn),
+        standing_on_warp: mmu.read_pointer(&sym::wMovementFlags) & 1 << 2 != 0,
+        destination_warp: mmu.read_pointer(&sym::wDestinationWarpID),
+    };
+    let overworld = Overworld::standing(sprites, mmu.read_pointer(&sym::wNumSprites), standing)
+        .with_battle_flags(mmu.read_pointer(&sym::wStatusFlags4) & 1 << 4 != 0, mmu.read_pointer(&sym::wStatusFlags2) & 1 != 0,
+            mmu.read_pointer(&sym::wNumberOfNoRandomBattleStepsLeft))
+        .with_step_counter(mmu.read_pointer(&sym::wStepCounter));
+    let menus = [&sym::wBattleAndStartSavedMenuItem, &sym::wPartyAndBillsPCSavedMenuItem, &sym::wBagSavedMenuItem,
+        &sym::wListScrollOffset].map(|at| mmu.read_pointer(at));
+    let sfx_note_delays = SFX_CHANNELS.map(|c| mmu.read(sym::wChannelNoteDelayCounters.address + c as u16));
+    let start = GymStart { world: walker.world(), overworld, menus, sfx_note_delays };
+    (Cartridge::running(walker.gb), start)
+}
+
+/// The screen as the recreation shows it over the overworld: what the UI covers, and the map through
+/// the view where it does not, as `scripts.rs` composes it.
+fn over_the_map(game: &Game) -> Vec<Vec<u8>> {
+    let in_battle = game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_)));
+    let map = game.modes().iter().rev().find_map(|mode| match mode {
+        Mode::Overworld(overworld) if !in_battle => Some(overworld.view().tile_map()),
+        _ => None,
+    });
+    (0..18).map(|y| (0..20).map(|x| {
+        game.ui().cover(x, y).or_else(|| map.map(|tiles| tiles[y * 20 + x])).unwrap_or(game.ui().get(x, y))
+    }).collect()).collect()
+}
+
+/// Frames until the recreation waits on anything but the overworld, and for what.
+fn gym_recreation_to_poll(game: &mut Game) -> (u32, Decision) {
+    for frames in 1..5000 {
+        game.frame(Input::None);
+        if let Status::Waiting(decision) = game.status() && decision != Decision::Overworld {
+            return (frames, decision);
+        }
+    }
+    panic!("the recreation never waited");
+}
+
+/// `wChannelSoundIDs` for the four music channels.
+fn cartridge_music(gb: &GameBoy) -> [u8; 4] {
+    std::array::from_fn(|c| gb.core().mmu().read(sym::wChannelSoundIDs.address + c as u16))
+}
+
+fn in_battle(gb: &GameBoy) -> bool {
+    gb.core().mmu().read(sym::wIsInBattle.address) != 0
+}
+
+/// BROCK talked to below him and fought through Pewter Gym's own script, so the battle is the one
+/// the script builds rather than one written into WRAM: his lone move on ONIX, the gym leader's
+/// battle music and the victory music. Compared at every poll from his first text to the first one
+/// after the battle: the screen and the music channels, and at each battle poll the enemy's moves.
+#[test]
+fn brock_fought_through_the_gym_s_script_matches_the_cartridge() {
+    use poke_core::move_name::PokemonMoveName;
+    use pokered::audio::data::sounds;
+    let (mut cartridge, _) = in_front_of_brock();
+    cartridge.talk();
+    let mut presses = vec![];
+    let (mut fought, mut bide) = (false, false);
+    loop {
+        let poll = cartridge.to_poll().expect("the cartridge polls");
+        let battling = in_battle(&cartridge.gb);
+        fought |= battling;
+        if fought && !battling {
+            break;
+        }
+        let mmu = cartridge.gb.core().mmu();
+        let onix = mmu.read(sym::wEnemyMonSpecies.address) == PokemonSpecies::Onix as u8;
+        let text: String = poll.screen.iter().map(|row| letters(row)).collect();
+        bide |= battling && onix && text.contains("FIGHT") && mmu.read_slice(sym::wEnemyMonMoves.address, 4).contains(&(PokemonMoveName::Bide as u8));
+        let button = policy(&poll.screen, presses.len());
+        presses.push(button);
+        cartridge.press(button);
+        assert!(presses.len() < 300, "the battle goes on");
+    }
+    assert!(bide, "ONIX came out knowing BIDE");
+
+    let tape = std::mem::take(&mut cartridge.tape);
+    let (mut cartridge, start) = in_front_of_brock();
+    let mut game = start.game(tape);
+    cartridge.talk();
+    recreation_talk(&mut game);
+    let mut heard = vec![];
+    for (poll, button) in presses.iter().map(|&button| Some(button)).chain([None]).enumerate() {
+        let theirs = cartridge.to_poll().expect("polls");
+        let (frames, decision) = gym_recreation_to_poll(&mut game);
+        println!("poll {poll} {decision:?}: cartridge {} frames, recreation {frames}", theirs.frames);
+        let mine = over_the_map(&game);
+        if theirs.screen != mine {
+            for (a, b) in theirs.screen.iter().zip(&mine) {
+                println!("  |{}|  |{}|", letters(a), letters(b));
+            }
+        }
+        assert_eq!(theirs.screen, mine, "the screen at poll {poll}");
+        let music = cartridge_music(&cartridge.gb);
+        assert_eq!(music, std::array::from_fn(|c| game.audio().channel_sound_id(c)), "the music at poll {poll}");
+        heard.push(music[0]);
+        let battle = game.modes().iter().find_map(|mode| match mode {
+            Mode::Battle(battle) => battle.battle(),
+            _ => None,
+        });
+        assert_eq!(in_battle(&cartridge.gb), battle.is_some(), "a battle at poll {poll}");
+        // Before the first mon is sent out `wEnemyMon` still holds the last battle's.
+        if let Some(battle) = battle.filter(|_| decision == Decision::BattleMenu) {
+            let theirs = cartridge.gb.core().mmu().read_slice(sym::wEnemyMonMoves.address, 4);
+            let mine: Vec<u8> = battle.enemy.mon.moves.iter().map(|name| name.map_or(0, |name| name as u8)).collect();
+            assert_eq!(theirs, mine, "the enemy's moves at poll {poll}");
+            assert_eq!(cartridge_state(&cartridge.gb), recreation_state(&game), "the battle at poll {poll}");
+        }
+        if let Some(button) = button {
+            press_both(&mut cartridge, &mut game, button);
+        }
+    }
+    for music in [sounds::MUSIC_GYM_LEADER_BATTLE, sounds::MUSIC_DEFEATED_GYM_LEADER] {
+        assert!(heard.contains(&music.id.0), "{music:?} was played");
+    }
+}

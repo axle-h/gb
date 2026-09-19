@@ -26,6 +26,7 @@ use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::mode::Ctx;
 use crate::systems::battle::Side;
 use super::hud;
+use super::present::{set_pal_battle, HpBarColours, MonPalettes};
 
 /// Animation ids: a move's own, and past the moves those of `constants/move_constants.asm`.
 pub mod anim {
@@ -172,6 +173,12 @@ pub struct AnimBattle {
     /// `hSCX`, which no window covers while the screen waves.
     #[serde(default)]
     pub h_scx: u8,
+    /// What `ChangeMonPic`'s `SET_PAL_BATTLE` sends: the mons as the step left them, and the bars
+    /// as the HUDs last drew them.
+    #[serde(default)]
+    pub mons: MonPalettes,
+    #[serde(default)]
+    pub hp_bar_colours: HpBarColours,
 }
 
 /// The routines the battle calls an animation through.
@@ -299,6 +306,8 @@ enum Op {
     LoadPic { side: Side, pic: Pic },
     /// `wTileMapBackup` or `wTileMapBackup2` written, which the battle keeps.
     SaveScreen(u8),
+    /// `RunPaletteCommand` of `SET_PAL_BATTLE`.
+    SetPalBattle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -611,7 +620,8 @@ impl Animation {
         })).collect();
         self.ops.extend([Op::Obp1(0xE4), Op::FrontPicToSprites, Op::Objects { index: 0, objects: objects.clone() }]);
         self.op(Op::Clear { x: 12, y: 0, width: PIC, height: PIC });
-        self.op(Op::LoadPic { side: Side::Enemy, pic: Pic::Species(PokemonSpecies::Marowak) });
+        // `ChangeMonPic` for the enemy, with the tile ids held back.
+        self.ops.extend([Op::LoadPic { side: Side::Enemy, pic: Pic::Species(PokemonSpecies::Marowak) }, Op::SetPalBattle]);
         for _ in 0..8 {
             self.ops.extend([Op::Obp1Xor(0x80), Op::Wait(10)]);
         }
@@ -1069,6 +1079,7 @@ impl Animation {
                 self.pic_tiles(tilemap::MON_PIC, PIC);
             }
         }
+        self.op(Op::SetPalBattle);
     }
 
     /// `AnimationMoveMonHorizontally`.
@@ -1461,6 +1472,7 @@ impl Animation {
                 (Side::Player, Pic::Species(species)) => hud::load_back_pic(&mut screen.tiles, species),
                 (side, Pic::Temp(bytes)) => screen.tiles.load(V_CHARS2 + pic_at(side).2 as usize, &bytes),
             },
+            Op::SetPalBattle => screen.sgb.run(&set_pal_battle(self.battle.hp_bar_colours, self.battle.mons)),
             Op::SaveScreen(1) => self.screen1 = Some(ui.clone()),
             Op::SaveScreen(_) => self.screen2 = Some(ui.clone()),
         }

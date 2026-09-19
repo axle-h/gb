@@ -243,7 +243,9 @@ pub struct AudioEngine {
     /// down.
     pub no_audio_fade_out: bool,
     registers: Registers,
-    #[serde(skip)]
+    /// Written since the last frame took them: a sound started by the main loop goes out with the
+    /// next VBlank, so a save taken between the two has to keep it.
+    #[serde(default)]
     out: Vec<Write>,
 }
 
@@ -271,6 +273,17 @@ impl AudioEngine {
         }
         self.update_music();
         self.take_writes()
+    }
+
+    /// What a backend that starts on an engine already running is fed before its first frame, as
+    /// one fed from a loaded save or switched on mid-run is: the registers a note does not rewrite,
+    /// wave RAM with its DAC, `NR50` and `NR51`.
+    pub fn standing_writes(&self) -> Vec<Write> {
+        // The DAC off around the copy, as `ApplyWavePatternAndFrequency` has it.
+        let registers = (AUD3WAVERAM..AUD3WAVERAM + AUD3WAVE_SIZE).chain([R_AUD3ENA, R_AUDVOL, R_AUDTERM]);
+        std::iter::once(Write::WaveDac(false))
+            .chain(registers.filter_map(|address| Write::decode(address, self.registers.get(address))))
+            .collect()
     }
 
     /// Everything written since the last take, which is what a sound started between two frames
@@ -1010,7 +1023,7 @@ impl AudioEngine {
         let d = (d | 0x80) & 0xC7;
         self.write_channel_register(c, REG_FREQUENCY_LO, e);
         self.write_channel_register(c, REG_FREQUENCY_LO + 1, d);
-        // The bug the plan keeps: engines 1 and 3 detune every channel while a cry is playing,
+        // A bug kept on purpose: engines 1 and 3 detune every channel while a cry is playing,
         // music included, because they do not ask which channel this is. `AUDIO_2` does.
         if self.bank != AudioBank::Two || c >= CHAN5 {
             self.apply_frequency_modifier(c, d, e);
@@ -1727,5 +1740,45 @@ mod tests {
         let mut restored: AudioEngine = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(restored, engine);
         assert_eq!(restored.frame(), engine.frame());
+    }
+
+    /// A sound started between two frames goes out with the next, whether or not the engine was
+    /// saved and loaded in between.
+    #[test]
+    fn a_sound_started_before_a_save_goes_out_after_the_load() {
+        let mut engine = playing(sounds::MUSIC_CITIES1);
+        engine.frame();
+        engine.play_music(sounds::MUSIC_POKECENTER);
+        let bytes = rmp_serde::to_vec_named(&engine).unwrap();
+        let mut restored: AudioEngine = rmp_serde::from_slice(&bytes).unwrap();
+        let theirs = engine.frame();
+        assert!(theirs.contains(&Write::MasterVolume { left: 0, right: 0, vin_left: false, vin_right: false }), "the song's reset");
+        assert_eq!(restored.frame(), theirs);
+    }
+
+    /// A backend fed a restored engine's standing writes and then its frames has the master volume,
+    /// the panning and wave RAM the engine wrote before the save, which no note of the song writes
+    /// again.
+    #[test]
+    fn standing_writes_hand_a_new_backend_the_registers_no_note_rewrites() {
+        let mut engine = playing(sounds::MUSIC_CITIES1);
+        let mut written = [0u8; 0x30];
+        let feed = |registers: &mut [u8; 0x30], writes: Vec<Write>| for write in writes {
+            let (address, value) = write.register();
+            registers[address as usize - 0xFF10] = value;
+        };
+        for _ in 0..100 {
+            feed(&mut written, engine.frame());
+        }
+        let bytes = rmp_serde::to_vec_named(&engine).unwrap();
+        let mut restored: AudioEngine = rmp_serde::from_slice(&bytes).unwrap();
+        let mut fresh = [0u8; 0x30];
+        feed(&mut fresh, restored.standing_writes());
+        feed(&mut fresh, restored.frame());
+        feed(&mut written, engine.frame());
+        let kept = |registers: &[u8; 0x30]| (registers[0x14], registers[0x15], registers[0x20..].to_vec(), registers[0x0A] & 0x80);
+        assert_eq!(kept(&fresh), kept(&written));
+        assert_eq!(fresh[0x14], 0x77, "the song's own master volume");
+        assert!(fresh[0x20..].iter().any(|&sample| sample != 0), "the wave instrument");
     }
 }

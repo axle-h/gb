@@ -60,6 +60,8 @@ pub enum Block {
     Mode(Box<Mode>),
     /// A battle on top, whose end `.battleOccurred` takes.
     Battle(Box<Mode>),
+    /// A mode in the overworld's place, which nothing returns from.
+    Replace(Box<Mode>),
     /// `WaitForTextScrollButtonPress`.
     TextScrollButton,
     /// `HoldTextDisplayOpen`: until A is let go.
@@ -225,8 +227,17 @@ pub enum Routine {
     PlayDefaultMusicCommon,
     EnterMapEnd,
     StartStep,
-    /// The start menu has closed, maybe having used a field move.
+    /// The start menu has closed, maybe having used a field move or cast a rod.
     AfterStartMenu,
+    /// `FishingInit` after its text, `RodResponse`, and `FishingAnim` a label at a time: the cast
+    /// with `wRodResponse`, the shakes left, the text, and the end.
+    FishingInitSound(ItemId),
+    RodResponse(ItemId),
+    FishingCast(u8),
+    FishingShake(u8),
+    FishingBite,
+    FishingText(DmgPointer),
+    FishingEnd,
     /// `UsedCut` once `UsedCutText` has printed: the tree out of the map, then `AnimCut`.
     UsedCutAnimation,
     /// `AnimCut` and `AnimateBoulderDust`, with the steps each has left.
@@ -265,6 +276,9 @@ pub(super) struct Runtime {
     pub sprites_frozen: bool,
     /// `BIT_NO_AUTO_TEXT_BOX`.
     pub no_auto_text_box: bool,
+    /// `BIT_NO_SPRITE_UPDATES`: the next `DisplayTextIDInit` skips its `UpdateSprites`, and clears it.
+    #[serde(default)]
+    pub no_sprite_updates: bool,
     /// `wDoNotWaitForButtonPressAfterDisplayingText`.
     pub do_not_wait: bool,
     /// `wOverrideSimulatedJoypadStatesMask`.
@@ -288,8 +302,8 @@ pub(super) struct Runtime {
     pub trainer_header_flag_bit: u8,
     /// `wEndBattleWinTextPointer`.
     pub end_battle_text: Option<DmgPointer>,
-    /// `wLoneAttackNo` and `wGymLeaderNo`.
-    pub lone_attack: u8,
+    /// `wGymLeaderNo`, the same byte as `wLoneAttackNo`: the leader's music and its last mon's lone
+    /// move both come from it.
     pub gym_leader_no: u8,
     /// `BIT_SEEN_BY_TRAINER`, `BIT_TRAINER_BATTLE`, `BIT_USE_CUR_MAP_SCRIPT`, `BIT_TALKED_TO_TRAINER`,
     /// `BIT_PRINT_END_BATTLE_TEXT` and `BIT_UNKNOWN_5_4`.
@@ -448,11 +462,21 @@ impl Script<'_, '_> {
             }
             Routine::AfterStartMenu => {
                 ow.surf_step(ctx);
+                if let Some(rod) = super::fishing::rod_chosen(ow.rt.outcome) {
+                    return ow.fishing_init(ctx, rod);
+                }
                 match ow.used_field_move(ctx) {
                     Some(flow) => flow,
                     None => Flow::Jump(Routine::CloseTextDisplay.into()),
                 }
             }
+            Routine::FishingInitSound(rod) => ow.fishing_init_sound(ctx, rod),
+            Routine::RodResponse(rod) => ow.rod_response(ctx, rod),
+            Routine::FishingCast(response) => ow.fishing_cast(ctx, response),
+            Routine::FishingShake(left) => ow.fishing_shake(ctx, left),
+            Routine::FishingBite => ow.fishing_bite(ctx),
+            Routine::FishingText(text) => ow.fishing_text(text),
+            Routine::FishingEnd => ow.fishing_end(ctx),
             Routine::UsedCutAnimation => ow.used_cut_animation(ctx),
             Routine::AnimCut(left) => ow.anim_cut_frame(ctx, left),
             Routine::DoBoulderDustAnimation => ow.do_boulder_dust_animation(ctx),
@@ -582,9 +606,9 @@ impl Script<'_, '_> {
         &mut self.ctx.world.scripts
     }
 
-    /// `GetMonName` into `wStringBuffer`, where a map's text reads it.
+    /// `GetMonName`, which copies into `wNameBuffer`.
     pub fn get_mon_name(&mut self, species: PokemonSpecies) {
-        self.ctx.world.text.strings.insert(TextBuffer::StringBuffer, species.name());
+        self.ctx.world.text.strings.insert(TextBuffer::NameBuffer, species.name());
     }
 
     /// `IsPlayerOnDungeonWarp`'s effect: the hole under the player, named by the floor it drops onto
@@ -763,6 +787,11 @@ impl Script<'_, '_> {
     pub fn enable_auto_text_box_drawing(&mut self) {
         self.ow.rt.no_auto_text_box = false;
         self.ow.rt.do_not_wait = false;
+    }
+
+    /// `BIT_NO_SPRITE_UPDATES`, so the next text opens with every sprite held where it is.
+    pub fn set_no_sprite_updates(&mut self) {
+        self.ow.rt.no_sprite_updates = true;
     }
 
     /// `DisableAutoTextBoxDrawing`.
@@ -1153,15 +1182,24 @@ impl Script<'_, '_> {
     }
 
     /// `EngageMapTrainer` and `InitBattleEnemyParameters` for the sprite in `slot`, which a gym
-    /// leader's own text does rather than being walked up to. `wGymLeaderNo` keeps its music.
+    /// leader's own text does rather than being walked up to, then `wGymLeaderNo`. Set after
+    /// `PlayTrainerMusic` has read it, so the leader's encounter music plays.
     pub fn engage_map_trainer(&mut self, slot: u8, gym_leader_no: u8) {
         self.ow.rt.sprite_index = slot;
-        self.ow.rt.gym_leader_no = gym_leader_no;
         self.ow.engage_map_trainer(self.ctx);
         let class = self.ow.rt.engaged_class;
         self.ow.rt.cur_opponent = class;
         self.ow.rt.enemy_mon_or_trainer_class = class;
         self.ow.rt.trainer_no = self.ow.rt.engaged_set;
+        if gym_leader_no != 0 {
+            self.ow.rt.gym_leader_no = gym_leader_no;
+        }
+    }
+
+    /// `wGymLeaderNo` set ahead of `EngageMapTrainer`, as `CinnabarGymBlaineText` does, which
+    /// silences the leader's encounter music.
+    pub fn set_gym_leader_no(&mut self, gym_leader_no: u8) {
+        self.ow.rt.gym_leader_no = gym_leader_no;
     }
 
     /// `wIsInBattle` at `$ff`: the battle the script sent the player into was lost.
@@ -1268,11 +1306,11 @@ impl Script<'_, '_> {
     }
 
     /// `predef HallOfFamePC` and the tail its script ends with: the ceremony, the credits, the save
-    /// and `jp Init`. It replaces itself with power-on rather than popping, so nothing carries on
-    /// after it.
+    /// and `jp Init`. It takes the overworld's place and replaces itself with power-on, so nothing
+    /// of the game is left running under the title screen.
     pub fn hall_of_fame_pc(&mut self) -> Then {
         let movie = crate::modes::movie::Movie::hall_of_fame();
-        Then::block(Block::Mode(Box::new(Mode::Movie(movie))))
+        Then::block(Block::Replace(Box::new(Mode::Movie(movie))))
     }
 
     /// `wOptions`' `BIT_BATTLE_ANIMATION`, which the champion's battle turns on whatever the player
@@ -1665,6 +1703,7 @@ impl Overworld {
                 self.rt.waiting = Waiting::Battle;
                 Some(Transition::Push(*mode))
             }
+            Block::Replace(mode) => Some(Transition::Replace(*mode)),
             Block::TextScrollButton => {
                 self.rt.waiting = Waiting::TextScrollButton;
                 self.text_scroll_button(ctx).then_some(Transition::Stay)
@@ -1759,7 +1798,9 @@ impl Overworld {
             }
         }
         self.font_loaded = true;
-        self.update_sprites(ctx);
+        if !std::mem::take(&mut self.rt.no_sprite_updates) {
+            self.update_sprites(ctx);
+        }
         for sprite in self.sprites.iter_mut().skip(1) {
             sprite.orig_facing = sprite.facing;
         }
@@ -1962,5 +2003,75 @@ mod tests {
         assert_eq!(overworld.view.blocks[stride * 3 + 3 + stride * 3 + 2], 0x0F);
         overworld.present(&mut ctx);
         assert_eq!(ctx.screen.map.blocks, overworld.view.blocks, "the screen draws the new block");
+    }
+
+    /// `PewterGymBrockText` sets `wGymLeaderNo` after `EngageMapTrainer`, so his encounter music
+    /// plays, and the same byte as `wLoneAttackNo` gives his Onix BIDE and the battle his music.
+    #[test]
+    fn brock_meets_the_player_to_his_music_and_fights_with_bide() {
+        use poke_core::charmap::encode;
+        use poke_core::move_name::PokemonMoveName;
+        use poke_core::species::PokemonSpecies;
+        use poke_core::sprite::SpriteFacing;
+        use crate::audio::data::{sounds, Sound};
+        use crate::command::{Command, Decision, Reply};
+        use crate::mode::{Mode, Status};
+        use crate::party::Named;
+        use crate::systems::add_mon::{new_party_mon, Origin};
+        use crate::{Game, Input};
+
+        let playing = |game: &Game, sound: Sound| (0..4).any(|channel| game.audio().channel_sound_id(channel) == sound.id.0);
+        let overworld = |game: &Game| game.modes().iter().find_map(|mode| match mode {
+            Mode::Overworld(overworld) => Some(overworld.rt.gym_leader_no),
+            _ => None,
+        });
+        let mut world = World { player_name: encode("RED").unwrap(), ..World::default() };
+        world.location = Location { map: Map::PewterGym, x: 4, y: 2, facing: SpriteFacing::Up, last_map: Map::PewterCity, ..Location::default() };
+        world.party = vec![Named {
+            mon: new_party_mon(PokemonSpecies::Pidgey, 40, 1, &Origin::Trainer, &mut GameRng::tape(vec![])),
+            ot: encode("RED").unwrap(),
+            nick: encode("MON").unwrap(),
+        }];
+        world.events.set(poke_core::symbols::pokered_events::EVENT_FOLLOWED_OAK_INTO_LAB);
+        let mut game = Game::new(world, GameRng::seeded(5), Pacing::Faithful);
+        game.push(Mode::Overworld(Overworld::new()));
+        let mut asked = false;
+        for _ in 0..20_000 {
+            if overworld(&game) == Some(1) {
+                break;
+            }
+            let input = match game.status() {
+                Status::Waiting(Decision::Overworld) if !asked => {
+                    asked = true;
+                    Input::Command(Command::Interact)
+                }
+                Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
+                _ => Input::None,
+            };
+            if let Some(reply) = game.frame(input).reply {
+                assert_eq!(reply, Reply::Accepted);
+            }
+        }
+        assert_eq!(overworld(&game), Some(1), "Brock's text engages him");
+        assert!(playing(&game, sounds::MUSIC_MEET_MALE_TRAINER), "the encounter music plays for a gym leader too");
+
+        let battle = |game: &Game| game.modes().iter().find_map(|mode| match mode {
+            Mode::Battle(battle) => battle.battle().map(|battle| battle.enemy_party.clone()),
+            _ => None,
+        });
+        for _ in 0..20_000 {
+            if battle(&game).is_some() && game.status() == Status::Waiting(Decision::Text) {
+                break;
+            }
+            let input = match game.status() {
+                Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
+                _ => Input::None,
+            };
+            game.frame(input);
+        }
+        let onix = battle(&game).expect("the battle began")[1].clone();
+        assert_eq!(onix.mon.species, PokemonSpecies::Onix);
+        assert!(onix.mon.moves.contains(&Some(PokemonMoveName::Bide)), "{:?}", onix.mon.moves);
+        assert!(playing(&game, sounds::MUSIC_GYM_LEADER_BATTLE));
     }
 }

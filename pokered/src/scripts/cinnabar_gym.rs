@@ -167,9 +167,13 @@ fn receive_tm38(rt: &mut Script) -> Flow {
 }
 
 /// `CinnabarGymStartBattleScript`: whoever the player is facing, by the sprite slot the map or the
-/// overworld put in `hSpriteIndex`.
+/// overworld put in `hSpriteIndex`. Blaine's text sets `wGymLeaderNo` before the engage, which is
+/// what keeps `PlayTrainerMusic` from playing a trainer's encounter music for him.
 fn start_battle_script(rt: &mut Script, gym_leader_no: u8) -> Flow {
     let slot = rt.sprite_index();
+    if gym_leader_no != 0 {
+        rt.set_gym_leader_no(gym_leader_no);
+    }
     rt.engage_map_trainer(slot, gym_leader_no);
     let next = match slot == CINNABARGYM_BLAINE {
         true => SCRIPT_CINNABARGYM_BLAINE_POST_BATTLE,
@@ -230,19 +234,17 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::BadgeInfo => {
             rt.set_event(EVENT_BEAT_BLAINE);
-            let text_id = match rt.give_item(ItemId::Tm38FireBlast, 1) {
-                true => TEXT_CINNABARGYM_BLAINE_RECEIVED_TM38,
-                false => TEXT_CINNABARGYM_BLAINE_TM38_NO_ROOM,
-            };
-            rt.display_text_id(text_id).then(Label::ReceivedTm38)
+            match rt.give_item(ItemId::Tm38FireBlast, 1) {
+                true => rt.display_text_id(TEXT_CINNABARGYM_BLAINE_RECEIVED_TM38).then(Label::ReceivedTm38),
+                false => rt.display_text_id(TEXT_CINNABARGYM_BLAINE_TM38_NO_ROOM).then(Label::GymVictory),
+            }
         }
         Label::ReceivedTm38 => {
-            if rt.is_item_in_bag(ItemId::Tm38FireBlast) {
-                rt.set_event(EVENT_GOT_TM38);
-            }
+            rt.set_event(EVENT_GOT_TM38);
             resume(rt, Label::GymVictory)
         }
-        // `.gymVictory`: every gate is marked won, and the next pass opens all six.
+        // `.gymVictory`: every trainer is marked beaten, and the next pass redraws the gates from
+        // their own events, so one never answered stays shut.
         Label::GymVictory => {
             rt.set_badge(BIT_VOLCANOBADGE);
             for event in EVENT_BEAT_CINNABAR_GYM_TRAINER_0..=EVENT_BEAT_CINNABAR_GYM_TRAINER_6 {

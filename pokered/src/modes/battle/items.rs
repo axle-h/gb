@@ -183,6 +183,8 @@ impl BattleMode {
     /// the party alone and brought across here from what changed.
     pub(super) fn item_used_from_party(&mut self, ctx: &mut Ctx) {
         let used = !matches!(self.outcome.take(), Some(Outcome::Chosen(crate::modes::use_item::NOT_USED)));
+        // `.done` and `.itemNotUsed`'s `RunDefaultPaletteCommand`, over the party menu's palettes.
+        self.push_set_pal_battle();
         self.action_taken = used;
         let before = self.party_before.take().expect("the party was noted before the item");
         let out = self.b().player_mon_number as usize;
@@ -272,7 +274,8 @@ impl BattleMode {
     /// `slot` is the ball's place in the bag, and `None` for the Safari Zone's, which are counted apart.
     pub(super) fn item_use_ball(&mut self, ball: ItemId, slot: Option<u8>, ctx: &mut Ctx) {
         if self.b().kind == BattleKind::Trainer {
-            // `ThrowBallAtTrainerMon`.
+            // `ThrowBallAtTrainerMon`, whose `RunDefaultPaletteCommand` is `SET_PAL_BATTLE`.
+            self.push_set_pal_battle();
             self.push(Present::LoadScreen1);
             self.toss(ball, 0, self.whose_turn);
             self.push(Present::Text(far("_ThrowBallAtTrainerMonText1")));
@@ -289,6 +292,7 @@ impl BattleMode {
         if self.battle_type == BattleType::Safari {
             super::boxes::use_safari_ball(ctx);
         }
+        self.push_set_pal_battle();
         self.push(Present::LoadScreen1);
         self.item_use_text(ctx);
         let enemy = self.b().enemy.mon.clone();

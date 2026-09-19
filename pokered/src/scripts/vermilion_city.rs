@@ -20,8 +20,8 @@ const PAD_BUTTONS_AND_CTRL_PAD: Joypad = Joypad::A.union(Joypad::B).union(Joypad
 
 /// `SSAnneTicketCheckCoords`: the square in front of the sailor, which is the only way down the pier.
 const TICKET_CHECK_COORDS: [(u8, u8); 1] = [(18, 30)];
-/// `.inFrontOfOrBehindGuardCoords`: talked to from either of these he asks for the ticket, and from
-/// anywhere else he only says hello.
+/// `.inFrontOfOrBehindGuardCoords`: talked to from either of these he only says hello, and from
+/// anywhere else but his left he asks for the ticket.
 const GUARD_COORDS: [(u8, u8); 2] = [(19, 29), (19, 31)];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,13 +130,14 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     })
 }
 
-/// `VermilionCitySailor1Text`.
+/// `VermilionCitySailor1Text`: facing right, or in front of him or behind him, only the greeting;
+/// from anywhere else, the one that asks for the ticket.
 fn sailor_text(rt: &mut Script) -> Flow {
     use local::VermilionCitySailor1Text as words;
     if rt.check_event(EVENT_SS_ANNE_LEFT) {
         return rt.print_text(text_at(words::ShipSetSailText)).ret();
     }
-    if rt.player_facing() == SPRITE_FACING_RIGHT || rt.are_player_coords_in_array(&GUARD_COORDS).is_none() {
+    if rt.player_facing() == SPRITE_FACING_RIGHT || rt.are_player_coords_in_array(&GUARD_COORDS).is_some() {
         return rt.print_text(text_at(words::WelcomeToSSAnneText)).ret();
     }
     rt.print_text(text_at(words::DoYouHaveATicketText)).then(Label::SailorTicket)

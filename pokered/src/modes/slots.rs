@@ -27,6 +27,7 @@ use crate::gfx::tiles::{V_CHARS0, V_CHARS2};
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
 use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
+use crate::modes::blink::ArrowBlink;
 use crate::modes::cursor_menu::CursorMenu;
 use crate::modes::text_box::TextBox;
 use crate::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
@@ -47,9 +48,11 @@ const BET_CURSOR: (u8, u8) = (15, 12);
 const MULTIPLIERS_AT: (usize, usize) = (16, 12);
 /// `hlcoord 14, 12` as `DisplayTextBoxID` reads it: the yes/no's cursor.
 const AGAIN_CURSOR: (usize, usize) = (15, 13);
-/// `hlcoord 2, 14`, the winning symbol in the text box. The `▼` beside it is at `hlcoord 18, 16`,
-/// which is where `TX_PROMPT_BUTTON` draws and blinks one of its own.
+/// `hlcoord 2, 14`, the winning symbol in the text box, and `hlcoord 18, 16`, the `▼` drawn with it.
 const SYMBOL_AT: (usize, usize) = (2, 14);
+const ARROW_AT: (usize, usize) = (18, 16);
+/// `WaitForTextScrollButtonPress`'s iterations a frame, in hundredths.
+const BLINK_PER_FRAME: u32 = 4454;
 /// Where `vChars2` holds a second copy of the symbols, for the one drawn in the text box.
 const SYMBOL_TILES: u8 = 0x25;
 
@@ -116,6 +119,8 @@ enum Phase {
     OutOfCoins(u8),
     /// `WaitForSoundToFinish`, before the spin's sound and before the payout's.
     WaitingForSound(Sound),
+    /// `WaitForTextScrollButtonPress` under the win's text: no sound, and the `▼` left as it is.
+    WaitingForPress(ArrowBlink),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +178,22 @@ impl SlotMachine {
         self.answered
     }
 
+    /// Whether the wheels are turning.
+    pub fn spinning(&self) -> bool {
+        matches!(self.phase, Phase::Winding { .. } | Phase::Spinning { .. } | Phase::Rolling { .. })
+    }
+
+    /// Whether the wheels are in `SlotMachine_SpinWheels`' `.loop2`, taking presses to stop them.
+    pub fn stopping_wheels(&self) -> bool {
+        matches!(self.phase, Phase::Spinning { .. })
+    }
+
+    /// Whether the next frame reads the pad, which this mode's `Busy` status does not show:
+    /// `SlotMachine_HandleInputWhileWheelsSpin`, and the `WaitForTextScrollButtonPress` under a win.
+    pub fn reading_the_pad(&self) -> bool {
+        matches!(self.phase, Phase::Spinning { wait: 0 } | Phase::WaitingForPress(_))
+    }
+
     /// `LoadSlotMachineTiles`: the cabinet's own tiles and tilemap, the symbols in both `vChars0`
     /// for the wheels and `vChars2` for the one a win prints, and the wheels stepped once each.
     fn load(&mut self, ctx: &mut Ctx) {
@@ -186,28 +207,38 @@ impl SlotMachine {
             ui.set(i % SCREEN_TILES_X, i / SCREEN_TILES_X, tile);
         }
         self.wheels = Wheels::new();
-        (0..3).for_each(|wheel| self.wheels.anim(wheel));
-        self.draw_wheels(ctx);
+        self.step_wheels(ctx, |wheels| (0..3).for_each(|wheel| wheels.anim(wheel)));
+        // `PromptUserToPlaySlots`' `FillMemory` from `wStoppingWhichSlotMachineWheel` zeroes the
+        // offsets under the wheels just drawn, so the first step draws from 0 rather than on.
+        self.wheels.offsets = [0; 3];
         ctx.screen.sgb.run(&PaletteCommand::Slots);
         ctx.screen.effects.obp0 = SLOTS_OBP0;
     }
 
-    /// The thirty-six objects the wheels are drawn from. The four above them are the overworld's,
-    /// which `wUpdateSpritesEnabled` of `$ff` leaves exactly where they were.
-    fn draw_wheels(&self, ctx: &mut Ctx) {
-        let objects: Vec<_> = (0..3).flat_map(|w| slots::anim_wheel_objects(w, self.wheels.offsets[w])).collect();
-        if ctx.screen.sprites.len() < objects.len() {
-            ctx.screen.sprites.resize(objects.len(), Default::default());
+    /// `step` over the wheels, each wheel it moved redrawn. `SlotMachine_AnimWheel` draws a wheel at
+    /// its offset and then advances it, so what shows is the offset before the step, and a wheel
+    /// that stopped keeps the objects it had. The twelve objects a wheel owns are among the first
+    /// thirty-six; the four above them are the overworld's, which `wUpdateSpritesEnabled` of `$ff`
+    /// leaves exactly where they were.
+    fn step_wheels<R>(&mut self, ctx: &mut Ctx, step: impl FnOnce(&mut Wheels) -> R) -> R {
+        let before = self.wheels.offsets;
+        let result = step(&mut self.wheels);
+        const WHEEL_OBJECTS: usize = 12;
+        if ctx.screen.sprites.len() < 3 * WHEEL_OBJECTS {
+            ctx.screen.sprites.resize(3 * WHEEL_OBJECTS, Default::default());
         }
-        ctx.screen.sprites[..objects.len()].copy_from_slice(&objects);
+        for w in (0..3).filter(|&w| self.wheels.offsets[w] != before[w]) {
+            let objects = slots::anim_wheel_objects(w, before[w]);
+            ctx.screen.sprites[w * WHEEL_OBJECTS..(w + 1) * WHEEL_OBJECTS].copy_from_slice(&objects);
+        }
+        result
     }
 
     /// `SlotMachine_PrintCreditCoins` and `SlotMachine_PrintPayoutCoins`.
     fn print_coins(&self, ctx: &mut Ctx) {
-        let ui = &mut ctx.screen.ui;
-        let at = |(x, y): (usize, usize)| y * SCREEN_TILES_X + x;
-        print_bcd(ui, at(CREDIT_AT), &ctx.world.coins, BcdFormat { skip_leading_zeroes: false, left_align: false, money_sign: false });
-        print_number(ui, at(PAYOUT_AT), self.payout as u32, NumberFormat { digits: 4, leading_zeroes: true, left_align: false });
+        print_credit(ctx);
+        let at = PAYOUT_AT.1 * SCREEN_TILES_X + PAYOUT_AT.0;
+        print_number(&mut ctx.screen.ui, at, self.payout as u32, NumberFormat { digits: 4, leading_zeroes: true, left_align: false });
     }
 
     /// `SlotMachine_LightBalls` and `SlotMachine_PutOutLitBalls`.
@@ -244,7 +275,9 @@ impl SlotMachine {
     /// `.skip1`: the bet is paid for, the balls light and the machine decides what it will allow.
     fn place_bet(&mut self, ctx: &mut Ctx) -> Transition {
         self.restore(ctx);
+        // `SlotMachine_SubtractBetFromPlayerCoins` falls into `SlotMachine_PrintCreditCoins`.
         sub_bcd(&mut ctx.world.coins, &[0, self.bet]);
+        print_credit(ctx);
         self.balls(ctx, slots::lit_ball_rows(self.bet), BALL_LIT);
         slots::set_flags(&mut *ctx.rng, &mut self.flags, &mut self.allow_matches, self.chance);
         self.wheels.bet();
@@ -304,11 +337,12 @@ impl SlotMachine {
         ui.set(SYMBOL_AT.0 + 1, SYMBOL_AT.1 - 1, tile + 3);
         ui.set(SYMBOL_AT.0, SYMBOL_AT.1, tile);
         ui.set(SYMBOL_AT.0 + 1, SYMBOL_AT.1, tile + 1);
+        ui.set(ARROW_AT.0, ARROW_AT.1, crate::modes::place_string::ch::DOWN_ARROW);
         ctx.world.text.strings.insert(TextBuffer::StringBuffer, slots::reward_text(symbol));
         // `inc bc` four times: the text starts past the symbol rather than at the box's own corner.
         let mut script = vec![TextCommand::Move(TILE_MAP + 14 * SCREEN_TILES_X as u16 + 5)];
+        // `_LinedUpText` ends in `<DONE>`, which ends the box: the wait is the caller's.
         script.extend(far_text("_LinedUpText").expect("the slot machine's texts are in the cartridge"));
-        script.push(TextCommand::PromptButton);
         self.phase = Phase::Child(After::Announced);
         Transition::Push(Mode::TextBox(TextBox::without_box(script)))
     }
@@ -326,7 +360,8 @@ impl SlotMachine {
             ctx.screen.effects.obp0 ^= FLASH;
         }
         let frames = if self.won.is_some_and(|symbol| symbol <= BAR) { COIN_FRAMES / 2 } else { COIN_FRAMES };
-        *wait = delay(ctx, frames);
+        // The frame this runs in is the first of the `DelayFrames`.
+        *wait = delay(ctx, frames).saturating_sub(1);
         Transition::Stay
     }
 
@@ -399,8 +434,7 @@ impl ModeUpdate for SlotMachine {
                 *turns -= 1;
                 // The frame this runs in is the first of the two the step waits.
                 *wait = delay(ctx, WIND_FRAMES).saturating_sub(1);
-                (0..3).for_each(|wheel| self.wheels.anim(wheel));
-                self.draw_wheels(ctx);
+                self.step_wheels(ctx, |wheels| (0..3).for_each(|wheel| wheels.anim(wheel)));
                 Transition::Stay
             }
             Phase::Spinning { wait } => {
@@ -415,8 +449,8 @@ impl ModeUpdate for SlotMachine {
                     self.answered += 1;
                     ctx.audio.play_sound(sounds::SFX_SLOTS_STOP_WHEEL);
                 }
-                let stopped = self.wheels.stop_or_anim(self.stopping, self.flags);
-                self.draw_wheels(ctx);
+                let (stopping, flags) = (self.stopping, self.flags);
+                let stopped = self.step_wheels(ctx, |wheels| wheels.stop_or_anim(stopping, flags));
                 if stopped {
                     return self.check_for_matches(ctx);
                 }
@@ -427,8 +461,7 @@ impl ModeUpdate for SlotMachine {
             Phase::Rolling { left } => {
                 *left -= 1;
                 let last = *left == 0;
-                self.wheels.anim(2);
-                self.draw_wheels(ctx);
+                self.step_wheels(ctx, |wheels| wheels.anim(2));
                 if last { self.check_for_matches(ctx) } else { Transition::Stay }
             }
             Phase::Flashing { left, wait } => {
@@ -453,6 +486,17 @@ impl ModeUpdate for SlotMachine {
                     return self.after_payout(ctx);
                 }
                 self.pay_a_coin(ctx)
+            }
+            Phase::WaitingForPress(blink) => {
+                if ctx.pad.low_sensitivity(ctx.frame_counter).intersects(Joypad::A | Joypad::B) {
+                    self.phase = Phase::WaitingForSound(Sound::Payout);
+                    return self.update(ctx);
+                }
+                if let Some(shown) = blink.tick(BLINK_PER_FRAME) {
+                    let tile = if shown { crate::modes::place_string::ch::DOWN_ARROW } else { UiSurface::BLANK };
+                    ctx.screen.ui.set(ARROW_AT.0, ARROW_AT.1, tile);
+                }
+                Transition::Stay
             }
             Phase::OutOfCoins(frames) => {
                 *frames += 1;
@@ -501,9 +545,10 @@ impl ModeUpdate for SlotMachine {
                 self.phase = Phase::OutOfCoins(0);
                 Transition::Stay
             }
+            // `WaitForTextScrollButtonPress` reads the pad in the frame `PrintText` returns.
             After::Announced => {
-                self.phase = Phase::WaitingForSound(Sound::Payout);
-                Transition::Stay
+                self.phase = Phase::WaitingForPress(ArrowBlink::default());
+                self.update(ctx)
             }
             After::Offered => {
                 self.phase = Phase::Child(After::Again);
@@ -522,6 +567,12 @@ impl ModeUpdate for SlotMachine {
     fn status(&self) -> Status {
         Status::Busy
     }
+}
+
+/// `SlotMachine_PrintCreditCoins`.
+fn print_credit(ctx: &mut Ctx) {
+    let at = CREDIT_AT.1 * SCREEN_TILES_X + CREDIT_AT.0;
+    print_bcd(&mut ctx.screen.ui, at, &ctx.world.coins, BcdFormat { skip_leading_zeroes: false, left_align: false, money_sign: false });
 }
 
 /// A wait that is presentation, which `Instant` pacing skips.

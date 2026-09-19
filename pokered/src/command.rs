@@ -87,7 +87,8 @@ pub enum Decision {
     MoveMenu,
     /// The trainer card, which `Advance` puts away.
     TrainerCard,
-    /// The town map from the bag, walked with UP and DOWN and left with `CancelOption`.
+    /// The town map from the bag, walked with UP and DOWN, or a Pokédex nest map; either is left
+    /// with `CancelOption`.
     TownMap,
     /// The town map FLY opens: a row per town visited, `ChooseOption` flies there and
     /// `CancelOption` backs out.

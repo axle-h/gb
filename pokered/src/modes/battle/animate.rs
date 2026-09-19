@@ -4,7 +4,7 @@
 
 use poke_core::move_name::PokemonMoveName;
 use crate::systems::battle::effects::BattleText;
-use crate::systems::battle::{effect, BattleKind, Side, Status1, Status2};
+use crate::systems::battle::{effect, BattleKind, Side, Status1, Status2, Status3};
 use super::animation::{anim, animation_type, AnimBattle, Routine};
 use super::present::Present;
 use super::BattleMode;
@@ -16,6 +16,7 @@ pub(super) struct Before {
     pub substitute: [bool; 2],
     pub minimized: [u8; 2],
     pub species: [poke_core::species::PokemonSpecies; 2],
+    pub transformed: [bool; 2],
 }
 
 fn index(side: Side) -> usize {
@@ -33,6 +34,7 @@ impl Before {
             substitute: sides.map(|side| side.status2.contains(Status2::HAS_SUBSTITUTE_UP)),
             minimized: sides.map(|side| side.minimized),
             species: sides.map(|side| side.mon.species),
+            transformed: sides.map(|side| side.status3.contains(Status3::TRANSFORMED)),
         }
     }
 }
@@ -50,6 +52,9 @@ impl BattleMode {
             ball_data: 0,
             animations_on: true,
             h_scx: self.h_scx,
+            mons: self.mon_palettes(),
+            // The bars as the HUDs last drew them are filled in when the animation starts.
+            hp_bar_colours: Default::default(),
         }
     }
 
@@ -186,6 +191,9 @@ impl BattleMode {
                 let mut battle = self.anim_battle();
                 battle.player_species = before.species[0];
                 battle.enemy_species = before.species[1];
+                // `TransformEffect_` sets `TRANSFORMED` after the animation, so `ChangeMonPic`'s
+                // palette is still the mon's own.
+                battle.mons = self.mon_palettes_as(before.transformed);
                 let routine = Routine::TransformEffect { id };
                 self.push(Present::Animation { routine, turn: side, battle });
                 if before.substitute[me] {

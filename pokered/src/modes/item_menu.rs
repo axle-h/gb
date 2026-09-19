@@ -18,16 +18,22 @@
 //! The Poké Flute is played from here too (`ItemUsePokeFlute`), over the map rather than the bag: a
 //! Snorlax the player is standing beside is woken, and its road's own script fights it.
 //!
+//! The Repels set the steps and are spent after a press, the Coin Case counts the coins, and the Card
+//! Key is never the time; the bag comes back after each. The Itemfinder searches the map's hidden
+//! items over the map rather than the bag and closes the start menu. A rod away from the water or
+//! while surfing is not the time; otherwise the bag closes with it, and the overworld casts it.
+//!
 //! An item whose effect is another chunk's is answered rather than run: the bag closes with
 //! `Outcome::Chosen(item id)` and the start menu comes back. Each has one arm in `use_item`.
 
 use poke_core::item::{self, ItemId};
 use poke_core::map::Map;
 use poke_core::map_header::MapHeader;
+use poke_core::rom_gfx::rom_slice;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_ROUTE12_SNORLAX, EVENT_BEAT_ROUTE16_SNORLAX,
     EVENT_FIGHT_ROUTE12_SNORLAX, EVENT_FIGHT_ROUTE16_SNORLAX};
 use poke_core::symbols::{pokered_symbols, DmgPointer};
-use poke_core::text_script::{far_text, TextBuffer};
+use poke_core::text_script::{far_text, TextBuffer, TextMoney};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, AudioBank, Sound, SoundId};
 use crate::command::Decision;
@@ -39,6 +45,7 @@ use crate::modes::list_menu::{remove_from_bag, ListMenu};
 use crate::modes::menu_input::MenuInput;
 use crate::modes::overworld::bike_surf::{item_use_bicycle, item_use_surfboard, Used};
 use crate::modes::overworld::escape::{arm_escape_warp, escape_rope_allowed};
+use crate::modes::overworld::fishing::fishing_refused;
 use crate::modes::pokedex::PokedexMenu;
 use crate::modes::quantity_menu::QuantityMenu;
 use crate::modes::text_box::TextBox;
@@ -74,10 +81,16 @@ enum Phase {
     Delay(u8),
     /// `PlayedFluteHadEffectText`'s `text_asm`: the tune on channel 3, waited out.
     Flute,
+    /// `PrintItemUseTextAndRemoveItem`'s `WaitForTextScrollButtonPress`.
+    WaitButton,
+    /// `ItemUseItemfinder.loop`'s `PlaySoundWaitForCurrent`s, with the sounds left to play.
+    Itemfinder(u8),
 }
 
 /// `ItemUseEscapeRope`'s `DelayFrames 30`.
 const ESCAPE_ROPE_FRAMES: u8 = 30;
+/// `ItemUseItemfinder.loop`'s four rounds of two sounds.
+const ITEMFINDER_SOUNDS: u8 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum After {
@@ -94,6 +107,8 @@ enum After {
     CloseMenu,
     /// `PlayedFluteHadEffectText` is closed: the tune plays next.
     Flute,
+    /// `ItemUseText00` for an item `PrintItemUseTextAndRemoveItem` spends after a press.
+    Used,
 }
 
 /// `wChannelSoundIDs + CHAN3`, which the flute's header claims and `ItemUsePokeFlute` waits on.
@@ -221,9 +236,6 @@ impl ItemMenu {
             return self.poke_flute(ctx);
         }
         let party_menu_path = self.item as u8 >= ItemId::Hm01Cut as u8 || item::opens_party_menu(self.item);
-        if !party_menu_path && item::closes_menu(self.item) {
-            return self.elsewhere();
-        }
         self.use_item(ctx, party_menu_path)
     }
 
@@ -255,10 +267,22 @@ impl ItemMenu {
                 self.phase = Phase::Child(After::MenuLoop);
                 Transition::Push(Mode::TownMap(TownMap::item()))
             }
+            ItemUse::Repel => self.repel(ctx, 100),
+            ItemUse::SuperRepel => self.repel(ctx, 200),
+            ItemUse::MaxRepel => self.repel(ctx, 250),
+            ItemUse::CoinCase => {
+                ctx.world.text.money.insert(TextMoney::PlayerCoins, ctx.world.coins.to_vec());
+                self.text_at(pokered_symbols::CoinCaseNumCoinsText, after)
+            }
+            // `ItemUseCardKey` compares the first byte of `GetTileAndCoordsInFrontOfPlayer`'s own code
+            // rather than the tile it finds, which is never one of the three doors.
+            ItemUse::CardKey => self.text("_ItemUseNotTimeText", after),
+            ItemUse::OldRod | ItemUse::GoodRod | ItemUse::SuperRod if fishing_refused(ctx) =>
+                self.text("_ItemUseNotTimeText", After::MenuLoop),
+            ItemUse::OldRod | ItemUse::GoodRod | ItemUse::SuperRod => self.elsewhere(),
+            ItemUse::Itemfinder => self.itemfinder(ctx),
             // The overworld's and the battle's.
-            ItemUse::Bicycle | ItemUse::Bait | ItemUse::Rock | ItemUse::EscapeRope | ItemUse::Repel | ItemUse::SuperRepel | ItemUse::MaxRepel | ItemUse::CardKey
-            | ItemUse::PokeFlute | ItemUse::CoinCase | ItemUse::OldRod | ItemUse::GoodRod | ItemUse::SuperRod
-            | ItemUse::Itemfinder => self.elsewhere(),
+            ItemUse::Bicycle | ItemUse::Bait | ItemUse::Rock | ItemUse::EscapeRope | ItemUse::PokeFlute => self.elsewhere(),
         }
     }
 
@@ -286,6 +310,25 @@ impl ItemMenu {
         self.text_at(pokered_symbols::PlayedFluteHadEffectText, After::Flute)
     }
 
+    /// `ItemUseRepelCommon`: the steps set over whatever an earlier one left, then
+    /// `PrintItemUseTextAndRemoveItem`.
+    fn repel(&mut self, ctx: &mut Ctx, steps: u8) -> Transition {
+        ctx.world.location.repel_steps = steps;
+        self.text_at(pokered_symbols::ItemUseText00, After::Used)
+    }
+
+    /// `ItemUseItemfinder`: `ItemUseReloadOverworldData`, then `HiddenItemNear`'s answer, after
+    /// which the start menu closes whether anything was found or not.
+    fn itemfinder(&mut self, ctx: &mut Ctx) -> Transition {
+        ctx.screen.ui.uncover(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y);
+        ctx.update_sprites = true;
+        if !hidden_item_near(ctx) {
+            return self.text_at(pokered_symbols::ItemfinderFoundNothingText, After::CloseMenu);
+        }
+        self.phase = Phase::Itemfinder(ITEMFINDER_SOUNDS);
+        self.update(ctx)
+    }
+
     /// `.tossItem`: how many, unless `TossItem_` is going to refuse it anyway.
     fn toss(&mut self, ctx: &mut Ctx) -> Transition {
         if !Inventory::may_toss(self.item) {
@@ -295,6 +338,22 @@ impl ItemMenu {
         let held = ctx.world.bag.items[self.slot as usize].quantity;
         Transition::Push(Mode::QuantityMenu(QuantityMenu::new(held, None)))
     }
+}
+
+/// `HiddenItemNear`: a hidden item not yet found on this map within four squares above and five
+/// below the player, and five either side. `Sub5ClampTo0` makes the near edges zero by a map's edge.
+fn hidden_item_near(ctx: &Ctx) -> bool {
+    let location = &ctx.world.location;
+    let near_edge = |at: u8| if at.wrapping_sub(5) < 0xF0 { at.wrapping_sub(5) } else { 0 };
+    let rows = rom_slice(pokered_symbols::HiddenItemCoords);
+    rows.chunks(3).take_while(|row| row[0] != 0xFF).enumerate()
+        .filter(|&(_, row)| row[0] == location.map as u8)
+        .any(|(index, row)| {
+            let found = ctx.world.hidden_items[index / 8] & 1 << (index % 8) != 0;
+            let (y, x) = (row[1], row[2]);
+            !found && near_edge(location.y) < y && y <= location.y.wrapping_add(4)
+                && near_edge(location.x) < x && x <= location.x.wrapping_add(5)
+        })
 }
 
 impl Default for ItemMenu {
@@ -331,6 +390,21 @@ impl ModeUpdate for ItemMenu {
                     ctx.world.events.set(event);
                 }
                 Transition::Pop(Outcome::Chosen(self.item as u8))
+            }
+            Phase::WaitButton => {
+                if !ctx.pad.low_sensitivity(ctx.frame_counter).intersects(Joypad::A | Joypad::B) {
+                    return Transition::Stay;
+                }
+                remove_from_bag(ctx, self.slot as usize, 1);
+                self.menu_loop(ctx)
+            }
+            Phase::Itemfinder(0) => self.text_at(pokered_symbols::ItemfinderFoundItemText, After::CloseMenu),
+            Phase::Itemfinder(_) if !ctx.audio.sound_finished() => Transition::Stay,
+            Phase::Itemfinder(left) => {
+                let sound = if left % 2 == 0 { sounds::SFX_HEALING_MACHINE } else { sounds::SFX_PURCHASE };
+                ctx.audio.play_sound(sound);
+                self.phase = Phase::Itemfinder(left - 1);
+                if left == 1 { self.update(ctx) } else { Transition::Stay }
             }
             Phase::Delay(1) => {
                 remove_from_bag(ctx, self.slot as usize, 1);
@@ -391,12 +465,18 @@ impl ModeUpdate for ItemMenu {
                 Transition::Stay
             }
             (After::CloseMenu, _) => self.after(ctx, After::CloseMenu),
+            (After::Used, _) => {
+                ctx.audio.play_sound(sounds::SFX_HEAL_AILMENT);
+                self.phase = Phase::WaitButton;
+                self.update(ctx)
+            }
         }
     }
 
     fn status(&self) -> Status {
         match self.phase {
             Phase::UseToss if self.input.is_polling() => Status::Waiting(Decision::UseToss),
+            Phase::WaitButton => Status::Waiting(Decision::Text),
             _ => Status::Busy,
         }
     }
@@ -799,6 +879,154 @@ mod tests {
         read_on_to(&mut game, Decision::List);
         assert_eq!(game.world().party[0].mon.mon.species, PokemonSpecies::Raichu);
         assert_eq!(game.world().bag.quantity_of(ItemId::ThunderStone), 0);
+    }
+
+    fn at(map: poke_core::map::Map, x: u8, y: u8, bag: &[(ItemId, u8)]) -> Game {
+        let mut world = game(bag, 10).world().clone();
+        world.location.map = map;
+        world.location.x = x;
+        world.location.y = y;
+        let mut game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::ItemMenu(ItemMenu::new()));
+        game
+    }
+
+    #[test]
+    fn a_repel_sets_the_steps_and_is_spent_after_a_press_over_whatever_was_left() {
+        for (item, steps) in [(ItemId::Repel, 100), (ItemId::SuperRepel, 200), (ItemId::MaxRepel, 250)] {
+            let mut game = game(&[(item, 2)], 10);
+            let mut world = game.world().clone();
+            world.location.repel_steps = 37;
+            game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+            game.push(Mode::ItemMenu(ItemMenu::new()));
+            use_first(&mut game);
+            assert_eq!(settle(&mut game), Decision::Text);
+            assert_eq!(text_row(&game, 14), encode("RED used").unwrap());
+            assert_eq!(game.world().location.repel_steps, steps);
+            assert_eq!(game.world().bag.quantity_of(item), 2, "not spent until the press");
+            game.frame(Input::Buttons(Joypad::A));
+            assert_eq!(settle(&mut game), Decision::List, "the bag again");
+            assert_eq!(game.world().bag.quantity_of(item), 1);
+        }
+    }
+
+    #[test]
+    fn the_coin_case_counts_the_coins_and_the_bag_comes_back() {
+        let mut game = game(&[(ItemId::CoinCase, 1)], 10);
+        let mut world = game.world().clone();
+        world.coins = [0x01, 0x20];
+        game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::ItemMenu(ItemMenu::new()));
+        use_first(&mut game);
+        assert_eq!(settle(&mut game), Decision::Text);
+        assert_eq!(text_row(&game, 14), encode("Coins").unwrap());
+        assert_eq!(text_row(&game, 16), encode("120").unwrap());
+        read_on_to(&mut game, Decision::List);
+    }
+
+    #[test]
+    fn the_card_key_is_never_the_time() {
+        assert!(![0x18, 0x24, 0x5E].contains(&rom_slice(pokered_symbols::GetTileAndCoordsInFrontOfPlayer)[0]),
+            "the byte `ItemUseCardKey` compares is a door tile");
+        let mut game = game(&[(ItemId::CardKey, 1)], 10);
+        use_first(&mut game);
+        assert_eq!(settle(&mut game), Decision::Text);
+        assert_eq!(text_row(&game, 14), encode("OAK: RED!").unwrap());
+        read_on_to(&mut game, Decision::List);
+        assert_eq!(game.world().bag.quantity_of(ItemId::CardKey), 1);
+    }
+
+    /// Frames from USE to the Itemfinder's text, and the text's first line.
+    fn itemfinder_at(x: u8, y: u8, found: &[u8]) -> (u32, Vec<u8>) {
+        let mut game = at(poke_core::map::Map::ViridianForest, x, y, &[(ItemId::Itemfinder, 1)]);
+        let mut world = game.world().clone();
+        world.hidden_items[0] = found[0];
+        game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::ItemMenu(ItemMenu::new()));
+        answer(&mut game, Decision::List, Command::ChooseListEntry(0));
+        assert_eq!(settle(&mut game), Decision::UseToss);
+        game.frame(Input::Command(Command::ChooseOption(0)));
+        let mut frames = 1;
+        while game.status() != Status::Waiting(Decision::Text) {
+            game.frame(Input::None);
+            frames += 1;
+            assert!(frames < 2000, "never printed");
+        }
+        (frames, text_row(&game, 14))
+    }
+
+    /// Viridian Forest's first hidden item is at (1, 18): four rows above the player to five below,
+    /// and five columns either side.
+    #[test]
+    fn the_itemfinder_answers_for_a_hidden_item_in_range_and_closes_the_menu_either_way() {
+        let (yes, nope) = (encode("Yes! ITEMFINDER").unwrap(), encode("Nope! ITEMFINDER").unwrap());
+        let (with_sounds, _) = itemfinder_at(5, 14, &[0]);
+        let (without, _) = itemfinder_at(6, 14, &[0]);
+        assert!(with_sounds > without + 60, "the four rounds of sounds first: {with_sounds} against {without}");
+        for (x, y, found) in [(5, 14, true), (6, 14, false), (5, 13, false), (5, 22, true), (5, 23, false), (0, 18, true)] {
+            let expected = if found { &yes } else { &nope };
+            assert_eq!(&itemfinder_at(x, y, &[0]).1, expected, "from ({x}, {y})");
+        }
+        assert_eq!(itemfinder_at(5, 14, &[1]).1, nope, "one already found");
+
+        let mut game = at(poke_core::map::Map::ViridianForest, 5, 14, &[(ItemId::Itemfinder, 1)]);
+        use_first(&mut game);
+        for _ in 0..600 {
+            if game.modes().is_empty() {
+                break;
+            }
+            let input = if game.status() == Status::Waiting(Decision::Text) { Input::Buttons(Joypad::A) } else { Input::None };
+            game.frame(input);
+            game.frame(Input::None);
+        }
+        assert!(game.modes().is_empty(), "the start menu closes behind it: {:?}", game.status());
+    }
+
+    #[test]
+    fn a_rod_away_from_the_water_is_not_the_time_and_the_bag_comes_back() {
+        let mut game = at(poke_core::map::Map::PalletTown, 5, 8, &[(ItemId::OldRod, 1)]);
+        use_first(&mut game);
+        assert_eq!(settle(&mut game), Decision::Text);
+        assert_eq!(text_row(&game, 14), encode("OAK: RED!").unwrap());
+        read_on_to(&mut game, Decision::List);
+    }
+
+    #[test]
+    fn a_rod_while_surfing_is_not_the_time_and_facing_water_it_is_answered() {
+        use crate::systems::overworld::location::SURFING;
+        let mut game = at(poke_core::map::Map::PalletTown, 4, 14, &[(ItemId::SuperRod, 1)]);
+        let mut world = game.world().clone();
+        world.location.ahead.tile = 0x14;
+        world.location.walk_bike_surf = SURFING;
+        game = Game::new(world.clone(), GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::ItemMenu(ItemMenu::new()));
+        use_first(&mut game);
+        assert_eq!(settle(&mut game), Decision::Text);
+        assert_eq!(text_row(&game, 14), encode("OAK: RED!").unwrap());
+
+        world.location.walk_bike_surf = crate::systems::overworld::location::WALKING;
+        game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::ItemMenu(ItemMenu::new()));
+        answer(&mut game, Decision::List, Command::ChooseListEntry(0));
+        game.frame(Input::Command(Command::ChooseOption(0)));
+        game.frame(Input::None);
+        assert!(game.modes().is_empty(), "the bag closes with the rod for the overworld to cast");
+        assert_eq!(game.world().bag.quantity_of(ItemId::SuperRod), 1);
+    }
+
+    /// `TryEvolvingMon`'s `PlayDefaultMusic`, which on the bike is the bike's song.
+    #[test]
+    fn an_evolution_out_of_battle_puts_the_map_s_music_back() {
+        let mut game = party_of(PokemonSpecies::Pikachu, 5, &[(ItemId::ThunderStone, 1)]);
+        let mut world = game.world().clone();
+        world.location.walk_bike_surf = crate::systems::overworld::location::BIKING;
+        game = Game::new(world, GameRng::seeded(0), Pacing::Instant);
+        game.push(Mode::ItemMenu(ItemMenu::new()));
+        use_first(&mut game);
+        answer(&mut game, Decision::PartyMenu, Command::ChooseOption(0));
+        read_on_to(&mut game, Decision::List);
+        assert_eq!(game.world().party[0].mon.mon.species, PokemonSpecies::Raichu);
+        assert_eq!(game.audio().channel_sound_id(0), sounds::MUSIC_BIKE_RIDING.id.0);
     }
 
     #[test]

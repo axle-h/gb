@@ -9,7 +9,8 @@
 //! Exact: the seen and owned counts (`CountSetBits`), the highest seen number and the window it
 //! bounds, all four ways the list scrolls, and the dex entry's height, weight and description as
 //! the entry stores them. Every `ClearScreen`, `Delay3` and `GBPalWhiteOutWithDelay3` here is
-//! loading and not modelled, so each screen takes input in the frame it is drawn.
+//! loading and not modelled, so each screen takes input in the frame it is drawn. The data page's
+//! `PlayCry` is pacing: the height, weight and description wait for the whole cry.
 //!
 //! The list is scrolled with a *dex number*; the data page needs the cartridge's *index*, which is
 //! what `PokedexToIndex` is for and what every table on that page is keyed by.
@@ -18,12 +19,14 @@ use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
 use poke_core::symbols::pokered_symbols;
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
+use crate::gfx::sgb::{determine_palette_id_out_of_battle, PaletteCommand};
 use crate::gfx::tiles::V_CHARS2;
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
-use crate::mode::{Ctx, ModeUpdate, Outcome, Status, Transition};
+use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::menu_input::MenuInput;
 use crate::modes::place_string::{coord, PlaceString};
+use crate::modes::town_map::TownMap;
 use crate::systems::pokedex::{count_set_bits, is_set, max_seen_mon, pokedex_to_index, species_of,
                               front_pic_tiles, DexEntry, NUM_POKEMON};
 use crate::systems::print_num::{print_number, NumberFormat};
@@ -36,6 +39,9 @@ const BALL: u8 = 0x72;
 const VERTICAL_LINE: u8 = 0x71;
 /// `.dashedLine`, printed in place of a name the player has not seen.
 const DASHED_LINE: &str = "----------";
+/// `rAUDVOL` while the data page is up, and after.
+const QUIET: u8 = 0x33;
+const LOUD: u8 = 0x77;
 /// `PokedexDataDividerLine`, the row of tiles under the data page's height and weight.
 const DIVIDER: [u8; SCREEN_TILES_X] = [0x68, 0x69, 0x6B, 0x69, 0x6B, 0x69, 0x6B, 0x69, 0x6B, 0x6B,
                                        0x6B, 0x6B, 0x69, 0x6B, 0x69, 0x6B, 0x69, 0x6B, 0x69, 0x6A];
@@ -97,6 +103,10 @@ pub struct PokedexMenu {
 enum Phase {
     List,
     SideMenu,
+    /// `PlayCry`'s `WaitForSoundToFinish`, with the picture up.
+    DataCry,
+    /// `LoadTownMap_Nest`, which the town map runs.
+    Area,
     /// The description printing, which is instant: see `print_description`.
     DataPrinting,
     /// `.waitForButtonPress`.
@@ -255,13 +265,18 @@ impl PokedexMenu {
                 self.draw_data(ctx);
                 self.show_picture(ctx)
             }
-            // The cry is the audio engine's, and it is the one row that does not leave.
+            // `.choseCry`: `GetCryData` and `PlaySound` with no wait, and the one row that does not
+            // leave. `wPokedexNum` is the index by now.
             SideMenuEntry::Cry => {
+                ctx.audio.play_cry(pokedex_to_index(self.dex));
                 self.input.call(ctx);
                 self.side_menu_update(ctx)
             }
-            // `LoadTownMap_Nest` is the town map's chunk; the row still leaves as it does.
-            SideMenuEntry::Area => self.exit_side_menu(SideExit::Shown, ctx),
+            SideMenuEntry::Area => {
+                self.phase = Phase::Area;
+                let species = species_of(self.dex).expect("a seen mon has a species");
+                Transition::Push(Mode::TownMap(TownMap::nest(species)))
+            }
             SideMenuEntry::Quit => self.exit_side_menu(SideExit::Quit, ctx),
         }
     }
@@ -330,6 +345,7 @@ impl PokedexMenu {
         match exit {
             SideExit::Quit => self.close(ctx),
             SideExit::Shown => {
+                ctx.screen.sgb.run(&PaletteCommand::Generic);
                 Self::set_up_graphics(ctx);
                 self.open_list(ctx)
             }
@@ -341,14 +357,19 @@ impl PokedexMenu {
     fn close(&mut self, ctx: &mut Ctx) -> Transition {
         ctx.pad.repeat_held = false;
         ctx.menu.last_item = 0;
+        ctx.screen.sgb.run(&PaletteCommand::Default);
         Transition::Pop(Outcome::Done)
     }
 
-    /// `ShowPokedexDataInternal` up to its picture: the frame, the words and the number.
+    /// `ShowPokedexDataInternal` up to its picture: the volume down, the palette, the frame, the
+    /// words and the number.
     fn draw_data(&mut self, ctx: &mut Ctx) {
         let text = |s: &str| poke_core::charmap::encode(s).expect("the data page's words encode");
         let index = pokedex_to_index(self.dex);
         let entry = DexEntry::of(index);
+        ctx.audio.no_audio_fade_out = true;
+        ctx.audio.set_master_volume(QUIET);
+        ctx.screen.sgb.run(&PaletteCommand::Pokedex { mon: determine_palette_id_out_of_battle(index) });
         let ui = &mut ctx.screen.ui;
         ui.fill(0, 0, SCREEN_TILES_X, 1, 0x64);
         ui.fill(0, 17, SCREEN_TILES_X, 1, 0x6F);
@@ -369,8 +390,7 @@ impl PokedexMenu {
         print_number(ui, coord(4, 8) as usize, self.dex as u32, format);
     }
 
-    /// The picture, the cry, and — for a mon the player has owned — the height, the weight and the
-    /// description. An unowned page is the picture and the number alone.
+    /// The picture and its cry, which `after_cry` waits out.
     fn show_picture(&mut self, ctx: &mut Ctx) -> Transition {
         let species = species_of(self.dex).expect("a seen mon has a species");
         // `LoadFlippedFrontSpriteByMonIndex`: the tiles are mirrored within each byte, and the
@@ -382,7 +402,17 @@ impl PokedexMenu {
                 ctx.screen.ui.set(7 - column as usize, 1 + row as usize, column * 7 + row);
             }
         }
-        // `PlayCry` is the audio engine's.
+        ctx.audio.play_cry(species as u8);
+        self.phase = Phase::DataCry;
+        self.after_cry(ctx)
+    }
+
+    /// Once the cry is over and for a mon the player has owned, the height, the weight and the
+    /// description. An unowned page is the picture and the number alone.
+    fn after_cry(&mut self, ctx: &mut Ctx) -> Transition {
+        if !ctx.audio.sound_finished() {
+            return Transition::Stay;
+        }
         if !is_set(&ctx.world.pokedex.owned, self.dex) {
             self.phase = Phase::DataWaiting;
             return self.wait_for_button(ctx);
@@ -426,7 +456,10 @@ impl PokedexMenu {
     fn wait_for_button(&mut self, ctx: &mut Ctx) -> Transition {
         if ctx.pad.low_sensitivity(ctx.frame_counter).intersects(Joypad::A | Joypad::B) {
             ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
+            ctx.screen.sgb.run(&PaletteCommand::Default);
             ctx.screen.tiles.load_text_box_tiles();
+            ctx.audio.no_audio_fade_out = false;
+            ctx.audio.set_master_volume(LOUD);
             if self.page_only {
                 ctx.menu.last_item = 0;
                 return Transition::Pop(Outcome::Done);
@@ -459,11 +492,14 @@ impl ModeUpdate for PokedexMenu {
     }
 
     fn open(&mut self, ctx: &mut Ctx) -> Transition {
-        Self::set_up_graphics(ctx);
         if self.page_only {
+            Self::set_up_graphics(ctx);
             self.draw_data(ctx);
             return self.show_picture(ctx);
         }
+        // `.setUpGraphics`.
+        ctx.screen.sgb.run(&PaletteCommand::Generic);
+        Self::set_up_graphics(ctx);
         self.open_list(ctx)
     }
 
@@ -471,6 +507,8 @@ impl ModeUpdate for PokedexMenu {
         match self.phase {
             Phase::List => self.list_input_update(ctx),
             Phase::SideMenu => self.side_menu_update(ctx),
+            Phase::DataCry => self.after_cry(ctx),
+            Phase::Area => Transition::Stay,
             Phase::DataPrinting => {
                 let mut printer = self.printer.take().expect("the description is printing");
                 match printer.update(ctx, &mut self.answered) {
@@ -489,6 +527,14 @@ impl ModeUpdate for PokedexMenu {
                 self.wait_for_button(ctx)
             }
             Phase::DataWaiting => self.wait_for_button(ctx),
+        }
+    }
+
+    /// The nest map has closed, and the dex draws itself again as it does after a data page.
+    fn resume(&mut self, _outcome: Outcome, ctx: &mut Ctx) -> Transition {
+        match self.phase {
+            Phase::Area => self.exit_side_menu(SideExit::Shown, ctx),
+            _ => Transition::Stay,
         }
     }
 
@@ -772,6 +818,123 @@ mod tests {
         until_waiting(&mut game, Decision::PokedexData);
         press(&mut game, Joypad::A);
         until_waiting(&mut game, Decision::Pokedex);
+    }
+
+    /// `PlayCry` blocks the page: the height is printed in the frame the cry ends and not before.
+    #[test]
+    fn the_data_page_waits_for_its_cry_before_the_height() {
+        let mut game = game(dex(20, 20));
+        until_waiting(&mut game, Decision::Pokedex);
+        press(&mut game, Joypad::A);
+        until_waiting(&mut game, Decision::PokedexSideMenu);
+        game.frame(Input::Buttons(Joypad::A));
+        assert!(!game.audio().sound_finished(), "the cry starts with the picture");
+        assert_eq!(row_text(&game, 6, 13..18), encode("?′??″").unwrap(), "and nothing is printed under it yet");
+        let mut frames = 1;
+        while row_text(&game, 6, 13..18) != encode("2′04″").unwrap() {
+            assert!(!game.audio().sound_finished(), "the cry ended {frames} frames in and the page did not go on");
+            game.frame(Input::None);
+            frames += 1;
+            assert!(frames < 200, "the height was never printed");
+        }
+        assert!(game.audio().sound_finished());
+        assert!(frames > 30, "Bulbasaur's cry is longer than {frames} frames");
+    }
+
+    /// A page from outside the dex, as a new catch or `DisplayPokedex` opens it, waits the same.
+    #[test]
+    fn a_page_from_outside_the_dex_waits_for_its_cry_too() {
+        let world = World { pokedex: dex(20, 20), ..World::default() };
+        let mut game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::Pokedex(PokedexMenu::data_page(1)));
+        game.frame(Input::None);
+        assert_eq!(game.status(), Status::Busy);
+        until_waiting(&mut game, Decision::PokedexData);
+        assert!(game.audio().sound_finished());
+    }
+
+    /// `.choseCry` plays the cry and leaves the cursor where it is, with no wait.
+    #[test]
+    fn cry_plays_the_cry_and_stays_on_the_side_menu() {
+        let mut game = game(dex(20, 20));
+        until_waiting(&mut game, Decision::Pokedex);
+        press(&mut game, Joypad::A);
+        until_waiting(&mut game, Decision::PokedexSideMenu);
+        press(&mut game, Joypad::DOWN);
+        until_waiting(&mut game, Decision::PokedexSideMenu);
+        while !game.audio().sound_finished() {
+            game.frame(Input::None);
+        }
+        game.frame(Input::Buttons(Joypad::A));
+        assert!(!game.audio().sound_finished(), "the cry is playing");
+        let cry = crate::audio::engine::AudioEngine::new(crate::audio::data::AudioBank::One).get_cry_data(PokemonSpecies::Bulbasaur as u8);
+        assert_eq!(game.audio().channel_sound_id(4), cry.0, "Bulbasaur's");
+        game.frame(Input::None);
+        assert_eq!(game.status(), Status::Waiting(Decision::PokedexSideMenu), "and the menu takes input under it");
+        assert_eq!(game.ui().get(15, 12), CURSOR, "still on CRY");
+    }
+
+    fn side_menu_row(game: &mut Game, row: u8) {
+        until_waiting(game, Decision::PokedexSideMenu);
+        for _ in 0..row {
+            press(game, Joypad::DOWN);
+            until_waiting(game, Decision::PokedexSideMenu);
+        }
+        press(game, Joypad::A);
+    }
+
+    /// AREA opens the nest map over the dex, and B on it brings the list back.
+    #[test]
+    fn area_shows_the_nest_map_and_b_comes_back_to_the_list() {
+        let mut game = game(dex(20, 20));
+        until_waiting(&mut game, Decision::Pokedex);
+        // Pidgey, number 16, is met in the grass of the first routes.
+        for _ in 0..15 {
+            press(&mut game, Joypad::DOWN);
+            until_waiting(&mut game, Decision::Pokedex);
+        }
+        press(&mut game, Joypad::A);
+        side_menu_row(&mut game, 2);
+        until_waiting(&mut game, Decision::TownMap);
+        assert!(matches!(game.modes().last(), Some(Mode::TownMap(_))));
+        let mut title = PokemonSpecies::Pidgey.name();
+        title.extend(encode("'s NEST").unwrap());
+        assert_eq!(row_text(&game, 0, 1..1 + title.len()), title);
+        let nests = game.screen().sprites.iter().filter(|object| object.tile == 4 && object.y < 160).count();
+        assert!(nests > 3, "a nest on every place Pidgey lives, not {nests}");
+        press(&mut game, Joypad::B);
+        until_waiting(&mut game, Decision::Pokedex);
+        assert_eq!(row_text(&game, 1, 1..9), encode("CONTENTS").unwrap(), "the list, drawn again");
+        assert_eq!(cursor_row(&game), Some(15), "on the row it was left on");
+    }
+
+    #[test]
+    fn a_mon_met_nowhere_wild_has_an_unknown_area() {
+        let mut game = game(dex(20, 20));
+        until_waiting(&mut game, Decision::Pokedex);
+        press(&mut game, Joypad::A);
+        side_menu_row(&mut game, 2);
+        until_waiting(&mut game, Decision::TownMap);
+        assert_eq!(row_text(&game, 9, 2..15), encode(" AREA UNKNOWN").unwrap());
+        assert!(game.screen().sprites.iter().all(|object| object.y >= 160), "and nothing marked, not even the player");
+    }
+
+    /// `SET_PAL_GENERIC` for the list, `SET_PAL_POKEDEX` with the mon's own palette for its page.
+    #[test]
+    fn the_list_and_the_page_send_their_own_palettes() {
+        let palettes = |command: PaletteCommand| {
+            let mut sgb = crate::gfx::sgb::SgbState::default();
+            sgb.run(&command);
+            sgb.palette_ids()
+        };
+        let mut game = game(dex(20, 20));
+        until_waiting(&mut game, Decision::Pokedex);
+        assert_eq!(game.screen().sgb.palette_ids(), palettes(PaletteCommand::Generic));
+        press(&mut game, Joypad::A);
+        side_menu_row(&mut game, 0);
+        let mon = determine_palette_id_out_of_battle(PokemonSpecies::Bulbasaur as u8);
+        assert_eq!(game.screen().sgb.palette_ids(), palettes(PaletteCommand::Pokedex { mon }));
+        assert_ne!(palettes(PaletteCommand::Pokedex { mon }), palettes(PaletteCommand::Generic));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, SoundId};
 use crate::input::Joypad;
 use crate::modes::overworld::movement::{NPC_MOVEMENT_DOWN, NPC_MOVEMENT_LEFT, NPC_MOVEMENT_RIGHT, NPC_MOVEMENT_UP};
-use crate::modes::overworld::script::SpritePosition;
+use crate::modes::overworld::script::{SpritePosition, Then};
 use crate::systems::pokedex::index_to_pokedex;
 use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_LEFT, SPRITE_FACING_RIGHT, SPRITE_FACING_UP};
 use super::{text_at, Flow, Script};
@@ -51,6 +51,10 @@ pub struct State {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Label {
+    PlayerEntersLabWalk,
+    PlayerEntersLabOakFaces,
+    PlayerEntersLabDone,
+    FollowedOakRivalFaced,
     ChooseMonSpeechFedUp,
     ChooseMonSpeechChooseMon,
     ChooseMonSpeechWhatAboutMe,
@@ -67,16 +71,30 @@ pub enum Label {
     RivalChoosesFaceUp,
     RivalChoosesReceived,
     RivalChoosesDone,
+    ChallengesPlayerRivalFaced,
     ChallengesPlayerText,
+    RivalEndBattleRivalFaced,
     RivalStartsExitText,
+    PokedexFaced,
     PokedexRivalSpeaks,
     PokedexRequest,
+    PokedexRequestFaced,
+    PokedexRequestText,
     PokedexInvention,
+    PokedexInventionFaced,
+    PokedexInventionText,
     PokedexGot,
+    PokedexGotText,
     PokedexHideBoth,
+    PokedexHiddenFaced,
     PokedexThatWasMyDream,
     PokedexRivalFacesRight,
+    PokedexRivalFacedRight,
     PokedexLeaveItToMe,
+    PokedexRivalLeavesWithIt,
+    /// `OaksLabRivalFaceUpOakFaceDownScript`, called: each turn held for `SetSpriteFacingDirectionAndDelay`.
+    RivalFaceUpOakFaceDown,
+    RivalFaceUpOakFaceDownOak,
     PokedexRivalLeaves,
     RivalArrivesMoves,
     /// `OaksLabOak1Text`: the rating after `.HowIsYourPokedexComingText`, and the parcel handed over.
@@ -161,8 +179,7 @@ pub fn script(rt: &mut Script) -> Flow {
             }
             rt.enable_auto_text_box_drawing();
             rt.joy_ignore(Joypad::SELECT | Joypad::START | PAD_CTRL_PAD);
-            rival_face_up_oak_face_down(rt);
-            rt.play_default_music().then(Label::PokedexRivalSpeaks)
+            rt.play_default_music().then(Label::PokedexFaced)
         }
         SCRIPT_OAKSLAB_RIVAL_LEAVES_WITH_POKEDEX => rival_leaves_with_pokedex(rt),
         _ => Flow::Return,
@@ -180,13 +197,10 @@ fn default_script(rt: &mut Script) -> Flow {
     Flow::Return
 }
 
-/// `OaksLabPlayerEntersLabScript`: the player is walked eight squares up to the table.
+/// `OaksLabPlayerEntersLabScript`: the player is walked eight squares up to the table, once the rival
+/// and Oak have turned to face him.
 fn player_enters_lab(rt: &mut Script) -> Flow {
-    rt.simulate_joypad_rle(sym::PlayerEntryMovementRLE);
-    rt.set_sprite_facing(OAKSLAB_RIVAL, SPRITE_FACING_DOWN);
-    rt.set_sprite_facing(OAKSLAB_OAK1, SPRITE_FACING_DOWN);
-    rt.maps().oaks_lab.cur_script = SCRIPT_OAKSLAB_FOLLOWED_OAK;
-    Flow::Return
+    rt.delay3().then(Label::PlayerEntersLabWalk)
 }
 
 /// `OaksLabFollowedOakScript`.
@@ -196,11 +210,7 @@ fn followed_oak(rt: &mut Script) -> Flow {
     }
     rt.set_event(EVENT_FOLLOWED_OAK_INTO_LAB);
     rt.set_event(EVENT_FOLLOWED_OAK_INTO_LAB_2);
-    rt.set_sprite_facing(OAKSLAB_RIVAL, SPRITE_FACING_UP);
-    rt.update_sprites();
-    rt.set_no_map_music(false);
-    rt.maps().oaks_lab.cur_script = SCRIPT_OAKSLAB_OAK_CHOOSE_MON_SPEECH;
-    rt.play_default_music().ret()
+    rt.set_sprite_facing_direction_and_delay(OAKSLAB_RIVAL, SPRITE_FACING_UP).then(Label::FollowedOakRivalFaced)
 }
 
 /// `OaksLabPlayerDontGoAwayScript`: a player walking back out of the lab is walked up again.
@@ -242,10 +252,7 @@ fn challenges_player(rt: &mut Script) -> Flow {
     if rt.y() != 6 {
         return Flow::Return;
     }
-    rt.set_sprite_facing(OAKSLAB_RIVAL, SPRITE_FACING_DOWN);
-    rt.set_player_moving_direction(PLAYER_DIR_UP);
-    rt.play_music(sounds::MUSIC_MEET_RIVAL);
-    rt.display_text_id(TEXT_OAKSLAB_RIVAL_ILL_TAKE_YOU_ON).then(Label::ChallengesPlayerText)
+    rt.set_sprite_facing_direction_and_delay(OAKSLAB_RIVAL, SPRITE_FACING_DOWN).then(Label::ChallengesPlayerRivalFaced)
 }
 
 /// `OaksLabRivalStartBattleScript`: the rival's team follows from the starter he took.
@@ -275,11 +282,7 @@ fn rival_end_battle(rt: &mut Script) -> Flow {
     if let Some(at) = rt.maps().oaks_lab.rival_at.take() {
         rt.set_sprite_position(OAKSLAB_RIVAL, at);
     }
-    rt.set_sprite_facing(OAKSLAB_RIVAL, SPRITE_FACING_DOWN);
-    rt.heal_party();
-    rt.set_event(EVENT_BATTLED_RIVAL_IN_OAKS_LAB);
-    rt.maps().oaks_lab.cur_script = SCRIPT_OAKSLAB_RIVAL_STARTS_EXIT;
-    Flow::Return
+    rt.set_sprite_facing_direction_and_delay(OAKSLAB_RIVAL, SPRITE_FACING_DOWN).then(Label::RivalEndBattleRivalFaced)
 }
 
 /// `OaksLabPlayerWatchRivalExitScript`: the player keeps facing the rival as he goes.
@@ -321,10 +324,9 @@ fn calc_rival_movement(rt: &mut Script) -> u8 {
     steps
 }
 
-/// `OaksLabRivalFaceUpOakFaceDownScript`.
-fn rival_face_up_oak_face_down(rt: &mut Script) {
-    rt.set_sprite_facing(OAKSLAB_RIVAL, SPRITE_FACING_UP);
-    rt.set_sprite_facing(OAKSLAB_OAK2, SPRITE_FACING_DOWN);
+/// `call OaksLabRivalFaceUpOakFaceDownScript`, then `label`.
+fn rival_face_up_oak_face_down(label: Label) -> Flow {
+    Then::call(Label::RivalFaceUpOakFaceDown).then(label)
 }
 
 /// `OaksLabRivalLeavesWithPokedexScript`: the rival is gone, and Route 22 is waiting for him.
@@ -446,6 +448,24 @@ fn oak1_text(rt: &mut Script) -> Flow {
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
+        Label::PlayerEntersLabWalk => {
+            rt.simulate_joypad_rle(sym::PlayerEntryMovementRLE);
+            rt.set_sprite_facing_direction_and_delay(OAKSLAB_RIVAL, SPRITE_FACING_DOWN).then(Label::PlayerEntersLabOakFaces)
+        }
+        Label::PlayerEntersLabOakFaces => {
+            rt.set_sprite_facing_direction_and_delay(OAKSLAB_OAK1, SPRITE_FACING_DOWN).then(Label::PlayerEntersLabDone)
+        }
+        Label::PlayerEntersLabDone => {
+            rt.maps().oaks_lab.cur_script = SCRIPT_OAKSLAB_FOLLOWED_OAK;
+            Flow::Return
+        }
+        Label::FollowedOakRivalFaced => {
+            rt.update_sprites();
+            rt.set_no_map_music(false);
+            rt.maps().oaks_lab.cur_script = SCRIPT_OAKSLAB_OAK_CHOOSE_MON_SPEECH;
+            rt.play_default_music().ret()
+        }
+
         Label::ChooseMonSpeechFedUp => rt.delay3().then(Label::ChooseMonSpeechChooseMon),
         Label::ChooseMonSpeechChooseMon => {
             rt.display_text_id(TEXT_OAKSLAB_OAK_CHOOSE_MON).then(Label::ChooseMonSpeechWhatAboutMe)
@@ -511,10 +531,22 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             Flow::Return
         }
 
+        Label::ChallengesPlayerRivalFaced => {
+            rt.set_player_moving_direction(PLAYER_DIR_UP);
+            rt.play_music(sounds::MUSIC_MEET_RIVAL);
+            rt.display_text_id(TEXT_OAKSLAB_RIVAL_ILL_TAKE_YOU_ON).then(Label::ChallengesPlayerText)
+        }
         Label::ChallengesPlayerText => {
             let path = rt.find_path_to_player(OAKSLAB_RIVAL, true, -1);
             rt.move_sprite(OAKSLAB_RIVAL, &path);
             rt.maps().oaks_lab.cur_script = SCRIPT_OAKSLAB_RIVAL_START_BATTLE;
+            Flow::Return
+        }
+
+        Label::RivalEndBattleRivalFaced => {
+            rt.heal_party();
+            rt.set_event(EVENT_BATTLED_RIVAL_IN_OAKS_LAB);
+            rt.maps().oaks_lab.cur_script = SCRIPT_OAKSLAB_RIVAL_STARTS_EXIT;
             Flow::Return
         }
 
@@ -543,32 +575,45 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             Flow::Return
         }
 
+        Label::RivalFaceUpOakFaceDown => {
+            rt.set_sprite_facing_direction_and_delay(OAKSLAB_RIVAL, SPRITE_FACING_UP).then(Label::RivalFaceUpOakFaceDownOak)
+        }
+        Label::RivalFaceUpOakFaceDownOak => rt.set_sprite_facing_direction_and_delay(OAKSLAB_OAK2, SPRITE_FACING_DOWN).ret(),
+
+        Label::PokedexFaced => rival_face_up_oak_face_down(Label::PokedexRivalSpeaks),
         Label::PokedexRivalSpeaks => {
             rt.display_text_id(TEXT_OAKSLAB_RIVAL_WHAT_DID_YOU_CALL_ME_FOR).then(Label::PokedexRequest)
         }
-        Label::PokedexRequest => {
-            rival_face_up_oak_face_down(rt);
+        Label::PokedexRequest => rt.delay_frames(1).then(Label::PokedexRequestFaced),
+        Label::PokedexRequestFaced => rival_face_up_oak_face_down(Label::PokedexRequestText),
+        Label::PokedexRequestText => {
             rt.display_text_id(TEXT_OAKSLAB_OAK_I_HAVE_A_REQUEST).then(Label::PokedexInvention)
         }
-        Label::PokedexInvention => {
-            rival_face_up_oak_face_down(rt);
+        Label::PokedexInvention => rt.delay_frames(1).then(Label::PokedexInventionFaced),
+        Label::PokedexInventionFaced => rival_face_up_oak_face_down(Label::PokedexInventionText),
+        Label::PokedexInventionText => {
             rt.display_text_id(TEXT_OAKSLAB_OAK_MY_INVENTION_POKEDEX).then(Label::PokedexGot)
         }
-        Label::PokedexGot => rt.display_text_id(TEXT_OAKSLAB_OAK_GOT_POKEDEX).then(Label::PokedexHideBoth),
-        Label::PokedexHideBoth => {
+        Label::PokedexGot => rt.delay_frames(1).then(Label::PokedexGotText),
+        Label::PokedexGotText => rt.display_text_id(TEXT_OAKSLAB_OAK_GOT_POKEDEX).then(Label::PokedexHideBoth),
+        Label::PokedexHideBoth => rt.delay3().then(Label::PokedexHiddenFaced),
+        Label::PokedexHiddenFaced => {
             rt.hide_object(TOGGLE_POKEDEX_1);
             rt.hide_object(TOGGLE_POKEDEX_2);
-            rival_face_up_oak_face_down(rt);
-            rt.display_text_id(TEXT_OAKSLAB_OAK_THAT_WAS_MY_DREAM).then(Label::PokedexThatWasMyDream)
+            rival_face_up_oak_face_down(Label::PokedexThatWasMyDream)
         }
         Label::PokedexThatWasMyDream => {
-            rt.set_sprite_facing_direction_and_delay(OAKSLAB_RIVAL, SPRITE_FACING_RIGHT)
-                .then(Label::PokedexRivalFacesRight)
+            rt.display_text_id(TEXT_OAKSLAB_OAK_THAT_WAS_MY_DREAM).then(Label::PokedexRivalFacesRight)
         }
         Label::PokedexRivalFacesRight => {
-            rt.display_text_id(TEXT_OAKSLAB_RIVAL_LEAVE_IT_ALL_TO_ME).then(Label::PokedexLeaveItToMe)
+            rt.set_sprite_facing_direction_and_delay(OAKSLAB_RIVAL, SPRITE_FACING_RIGHT)
+                .then(Label::PokedexRivalFacedRight)
         }
+        Label::PokedexRivalFacedRight => rt.delay3().then(Label::PokedexLeaveItToMe),
         Label::PokedexLeaveItToMe => {
+            rt.display_text_id(TEXT_OAKSLAB_RIVAL_LEAVE_IT_ALL_TO_ME).then(Label::PokedexRivalLeavesWithIt)
+        }
+        Label::PokedexRivalLeavesWithIt => {
             rt.set_event(EVENT_GOT_POKEDEX);
             rt.set_event(EVENT_OAK_GOT_PARCEL);
             rt.hide_object(TOGGLE_LYING_OLD_MAN);

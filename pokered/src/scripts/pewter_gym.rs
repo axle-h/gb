@@ -119,16 +119,13 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::WaitTakeThis => {
             rt.set_event(EVENT_BEAT_BROCK);
-            let text_id = match rt.give_item(ItemId::Tm34Bide, 1) {
-                true => TEXT_PEWTERGYM_RECEIVED_TM34,
-                false => TEXT_PEWTERGYM_TM34_NO_ROOM,
-            };
-            rt.display_text_id(text_id).then(Label::ReceivedTm34)
+            match rt.give_item(ItemId::Tm34Bide, 1) {
+                true => rt.display_text_id(TEXT_PEWTERGYM_RECEIVED_TM34).then(Label::ReceivedTm34),
+                false => rt.display_text_id(TEXT_PEWTERGYM_TM34_NO_ROOM).then(Label::GymVictory),
+            }
         }
         Label::ReceivedTm34 => {
-            if rt.is_item_in_bag(ItemId::Tm34Bide) {
-                rt.set_event(EVENT_GOT_TM34);
-            }
+            rt.set_event(EVENT_GOT_TM34);
             resume(rt, Label::GymVictory)
         }
         // `.gymVictory`: the guide goes, and the rival is taken off Route 22 until Giovanni puts him

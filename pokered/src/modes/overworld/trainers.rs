@@ -222,13 +222,19 @@ impl Overworld {
     /// `TalkToTrainer`: the after-battle words for a trainer already beaten, else the words before
     /// the battle and the battle's end text saved.
     pub(super) fn talk_to_trainer(&mut self, ctx: &mut Ctx, at: DmgPointer) -> Flow {
-        self.rt.trainer_header = Some(at);
         let header = TrainerHeader::read(at);
-        self.rt.trainer_header_flag_bit = header.sprite;
-        if ctx.world.events.is_set(header.event) {
+        if self.talk_to_trainer_header(ctx, at) {
             return Then::block(Block::PrintText(text_at(header.after_battle))).ret();
         }
         Then::block(Block::PrintText(text_at(header.before_battle))).then(Routine::TalkToTrainerNotYetFought)
+    }
+
+    /// `TalkToTrainer` up to its choice of text: the header saved, and whether its trainer is beaten.
+    pub(super) fn talk_to_trainer_header(&mut self, ctx: &mut Ctx, at: DmgPointer) -> bool {
+        self.rt.trainer_header = Some(at);
+        let header = TrainerHeader::read(at);
+        self.rt.trainer_header_flag_bit = header.sprite;
+        ctx.world.events.is_set(header.event)
     }
 
     /// `.trainerNotYetFought` after its `PrintText`.

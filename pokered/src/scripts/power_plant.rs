@@ -6,7 +6,8 @@ use poke_core::symbols::pokered_map_scripts::{TEXT_POWERPLANT_ELECTRODE1, TEXT_P
     TEXT_POWERPLANT_VOLTORB5, TEXT_POWERPLANT_VOLTORB6, TEXT_POWERPLANT_ZAPDOS};
 use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
-use super::{Flow, Script};
+use poke_core::species::PokemonSpecies;
+use super::{text_at, Flow, Routine, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
@@ -20,6 +21,9 @@ pub enum Label {
     StoreCurScript,
     /// `PowerPlantInitBattleScript`'s own store, after `TalkToTrainer`.
     InitBattleStoreCurScript,
+    /// `PowerPlantZapdosBattleText`, whose `text_asm` plays Zapdos's cry before the battle.
+    ZapdosBattleText,
+    ZapdosCry,
 }
 
 pub fn script(rt: &mut Script) -> Flow {
@@ -41,7 +45,11 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         TEXT_POWERPLANT_VOLTORB5 => sym::Voltorb5TrainerHeader,
         TEXT_POWERPLANT_ELECTRODE2 => sym::Voltorb6TrainerHeader,
         TEXT_POWERPLANT_VOLTORB6 => sym::Voltorb7TrainerHeader,
-        TEXT_POWERPLANT_ZAPDOS => sym::ZapdosTrainerHeader,
+        TEXT_POWERPLANT_ZAPDOS => {
+            let before = Some(Label::ZapdosBattleText.into());
+            let then = rt.talk_to_trainer_asm(sym::ZapdosTrainerHeader, before, None);
+            return Some(then.then(Label::InitBattleStoreCurScript));
+        }
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).then(Label::InitBattleStoreCurScript))
@@ -52,6 +60,11 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::StoreCurScript | Label::InitBattleStoreCurScript => {
             rt.maps().power_plant.cur_script = rt.cur_map_script();
             Flow::Return
+        }
+        Label::ZapdosBattleText => rt.print_text(text_at(sym::PowerPlantZapdosBattleText)).then(Label::ZapdosCry),
+        Label::ZapdosCry => {
+            rt.play_cry(PokemonSpecies::Zapdos);
+            rt.wait_for_sound_to_finish().then(Routine::TalkToTrainerNotYetFought)
         }
     }
 }

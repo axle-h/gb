@@ -207,8 +207,10 @@ const TEXT_BOX_TILES: u16 = (sym::TextBoxGraphicsEnd.address - sym::TextBoxGraph
 const HP_BAR_AND_STATUS_TILES: u16 = (sym::HpBarAndStatusGraphicsEnd.address - sym::HpBarAndStatusGraphics.address) / 16;
 
 /// Arithmetic long enough to run over frames, which the recreation does at once: lag, priced by the
-/// VBlanks the cartridge takes between its entry and its return.
-const LAG: [DmgPointer; 1] = [sym::CalcLevelFromExperience];
+/// VBlanks the cartridge takes between its entry and its return. `CalcStat`'s square root of stat
+/// experience and its divisions can run over a frame, which `_AddPartyMon` pays for HP and again in
+/// `CalcStats`.
+const LAG: [DmgPointer; 3] = [sym::CalcLevelFromExperience, sym::CalcStat, sym::CalcStats];
 /// The same for a loop inside a routine that also waits: from the first time its start is reached
 /// to its end.
 const LAG_SPANS: [(DmgPointer, DmgPointer); 1] = [(local::RedrawPartyMenu_::r#loop, local::RedrawPartyMenu_::afterDrawingMonEntries)];
@@ -328,6 +330,8 @@ impl Cartridge {
                     self.lagging = Some((self.gb.core().registers().sp, back, self.acting));
                     all.push(back);
                 }
+                // One inside another, as `CalcStats`' calls of `CalcStat`: the outer one prices both.
+                Stop::Breakpoint(hit) if lag.contains(&hit) => {}
                 // `VBlank`'s own far calls return through the same address, below the routine's stack.
                 Stop::Breakpoint(hit) if self.lagging.is_some_and(|(sp, back, _)| hit == back && self.gb.core().registers().sp > sp) => {
                     let (_, back, from) = self.lagging.take().unwrap();
@@ -824,6 +828,7 @@ fn lockstep_from(state: &[u8], prepare: impl FnOnce(&mut Cartridge), from_poll: 
     let mmu = cartridge.gb.core().mmu();
     let saved_menu_items = [&sym::wBattleAndStartSavedMenuItem, &sym::wPartyAndBillsPCSavedMenuItem, &sym::wBagSavedMenuItem,
         &sym::wListScrollOffset].map(|at| mmu.read_pointer(at));
+    let sfx_note_delays = SFX_CHANNELS.map(|c| cartridge.read(sym::wChannelNoteDelayCounters.address + c as u16));
     cartridge.tape.clear();
     cartridge.entered.clear();
     let mut polls = vec![cartridge.seen(Kind::Overworld, 0)];
@@ -842,6 +847,7 @@ fn lockstep_from(state: &[u8], prepare: impl FnOnce(&mut Cartridge), from_poll: 
     let mut game = Game::new(world, GameRng::tape(cartridge.tape.clone()), Pacing::Faithful);
     let menu = game.menu_mut();
     [menu.battle_and_start, menu.party_and_bills, menu.bag_saved, menu.list_scroll] = saved_menu_items;
+    seed_sfx_note_delays(&mut game, sfx_note_delays);
     game.push(Mode::Overworld(overworld));
     let (seen, screen) = recreation_seen(&mut game, Kind::Overworld, 0);
     if from_poll {
@@ -861,6 +867,23 @@ fn lockstep_from(state: &[u8], prepare: impl FnOnce(&mut Cartridge), from_poll: 
             time(&polls[i], &polls[i + 1], frames, action, &game, &format!("{i}: {what}"));
         }
     }
+}
+
+/// The four sound effect channels.
+const SFX_CHANNELS: [usize; 4] = [4, 5, 6, 7];
+
+/// The idle sound effect channels' note delay counters, which a new engine starts at zero where the
+/// cartridge's are wherever its last sound left them. A cry parks channel 7 on a `sound_ret` that a
+/// zero counter reaches only 255 frames on, and a sound effect wanting the channel before then is
+/// dropped.
+fn seed_sfx_note_delays(game: &mut Game, counters: [u8; 4]) {
+    let mut engine = serde_json::to_value(game.audio()).expect("the engine serialises");
+    for (c, counter) in SFX_CHANNELS.into_iter().zip(counters) {
+        if game.audio().channel_sound_id(c) == 0 {
+            engine["channels"][c]["note_delay_counter"] = counter.into();
+        }
+    }
+    *game.audio_mut() = serde_json::from_value(engine).expect("the engine deserialises");
 }
 
 /// The tile `UpdatePlayerSprite` reads to decide the player is behind drawn text, which a page
@@ -1386,9 +1409,6 @@ fn fly_lands_in_the_town_chosen_as_the_cartridge_does() {
 /// naming screen it opens is the naming lockstep's, and the polls of its question are the ones
 /// `party_unsettled` covers.
 #[test]
-#[ignore = "the recreation leaves the dex page's blank tiles on screen: the cartridge's \
-            `OaksLabShowPokeBallPokemonScript` calls `ReloadMapData` after `StarterDex`, and \
-            `scripts/oaks_lab.rs`'s `Label::BallDexShown` goes straight to the offer"]
 fn the_charmander_ball_is_taken_as_the_cartridge_does() {
     lockstep(include_bytes!("../pokemon/data/branch-oaks-lab.bin"), |_| {}, |_, seen| match seen.kind {
         Kind::Prompt if seen.held.is_none() => Some((Action::Press(Joypad::B, 1), "no nickname")),

@@ -34,7 +34,7 @@ use crate::systems::battle::Battle;
 use crate::world::World;
 use flow::Step;
 use menus::Menu;
-use present::{Present, Waiting};
+use present::{HpBarColours, Present, Waiting};
 
 /// Who the player faces: a wild mon, or a trainer from `TrainerDataPointers`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +135,14 @@ pub struct BattleMode {
     /// `hSCX`, hidden under the window but for the effects that move it aside.
     #[serde(default)]
     h_scx: u8,
+    /// `wPlayerHPBarColor` and `wEnemyHPBarColor`, as the HUDs last drew them.
+    #[serde(default)]
+    hp_bar_colours: HpBarColours,
+    /// `wBattleMonSpecies` and `wEnemyMonSpecies2` as `SetPal_Battle` reads them, which the mons
+    /// do not keep: 0 before a side's first mon is loaded, and the enemy's 0 again once a trainer's
+    /// pic scrolls back in.
+    #[serde(default)]
+    pal_species: [u8; 2],
 }
 
 fn player_side() -> crate::systems::battle::Side {
@@ -197,6 +205,8 @@ impl BattleMode {
             trainer_oam_block: None,
             skip_move_animations: false,
             h_scx: 0,
+            hp_bar_colours: HpBarColours::default(),
+            pal_species: [0; 2],
         }
     }
 
@@ -227,6 +237,11 @@ impl BattleMode {
     /// Whether an animation, the transition or the opening slide is playing.
     pub fn animating(&self) -> bool {
         matches!(self.waiting, Waiting::Animation(_) | Waiting::Transition(_) | Waiting::Silhouettes(_))
+    }
+
+    /// Whether an HP bar is moving.
+    pub fn draining_hp_bar(&self) -> bool {
+        matches!(self.waiting, Waiting::HpBar(_))
     }
 
     /// The cursor of whichever of the battle's own menus is up.
@@ -606,5 +621,347 @@ mod tests {
             assert!(guard < 200, "the battle goes on");
         }
         assert_ne!(game.world().money, [0; 3], "the prize is paid");
+    }
+
+    /// Loses to `opponent` on `map` with a lone MAGIKARP and the bike forced on, and says which of
+    /// `lines` the text box showed on the way.
+    fn lose_on(map: poke_core::map::Map, opponent: BattleMode, lines: &[&str]) -> (Game, Vec<bool>) {
+        let mut world = World {
+            player_name: encode("RED").unwrap(),
+            rival_name: encode("BLUE").unwrap(),
+            party: vec![Named {
+                mon: new_party_mon(PokemonSpecies::Magikarp, 2, 0, &Origin::Trainer, &mut GameRng::tape(vec![])),
+                ot: encode("RED").unwrap(),
+                nick: encode("FISH").unwrap(),
+            }],
+            ..World::default()
+        };
+        world.location.map = map;
+        world.location.always_on_bike = true;
+        let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
+        game.push(Mode::Battle(opponent));
+        let mut seen = vec![false; lines.len()];
+        let mut guard = 0;
+        while let Some(decision) = settle(&mut game) {
+            for (line, seen) in lines.iter().zip(seen.iter_mut()) {
+                let words = encode(&format!("{line}@")).unwrap();
+                let words = &words[..words.len() - 1];
+                *seen |= game.screen().ui.row(14).windows(words.len()).any(|window| window == words);
+            }
+            let next = match decision {
+                Decision::Text => Command::Advance,
+                Decision::BattleMenu | Decision::BattleMoves => Command::Fight(0),
+                decision => panic!("the battle asked {decision:?}"),
+            };
+            assert_eq!(command(&mut game, next.clone()), Reply::Accepted, "{next:?}");
+            guard += 1;
+            assert!(guard < 200, "the battle goes on");
+        }
+        (game, seen)
+    }
+
+    /// `HandlePlayerBlackOut`: the first rival gloats, and in Oak's lab that is the end of it.
+    #[test]
+    fn losing_to_the_rival_in_oaks_lab_is_no_blackout() {
+        let (game, seen) = lose_on(poke_core::map::Map::OaksLab, BattleMode::trainer(0x19, 1, 0, 0), &["Yeah! Am", "is out of"]);
+        assert_eq!(seen, [true, false]);
+        assert!(game.world().location.always_on_bike, "only a blackout gets off the bike");
+    }
+
+    /// The first rival on Route 22 gloats and the player blacks out too.
+    #[test]
+    fn losing_to_the_rival_on_route_22_blacks_out_after_his_gloat() {
+        let (game, seen) = lose_on(poke_core::map::Map::Route22, BattleMode::trainer(0x19, 1, 0, 0), &["Yeah! Am", "is out of"]);
+        assert_eq!(seen, [true, true]);
+        assert!(!game.world().location.always_on_bike, "a blackout gets off the bike");
+    }
+
+    #[test]
+    fn losing_to_a_trainer_blacks_out_and_gets_off_the_bike() {
+        let (game, seen) = lose_on(poke_core::map::Map::Route17, BattleMode::trainer(1, 1, 0, 0), &["Yeah! Am", "is out of"]);
+        assert_eq!(seen, [false, true]);
+        assert!(!game.world().location.always_on_bike);
+        assert_eq!(game.screen().sgb.palette_ids(), [crate::gfx::sgb::PAL_BLACK; 4], "`HandlePlayerBlackOut`'s black");
+    }
+
+    /// The four `SuperPalettes` ids `SetPal_Battle` sends for these bars and species indices.
+    fn battle_palettes(bars: [HpBarColour; 2], player: u8, enemy: u8) -> [u8; 4] {
+        use crate::gfx::sgb::{determine_palette_id_out_of_battle as id, PAL_GREENBAR};
+        [PAL_GREENBAR + bars[0] as u8, PAL_GREENBAR + bars[1] as u8, id(player), id(enemy)]
+    }
+
+    use crate::systems::hp_bar::HpBarColour::{self, Green, Red, Yellow};
+
+    /// Each change of the SGB's palettes while the battle runs up to the next thing it waits on.
+    fn settle_recording(game: &mut Game, seen: &mut Vec<[u8; 4]>) -> Option<Decision> {
+        for _ in 0..5000 {
+            if !game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_))) {
+                return None;
+            }
+            if let Status::Waiting(decision) = game.status() {
+                return Some(decision);
+            }
+            game.frame(Input::None);
+            let ids = game.screen().sgb.palette_ids();
+            if seen.last() != Some(&ids) {
+                seen.push(ids);
+            }
+        }
+        panic!("nothing ever waited");
+    }
+
+    fn command_recording(game: &mut Game, command: Command, seen: &mut Vec<[u8; 4]>) {
+        assert_eq!(game.frame(Input::Command(command.clone())).reply, Some(Reply::Accepted), "{command:?}");
+        for _ in 0..3000 {
+            let done = game.frame(Input::None).events.contains(&Event::CommandDone(command.clone()));
+            let ids = game.screen().sgb.palette_ids();
+            if seen.last() != Some(&ids) {
+                seen.push(ids);
+            }
+            if done {
+                return;
+            }
+        }
+        panic!("{command:?} never finished");
+    }
+
+    /// `_InitBattleCommon` sends black before the slide and the battle's own packet after it, with
+    /// no mon of the player's loaded yet; after that a HUD sends it again when its bar is a new
+    /// colour, and `SendOutMon` for the mon.
+    #[test]
+    fn a_battle_opens_black_then_colours_each_mon_and_each_bar() {
+        use crate::gfx::sgb::{PaletteCommand, SgbState};
+        let mut world = game(BattleMode::wild(PokemonSpecies::Magikarp, 5)).world().clone();
+        let bird = &mut world.party[0].mon;
+        bird.mon.hp = bird.stats[0] * 2 / 5;
+        let rat = &mut world.party[1].mon;
+        rat.mon.hp = rat.stats[0] / 10;
+        let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
+        game.push(Mode::Battle(BattleMode::wild(PokemonSpecies::Magikarp, 5)));
+        let mut black = SgbState::default();
+        black.run(&PaletteCommand::BattleBlack);
+        let (bird, rat, karp) = (PokemonSpecies::Pidgey as u8, PokemonSpecies::Rattata as u8, PokemonSpecies::Magikarp as u8);
+
+        let mut seen = vec![game.screen().sgb.palette_ids()];
+        assert_eq!(settle_recording(&mut game, &mut seen), Some(Decision::Text));
+        assert_eq!(seen[1..], [black.palette_ids(), battle_palettes([Green, Green], 0, karp)],
+            "`wBattleMonSpecies` is still zero when the slide ends");
+
+        // The HUD is drawn before `SendOutMon`'s own packet, and already has the mon.
+        let mut seen = vec![game.screen().sgb.palette_ids()];
+        command_recording(&mut game, Command::Advance, &mut seen);
+        assert_eq!(settle_recording(&mut game, &mut seen), Some(Decision::BattleMenu));
+        assert_eq!(seen, [battle_palettes([Green, Green], 0, karp), battle_palettes([Yellow, Green], bird, karp)]);
+
+        let mut seen = vec![game.screen().sgb.palette_ids()];
+        command_recording(&mut game, Command::SwitchPokemon(1), &mut seen);
+        while settle_recording(&mut game, &mut seen) == Some(Decision::Text) {
+            command_recording(&mut game, Command::Advance, &mut seen);
+        }
+        let mut party_menu = SgbState::default();
+        party_menu.run(&PaletteCommand::PartyMenu);
+        assert_eq!(seen, [
+            battle_palettes([Yellow, Green], bird, karp),
+            party_menu.palette_ids(),
+            battle_palettes([Yellow, Green], bird, karp),
+            battle_palettes([Red, Green], rat, karp),
+        ], "`.notAlreadyOut` puts the battle back for the mon still out, and `SendOutMon`'s HUD brings the next");
+    }
+
+    /// Plays one frame with `buttons` held and one with them let go, recording the palettes.
+    fn press_recording(game: &mut Game, buttons: crate::input::Joypad, seen: &mut Vec<[u8; 4]>) {
+        for input in [Input::Buttons(buttons), Input::None] {
+            game.frame(input);
+            let ids = game.screen().sgb.palette_ids();
+            if seen.last() != Some(&ids) {
+                seen.push(ids);
+            }
+        }
+    }
+
+    /// `ItemUsePPRestore` from the battle's bag on BIRD, whose moves hold `pp`: the item on the first
+    /// move, and back out of the bag it reopens onto. The palettes from the battle menu on, and the
+    /// game.
+    fn restore_pp_in_battle(item: poke_core::item::ItemId, pp: [u8; 4]) -> (Vec<[u8; 4]>, Game) {
+        use poke_core::bag::BagItem;
+        let mut world = game(BattleMode::wild(PokemonSpecies::Magikarp, 5)).world().clone();
+        world.party[0].mon.mon.pp = pp;
+        world.bag = crate::systems::inventory::Inventory::bag(vec![BagItem::new(item, 1)]);
+        let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
+        game.push(Mode::Battle(BattleMode::wild(PokemonSpecies::Magikarp, 5)));
+        assert_eq!(settle(&mut game), Some(Decision::Text));
+        command(&mut game, Command::Advance);
+        assert_eq!(settle(&mut game), Some(Decision::BattleMenu));
+        let mut seen = vec![game.screen().sgb.palette_ids()];
+        command_recording(&mut game, Command::UseItem { item, target: Some(0) }, &mut seen);
+        let mut guard = 0;
+        loop {
+            match settle_recording(&mut game, &mut seen).expect("the battle goes on") {
+                Decision::MoveMenu => press_recording(&mut game, crate::input::Joypad::A, &mut seen),
+                Decision::Text => command_recording(&mut game, Command::Advance, &mut seen),
+                Decision::List => press_recording(&mut game, crate::input::Joypad::B, &mut seen),
+                Decision::BattleMenu => break,
+                decision => panic!("the item asked {decision:?}"),
+            }
+            guard += 1;
+            assert!(guard < 20, "the item never let go");
+        }
+        (seen, game)
+    }
+
+    /// `ItemUsePPRestore`'s `.restorePP` returns with the zero flag set for a move already full, to
+    /// `.useEther`'s `jp .noEffect`, which falls into `.itemNotUsed` and its `RunDefaultPaletteCommand`;
+    /// a Max Ether on a full move with PP Ups used takes `.done`'s. Either way the party menu's
+    /// palette gives way to the battle's before the bag reopens.
+    #[test]
+    fn an_ether_that_does_nothing_puts_the_battle_palette_back_as_one_that_restores_does() {
+        use poke_core::item::ItemId;
+        use crate::gfx::sgb::{PaletteCommand, SgbState};
+        use crate::systems::pp::max_pp;
+        let bird = game(BattleMode::wild(PokemonSpecies::Magikarp, 5)).world().party[0].mon.mon.clone();
+        let full = bird.pp;
+        let first = bird.moves[0].expect("a first move");
+        let pp_upped = 3 << 6 | max_pp(first, 3 << 6);
+        let mut party_menu = SgbState::default();
+        party_menu.run(&PaletteCommand::PartyMenu);
+        let battle = battle_palettes([Green, Green], PokemonSpecies::Pidgey as u8, PokemonSpecies::Magikarp as u8);
+        for (item, pp, used) in [
+            (ItemId::Ether, full, false),
+            (ItemId::MaxEther, full, false),
+            (ItemId::Ether, [pp_upped, full[1], full[2], full[3]], false),
+            // The Max Ether compares the PP Ups with the PP, so the move never reads as full.
+            (ItemId::MaxEther, [pp_upped, full[1], full[2], full[3]], true),
+            (ItemId::Ether, [0, full[1], full[2], full[3]], true),
+        ] {
+            let (seen, game) = restore_pp_in_battle(item, pp);
+            let what = format!("{item:?} on PP {:#04X}", pp[0]);
+            let menu = seen.iter().position(|&ids| ids == party_menu.palette_ids()).unwrap_or_else(|| panic!("{what}: the party menu"));
+            assert_eq!(seen[menu + 1..], [battle], "{what}: the battle's palette straight after the party menu");
+            assert_eq!(game.world().bag.items.is_empty(), used, "{what}: used");
+        }
+    }
+
+    /// `TransformEffect_` sets `TRANSFORMED` only after the animation, so the `SET_PAL_BATTLE` that
+    /// `ChangeMonPic` sends still has the mon's own palette, and the grey comes with the next packet:
+    /// here `.notAlreadyOut`'s, putting the battle back behind the party menu.
+    #[test]
+    fn a_transformed_mon_turns_grey_at_the_next_set_pal_battle_not_at_its_own_picture() {
+        use poke_core::move_name::PokemonMoveName;
+        use crate::gfx::sgb::{determine_palette_id_out_of_battle as id, PaletteCommand, SgbState, PAL_GRAYMON};
+        use crate::systems::battle::Status3;
+        let (mew, karp) = (PokemonSpecies::Mew as u8, PokemonSpecies::Magikarp as u8);
+        assert_ne!(id(mew), PAL_GRAYMON, "a mon that is not grey already");
+        let mut party_menu = SgbState::default();
+        party_menu.run(&PaletteCommand::PartyMenu);
+        for animations in [true, false] {
+            let mut world = game(BattleMode::wild(PokemonSpecies::Magikarp, 5)).world().clone();
+            world.options.battle_animation = animations;
+            world.party[0].mon = new_party_mon(PokemonSpecies::Mew, 30, 0, &Origin::Trainer, &mut GameRng::tape(vec![]));
+            world.party[0].mon.mon.moves = [Some(PokemonMoveName::Transform), None, None, None];
+            world.party[0].mon.mon.pp = [10, 0, 0, 0];
+            let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
+            game.push(Mode::Battle(BattleMode::wild(PokemonSpecies::Magikarp, 5)));
+            assert_eq!(settle(&mut game), Some(Decision::Text));
+            command(&mut game, Command::Advance);
+            assert_eq!(settle(&mut game), Some(Decision::BattleMenu));
+            let mut seen = vec![game.screen().sgb.palette_ids()];
+            command_recording(&mut game, Command::Fight(0), &mut seen);
+            while settle_recording(&mut game, &mut seen) == Some(Decision::Text) {
+                command_recording(&mut game, Command::Advance, &mut seen);
+            }
+            let Some(Mode::Battle(battle)) = game.modes().last() else { panic!("the battle is up") };
+            assert!(battle.battle().unwrap().player.status3.contains(Status3::TRANSFORMED), "MEW transformed");
+            assert!(seen.iter().all(|ids| ids[2] == id(mew)), "animations {animations}: MEW kept its palette through its turn: {seen:?}");
+
+            let mut seen = vec![game.screen().sgb.palette_ids()];
+            command_recording(&mut game, Command::SwitchPokemon(1), &mut seen);
+            let menu = seen.iter().position(|&ids| ids == party_menu.palette_ids()).expect("the party menu");
+            assert_eq!(seen[menu + 1][2..], [PAL_GRAYMON, id(karp)], "animations {animations}: the grey at the next packet");
+        }
+    }
+
+    /// A fainted enemy's bar goes red, `ReplaceFaintedEnemyMon` puts it back to green before the
+    /// next mon comes out in its own colours, and the trainer's pic scrolls back in as species 0.
+    #[test]
+    fn a_trainers_mons_are_coloured_as_each_comes_out() {
+        let mut game = game(BattleMode::trainer(1, 1, 0, 0));
+        let mut seen = vec![];
+        let mut guard = 0;
+        while let Some(decision) = settle_recording(&mut game, &mut seen) {
+            let next = match decision {
+                Decision::Text => Command::Advance,
+                Decision::BattleMenu | Decision::BattleMoves => Command::Fight(1),
+                Decision::TwoOption => Command::ChooseOption(1),
+                decision => panic!("the battle asked {decision:?}"),
+            };
+            command_recording(&mut game, next, &mut seen);
+            guard += 1;
+            assert!(guard < 200, "the battle goes on");
+        }
+        let (bird, rattata, ekans) = (PokemonSpecies::Pidgey as u8, PokemonSpecies::Rattata as u8, PokemonSpecies::Ekans as u8);
+        let battle = seen.iter().position(|ids| *ids == battle_palettes([Green, Green], 0, 0)).expect("the opening packet");
+        assert_eq!(seen[battle..], [
+            battle_palettes([Green, Green], 0, 0),
+            battle_palettes([Green, Green], 0, rattata),
+            battle_palettes([Green, Green], bird, rattata),
+            battle_palettes([Green, Red], bird, rattata),
+            battle_palettes([Green, Green], bird, rattata),
+            battle_palettes([Green, Green], bird, ekans),
+            battle_palettes([Green, Red], bird, ekans),
+            battle_palettes([Green, Red], bird, 0),
+        ]);
+    }
+
+    /// `HandlePlayerBlackOut` sends black only once the Oak's lab rival has had his say, and there
+    /// not at all.
+    #[test]
+    fn losing_in_oaks_lab_leaves_the_rival_in_colour() {
+        let (game, _) = lose_on(poke_core::map::Map::OaksLab, BattleMode::trainer(0x19, 1, 0, 0), &[]);
+        let ids = game.screen().sgb.palette_ids();
+        assert_eq!(ids[3], crate::gfx::sgb::determine_palette_id_out_of_battle(0), "the rival's pic, species 0");
+        assert_ne!(ids, [crate::gfx::sgb::PAL_BLACK; 4]);
+    }
+
+    /// The overworld's `LoadMapData` puts the map's palette back once the battle is over.
+    #[test]
+    fn the_map_takes_its_own_palette_back_after_a_battle() {
+        use poke_core::map::Map;
+        use poke_core::sprite::SpriteFacing;
+        use poke_core::symbols::pokered_events::EVENT_BEAT_ARTICUNO;
+        use crate::gfx::sgb::PAL_CAVE;
+        use crate::modes::overworld::Overworld;
+        use crate::systems::overworld::Location;
+        let mut world = game(BattleMode::wild(PokemonSpecies::Magikarp, 5)).world().clone();
+        world.location = Location { map: Map::SeafoamIslandsB4F, x: 6, y: 2, facing: SpriteFacing::Up, last_map: Map::PalletTown, ..Location::default() };
+        world.party = vec![Named {
+            mon: new_party_mon(PokemonSpecies::Mewtwo, 70, 1, &Origin::Trainer, &mut GameRng::tape(vec![])),
+            ot: encode("RED").unwrap(),
+            nick: encode("MON").unwrap(),
+        }];
+        world.party[0].mon.mon.moves[0] = Some(poke_core::move_name::PokemonMoveName::Psychic);
+        let mut game = Game::new(world, GameRng::seeded(5), Pacing::Faithful);
+        game.push(Mode::Overworld(Overworld::new()));
+        let cave = [PAL_CAVE, 0, 0, 0];
+        let mut in_battle = false;
+        let mut coloured_in_battle = false;
+        for _ in 0..80_000 {
+            let battling = game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_)));
+            in_battle |= battling;
+            coloured_in_battle |= battling && game.screen().sgb.palette_ids() != cave;
+            if game.world().events.is_set(EVENT_BEAT_ARTICUNO) && game.status() == Status::Waiting(Decision::Overworld) {
+                break;
+            }
+            let input = match game.status() {
+                Status::Waiting(Decision::Overworld) if !in_battle => Input::Command(Command::Interact),
+                Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
+                Status::Waiting(Decision::BattleMenu | Decision::BattleMoves) => Input::Command(Command::Fight(0)),
+                Status::Waiting(Decision::TwoOption) => Input::Command(Command::ChooseOption(1)),
+                _ => Input::None,
+            };
+            game.frame(input);
+        }
+        assert!(game.world().events.is_set(EVENT_BEAT_ARTICUNO), "Articuno was beaten");
+        assert!(coloured_in_battle);
+        assert_eq!(game.screen().sgb.palette_ids(), cave);
     }
 }

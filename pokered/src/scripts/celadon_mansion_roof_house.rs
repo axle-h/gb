@@ -1,5 +1,5 @@
-//! `CeladonMansionRoofHouse_Script`: the Eevee in its ball, which stays where it is if the party
-//! has no room for it.
+//! `CeladonMansionRoofHouse_Script`: the Eevee in its ball, which goes to the box if the party is
+//! full and stays where it is only if the box is full too.
 
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_map_scripts::TEXT_CELADONMANSION_ROOF_HOUSE_EEVEE_POKEBALL;
@@ -28,7 +28,7 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
         Label::EeveeGiven => {
-            if rt.added_to_party() {
+            if rt.gave_pokemon() {
                 rt.hide_object(TOGGLE_CELADON_MANSION_EEVEE_GIFT);
             }
             Flow::Return

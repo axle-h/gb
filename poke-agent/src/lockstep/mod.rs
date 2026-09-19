@@ -20,6 +20,7 @@ mod pokemart;
 mod save;
 mod screen;
 mod scripts;
+mod slots;
 mod start_menu;
 mod status_screen;
 mod synth;

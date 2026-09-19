@@ -17,7 +17,8 @@ pub struct State {}
 pub enum Label {
     /// `CeladonCityGramps3Text`, after the offer and after whichever answer it gave.
     Gramps3Offered,
-    Gramps3Done,
+    /// `.Success`, where `GiveItem`'s carry sent it.
+    Gramps3Received,
     PoliwrathCry,
 }
 
@@ -46,22 +47,17 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
-        Label::Gramps3Offered => {
-            let said = match rt.give_item(ItemId::Tm41Softboiled, 1) {
-                true => gramps::ReceivedTM41Text,
-                false => gramps::TM41NoRoomText,
-            };
-            rt.print_text(text_at(said)).then(Label::Gramps3Done)
-        }
-        Label::Gramps3Done => {
-            if rt.is_item_in_bag(ItemId::Tm41Softboiled) {
-                rt.set_event(EVENT_GOT_TM41);
-            }
+        Label::Gramps3Offered => match rt.give_item(ItemId::Tm41Softboiled, 1) {
+            true => rt.print_text(text_at(gramps::ReceivedTM41Text)).then(Label::Gramps3Received),
+            false => rt.print_text(text_at(gramps::TM41NoRoomText)).ret(),
+        },
+        Label::Gramps3Received => {
+            rt.set_event(EVENT_GOT_TM41);
             Flow::Return
         }
         Label::PoliwrathCry => {
             rt.play_cry(PokemonSpecies::Poliwrath);
-            Flow::Return
+            rt.wait_for_sound_to_finish().ret()
         }
     }
 }

@@ -28,6 +28,7 @@ pub enum Label {
     OakCongratulations,
     ResetEventsAndSave,
     OakTurned,
+    OakHeld,
     OakSpoke,
     Saving,
 }
@@ -89,7 +90,9 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::DefaultScript => default_script(rt),
         Label::OakCongratulations => oak_congratulations(rt),
         Label::ResetEventsAndSave => rt.delay3().then(Label::Saving),
-        Label::OakTurned => {
+        // Oak is held turned to the player for the `Delay3` before he speaks.
+        Label::OakTurned => rt.delay3().then(Label::OakHeld),
+        Label::OakHeld => {
             rt.joy_ignore(Joypad::empty());
             rt.set_player_moving_direction(PLAYER_DIR_RIGHT);
             rt.display_text_id(TEXT_HALLOFFAME_OAK).then(Label::OakSpoke)

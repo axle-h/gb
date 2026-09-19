@@ -1,15 +1,14 @@
 //! `LancesRoom_Script`: the last of the Elite Four, the hallway that walks itself and the doorway
 //! that bricks itself up behind the player.
 
-use poke_core::symbols::pokered_events::{EVENT_BEAT_LANCE, EVENT_BEAT_LANCES_ROOM_TRAINER_0,
-    EVENT_LANCES_ROOM_LOCK_DOOR};
+use poke_core::symbols::pokered_events::{EVENT_BEAT_LANCE, EVENT_LANCES_ROOM_LOCK_DOOR};
 use crate::audio::data::sounds;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_LANCESROOM_DEFAULT, SCRIPT_LANCESROOM_LANCE_END_BATTLE,
     SCRIPT_LANCESROOM_NOOP, SCRIPT_LANCESROOM_PLAYER_IS_MOVING, TEXT_LANCESROOM_LANCE};
 use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
-use super::{Code, Flow, Script};
+use super::{text_at, Code, Flow, Script};
 
 /// `LanceTriggerMovementCoords`, as (x, y). The first two stand beside Lance, the next two are the
 /// doorway the room bricks up, and the last is the staircase the walk down the hallway starts on.
@@ -43,7 +42,8 @@ pub enum Label {
     StoreCurScript,
     MovedIn,
     AfterEndTrainerBattle,
-    /// `LancesRoomLanceAfterBattleText`'s `text_asm`, which is what marks the gauntlet won.
+    /// `LancesRoomLanceAfterBattleText`, whose `text_asm` is what marks the gauntlet won.
+    LanceAfterBattle,
     LanceSpoke,
 }
 
@@ -133,7 +133,10 @@ fn end_battle(rt: &mut Script) -> Flow {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     match text_id {
-        TEXT_LANCESROOM_LANCE => Some(rt.talk_to_trainer(sym::LancesRoomTrainerHeader0).then(Label::LanceSpoke)),
+        TEXT_LANCESROOM_LANCE => {
+            let after = Some(Label::LanceAfterBattle.into());
+            Some(rt.talk_to_trainer_asm(sym::LancesRoomTrainerHeader0, None, after).ret())
+        }
         _ => None,
     }
 }
@@ -160,11 +163,9 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             }
             rt.display_text_id(TEXT_LANCESROOM_LANCE).ret()
         }
-        // The event rides on the after-battle text, so it is set only when that is what was said.
+        Label::LanceAfterBattle => rt.print_text(text_at(sym::LancesRoomLanceAfterBattleText)).then(Label::LanceSpoke),
         Label::LanceSpoke => {
-            if rt.check_event(EVENT_BEAT_LANCES_ROOM_TRAINER_0) {
-                rt.set_event(EVENT_BEAT_LANCE);
-            }
+            rt.set_event(EVENT_BEAT_LANCE);
             Flow::Return
         }
     }

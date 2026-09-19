@@ -76,7 +76,7 @@ impl Overworld {
                 false => BattleMode::wild(species, level),
             });
         }
-        let battle = BattleMode::trainer(opponent - OPP_ID_OFFSET, self.rt.trainer_no, self.rt.lone_attack,
+        let battle = BattleMode::trainer(opponent - OPP_ID_OFFSET, self.rt.trainer_no, self.rt.gym_leader_no,
             ctx.world.scripts.rival_starter);
         Some(match self.rt.end_battle_text.filter(|_| self.rt.print_end_battle_text) {
             Some(words) => battle.with_end_battle_text(text_at(words)),

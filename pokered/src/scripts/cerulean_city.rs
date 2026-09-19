@@ -225,6 +225,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::RivalDefeatedText => {
             rt.play_sound(SoundId::STOP_ALL_MUSIC);
             rt.music_rival_alternate_start();
+            rt.set_sprite_movement_bytes_to_ff(CERULEANCITY_RIVAL);
             let path = match rt.x() == RIGHT_OF_BRIDGE {
                 true => RIVAL_LEAVES_RIGHT,
                 false => RIVAL_LEAVES_LEFT,

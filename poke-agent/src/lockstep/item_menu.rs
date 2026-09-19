@@ -67,8 +67,8 @@ pub(super) fn the_bag(gb: &GameBoy) -> Inventory {
     }).collect())
 }
 
-/// Everything these screens read: the name, the events, the text speed, the money, the bag, the
-/// party.
+/// Everything these screens read: the name, the events, the text speed, the money and the coins,
+/// the bag, the party.
 pub(super) fn the_world(gb: &GameBoy) -> World {
     let mmu = gb.core().mmu();
     let mut world = World {
@@ -76,6 +76,7 @@ pub(super) fn the_world(gb: &GameBoy) -> World {
         party: the_party(gb),
         bag: the_bag(gb),
         money: mmu.read_slice(sym::wPlayerMoney.address, 3).try_into().unwrap(),
+        coins: mmu.read_slice(sym::wPlayerCoins.address, 2).try_into().unwrap(),
         ..World::default()
     };
     world.options.text_speed = match mmu.read_game_options().expect("the fixture's options").text_speed {
@@ -343,4 +344,58 @@ fn step_back_to_the_bag(gb: &mut GameBoy, game: &mut Game, what: &str) {
     super::status_screen::cartridge_until_polling(gb);
     super::status_screen::recreation_until(game, Decision::List);
     assert_eq!(screen(gb), recreated(game), "{what}");
+}
+
+/// A Super Repel, which sets the steps as the text prints and is spent at the press after it.
+#[test]
+fn a_repel_shows_what_the_cartridge_shows_at_every_poll() {
+    let (mut gb, mut game) = both_on_item(|gb| {
+        write_bag(gb, &[(ItemId::SuperRepel, 2), (ItemId::Potion, 1)]);
+        gb.core_mut().mmu_mut().write(sym::wRepelRemainingSteps.address, 7);
+    });
+    let hurry = hurried_letter(&game);
+    step(&mut gb, &mut game, Joypad::A, Decision::List, LIST, "the bag");
+    step(&mut gb, &mut game, Joypad::A, Decision::UseToss, CURSOR, "USE/TOSS");
+    step(&mut gb, &mut game, Joypad::A, Decision::Text, BOX + hurry, "used SUPER REPEL");
+    let steps = gb.core().mmu().read_pointer(&sym::wRepelRemainingSteps);
+    assert_eq!((game.world().location.repel_steps, steps), (200, 200));
+    step(&mut gb, &mut game, Joypad::A, Decision::List, LIST, "the bag with one fewer");
+    assert_eq!(game.world().bag, the_bag(&gb));
+    back_to_the_start_menu(&mut gb, &mut game);
+}
+
+/// The Coin Case counting the fixture's coins, which are written in first.
+#[test]
+fn the_coin_case_shows_what_the_cartridge_shows_at_every_poll() {
+    let (mut gb, mut game) = both_on_item(|gb| {
+        write_bag(gb, &[(ItemId::CoinCase, 1)]);
+        gb.core_mut().mmu_mut().write_slice(sym::wPlayerCoins.address, &[0x04, 0x56]);
+    });
+    let hurry = hurried_letter(&game);
+    step(&mut gb, &mut game, Joypad::A, Decision::List, LIST, "the bag");
+    step(&mut gb, &mut game, Joypad::A, Decision::UseToss, CURSOR, "USE/TOSS");
+    step(&mut gb, &mut game, Joypad::A, Decision::Text, BOX + ARROW + hurry, "the coins");
+    step(&mut gb, &mut game, Joypad::A, Decision::List, LIST, "the bag again");
+    back_to_the_start_menu(&mut gb, &mut game);
+}
+
+/// `OLD_ROD`, in the bag's first slot, with the start menu's cursor left on `ITEM`.
+fn old_rod_on_top(cartridge: &mut super::scripts::Cartridge) {
+    cartridge.write(sym::wBagItems.address, ItemId::OldRod as u8);
+    cartridge.write(sym::wBagItems.address + 1, 1);
+    cartridge.write(sym::wBattleAndStartSavedMenuItem.address, 2);
+    cartridge.write(sym::wBagSavedMenuItem.address, 0);
+    cartridge.write(sym::wListScrollOffset.address, 0);
+}
+
+/// The Old Rod cast into Pallet Town's pond, where the fixture stands on the shore facing the water:
+/// the text, the cast, the shakes and the bubble, up to the bite.
+#[test]
+fn the_old_rod_hooks_a_magikarp_as_the_cartridge_does() {
+    use super::scripts::{lockstep, Action, PROMPT, WAIT};
+    const SCRIPT: &[(Action, &str)] = &[
+        (Action::Press(Joypad::START, 2), "START"), (PROMPT, "ITEM"), (PROMPT, "the Old Rod"),
+        (PROMPT, "USE: the text, the cast and the shakes, to the bubble"), (WAIT, "the bubble, to the bite"),
+    ];
+    lockstep(include_bytes!("../pokemon/data/postgame-fishing.bin"), old_rod_on_top, move |i, _| SCRIPT.get(i).copied());
 }

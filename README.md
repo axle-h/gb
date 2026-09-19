@@ -269,11 +269,13 @@ pokered/          Pokémon Red recreated natively, on `poke-core` alone; in prog
 poke-agent/       the Pokémon layer — agent, policies, LLM turn loop, the run directory
 poke-agent-web/   the axum server, the video and audio codecs, and the SPA
 poke-agent-sdl/   the desktop window
+pokered-sdl/      the native game in a window, from the keyboard
 vendor/           pokered, the disassembly, as a submodule; Blip_Buffer's C++, for golden vectors
 ```
 
-`gb` and `poke-core` ← `poke-agent` ← the two binaries, and `poke-core` ← `pokered`, and nothing
-else: neither `poke-core` nor `pokered` knows about `gb`. Each crate has one feature, `slow-tests`.
+`gb`, `poke-core` and `pokered` ← `poke-agent` ← the two binaries, `poke-core` ← `pokered` ←
+`pokered-sdl`, and nothing else: neither `poke-core` nor `pokered` knows about `gb`. `poke-agent` holds
+the lockstep tests and harvesters that run the two side by side. Each crate has one feature, `slow-tests`.
 
 | Concern | Choice | Reason |
 |---|---|---|

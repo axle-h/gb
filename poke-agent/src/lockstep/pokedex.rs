@@ -1,5 +1,5 @@
-//! The Pokédex the start menu's first row opens: the list of numbers, the menu on its lower right
-//! and a data page, all three drawn from the fixture's own seen and owned flags.
+//! The Pokédex the start menu's first row opens: the list of numbers, the menu on its lower right,
+//! a data page and the nest map, all drawn from the fixture's own seen and owned flags.
 
 use gb::cycles::MachineCycles;
 use gb::game_boy::{GameBoy, Stop};
@@ -9,12 +9,14 @@ use pokered::input::Joypad;
 use pokered::mode::{Mode, Status};
 use pokered::modes::pokedex::PokedexMenu;
 use pokered::party::Pokedex;
+use pokered::systems::overworld::Location;
+use poke_core::map::Map;
 use pokered::rng::GameRng;
 use pokered::systems::pokedex::{front_pic_tiles, is_set, species_of, FLAG_BYTES};
 use pokered::world::World;
 use pokered::{Game, Input, Pacing};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
-use super::{assert_late, breakpoint, cartridge_cursor_to, cartridge_until_polling, joypad, open_the_start_menu,
+use super::{assert_late, breakpoint, ARROW, cartridge_cursor_to, cartridge_until_polling, joypad, open_the_start_menu,
             recreation_until_polling, tile_row, to_vblank, CURSOR, LIST_REDRAWN};
 
 
@@ -48,7 +50,10 @@ fn open_the_pokedex() -> (GameBoy, Game) {
     to_vblank(&mut gb);
 
     let pokedex = the_pokedex(&gb);
-    let mut game = Game::new(World { pokedex, ..World::default() }, GameRng::seeded(0), Pacing::Faithful);
+    // The nest map marks where the player stands.
+    let map = Map::from_repr(gb.core().mmu().read_pointer(&pokered_symbols::wCurMap)).expect("a map the fixture is on");
+    let location = Location { map, ..Location::default() };
+    let mut game = Game::new(World { pokedex, location, ..World::default() }, GameRng::seeded(0), Pacing::Faithful);
     game.push(Mode::Pokedex(PokedexMenu::new()));
     (gb, game)
 }
@@ -165,10 +170,19 @@ fn the_side_menu_and_a_data_page_match_the_cartridge() {
     assert_eq!(cartridge_screen(&gb), recreation_screen(&game), "the side menu as drawn");
 
     // `DATA` is the row the menu opens on, so A goes straight to the page. It stops at the page
-    // break in the middle of the description, which is where both are waiting on a button.
+    // break in the middle of the description, which is where both are waiting on a button. The
+    // cartridge's way there is mostly loading the picture, so what is timed is the cry, from the
+    // frame the picture goes up: the height, weight and description wait for all of it, and the
+    // page break's `ProtectedDelay3` is the only loading after it. The recreation puts the picture
+    // up in the frame A lands, one before `press` lets go.
     press(&mut gb, &mut game, Joypad::A);
-    cartridge_until_polling(&mut gb);
-    recreation_until_polling(&mut game, Decision::PokedexData);
+    assert_eq!(game.ui().get(7, 1), 0, "the recreation's picture is up");
+    let cry = breakpoint(pokered_symbols::PlayCry);
+    let (stop, _) = gb.run_until(&[cry], MachineCycles::PER_FRAME * 600);
+    assert_eq!(stop, Stop::Breakpoint(cry), "the data page never cried");
+    let cartridge = cartridge_until_polling(&mut gb) - 1;
+    let recreation = 1 + recreation_until_polling(&mut game, Decision::PokedexData);
+    assert_late(cartridge, recreation, ARROW, "the cry");
     assert_eq!(without_the_arrow(cartridge_screen(&gb)), without_the_arrow(recreation_screen(&game)),
         "the data page as drawn");
 
@@ -189,5 +203,60 @@ fn the_side_menu_and_a_data_page_match_the_cartridge() {
         assert_eq!(without_the_arrow(cartridge_screen(&gb)), without_the_arrow(recreation_screen(&game)),
             "page {page} of the description");
     }
+    assert_eq!(cartridge_screen(&gb), recreation_screen(&game), "the list, drawn again from scratch");
+}
+
+/// Walks the list down to `dex`, comparing every poll on the way.
+fn walk_down_to(gb: &mut GameBoy, game: &mut Game, dex: u8) {
+    for step in 0..160 {
+        if cartridge_selection(gb) == dex {
+            return;
+        }
+        press(gb, game, Joypad::DOWN);
+        cartridge_until_polling(gb);
+        recreation_until_polling(game, Decision::Pokedex);
+        assert_eq!(cartridge_screen(gb), recreation_screen(game), "walking down, step {step}");
+    }
+    panic!("the list never reached {dex}");
+}
+
+/// `AREA`: the town map with a nest icon on every place the mon is met wild and the player's own
+/// marker, then B back to the list. The cartridge turns the LCD off to load the map, so this is
+/// compared and not timed.
+#[test]
+fn the_nest_map_matches_the_cartridge() {
+    let (mut gb, mut game) = open_the_pokedex();
+    cartridge_until_polling(&mut gb);
+    recreation_until_polling(&mut game, Decision::Pokedex);
+
+    // Pidgey, Rattata or Spearow: the first the fixture has seen, each met in plenty of grass.
+    let seen = the_pokedex(&gb).seen;
+    let dex = [16u8, 19, 21].into_iter().find(|&dex| is_set(&seen, dex)).expect("the fixture has seen a route bird or rat");
+    walk_down_to(&mut gb, &mut game, dex);
+    press(&mut gb, &mut game, Joypad::A);
+    cartridge_until_polling(&mut gb);
+    recreation_until_polling(&mut game, Decision::PokedexSideMenu);
+    for _ in 0..2 {
+        press(&mut gb, &mut game, Joypad::DOWN);
+        cartridge_until_polling(&mut gb);
+        recreation_until_polling(&mut game, Decision::PokedexSideMenu);
+    }
+    press(&mut gb, &mut game, Joypad::A);
+    cartridge_until_polling(&mut gb);
+    recreation_until_polling(&mut game, Decision::TownMap);
+    assert_eq!(cartridge_screen(&gb), recreation_screen(&game), "the nest map as drawn");
+
+    // The nests from slot 0 up, and the player's marker in its own four slots. What the cartridge
+    // leaves in the slots between is whatever was there before, and is never shown.
+    let oam = super::battle::cartridge_oam(&gb);
+    let ours: Vec<[u8; 4]> = game.screen().sprites.iter().map(|o| [o.y, o.x, o.tile, o.attributes]).collect();
+    let nests = ours.iter().take_while(|object| object[2] == 4 && object[0] < 160).count();
+    assert!(nests > 1, "{nests} nests");
+    assert_eq!(oam[..nests], ours[..nests], "the nests");
+    assert_eq!(oam[36..], ours[36..], "the player's marker");
+
+    press(&mut gb, &mut game, Joypad::B);
+    cartridge_until_polling(&mut gb);
+    recreation_until_polling(&mut game, Decision::Pokedex);
     assert_eq!(cartridge_screen(&gb), recreation_screen(&game), "the list, drawn again from scratch");
 }

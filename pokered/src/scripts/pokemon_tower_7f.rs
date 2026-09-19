@@ -2,6 +2,8 @@
 //! when beaten, and Mr Fuji taking the player home with him.
 
 use poke_core::map::Map;
+use poke_core::pointer::{DmgBank, DmgPointer};
+use poke_core::rom_gfx::rom_slice;
 use poke_core::symbols::pokered_events::{EVENT_RESCUED_MR_FUJI, EVENT_RESCUED_MR_FUJI_2};
 use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_POKEMONTOWER7F_DEFAULT, SCRIPT_POKEMONTOWER7F_HIDE_NPC,
@@ -12,36 +14,15 @@ use poke_core::symbols::pokered_toggles::{TOGGLE_MR_FUJIS_HOUSE_MR_FUJI, TOGGLE_
     TOGGLE_SAFFRON_CITY_E, TOGGLE_SAFFRON_CITY_F};
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
-use crate::modes::overworld::movement::{NPC_MOVEMENT_DOWN, NPC_MOVEMENT_LEFT, NPC_MOVEMENT_RIGHT};
 use crate::systems::overworld::sprites::SPRITE_FACING_UP;
 use super::{text_at, Flow, Script};
 
+/// A movement list's end.
 const END: u8 = 0xFF;
 const PAD_CTRL_PAD: Joypad = Joypad::UP.union(Joypad::DOWN).union(Joypad::LEFT).union(Joypad::RIGHT);
 const PAD_BUTTONS: Joypad = Joypad::A.union(Joypad::B).union(Joypad::SELECT).union(Joypad::START);
 /// `MR_FUJIS_HOUSE`'s first warp, and the map the house is entered from.
 const MR_FUJIS_HOUSE_WARP: u8 = 1;
-
-const EXIT_RIGHT_DOWN_LEFT: [u8; 8] = [NPC_MOVEMENT_RIGHT, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN,
-    NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_LEFT, END];
-const EXIT_DOWN_RIGHT: [u8; 7] = [NPC_MOVEMENT_DOWN, NPC_MOVEMENT_RIGHT, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN,
-    NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, END];
-const EXIT_DOWN: [u8; 6] = [NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN,
-    NPC_MOVEMENT_DOWN, END];
-const EXIT_LEFT_DOWN: [u8; 8] = [NPC_MOVEMENT_LEFT, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN,
-    NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, END];
-const EXIT_DOWN_LEFT: [u8; 7] = [NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_LEFT,
-    NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, END];
-const EXIT_RIGHT_DOWN: [u8; 8] = [NPC_MOVEMENT_RIGHT, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN,
-    NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, END];
-
-/// `PokemonTower7FNPCCoordMovementTable`: four squares per Rocket, each the square the player has to
-/// have been standing on to fight him, and the way out that does not walk through the player.
-const EXITS: [[((u8, u8), &[u8]); 4]; 3] = [
-    [((9, 12), &EXIT_RIGHT_DOWN_LEFT), ((10, 11), &EXIT_DOWN_RIGHT), ((11, 11), &EXIT_DOWN), ((12, 11), &EXIT_DOWN)],
-    [((12, 10), &EXIT_LEFT_DOWN), ((11, 9), &EXIT_DOWN_LEFT), ((10, 9), &EXIT_DOWN), ((9, 9), &EXIT_DOWN)],
-    [((9, 8), &EXIT_RIGHT_DOWN), ((10, 7), &EXIT_DOWN), ((11, 7), &EXIT_DOWN), ((12, 7), &EXIT_DOWN)],
-];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
@@ -110,6 +91,32 @@ fn warp_to_mr_fujis_house(rt: &mut Script) -> Flow {
     Flow::Return
 }
 
+/// `PokemonTower7FRocketLeaveMovementScript`.
+fn rocket_leave_movement(rt: &mut Script) {
+    let slot = rt.sprite_index();
+    if let Some(path) = leave_movement(slot, rt.x(), rt.y()) {
+        rt.move_sprite(slot, path);
+    }
+}
+
+/// `PokemonTower7FNPCCoordMovementTable` searched from the Rocket in `slot`'s own four rows for the
+/// square the player stands on. The loop has no end, so a square none of his rows names runs on into
+/// the next Rocket's and walks him out their way; one found nowhere before the bank ends leaves him
+/// standing, where the cartridge would read on past the ROM.
+pub(super) fn leave_movement(slot: u8, x: u8, y: u8) -> Option<&'static [u8]> {
+    let table = sym::PokemonTower7FNPCCoordMovementTable + (slot.wrapping_sub(1) << 4) as u16;
+    let row = rom_slice(table).chunks_exact(4).find(|row| row[0] == y && row[1] == x)?;
+    let address = u16::from_le_bytes([row[2], row[3]]);
+    let bank = match address {
+        0..0x4000 => DmgBank::ROM { bank: 0 },
+        0x4000..0x8000 => table.bank,
+        _ => return None,
+    };
+    let bytes = rom_slice(DmgPointer { bank, address });
+    let end = bytes.iter().position(|&b| b == END).map_or(bytes.len(), |i| i + 1);
+    Some(&bytes[..end])
+}
+
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
         TEXT_POKEMONTOWER7F_ROCKET1 => sym::PokemonTower7TrainerHeader0,
@@ -135,12 +142,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             rt.display_text_id(rt.sprite_index()).then(Label::RocketSpokeTo)
         }
         Label::RocketSpokeTo => {
-            let slot = rt.sprite_index();
-            let here = (rt.x(), rt.y());
-            let exits = EXITS[slot as usize - 1];
-            if let Some(&(_, path)) = exits.iter().find(|&&(at, _)| at == here) {
-                rt.move_sprite(slot, path);
-            }
+            rocket_leave_movement(rt);
             rt.maps().pokemon_tower_7f.cur_script = SCRIPT_POKEMONTOWER7F_HIDE_NPC;
             Flow::Return
         }

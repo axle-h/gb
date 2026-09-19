@@ -39,7 +39,7 @@ pub enum Hidden {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventRuntime {
     pub hidden: Option<Hidden>,
-    /// `wHiddenEventIndex`, which only ever counts up.
+    /// `wHiddenEventIndex`, which counts up from the map's entry.
     pub hidden_event_index: u8,
     /// `wHiddenItemOrCoinsIndex`.
     pub hidden_item_or_coins_index: u8,

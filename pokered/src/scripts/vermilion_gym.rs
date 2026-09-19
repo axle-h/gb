@@ -137,16 +137,13 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::BadgeInfo => {
             rt.set_event(EVENT_BEAT_LT_SURGE);
-            let text_id = match rt.give_item(ItemId::Tm24Thunderbolt, 1) {
-                true => TEXT_VERMILIONGYM_LT_SURGE_RECEIVED_TM24,
-                false => TEXT_VERMILIONGYM_LT_SURGE_TM24_NO_ROOM,
-            };
-            rt.display_text_id(text_id).then(Label::ReceivedTm24)
+            match rt.give_item(ItemId::Tm24Thunderbolt, 1) {
+                true => rt.display_text_id(TEXT_VERMILIONGYM_LT_SURGE_RECEIVED_TM24).then(Label::ReceivedTm24),
+                false => rt.display_text_id(TEXT_VERMILIONGYM_LT_SURGE_TM24_NO_ROOM).then(Label::GymVictory),
+            }
         }
         Label::ReceivedTm24 => {
-            if rt.is_item_in_bag(ItemId::Tm24Thunderbolt) {
-                rt.set_event(EVENT_GOT_TM24);
-            }
+            rt.set_event(EVENT_GOT_TM24);
             resume(rt, Label::GymVictory)
         }
         Label::GymVictory => {

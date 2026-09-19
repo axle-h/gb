@@ -7,7 +7,7 @@
 use poke_core::species::PokemonSpecies;
 use poke_core::text_script::{TextCommand, TextSound};
 use serde::{Deserialize, Serialize};
-use crate::audio::data::sounds;
+use crate::audio::data::{sounds, SoundId};
 use crate::command::Decision;
 use crate::gfx::text_boxes::TextBoxId;
 use crate::gfx::ui::UiSurface;
@@ -44,6 +44,10 @@ pub struct TextBox {
     /// the screen when the text ends.
     #[serde(default)]
     off_screen: Option<UiSurface>,
+    /// What the script's `text_asm` does when it plays a sound and runs on into more text, which
+    /// is then the rest of `commands`. Without one a `text_asm` ends the script.
+    #[serde(default)]
+    asm_sound: Option<SoundId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +64,10 @@ enum Phase {
     Digits { writes: Vec<BcdWrite>, next: usize, end: u16, delay: Option<LetterDelay> },
     /// `TX_SOUND`'s `WaitForSoundToFinish`, or `PlayCry`'s own.
     Sounding,
+    /// `TX_SCROLL`: `scrolled` lines of two are up, and `frames` of the last one's five are left.
+    Scrolling { scrolled: u8, frames: u8 },
+    /// A `text_asm` that is `PlaySoundWaitForCurrent`, waiting for the current sound to end.
+    AsmSound(SoundId),
 }
 
 impl TextBox {
@@ -69,7 +77,14 @@ impl TextBox {
     }
 
     pub fn script(commands: Vec<TextCommand>) -> Self {
-        Self { commands, index: 0, dest: FIRST_LINE, printer: None, phase: Phase::Running, answered: 0, no_box: false, off_screen: None }
+        Self { commands, index: 0, dest: FIRST_LINE, printer: None, phase: Phase::Running, answered: 0, no_box: false,
+               off_screen: None, asm_sound: None }
+    }
+
+    /// A script whose `text_asm` is `PlaySoundWaitForCurrent` of `sound` and a jump to the text after
+    /// it, printed on from where the text before it stopped.
+    pub fn with_asm_sound(self, sound: SoundId) -> Self {
+        Self { asm_sound: Some(sound), ..self }
     }
 
     /// `PrintText_NoCreatingTextBox`: `DisplayTextID`'s own, which draws its box itself unless
@@ -145,12 +160,10 @@ impl TextBox {
                 let at = at.wrapping_sub(TILE_MAP) as usize;
                 ctx.screen.ui.text_box_border(at % 20, at / 20, width as usize, height as usize);
             }
+            // No `▼` and no wait for a press: two `ScrollTextUpOneLine`s, five frames each.
             TextCommand::Scroll => {
-                // No `▼` and no wait: the two scrolls and then on with the next command.
                 PlaceString::put(&mut ctx.screen.ui, ARROW, UiSurface::BLANK);
-                PlaceString::scroll_up_one_line(&mut ctx.screen.ui);
-                PlaceString::scroll_up_one_line(&mut ctx.screen.ui);
-                self.dest = SECOND_LINE;
+                return Some(self.scroll(ctx, 0));
             }
             TextCommand::PromptButton | TextCommand::WaitButton => {
                 let arrow = command == TextCommand::PromptButton;
@@ -192,10 +205,32 @@ impl TextBox {
                     return Some(Transition::Stay);
                 }
             }
-            // The 599 escapes are each their own chunk's.
-            TextCommand::Asm(_) => return Some(Transition::Pop(Outcome::Done)),
+            TextCommand::Asm(_) => match self.asm_sound {
+                Some(sound) => {
+                    self.phase = Phase::AsmSound(sound);
+                    return Some(self.step(ctx));
+                }
+                // The 599 escapes are each their own chunk's.
+                None => return Some(Transition::Pop(Outcome::Done)),
+            },
         }
         None
+    }
+
+    /// `ScrollTextUpOneLine` after `scrolled` of them, and on to the second line after both.
+    fn scroll(&mut self, ctx: &mut Ctx, scrolled: u8) -> Transition {
+        if scrolled == 2 {
+            self.dest = SECOND_LINE;
+            self.phase = Phase::Running;
+            return self.run(ctx);
+        }
+        PlaceString::scroll_up_one_line(&mut ctx.screen.ui);
+        let frames = self.delay(ctx, 5);
+        if frames == 0 {
+            return self.scroll(ctx, scrolled + 1);
+        }
+        self.phase = Phase::Scrolling { scrolled: scrolled + 1, frames };
+        Transition::Stay
     }
 
     /// `PrintBCDNumber`'s writes up to the next letter delay, then the next command.
@@ -255,6 +290,17 @@ impl TextBox {
                 self.run(ctx)
             }
             Phase::Sounding => Transition::Stay,
+            Phase::AsmSound(sound) if ctx.pacing == crate::Pacing::Instant || ctx.audio.sound_finished() => {
+                ctx.audio.play_sound(sound);
+                self.phase = Phase::Running;
+                self.run(ctx)
+            }
+            Phase::AsmSound(_) => Transition::Stay,
+            Phase::Scrolling { scrolled, frames } if frames > 1 => {
+                self.phase = Phase::Scrolling { scrolled, frames: frames - 1 };
+                Transition::Stay
+            }
+            Phase::Scrolling { scrolled, .. } => self.scroll(ctx, scrolled),
             Phase::Pausing(frames) if frames > 1 => {
                 self.phase = Phase::Pausing(frames - 1);
                 Transition::Stay
@@ -639,6 +685,106 @@ mod tests {
         assert_eq!(frames, 6, "the same frames as a text drawn on the screen");
         assert_eq!(row(&game, 14), "AB");
         assert_eq!(game.ui().get(0, 0), 0x31, "and the screen it was drawn off is still under it");
+    }
+
+    /// `TX_SCROLL`: the two lines go up one at a time, five frames apart, and the next command
+    /// prints on the second line five frames after the second.
+    #[test]
+    fn scroll_moves_the_text_up_two_lines_over_ten_frames() {
+        let commands = vec![
+            TextCommand::Text(encode("A<LINE>B@").unwrap()),
+            TextCommand::Scroll,
+            TextCommand::Text(encode("C@").unwrap()),
+        ];
+        let mut game = scripted(commands, TextVars::default(), Pacing::Faithful);
+        frames_until(&mut game, |g| row(g, 15) == "B");
+        assert_eq!([row(&game, 13), row(&game, 14), row(&game, 15), row(&game, 16)], ["A", "", "B", ""]);
+        assert_eq!(frames_until(&mut game, |g| row(g, 14) == "B"), 5);
+        assert_eq!(row(&game, 16), "", "no `▼` and no wait for a press");
+        assert_eq!(frames_until(&mut game, |g| row(g, 16) == "C"), 5);
+    }
+
+    #[test]
+    fn instant_pacing_scrolls_at_once() {
+        let commands = vec![
+            TextCommand::Text(encode("A<LINE>B@").unwrap()),
+            TextCommand::Scroll,
+            TextCommand::Text(encode("C@").unwrap()),
+        ];
+        let mut game = scripted(commands, TextVars::default(), Pacing::Instant);
+        game.frame(Input::None);
+        assert_eq!((row(&game, 14).as_str(), row(&game, 16).as_str()), ("B", "C"));
+    }
+
+    /// Frames a sound plays for before `WaitForSoundToFinish` returns, measured on an engine of
+    /// its own.
+    fn frames_playing(play: impl Fn(&mut crate::audio::engine::AudioEngine)) -> u64 {
+        let mut engine = crate::audio::engine::AudioEngine::new(crate::audio::data::AudioBank::One);
+        play(&mut engine);
+        let mut frames = 0;
+        while !engine.sound_finished() {
+            engine.frame();
+            frames += 1;
+        }
+        frames
+    }
+
+    /// `TX_SOUND` plays its sound and the text waits the whole of it before going on.
+    #[test]
+    fn a_sound_is_heard_out_before_the_text_goes_on() {
+        let commands = vec![
+            TextCommand::Text(encode("A@").unwrap()),
+            TextCommand::Sound(TextSound::GetKeyItem),
+            TextCommand::Text(encode("B@").unwrap()),
+        ];
+        let mut game = scripted(commands, TextVars::default(), Pacing::Faithful);
+        frames_until(&mut game, |g| !g.audio().sound_finished());
+        assert!((4..8).any(|channel| game.audio().channel_sound_id(channel) == sounds::SFX_GET_KEY_ITEM.0),
+            "SFX_GET_KEY_ITEM is playing");
+        assert_eq!(game.status(), Status::Busy, "a sound is not a decision");
+        let waited = frames_until(&mut game, |g| {
+            assert!(row(g, 14) == "A" || g.audio().sound_finished(), "B went up under the sound");
+            row(g, 14) == "AB"
+        });
+        let length = frames_playing(|engine| engine.play_sound(sounds::SFX_GET_KEY_ITEM));
+        assert!(waited >= length && waited <= length + 1, "waited {waited} frames for a {length}-frame sound");
+    }
+
+    /// The three cries go through `PlayCry`, whose own wait holds the text the same way.
+    #[test]
+    fn a_cry_is_heard_out_before_the_text_goes_on() {
+        let commands = vec![
+            TextCommand::Text(encode("A@").unwrap()),
+            TextCommand::Sound(TextSound::CryDewgong),
+            TextCommand::Text(encode("B@").unwrap()),
+        ];
+        let mut game = scripted(commands, TextVars::default(), Pacing::Faithful);
+        frames_until(&mut game, |g| !g.audio().sound_finished());
+        let cry = crate::audio::engine::AudioEngine::new(crate::audio::data::AudioBank::One)
+            .get_cry_data(PokemonSpecies::Dewgong as u8);
+        assert_eq!(game.audio().channel_sound_id(4), cry.0, "Dewgong's cry");
+        let waited = frames_until(&mut game, |g| {
+            assert!(row(g, 14) == "A" || g.audio().sound_finished(), "B went up under the cry");
+            row(g, 14) == "AB"
+        });
+        let length = frames_playing(|engine| engine.play_cry(PokemonSpecies::Dewgong as u8));
+        assert!(waited >= length && waited <= length + 1, "waited {waited} frames for a {length}-frame cry");
+    }
+
+    /// A `text_asm` that plays a sound runs on into the text after it, from where the text stopped.
+    #[test]
+    fn an_asm_sound_plays_and_the_text_runs_on_where_it_stopped() {
+        let commands = vec![
+            TextCommand::Text(encode("A@").unwrap()),
+            TextCommand::Asm(pokered_symbols::OneTwoAndText),
+            TextCommand::Text(encode("B@").unwrap()),
+        ];
+        let world = World { player_name: encode("RED").unwrap(), ..World::default() };
+        let mut game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::TextBox(TextBox::script(commands).with_asm_sound(sounds::SFX_SWAP)));
+        frames_until(&mut game, |g| !g.audio().sound_finished());
+        assert!((4..8).any(|channel| game.audio().channel_sound_id(channel) == sounds::SFX_SWAP.0));
+        frames_until(&mut game, |g| row(g, 14) == "AB");
     }
 
     #[test]

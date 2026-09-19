@@ -66,9 +66,10 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             let Some(mon) = rt.fossil_mon() else { return Flow::Return };
             rt.give_pokemon(mon, REVIVED_LEVEL).then(Label::MonGiven)
         }
-        // A full party leaves all three events set, so he holds the revived mon until there is room.
+        // `GivePokemon`'s carry: a mon sent to the box is handed over as surely as one in the party,
+        // and only a full box leaves all three events set for him to hold it until there is room.
         Label::MonGiven => {
-            if rt.added_to_party() {
+            if rt.gave_pokemon() {
                 rt.reset_event(EVENT_GAVE_FOSSIL_TO_LAB);
                 rt.reset_event(EVENT_LAB_STILL_REVIVING_FOSSIL);
                 rt.reset_event(EVENT_LAB_HANDING_OVER_FOSSIL_MON);

@@ -318,4 +318,253 @@ mod tests {
         save[4] = 99;
         assert_eq!(Game::load(&save, Pacing::Faithful).unwrap_err(), "save version 99, expected 1");
     }
+
+    use std::hash::{Hash, Hasher};
+    use poke_core::charmap::encode;
+    use poke_core::map::Map;
+    use poke_core::species::PokemonSpecies;
+    use crate::command::Decision;
+    use crate::modes::battle::BattleMode;
+    use crate::modes::slots::SlotMachine;
+    use crate::party::Named;
+    use crate::systems::add_mon::{new_party_mon, Origin};
+
+    /// What one frame is fed, kept so a loaded copy can be fed it again.
+    #[derive(Clone)]
+    enum Fed {
+        Buttons(Joypad),
+        Command(Command),
+        Nothing,
+    }
+
+    impl Fed {
+        fn input(&self) -> Input {
+            match self {
+                Fed::Buttons(held) => Input::Buttons(*held),
+                Fed::Command(command) => Input::Command(command.clone()),
+                Fed::Nothing => Input::None,
+            }
+        }
+    }
+
+    fn digest(bytes: &[u8]) -> u64 {
+        let mut hasher = std::hash::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// `NR50`, `NR51`, wave RAM and the wave DAC as a backend fed `writes` holds them: what no note
+    /// writes again.
+    #[derive(Debug, Clone, Default, PartialEq)]
+    struct Kept {
+        master_volume: u8,
+        panning: u8,
+        wave_ram: [u8; 16],
+        wave_dac: bool,
+    }
+
+    impl Kept {
+        fn feed(&mut self, writes: &[Write]) {
+            for &write in writes {
+                match write {
+                    Write::MasterVolume { .. } => self.master_volume = write.register().1,
+                    Write::Panning(panning) => self.panning = panning,
+                    Write::WaveRam { index, samples } => self.wave_ram[index as usize] = samples,
+                    Write::WaveDac(on) => self.wave_dac = on,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// One frame of the original run, as a copy loaded before it must reproduce it.
+    struct Played {
+        fed: Fed,
+        audio: Vec<Write>,
+        status: Status,
+        save: u64,
+        saved: Option<u64>,
+        kept: Kept,
+    }
+
+    /// Plays `game` for `frames` frames, feeding what `drive` picks and saving wherever `save_here`
+    /// says; then loads every save and plays it on with the same inputs. Each copy must give the same
+    /// `save()` bytes, status, game save and audio writes from then on, and a backend that starts on
+    /// the copy with its standing writes must hold the registers no note rewrites exactly as one that
+    /// heard the whole run does. Returns the frames saved at.
+    fn resumes_identically(mut game: Game, frames: usize, mut drive: impl FnMut(&Game) -> Fed,
+        mut save_here: impl FnMut(&Game, usize) -> bool) -> Vec<usize>
+    {
+        let mut saves = vec![];
+        let mut played = vec![];
+        let mut kept = Kept::default();
+        for frame in 0..frames {
+            if save_here(&game, frame) {
+                saves.push((frame, game.save()));
+            }
+            let fed = drive(&game);
+            let out = game.frame(fed.input());
+            kept.feed(&out.audio);
+            played.push(Played { fed, audio: out.audio, status: out.status, save: digest(&game.save()),
+                saved: out.save.as_deref().map(digest), kept: kept.clone() });
+        }
+        assert!(!saves.is_empty(), "nowhere was saved");
+        for (from, bytes) in &saves {
+            let mut copy = Game::load(bytes, Pacing::Faithful).unwrap();
+            assert_eq!(copy.save(), *bytes, "frame {from}: the load round trips");
+            let mut backend = Kept::default();
+            backend.feed(&copy.audio().standing_writes());
+            for (frame, original) in played.iter().enumerate().skip(*from) {
+                let out = copy.frame(original.fed.input());
+                let what = format!("saved at frame {from}, frame {frame}");
+                assert_eq!(out.audio, original.audio, "{what}: the audio");
+                backend.feed(&out.audio);
+                assert_eq!(backend, original.kept, "{what}: what a backend started on the copy holds");
+                assert_eq!(out.status, original.status, "{what}: the status");
+                assert_eq!(out.save.as_deref().map(digest), original.saved, "{what}: the game's own save");
+                assert_eq!(digest(&copy.save()), original.save, "{what}: the save bytes");
+            }
+        }
+        saves.into_iter().map(|(frame, _)| frame).collect()
+    }
+
+    fn named(species: PokemonSpecies, level: u8, nick: &str) -> Named<crate::party::PartyMon> {
+        Named {
+            mon: new_party_mon(species, level, 0, &Origin::Trainer, &mut GameRng::tape(vec![])),
+            ot: encode("RED").unwrap(),
+            nick: encode(nick).unwrap(),
+        }
+    }
+
+    fn battle_game(opponent: BattleMode) -> Game {
+        let world = World {
+            player_name: encode("RED").unwrap(),
+            party: vec![named(PokemonSpecies::Pidgey, 50, "BIRD"), named(PokemonSpecies::Rattata, 40, "RAT")],
+            ..World::default()
+        };
+        let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
+        game.push(Mode::Battle(opponent));
+        game
+    }
+
+    fn battle(game: &Game) -> Option<&BattleMode> {
+        game.modes().iter().find_map(|mode| match mode {
+            Mode::Battle(battle) => Some(battle),
+            _ => None,
+        })
+    }
+
+    /// Every question answered with move `fight`, No or the text's `▼`.
+    fn answer(game: &Game, fight: u8) -> Fed {
+        match game.status() {
+            Status::Waiting(Decision::Text) => Fed::Command(Command::Advance),
+            Status::Waiting(Decision::BattleMenu | Decision::BattleMoves) => Fed::Command(Command::Fight(fight)),
+            Status::Waiting(Decision::TwoOption) => Fed::Command(Command::ChooseOption(1)),
+            _ => Fed::Nothing,
+        }
+    }
+
+    /// Saves where `interesting` first turns true and a few frames on from there, `limit` times.
+    fn at_starts_of(limit: usize, mut interesting: impl FnMut(&Game) -> bool) -> impl FnMut(&Game, usize) -> bool {
+        let (mut was, mut since, mut taken) = (false, None, 0);
+        move |game, _| {
+            let now = interesting(game);
+            let started = now && !was;
+            was = now;
+            if started && taken < limit {
+                since = Some(0);
+            }
+            let save = match &mut since {
+                Some(frames) => {
+                    let save = matches!(*frames, 0 | 7);
+                    *frames += 1;
+                    if *frames > 7 {
+                        since = None;
+                        taken += 1;
+                    }
+                    save
+                }
+                None => false,
+            };
+            save
+        }
+    }
+
+    #[test]
+    fn a_wild_battle_saved_mid_turn_resumes_identically() {
+        // WING ATTACK, which ONIX shrugs off for long enough to hit back.
+        let game = battle_game(BattleMode::wild(PokemonSpecies::Onix, 20));
+        let (mut animations, mut bars) = (0, 0);
+        let mut animating = at_starts_of(3, |game| battle(game).is_some_and(BattleMode::animating));
+        let mut draining = at_starts_of(3, |game| battle(game).is_some_and(BattleMode::draining_hp_bar));
+        let saved = resumes_identically(game, 3000, |game| answer(game, 1), |game, frame| {
+            let (a, b) = (animating(game, frame), draining(game, frame));
+            animations += (a && battle(game).is_some_and(BattleMode::animating)) as u32;
+            bars += (b && battle(game).is_some_and(BattleMode::draining_hp_bar)) as u32;
+            a || b
+        });
+        assert!(animations >= 3 && bars >= 3, "saved in {animations} animations and {bars} bars, at {saved:?}");
+    }
+
+    #[test]
+    fn a_trainer_battle_saved_across_a_faint_and_a_send_out_resumes_identically() {
+        let game = battle_game(BattleMode::trainer(1, 1, 0, 0));
+        let enemy = |game: &Game| battle(game).and_then(BattleMode::battle).map(|battle| (battle.enemy.mon.species, battle.enemy.mon.hp));
+        let (mut fainted, mut sent_out) = (at_starts_of(2, move |game| enemy(game).is_some_and(|(_, hp)| hp == 0)), None);
+        let mut sends = 0;
+        let saved = resumes_identically(game, 4000, |game| answer(game, 1), |game, frame| {
+            let species = enemy(game).map(|(species, _)| species);
+            let new_mon = species.is_some() && sent_out.is_some_and(|last| last != species) ;
+            sent_out = Some(species);
+            sends += new_mon as u32;
+            fainted(game, frame) || new_mon
+        });
+        assert!(sends >= 1, "no send-out was saved at: {saved:?}");
+        assert!(saved.len() >= 5, "saved at {saved:?}");
+    }
+
+    #[test]
+    fn the_intro_movie_saved_anywhere_resumes_identically() {
+        let game = Game::power_on(None, GameRng::seeded(1), Pacing::Faithful);
+        let saved = resumes_identically(game, 900, |_| Fed::Nothing, |_, frame| frame % 97 == 13);
+        assert_eq!(saved.len(), 10);
+    }
+
+    /// A champion in the Hall of Fame, saved through the ceremony and the credits.
+    #[test]
+    fn the_hall_of_fame_and_the_credits_saved_anywhere_resume_identically() {
+        let mut world = World { player_name: encode("RED").unwrap(), ..World::default() };
+        world.party = vec![named(PokemonSpecies::Squirtle, 85, "MON"), named(PokemonSpecies::Pidgey, 9, "MON")];
+        world.location.map = Map::HallOfFame;
+        let mut game = Game::new(world, GameRng::seeded(4), Pacing::Faithful);
+        game.push(Mode::Movie(Movie::hall_of_fame()));
+        let text = |game: &Game| match game.status() {
+            Status::Waiting(Decision::Text) => Fed::Command(Command::Advance),
+            _ => Fed::Nothing,
+        };
+        let saved = resumes_identically(game, 7000, text, |_, frame| frame % 700 == 350);
+        assert_eq!(saved.len(), 10);
+    }
+
+    /// A slot machine taken from the bet through the spin to the next offer, saved as the wheels turn.
+    #[test]
+    fn a_slot_machine_saved_mid_spin_resumes_identically() {
+        let world = World { coins: [0x10, 0x00], ..World::default() };
+        let mut game = Game::new(world, GameRng::seeded(3), Pacing::Faithful);
+        game.push(Mode::SlotMachine(SlotMachine::new(crate::systems::slots::NOT_LUCKY)));
+        let mut frames = 0;
+        let play = move |game: &Game| {
+            frames += 1;
+            match game.status() {
+                Status::Waiting(Decision::TwoOption) => Fed::Command(Command::ChooseOption(1)),
+                Status::Waiting(Decision::Text) => Fed::Command(Command::Advance),
+                Status::Waiting(_) => Fed::Command(Command::ChooseOption(0)),
+                _ if frames % 2 == 0 => Fed::Buttons(Joypad::A),
+                _ => Fed::Nothing,
+            }
+        };
+        let spinning = |game: &Game| matches!(game.modes().last(), Some(Mode::SlotMachine(machine)) if machine.spinning());
+        let saved = resumes_identically(game, 1500, play, move |game, frame| spinning(game) && frame % 11 == 0);
+        assert!(saved.len() >= 5, "saved at {saved:?}");
+    }
 }

@@ -114,16 +114,13 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::BadgeInfo => {
             rt.set_event(EVENT_BEAT_MISTY);
-            let text_id = match rt.give_item(ItemId::Tm11Bubblebeam, 1) {
-                true => TEXT_CERULEANGYM_MISTY_RECEIVED_TM11,
-                false => TEXT_CERULEANGYM_MISTY_TM11_NO_ROOM,
-            };
-            rt.display_text_id(text_id).then(Label::ReceivedTm11)
+            match rt.give_item(ItemId::Tm11Bubblebeam, 1) {
+                true => rt.display_text_id(TEXT_CERULEANGYM_MISTY_RECEIVED_TM11).then(Label::ReceivedTm11),
+                false => rt.display_text_id(TEXT_CERULEANGYM_MISTY_TM11_NO_ROOM).then(Label::GymVictory),
+            }
         }
         Label::ReceivedTm11 => {
-            if rt.is_item_in_bag(ItemId::Tm11Bubblebeam) {
-                rt.set_event(EVENT_GOT_TM11);
-            }
+            rt.set_event(EVENT_GOT_TM11);
             resume(rt, Label::GymVictory)
         }
         Label::GymVictory => {

@@ -9,9 +9,11 @@ use poke_core::symbols::pokered_local_labels::ViridianGymGiovanniText;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_VIRIDIANGYM_DEFAULT, SCRIPT_VIRIDIANGYM_GIOVANNI_POST_BATTLE,
     SCRIPT_VIRIDIANGYM_PLAYER_SPINNING, TEXT_VIRIDIANGYM_COOLTRAINER_M1, TEXT_VIRIDIANGYM_COOLTRAINER_M2,
     TEXT_VIRIDIANGYM_COOLTRAINER_M3, TEXT_VIRIDIANGYM_GIOVANNI, TEXT_VIRIDIANGYM_GIOVANNI_EARTH_BADGE_INFO,
-    TEXT_VIRIDIANGYM_GIOVANNI_RECEIVED_TM27, TEXT_VIRIDIANGYM_GIOVANNI_TM27_NO_ROOM, TEXT_VIRIDIANGYM_HIKER1,
+    TEXT_VIRIDIANGYM_GIOVANNI_RECEIVED_TM27, TEXT_VIRIDIANGYM_GIOVANNI_TM27_NO_ROOM, TEXT_VIRIDIANGYM_GYM_GUIDE,
+    TEXT_VIRIDIANGYM_HIKER1,
     TEXT_VIRIDIANGYM_HIKER2, TEXT_VIRIDIANGYM_HIKER3, TEXT_VIRIDIANGYM_ROCKER1, TEXT_VIRIDIANGYM_ROCKER2};
-use poke_core::symbols::pokered_symbols::{ViridianGymArrowTilePlayerMovement, ViridianGymTrainerHeader0,
+use poke_core::symbols::pokered_symbols::{ViridianGymArrowTilePlayerMovement, ViridianGymGuidePostBattleText,
+    ViridianGymGuidePreBattleText, ViridianGymTrainerHeader0,
     ViridianGymTrainerHeader1, ViridianGymTrainerHeader2, ViridianGymTrainerHeader3, ViridianGymTrainerHeader4,
     ViridianGymTrainerHeader5, ViridianGymTrainerHeader6, ViridianGymTrainerHeader7, ViridianGymTrainerHeaders};
 use poke_core::symbols::pokered_toggles::{TOGGLE_ROUTE_22_RIVAL_2, TOGGLE_VIRIDIAN_GYM_GIOVANNI};
@@ -47,6 +49,7 @@ pub enum Label {
     PreBattle,
     PostBattleAdvice,
     GiovanniHidden,
+    GiovanniGone,
 }
 
 pub fn script(rt: &mut Script) -> Flow {
@@ -96,6 +99,14 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     if text_id == TEXT_VIRIDIANGYM_GIOVANNI {
         return Some(giovanni_text(rt));
     }
+    // `ViridianGymGymGuideText`.
+    if text_id == TEXT_VIRIDIANGYM_GYM_GUIDE {
+        let words = match rt.check_event(EVENT_BEAT_VIRIDIAN_GYM_GIOVANNI) {
+            true => ViridianGymGuidePostBattleText,
+            false => ViridianGymGuidePreBattleText,
+        };
+        return Some(rt.print_text(text_at(words)).ret());
+    }
     let header = match text_id {
         TEXT_VIRIDIANGYM_COOLTRAINER_M1 => ViridianGymTrainerHeader0,
         TEXT_VIRIDIANGYM_HIKER1 => ViridianGymTrainerHeader1,
@@ -135,16 +146,13 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::BadgeInfo => {
             rt.set_event(EVENT_BEAT_VIRIDIAN_GYM_GIOVANNI);
-            let text_id = match rt.give_item(ItemId::Tm27Fissure, 1) {
-                true => TEXT_VIRIDIANGYM_GIOVANNI_RECEIVED_TM27,
-                false => TEXT_VIRIDIANGYM_GIOVANNI_TM27_NO_ROOM,
-            };
-            rt.display_text_id(text_id).then(Label::ReceivedTm27)
+            match rt.give_item(ItemId::Tm27Fissure, 1) {
+                true => rt.display_text_id(TEXT_VIRIDIANGYM_GIOVANNI_RECEIVED_TM27).then(Label::ReceivedTm27),
+                false => rt.display_text_id(TEXT_VIRIDIANGYM_GIOVANNI_TM27_NO_ROOM).then(Label::GymVictory),
+            }
         }
         Label::ReceivedTm27 => {
-            if rt.is_item_in_bag(ItemId::Tm27Fissure) {
-                rt.set_event(EVENT_GOT_TM27);
-            }
+            rt.set_event(EVENT_GOT_TM27);
             resume(rt, Label::GymVictory)
         }
         // `.gym_victory`: the gym's trainers are all marked beaten, so nobody stops the way out.
@@ -169,7 +177,8 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::GiovanniHidden => {
             rt.hide_object(TOGGLE_VIRIDIAN_GYM_GIOVANNI);
             rt.update_sprites();
-            rt.gb_fade_in_from_black().ret()
+            rt.delay3().then(Label::GiovanniGone)
         }
+        Label::GiovanniGone => rt.gb_fade_in_from_black().ret(),
     }
 }

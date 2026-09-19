@@ -11,7 +11,8 @@ use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use crate::systems::overworld::location::WALKING;
-use super::{Flow, Script};
+use poke_core::species::PokemonSpecies;
+use super::{text_at, Flow, Routine, Script};
 
 /// `SeafoamIslandsB4FDefaultScript.Coords`, as (x, y): the water in front of the exit, one row of
 /// which is two steps from dry land and the other one.
@@ -31,6 +32,9 @@ pub enum Label {
     ArticunoTalkedTo,
     /// The same store after `EndTrainerBattle`, back to the current's own script.
     BattleEnded,
+    /// `SeafoamIslandsB4FArticunoBattleText`, whose `text_asm` plays Articuno's cry before the battle.
+    ArticunoBattleText,
+    ArticunoCry,
 }
 
 pub fn script(rt: &mut Script) -> Flow {
@@ -123,13 +127,21 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     }
     // Articuno's object carries a species and a level rather than a trainer, so its header's zero
     // opponent starts a wild battle where a trainer's would start a trainer one.
-    Some(rt.talk_to_trainer(sym::ArticunoTrainerHeader).then(Label::ArticunoTalkedTo))
+    let before = Some(Label::ArticunoBattleText.into());
+    Some(rt.talk_to_trainer_asm(sym::ArticunoTrainerHeader, before, None).then(Label::ArticunoTalkedTo))
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
     let next = match label {
         Label::ArticunoTalkedTo => SCRIPT_SEAFOAMISLANDSB4F_OBJECT_MOVING3,
         Label::BattleEnded => SCRIPT_SEAFOAMISLANDSB4F_DEFAULT,
+        Label::ArticunoBattleText => {
+            return rt.print_text(text_at(sym::SeafoamIslandsB4FArticunoBattleText)).then(Label::ArticunoCry);
+        }
+        Label::ArticunoCry => {
+            rt.play_cry(PokemonSpecies::Articuno);
+            return rt.wait_for_sound_to_finish().then(Routine::TalkToTrainerNotYetFought);
+        }
     };
     rt.maps().seafoam_islands_b4f.cur_script = next;
     Flow::Return

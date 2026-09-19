@@ -120,16 +120,13 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::BadgeInfo => {
             rt.set_event(EVENT_BEAT_KOGA);
-            let text_id = match rt.give_item(ItemId::Tm06Toxic, 1) {
-                true => TEXT_FUCHSIAGYM_KOGA_RECEIVED_TM06,
-                false => TEXT_FUCHSIAGYM_KOGA_TM06_NO_ROOM,
-            };
-            rt.display_text_id(text_id).then(Label::ReceivedTm06)
+            match rt.give_item(ItemId::Tm06Toxic, 1) {
+                true => rt.display_text_id(TEXT_FUCHSIAGYM_KOGA_RECEIVED_TM06).then(Label::ReceivedTm06),
+                false => rt.display_text_id(TEXT_FUCHSIAGYM_KOGA_TM06_NO_ROOM).then(Label::GymVictory),
+            }
         }
         Label::ReceivedTm06 => {
-            if rt.is_item_in_bag(ItemId::Tm06Toxic) {
-                rt.set_event(EVENT_GOT_TM06);
-            }
+            rt.set_event(EVENT_GOT_TM06);
             resume(rt, Label::GymVictory)
         }
         // `.gymVictory`: his six trainers are all marked beaten, so nobody stops the way out.

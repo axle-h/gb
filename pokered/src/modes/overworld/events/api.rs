@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, SoundId};
 use crate::gfx::layers::Object;
 use crate::gfx::mon_icons::clear_sprites;
+use crate::gfx::sgb::PaletteCommand;
 use crate::gfx::text_boxes::TextBoxId;
 use crate::gfx::tiles::{V_CHARS0, V_CHARS1, V_CHARS2};
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
@@ -35,6 +36,7 @@ use crate::systems::math::sub_bcd;
 use crate::systems::pokedex::{count_set_bits, index_to_pokedex, pic_tiles};
 use crate::systems::print_num::{print_bcd, BcdFormat};
 use crate::systems::slots;
+use crate::scripts::Code;
 use super::super::script::{Block, Flow, Routine, Script, Then};
 use super::hidden::{predef_in, print_without_box};
 use super::{after_yes_no, place_rom_string, print, restore_screen_tiles_and_reload_tile_patterns, save_screen_tiles_to_buffer2,
@@ -50,6 +52,17 @@ pub enum Picture {
 }
 
 impl Script<'_, '_> {
+    /// `TalkToTrainer` for a trainer whose before- or after-battle text is a `text_asm`: the map's
+    /// label in place of the runtime printing that text. An `after` label returns when its code is
+    /// done; a `before` label must end by going on to `Routine::TalkToTrainerNotYetFought`.
+    pub fn talk_to_trainer_asm(&mut self, header: DmgPointer, before: Option<Code>, after: Option<Code>) -> Then {
+        let beaten = self.ow.talk_to_trainer_header(self.ctx, header);
+        match (beaten, before, after) {
+            (true, _, Some(label)) | (false, Some(label), _) => Then::call(label),
+            _ => Then::call(Routine::TalkToTrainer(header)),
+        }
+    }
+
     /// `DoInGameTradeDialogue` for `TRADE_FOR_*`.
     pub fn do_in_game_trade_dialogue(&mut self, which: u8) -> Then {
         Then::call(Label::InGameTrade(which))
@@ -345,8 +358,7 @@ pub(super) fn resume(s: &mut Script, label: Label) -> Flow {
         DisplayPokedex(species) => display_pokedex(s, species),
         DisplayPokedexShown(species) => {
             s.ctx.world.no_text_delay = false;
-            s.ctx.screen.tiles.load_text_box_tiles();
-            s.ctx.screen.tiles.load_tileset(s.ow.view.tileset);
+            reload_map_data(s);
             s.ctx.world.pokedex.set_seen(species);
             s.set_do_not_wait_for_button_press(true);
             Flow::Return
@@ -359,9 +371,11 @@ pub(super) fn resume(s: &mut Script, label: Label) -> Flow {
             let page = PokedexMenu::data_page(dex);
             Then::block(Block::Mode(Box::new(Mode::Pokedex(page)))).then(StarterDexShown)
         }
+        // `OaksLabShowPokeBallPokemonScript`'s `ReloadMapData` and `DelayFrames 10` after the page.
         StarterDexShown => {
             s.ctx.world.pokedex.owned[0] = 0;
-            Flow::Return
+            reload_map_data(s);
+            s.delay_frames(10).ret()
         }
 
         QuizQuestion => {
@@ -705,6 +719,14 @@ fn bills_list_chosen(s: &mut Script) -> Flow {
     }
 }
 
+/// `ReloadMapData`: the text box and tileset tiles, and the map view drawn over whatever screen was
+/// up, which here is every cell of the UI surface given back to the map.
+fn reload_map_data(s: &mut Script) {
+    s.ctx.screen.tiles.load_text_box_tiles();
+    s.ctx.screen.tiles.load_tileset(s.ow.view.tileset);
+    s.ctx.screen.ui.uncover(0, 0, SCREEN_TILES_X, crate::gfx::ui::SCREEN_TILES_Y);
+}
+
 /// `_DisplayPokedex`. `ReloadMapData` and the ten frames after it are loading.
 fn display_pokedex(s: &mut Script, species: PokemonSpecies) -> Flow {
     s.ctx.world.no_text_delay = true;
@@ -805,7 +827,10 @@ fn dex_rating(s: &mut Script) -> Flow {
     let seen = count_set_bits(&s.ctx.world.pokedex.seen);
     let owned = count_set_bits(&s.ctx.world.pokedex.owned);
     let numbers = &mut s.ctx.world.text.numbers;
+    // `hDexRatingNumMonsSeen` is `hOaksAideRequirement`'s byte, and a decoded text names it by the
+    // first of them, so the seen count goes under both.
     numbers.insert(TextNumber::DexRatingNumMonsSeenH, seen as u32);
+    numbers.insert(TextNumber::OaksAideRequirement, seen as u32);
     numbers.insert(TextNumber::DexRatingNumMonsOwnedH, owned as u32);
     if s.check_event(EVENT_HALL_OF_FAME_DEX_RATING) {
         s.reset_event(EVENT_HALL_OF_FAME_DEX_RATING);
@@ -1075,6 +1100,8 @@ fn diploma(s: &mut Script) -> Flow {
     let border = rom_slice(sym::TrainerInfoTextBoxTileGraphics);
     let count = (sym::TrainerInfoTextBoxTileGraphicsEnd.address - sym::TrainerInfoTextBoxTileGraphics.address) as usize;
     tiles_load(s, V_CHARS2 + 0x76, &border[..count]);
+    // `SET_PAL_GENERIC`, which nothing puts back until the next map's `SET_PAL_OVERWORLD`.
+    s.ctx.screen.sgb.run(&PaletteCommand::Generic);
     s.ctx.screen.effects = Default::default();
     s.ctx.screen.effects.obp0 = 0x90;
     Then::block(Block::TextScrollButton).then(Label::DiplomaDone)

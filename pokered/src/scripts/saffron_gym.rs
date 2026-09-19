@@ -121,16 +121,13 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::BadgeInfo => {
             rt.set_event(EVENT_BEAT_SABRINA);
-            let text_id = match rt.give_item(ItemId::Tm46Psywave, 1) {
-                true => TEXT_SAFFRONGYM_SABRINA_RECEIVED_TM46,
-                false => TEXT_SAFFRONGYM_SABRINA_TM46_NO_ROOM,
-            };
-            rt.display_text_id(text_id).then(Label::ReceivedTm46)
+            match rt.give_item(ItemId::Tm46Psywave, 1) {
+                true => rt.display_text_id(TEXT_SAFFRONGYM_SABRINA_RECEIVED_TM46).then(Label::ReceivedTm46),
+                false => rt.display_text_id(TEXT_SAFFRONGYM_SABRINA_TM46_NO_ROOM).then(Label::GymVictory),
+            }
         }
         Label::ReceivedTm46 => {
-            if rt.is_item_in_bag(ItemId::Tm46Psywave) {
-                rt.set_event(EVENT_GOT_TM46);
-            }
+            rt.set_event(EVENT_GOT_TM46);
             resume(rt, Label::GymVictory)
         }
         // `.gymVictory`: her seven trainers are all marked beaten, so nobody stops the way out.

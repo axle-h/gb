@@ -3,7 +3,8 @@
 use poke_core::symbols::pokered_map_scripts::TEXT_CERULEANCAVEB1F_MEWTWO;
 use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
-use super::{Flow, Script};
+use poke_core::species::PokemonSpecies;
+use super::{text_at, Flow, Routine, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
@@ -15,6 +16,9 @@ pub struct State {
 pub enum Label {
     /// `ld [wCeruleanCaveB1FCurScript], a` after the table's routine.
     StoreCurScript,
+    /// `MewtwoBattleText`, whose `text_asm` plays Mewtwo's cry before the battle.
+    MewtwoBattleText,
+    MewtwoCry,
 }
 
 pub fn script(rt: &mut Script) -> Flow {
@@ -30,7 +34,8 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     }
     // Mewtwo's object carries a species and a level rather than a trainer, so its header's zero
     // opponent starts a wild battle where a trainer's would start a trainer one.
-    Some(rt.talk_to_trainer(sym::MewtwoTrainerHeader).ret())
+    let before = Some(Label::MewtwoBattleText.into());
+    Some(rt.talk_to_trainer_asm(sym::MewtwoTrainerHeader, before, None).ret())
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -38,6 +43,11 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::StoreCurScript => {
             rt.maps().cerulean_cave_b1f.cur_script = rt.cur_map_script();
             Flow::Return
+        }
+        Label::MewtwoBattleText => rt.print_text(text_at(sym::MewtwoBattleText)).then(Label::MewtwoCry),
+        Label::MewtwoCry => {
+            rt.play_cry(PokemonSpecies::Mewtwo);
+            rt.wait_for_sound_to_finish().then(Routine::TalkToTrainerNotYetFought)
         }
     }
 }

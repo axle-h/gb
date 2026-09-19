@@ -42,5 +42,5 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::NidoranFCry => PokemonSpecies::NidoranFemale,
     };
     rt.play_cry(species);
-    Flow::Return
+    rt.wait_for_sound_to_finish().ret()
 }

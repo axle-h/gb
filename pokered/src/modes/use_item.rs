@@ -20,9 +20,10 @@
 //! item refused before any party menu came up. A vitamin or a Rare Candy with no effect, a machine
 //! whose party menu is backed out of, and a machine not learned all still answer 1.
 //!
-//! Not modelled: `PlayDefaultMusic` after an evolution, since no map music is kept yet, and
-//! `LoadScreenTilesFromBuffer1` when a machine's party menu is backed out of, which the palettes
-//! have already whited out and the bag draws over.
+//! An evolution out of battle ends in `PlayDefaultMusic`, as `TryEvolvingMon` does.
+//!
+//! Not modelled: `LoadScreenTilesFromBuffer1` when a machine's party menu is backed out of, which
+//! the palettes have already whited out and the bag draws over.
 
 use poke_core::item::{machine_move, ItemId};
 use poke_core::move_name::PokemonMoveName;
@@ -100,6 +101,8 @@ enum Phase {
     WaitButton(Then),
     /// `PlaySoundWaitForCurrent` of `sound`, and for a stone `WaitForSoundToFinish` after it.
     Sound { sound: Sound, playing: bool },
+    /// `TryEvolvingMon`'s `PlayDefaultMusic` after an evolution: its `WaitForSoundToFinish`.
+    DefaultMusic,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -487,6 +490,11 @@ impl ModeUpdate for UseItem {
                 }
                 self.try_evolving(ctx)
             }
+            Phase::DefaultMusic if !ctx.audio.sound_finished() => Transition::Stay,
+            Phase::DefaultMusic => {
+                crate::modes::overworld::play_default_music(ctx);
+                Transition::Pop(Outcome::Chosen(USED))
+            }
         }
     }
 
@@ -525,8 +533,12 @@ impl ModeUpdate for UseItem {
             // A stone that evolved nothing has had no effect and is kept; a Rare Candy is used either way.
             (After::Evolving, outcome) if self.flow == Flow::EvoStone && outcome != Outcome::Chosen(1) =>
                 self.text("_ItemUseNoEffectText", After::Finish { result: NOT_USED, remove: false }),
-            (After::Evolving, _) => {
+            (After::Evolving, outcome) => {
                 self.remove_used_item(ctx);
+                if outcome == Outcome::Chosen(1) && !self.in_battle {
+                    self.phase = Phase::DefaultMusic;
+                    return self.update(ctx);
+                }
                 Transition::Pop(Outcome::Chosen(USED))
             }
             (After::Booted, _) => self.text("_TeachMachineMoveText", After::Teach),

@@ -272,6 +272,24 @@ fn a_blackout_fades_the_music_to_silence_before_it_warps() {
     assert_eq!(game.world().location.map, Map::ViridianCity);
 }
 
+/// The gym guide's `text_asm` picks his words by whether Giovanni is beaten.
+#[test]
+fn the_viridian_gym_guide_cheers_the_player_on_and_then_on_again() {
+    let first_words = |beaten: bool| {
+        let mut game = game(Map::ViridianGym, 16, 16, SpriteFacing::Up, 7, |world| {
+            if beaten {
+                world.events.set(EVENT_BEAT_VIRIDIAN_GYM_GIOVANNI);
+            }
+        });
+        play_until(&mut game, 600, free);
+        command(&mut game, Command::Interact);
+        play_until(&mut game, 2000, |game| game.status() == Status::Waiting(Decision::Text));
+        game
+    };
+    assert!(on_screen(&first_words(false), "Yo! Champ in"));
+    assert!(on_screen(&first_words(true), "Blow me away!"));
+}
+
 /// `ViridianGymArrowMovement5`, `db PAD_DOWN, 2`, under (16, 10).
 #[test]
 fn an_arrow_tile_slides_the_player_along_it_until_its_presses_run_out() {
@@ -282,22 +300,40 @@ fn an_arrow_tile_slides_the_player_along_it_until_its_presses_run_out() {
     assert_eq!(game.world().scripts.maps.viridian_gym.cur_script, SCRIPT_VIRIDIANGYM_DEFAULT);
 }
 
-/// The guard stops anyone carrying a bicycle on any of the four squares in front of his counter, and
-/// the number of squares between them and it is how many steps he walks them up.
-#[test]
-fn the_cycling_road_s_gate_takes_the_bike_back_and_walks_the_player_to_the_counter() {
+/// The guard stops a player on foot on any of the four squares in front of his counter, and the
+/// number of squares between them and it is how many steps he walks them up; `IsItemInBag` clears Z
+/// for a bicycle held, which is what lets its rider by.
+fn cycling_road_gate(map: Map, stop: (u8, u8), counter: (u8, u8), cur_script: impl Fn(&World) -> u8) {
     use crate::systems::overworld::location::BIKING;
-    let mut game = game(Map::Route16Gate1F, 4, 10, SpriteFacing::Up, 9, |world| {
+    let mut walker = game(map, stop.0, stop.1, SpriteFacing::Up, 9, |_| {});
+    play_until(&mut walker, 8000, |game| {
+        (game.world().location.x, game.world().location.y) == counter && free(game)
+    });
+    assert_eq!(cur_script(walker.world()), 0);
+
+    let mut rider = game(map, stop.0, stop.1, SpriteFacing::Up, 9, |world| {
         world.bag.add(ItemId::Bicycle, 1);
         world.location.always_on_bike = true;
         world.location.walk_bike_surf = BIKING;
     });
-    assert!(game.world().location.always_on_bike);
-    play_until(&mut game, 8000, |game| {
-        (game.world().location.x, game.world().location.y) == (5, 7) && free(game)
-    });
-    assert!(!game.world().location.always_on_bike, "the gate is the only place the road gives the bike back");
-    assert_eq!(game.world().scripts.maps.route16_gate_1f.cur_script, 0);
+    play_until(&mut rider, 600, free);
+    for _ in 0..300 {
+        rider.frame(Input::None);
+    }
+    assert!(free(&rider), "the guard has nothing to say to a rider");
+    assert_eq!((rider.world().location.x, rider.world().location.y), stop);
+    assert!(!rider.world().location.always_on_bike, "the gate is the only place the road gives the bike back");
+    assert_eq!(cur_script(rider.world()), 0);
+}
+
+#[test]
+fn the_southern_cycling_road_gate_stops_only_a_player_without_a_bike() {
+    cycling_road_gate(Map::Route16Gate1F, (4, 10), (5, 7), |world| world.scripts.maps.route16_gate_1f.cur_script);
+}
+
+#[test]
+fn the_northern_cycling_road_gate_stops_only_a_player_without_a_bike() {
+    cycling_road_gate(Map::Route18Gate1F, (4, 6), (5, 3), |world| world.scripts.maps.route18_gate_1f.cur_script);
 }
 
 /// `SeafoamIslandsB4FMoveObjectScript`, which `CheckForceBikeOrSurf` arms as the player lands in the
@@ -379,10 +415,20 @@ fn oaks_lab_walks_the_player_to_the_table_and_hands_out_the_starters() {
     command(&mut game, Command::Face(Direction::Right));
     play_until(&mut game, 600, free);
     command(&mut game, Command::Interact);
-    play_answering(&mut game, 20_000, &mut vec![0, 1], |game| game.world().party.len() == 2);
+    let mut named = false;
+    play_answering(&mut game, 20_000, &mut vec![0, 1], |game| {
+        named |= on_second_line(game, "a CHARMANDER!");
+        game.world().party.len() == 2
+    });
+    assert!(named, "`GetMonName` fills the name the received text reads");
     assert_eq!(game.world().party[1].mon.mon.species, PokemonSpecies::Charmander);
     assert!(game.world().scripts.got_starter);
-    play_answering(&mut game, 40_000, &mut vec![1], |game| game.world().events.is_set(EVENT_GOT_STARTER) && free(game));
+    let mut rival_named = false;
+    play_answering(&mut game, 40_000, &mut vec![1], |game| {
+        rival_named |= on_screen(game, "SQUIRTLE!") || on_second_line(game, "SQUIRTLE!");
+        game.world().events.is_set(EVENT_GOT_STARTER) && free(game)
+    });
+    assert!(rival_named, "the rival's received text names his starter");
     assert_eq!(game.world().scripts.rival_starter, PokemonSpecies::Squirtle as u8);
     assert!(game.world().location.is_hidden(poke_core::symbols::pokered_toggles::TOGGLE_STARTER_BALL_1 as u8));
     assert!(game.world().location.is_hidden(poke_core::symbols::pokered_toggles::TOGGLE_STARTER_BALL_2 as u8));
@@ -402,6 +448,47 @@ fn the_rival_is_healed_over_and_walks_out_of_oaks_lab_once_the_battle_is_done() 
     assert!(world.events.is_set(EVENT_BATTLED_RIVAL_IN_OAKS_LAB));
     assert_eq!(world.party[0].mon.mon.hp, world.party[0].mon.stats[0], "HealParty");
     assert!(world.location.is_hidden(poke_core::symbols::pokered_toggles::TOGGLE_OAKS_LAB_RIVAL as u8));
+}
+
+/// Oak's rating counts what has been seen: the byte it prints is shared with `hOaksAideRequirement`,
+/// and the text reads it by that name.
+#[test]
+fn oak_s_dex_rating_prints_how_many_have_been_seen() {
+    use poke_core::symbols::pokered_map_scripts::SCRIPT_OAKSLAB_NOOP;
+    let mut game = game(Map::OaksLab, 5, 3, SpriteFacing::Up, 3, |world| {
+        world.events.set(EVENT_GOT_STARTER);
+        world.events.set(EVENT_BATTLED_RIVAL_IN_OAKS_LAB);
+        world.events.set(EVENT_GOT_POKEDEX);
+        world.events.set(EVENT_PALLET_AFTER_GETTING_POKEBALLS);
+        world.scripts.maps.oaks_lab.cur_script = SCRIPT_OAKSLAB_NOOP;
+        show(world, poke_core::symbols::pokered_toggles::TOGGLE_OAKS_LAB_OAK_1);
+        world.pokedex.seen[..2].copy_from_slice(&[0xFF, 0x0F]);
+    });
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Interact);
+    let mut seen = false;
+    play_until(&mut game, 8000, |game| {
+        seen |= on_screen(game, "12 POKéMON seen");
+        free(game)
+    });
+    assert!(seen, "the seen count");
+}
+
+/// The diploma is drawn in `SET_PAL_GENERIC`'s colours rather than the mansion's.
+#[test]
+fn the_diploma_sends_the_generic_sgb_palette() {
+    use crate::gfx::sgb::{PaletteCommand, SgbState};
+    let mut game = game(Map::CeladonMansion3F, 2, 4, SpriteFacing::Up, 3, |world| {
+        world.pokedex.owned = [0xFF; 19];
+        world.pokedex.seen = [0xFF; 19];
+    });
+    play_until(&mut game, 600, free);
+    let mut generic = SgbState::default();
+    generic.run(&PaletteCommand::Generic);
+    assert_ne!(game.screen().sgb.palette_ids(), generic.palette_ids(), "the mansion's own");
+    command(&mut game, Command::Interact);
+    play_until(&mut game, 4000, |game| game.screen().sprites[0].attributes == crate::gfx::layers::Object::BEHIND_BG);
+    assert_eq!(game.screen().sgb.palette_ids(), generic.palette_ids());
 }
 
 /// The parcel is what brings the rival back, and the Pokédex is what he is brought back for.
@@ -510,9 +597,16 @@ fn giovanni_hands_over_the_earth_badge_tm27_and_the_second_route_22_battle() {
     assert!(world.events.is_set(EVENT_BEAT_VIRIDIAN_GYM_TRAINER_7), "and nobody is left to stop the way out");
 }
 
-/// The gym guide takes over the pad: the player is walked across town and he walks off and back.
+/// The song on channel 1, where the town's music and the guides' tune both start.
+fn music_on(game: &Game) -> u8 {
+    game.audio().channel_sound_id(0)
+}
+
+/// The gym guide takes over the pad: the player is walked across town to his own tune, and when he
+/// points at the door the town's music comes back before he walks off and back.
 #[test]
 fn pewter_s_gym_guide_walks_the_player_to_the_gym_and_puts_himself_back() {
+    use crate::audio::data::sounds::{MUSIC_CITIES1, MUSIC_MUSEUM_GUY};
     use poke_core::symbols::pokered_map_scripts::{SCRIPT_PEWTERCITY_DEFAULT, SCRIPT_PEWTERCITY_YOUNGSTER_SHOWS_PLAYER_GYM};
     let mut game = game(Map::PewterCity, 35, 17, SpriteFacing::Down, 5, |world| {
         world.events.clear(EVENT_BEAT_BROCK);
@@ -520,12 +614,37 @@ fn pewter_s_gym_guide_walks_the_player_to_the_gym_and_puts_himself_back() {
     play_until(&mut game, 20_000, |game| {
         game.world().scripts.maps.pewter_city.cur_script == SCRIPT_PEWTERCITY_YOUNGSTER_SHOWS_PLAYER_GYM
     });
+    let mut heard = false;
     play_until(&mut game, 40_000, |game| {
+        heard |= music_on(game) == MUSIC_MUSEUM_GUY.id.0;
         game.world().scripts.maps.pewter_city.cur_script == SCRIPT_PEWTERCITY_DEFAULT && free(game)
     });
+    assert!(heard, "the guide's tune");
     assert_ne!((game.world().location.x, game.world().location.y), (35, 17), "led away from the way out");
     assert!(!game.world().location.is_hidden(poke_core::symbols::pokered_toggles::TOGGLE_GYM_GUY as u8),
         "he is back where he started");
+    assert_eq!(music_on(&game), MUSIC_CITIES1.id.0, "the town's own music again");
+}
+
+/// The museum guide, told the player has not been, walks them there to his tune and gives the town
+/// its music back once he is pointing at the door.
+#[test]
+fn pewter_s_museum_guide_walks_the_player_there_and_the_town_s_music_comes_back() {
+    use crate::audio::data::sounds::{MUSIC_CITIES1, MUSIC_MUSEUM_GUY};
+    use poke_core::symbols::pokered_map_scripts::{SCRIPT_PEWTERCITY_DEFAULT, SCRIPT_PEWTERCITY_SUPER_NERD1_SHOWS_PLAYER_MUSEUM};
+    let mut game = game(Map::PewterCity, 27, 18, SpriteFacing::Up, 5, |_| {});
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Interact);
+    play_until(&mut game, 20_000, |game| {
+        game.world().scripts.maps.pewter_city.cur_script == SCRIPT_PEWTERCITY_SUPER_NERD1_SHOWS_PLAYER_MUSEUM
+    });
+    let mut heard = false;
+    play_until(&mut game, 40_000, |game| {
+        heard |= music_on(game) == MUSIC_MUSEUM_GUY.id.0;
+        game.world().scripts.maps.pewter_city.cur_script == SCRIPT_PEWTERCITY_DEFAULT && free(game)
+    });
+    assert!(heard, "the guide's tune");
+    assert_eq!(music_on(&game), MUSIC_CITIES1.id.0, "the town's own music again");
 }
 
 
@@ -870,10 +989,10 @@ fn the_vermilion_gym_s_doors_are_shut_until_the_second_switch_is_found() {
 }
 
 /// The sailor on the pier checks for a ticket by standing in the way: whoever steps onto his square
-/// without one is walked straight back off it.
+/// without one is walked straight back off it, and one flashed lets the player stay on it.
 #[test]
 fn vermilion_s_sailor_turns_a_ticketless_player_back_off_the_pier() {
-    use poke_core::symbols::pokered_map_scripts::SCRIPT_VERMILIONCITY_DEFAULT;
+    use poke_core::symbols::pokered_map_scripts::{SCRIPT_VERMILIONCITY_DEFAULT, SCRIPT_VERMILIONCITY_PLAYER_ALLOWED_TO_PASS};
     let step_onto_the_pier = |ticket: bool| {
         let mut game = game(Map::VermilionCity, 18, 29, SpriteFacing::Down, 5, |world| {
             if ticket {
@@ -883,12 +1002,36 @@ fn vermilion_s_sailor_turns_a_ticketless_player_back_off_the_pier() {
         play_until(&mut game, 600, free);
         command(&mut game, Command::Step(Direction::Down));
         play_until(&mut game, 20_000, |game| {
-            free(game) && game.world().scripts.maps.vermilion_city.cur_script == SCRIPT_VERMILIONCITY_DEFAULT
+            let script = game.world().scripts.maps.vermilion_city.cur_script;
+            free(game) && [SCRIPT_VERMILIONCITY_DEFAULT, SCRIPT_VERMILIONCITY_PLAYER_ALLOWED_TO_PASS].contains(&script)
         });
-        (game.world().location.x, game.world().location.y)
+        (game.world().location.x, game.world().location.y, game.world().scripts.maps.vermilion_city.cur_script)
     };
-    assert_eq!(step_onto_the_pier(false), (18, 29), "walked back up");
-    assert_eq!(step_onto_the_pier(true), (18, 30), "the ticket is the way past");
+    assert_eq!(step_onto_the_pier(false), (18, 29, SCRIPT_VERMILIONCITY_DEFAULT), "walked back up");
+    assert_eq!(step_onto_the_pier(true), (18, 30, SCRIPT_VERMILIONCITY_PLAYER_ALLOWED_TO_PASS),
+        "the ticket is the way past");
+}
+
+/// Spoken to from in front of him, from behind him or from his left, the pier's sailor only says
+/// hello; from anywhere else he asks for the ticket too.
+#[test]
+fn vermilion_s_sailor_asks_for_the_ticket_only_off_his_own_line() {
+    let asked = |x: u8, y: u8, facing: SpriteFacing| {
+        let mut game = game(Map::VermilionCity, x, y, facing, 5, |_| {});
+        play_until(&mut game, 600, free);
+        command(&mut game, Command::Interact);
+        play_until(&mut game, 600, |game| game.status() == Status::Waiting(Decision::Text));
+        let mut asked = false;
+        play_until(&mut game, 4000, |game| {
+            asked |= on_screen(game, "Excuse me, do you");
+            free(game)
+        });
+        asked
+    };
+    assert!(!asked(19, 29, SpriteFacing::Down), "in front of him");
+    assert!(!asked(19, 31, SpriteFacing::Up), "behind him");
+    assert!(!asked(18, 30, SpriteFacing::Right), "facing right");
+    assert!(asked(20, 30, SpriteFacing::Left), "from the water side");
 }
 
 /// The Machop's line is interrupted by its own cry, which the rest of the line waits out.
@@ -1329,6 +1472,43 @@ fn giovanni_leaves_the_silph_scope_behind_him_in_the_hideout() {
     assert!(!world.location.is_hidden(TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_4 as u8), "the Silph Scope");
 }
 
+/// The third Rocket on the hideout's bottom floor drops the Lift Key the first time he is spoken to
+/// after his battle: his after-battle text is a `text_asm` that shows its ball, and only once.
+#[test]
+fn the_hideout_rocket_drops_the_lift_key_once_he_is_beaten() {
+    use poke_core::symbols::pokered_toggles::TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_5;
+    let mut game = game(Map::RocketHideoutB4F, 11, 3, SpriteFacing::Up, 5, one_shot);
+    let key_ball = |game: &Game| !game.world().location.is_hidden(TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_5 as u8);
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Interact);
+    play_until(&mut game, 20_000, |game| game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_))));
+    play_until(&mut game, 60_000, |game| game.world().events.is_set(EVENT_BEAT_ROCKET_HIDEOUT_4_TRAINER_2) && free(game));
+    assert!(!key_ball(&game), "not until he is spoken to again");
+
+    command(&mut game, Command::Interact);
+    play_until(&mut game, 4000, free);
+    assert!(key_ball(&game), "dropped");
+    assert!(game.world().events.is_set(EVENT_ROCKET_DROPPED_LIFT_KEY));
+
+    command(&mut game, Command::Step(Direction::Left));
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Face(Direction::Up));
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Interact);
+    play_until(&mut game, 4000, |game| game.world().bag.quantity_of(ItemId::LiftKey) == 1 && free(game));
+    assert!(!key_ball(&game), "picked up");
+
+    // Spoken to again, he has nothing left to drop.
+    command(&mut game, Command::Step(Direction::Right));
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Face(Direction::Up));
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Interact);
+    play_until(&mut game, 4000, free);
+    assert!(!key_ball(&game));
+    assert_eq!(game.world().bag.quantity_of(ItemId::LiftKey), 1);
+}
+
 /// Talking to Giovanni in the hideout arms the script the badge and the scope hang off.
 #[test]
 fn talking_to_the_hideout_giovanni_starts_the_battle() {
@@ -1371,24 +1551,77 @@ fn the_thirsty_girl_trades_a_tm_for_each_drink() {
     assert_eq!(world.bag.quantity_of(ItemId::FreshWater), 1, "the other one is still in the bag");
 }
 
-/// The Eevee stays in its ball until there is room in the party for it.
+/// A mon for a box, as `SendNewMonToBox` would keep it.
+fn box_mon(species: PokemonSpecies, level: u8) -> Named<crate::party::BoxMon> {
+    let named = mon(species, level);
+    Named { mon: crate::systems::add_mon::deposit(named.mon), ot: named.ot, nick: named.nick }
+}
+
+/// A party of six and a current box with `boxed` in it.
+fn full_party(world: &mut World, boxed: usize) {
+    world.party = vec![mon(PokemonSpecies::Pidgey, 5); 6];
+    world.boxes = vec![vec![box_mon(PokemonSpecies::Rattata, 2); boxed]];
+}
+
+/// The Eevee's ball goes with it wherever `GivePokemon` puts it, the party or the box, and stays
+/// only when both are full.
 #[test]
-fn the_celadon_eevee_is_left_where_it_is_when_the_party_is_full() {
+fn the_celadon_eevee_goes_to_the_box_when_the_party_is_full_and_stays_when_that_is_too() {
+    use crate::party::MONS_PER_BOX;
     use poke_core::symbols::pokered_toggles::TOGGLE_CELADON_MANSION_EEVEE_GIFT;
-    let full = |world: &mut World| world.party = vec![mon(PokemonSpecies::Pidgey, 5); 6];
-    let mut packed = game(Map::CeladonMansionRoofHouse, 4, 4, SpriteFacing::Up, 6, full);
-    play_until(&mut packed, 600, free);
-    command(&mut packed, Command::Interact);
-    play_until(&mut packed, 8000, free);
-    assert_eq!(packed.world().party.len(), 6);
+    let take = |setup: fn(&mut World)| {
+        let mut game = game(Map::CeladonMansionRoofHouse, 4, 4, SpriteFacing::Up, 6, setup);
+        play_until(&mut game, 600, free);
+        command(&mut game, Command::Interact);
+        play_until(&mut game, 8000, free);
+        game
+    };
+    let packed = take(|world| full_party(world, MONS_PER_BOX));
+    assert_eq!((packed.world().party.len(), packed.world().boxes[0].len()), (6, MONS_PER_BOX));
     assert!(!packed.world().location.is_hidden(TOGGLE_CELADON_MANSION_EEVEE_GIFT as u8), "still there");
 
-    let mut room = game(Map::CeladonMansionRoofHouse, 4, 4, SpriteFacing::Up, 6, |_| {});
-    play_until(&mut room, 600, free);
-    command(&mut room, Command::Interact);
-    play_until(&mut room, 8000, |game| game.world().party.len() == 2 && free(game));
+    let boxed = take(|world| full_party(world, 0));
+    assert_eq!(boxed.world().boxes[0].len(), 1);
+    assert_eq!(boxed.world().boxes[0][0].mon.species, PokemonSpecies::Eevee);
+    assert!(boxed.world().location.is_hidden(TOGGLE_CELADON_MANSION_EEVEE_GIFT as u8), "no ball left to take another from");
+
+    let room = take(|_| {});
     assert_eq!(room.world().party[1].mon.mon.species, PokemonSpecies::Eevee);
     assert!(room.world().location.is_hidden(TOGGLE_CELADON_MANSION_EEVEE_GIFT as u8));
+}
+
+/// The revived fossil goes to the box with the party full, and the lab is done with it: asked again,
+/// the scientist offers to revive another rather than handing the same one over twice.
+#[test]
+fn the_revived_fossil_goes_to_the_box_once_when_the_party_is_full() {
+    let mut game = game(Map::CinnabarLabFossilRoom, 5, 3, SpriteFacing::Up, 6, |world| {
+        full_party(world, 0);
+        world.events.set(EVENT_GAVE_FOSSIL_TO_LAB);
+        world.fossil = Some((ItemId::DomeFossil, PokemonSpecies::Kabuto));
+    });
+    play_until(&mut game, 600, free);
+    let talk = |game: &mut Game| {
+        // He walks left and right along his row: wait for him to stand right above the player.
+        for _ in 0..6000 {
+            if let Some(Mode::Overworld(overworld)) = game.modes().last()
+                && overworld.in_front_text(game.world()) == 1
+                && free(game)
+            {
+                break;
+            }
+            game.frame(Input::None);
+        }
+        command(game, Command::Interact);
+        play_until(game, 8000, free);
+    };
+    talk(&mut game);
+    let world = game.world();
+    assert_eq!(world.boxes[0].len(), 1);
+    assert_eq!(world.boxes[0][0].mon.species, PokemonSpecies::Kabuto);
+    assert!(!world.events.is_set(EVENT_GAVE_FOSSIL_TO_LAB));
+    assert!(!world.events.is_set(EVENT_LAB_HANDING_OVER_FOSSIL_MON));
+    talk(&mut game);
+    assert_eq!(game.world().boxes[0].len(), 1, "one fossil, one Kabuto");
 }
 
 /// The binoculars upstairs of the Route 16 gate answer a player who is facing them.
@@ -1795,15 +2028,22 @@ fn blaines_volcano_badge_comes_with_tm38_and_marks_his_seven_trainers_beaten() {
     assert!(world.events.is_set(EVENT_BEAT_CINNABAR_GYM_TRAINER_6));
 }
 
-/// Talking to Blaine arms the post-battle script and starts his battle where the player stands.
+/// Talking to Blaine arms the post-battle script and starts his battle where the player stands, and
+/// `wGymLeaderNo`, set before he is engaged, keeps a trainer's encounter music from playing.
 #[test]
 fn talking_to_blaine_starts_the_battle_and_arms_the_badge_script() {
+    use crate::audio::data::sounds::MUSIC_MEET_MALE_TRAINER;
     use poke_core::symbols::pokered_map_scripts::SCRIPT_CINNABARGYM_BLAINE_POST_BATTLE;
     let mut game = game(Map::CinnabarGym, 3, 4, SpriteFacing::Up, 5, one_shot);
     play_until(&mut game, 600, free);
     command(&mut game, Command::Interact);
-    play_until(&mut game, 20_000, |game| game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_))));
+    let mut encounter_music = false;
+    play_until(&mut game, 20_000, |game| {
+        encounter_music |= music_on(game) == MUSIC_MEET_MALE_TRAINER.id.0;
+        game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_)))
+    });
     assert_eq!(game.world().scripts.maps.cinnabar_gym.cur_script, SCRIPT_CINNABARGYM_BLAINE_POST_BATTLE);
+    assert!(!encounter_music, "a gym leader has no encounter music");
 }
 
 /// Beating a Super Nerd opens the gate two below his text id, and the gym's own script draws it.
@@ -1926,16 +2166,17 @@ fn a_boulder_pushed_down_victory_roads_hole_turns_up_on_the_floor_below() {
 
 /// Victory Road's gates are blocks rather than objects, so nothing remembers them: each floor's
 /// script draws its gate open again every time the map is loaded, which here is the player walking
-/// in through the stairs between the two floors.
+/// in from Route 23 and up the stairs between the two floors. Not down them: loading 2F lets 1F's
+/// switch go, `VictoryRoad2FResetBoulderEventScript`.
 #[test]
 fn victory_roads_gates_are_drawn_open_again_whenever_the_floor_is_loaded() {
     /// The block a switch held down opens its gate to.
     const OPEN: u8 = 0x1D;
-    let mut first = game(Map::VictoryRoad2F, 1, 8, SpriteFacing::Left, 5, |world| {
+    let mut first = game(Map::Route23, 4, 32, SpriteFacing::Up, 5, |world| {
         world.events.set(EVENT_VICTORY_ROAD_1_BOULDER_ON_SWITCH);
     });
     play_until(&mut first, 600, free);
-    command(&mut first, Command::Step(Direction::Left));
+    command(&mut first, Command::Step(Direction::Up));
     play_until(&mut first, 8000, |game| game.world().location.map == Map::VictoryRoad1F && free(game));
     assert_eq!(block_at(&first, 4, 6), OPEN, "the floor below's gate");
 
@@ -2069,6 +2310,13 @@ fn on_screen(game: &Game, words: &str) -> bool {
     let words = encode(&format!("{words}@")).unwrap();
     let words = &words[..words.len() - 1];
     game.screen().ui.row(14).windows(words.len()).any(|window| window == words)
+}
+
+/// `words` on the message box's second line.
+fn on_second_line(game: &Game, words: &str) -> bool {
+    let words = encode(&format!("{words}@")).unwrap();
+    let words = &words[..words.len() - 1];
+    game.screen().ui.row(16).windows(words.len()).any(|window| window == words)
 }
 
 /// Waits until the sprite with `text_id` is the one the player faces, it being free to wander.
@@ -2860,15 +3108,15 @@ fn the_route_15_gate_binoculars_print_to_a_player_facing_up() {
 
 // ---- Routes 16 to 18, the Cycling Road ----
 
-/// A rider on each of the three Cycling Road maps engages a player standing in its line, on the
-/// map's own passes and with no step taken.
+/// A rider on each of the three Cycling Road maps engages a player in its line, on the map's own
+/// passes and with no step pressed: on Route 17 the slope carries the player into it.
 #[test]
-fn a_trainer_on_each_of_routes_16_to_18_sees_the_player_standing_in_its_line() {
+fn a_trainer_on_each_of_routes_16_to_18_sees_the_player_in_its_line() {
     use poke_core::symbols::pokered_map_scripts::{SCRIPT_ROUTE16_END_BATTLE, SCRIPT_ROUTE17_END_BATTLE,
         SCRIPT_ROUTE18_END_BATTLE};
     for (map, x, y, end_battle) in [
         (Map::Route16, 15, 12, SCRIPT_ROUTE16_END_BATTLE),
-        (Map::Route17, 10, 19, SCRIPT_ROUTE17_END_BATTLE),
+        (Map::Route17, 10, 15, SCRIPT_ROUTE17_END_BATTLE),
         (Map::Route18, 38, 11, SCRIPT_ROUTE18_END_BATTLE),
     ] {
         let mut game = game(map, x, y, SpriteFacing::Down, 5, one_shot);
@@ -3603,6 +3851,31 @@ fn the_museum_doorway_takes_50_for_a_ticket_and_then_stops_asking() {
     assert!(free(&game));
 }
 
+/// A ticket is good for one visit: Pewter City puts the museum's script back to its start on every
+/// pass, so the doorway asks again, and charges again, on the way back in.
+#[test]
+fn the_museum_charges_again_after_the_player_has_left() {
+    let mut game = game(Map::Museum1F, 10, 4, SpriteFacing::Up, 3, |world| {
+        world.money = [0x00, 0x01, 0x00];
+        world.location.last_map = Map::PewterCity;
+    });
+    play_until(&mut game, 2000, |game| game.status() == Status::Waiting(Decision::TwoOption));
+    play_answering(&mut game, 8000, &mut vec![0], free);
+    assert_eq!(game.world().money, [0x00, 0x00, 0x50]);
+    while game.world().location.map != Map::PewterCity {
+        command(&mut game, Command::Step(Direction::Down));
+        play_until(&mut game, 2000, free);
+    }
+    assert_eq!(game.world().scripts.maps.museum_1f.cur_script, 0);
+    assert!(!game.world().events.is_set(EVENT_BOUGHT_MUSEUM_TICKET));
+    while game.status() != Status::Waiting(Decision::TwoOption) {
+        command(&mut game, Command::Step(Direction::Up));
+        play_until(&mut game, 2000, |game| free(game) || game.status() == Status::Waiting(Decision::TwoOption));
+    }
+    play_answering(&mut game, 8000, &mut vec![0], free);
+    assert_eq!(game.world().money, [0x00, 0x00, 0x00], "a second ticket");
+}
+
 /// A player who will not pay, or cannot, is told to come again and walked back out of the doorway.
 #[test]
 fn the_museum_doorway_walks_out_a_player_who_does_not_pay() {
@@ -3779,4 +4052,608 @@ fn mewtwo_fights_the_player_who_walks_up_to_it() {
     assert!(game.world().location.is_hidden(TOGGLE_MEWTWO as u8));
     assert_eq!(game.world().scripts.maps.cerulean_cave_b1f.cur_script, 0);
 }
+
+
+/// Whether a text box's top-left corner is up, which `DisplayTextIDInit` draws before anything else.
+fn text_box_up(game: &Game) -> bool {
+    game.screen().ui.get(0, 12) == 0x79
+}
+
+/// The overworld under whatever is on top.
+fn overworld_of(game: &Game) -> &Overworld {
+    game.modes().iter().rev().find_map(|mode| match mode {
+        Mode::Overworld(overworld) => Some(overworld),
+        _ => None,
+    }).expect("the overworld is up")
+}
+
+/// The gym guide's pointing frame is not his own sheet's, and `BIT_NO_SPRITE_UPDATES` is what keeps
+/// the text's `UpdateSprites` from putting it back as the box opens.
+#[test]
+fn pewter_s_gym_guide_is_still_pointing_when_his_text_opens() {
+    use poke_core::symbols::pokered_map_scripts::SCRIPT_PEWTERCITY_YOUNGSTER_SHOWS_PLAYER_GYM;
+    use poke_core::symbols::pokered_symbols::PEWTERCITY_YOUNGSTER;
+    let mut game = game(Map::PewterCity, 35, 17, SpriteFacing::Down, 5, |world| {
+        world.events.clear(EVENT_BEAT_BROCK);
+    });
+    // Past his "follow me", which is up as his walk is set going.
+    play_until(&mut game, 20_000, |game| {
+        game.world().scripts.maps.pewter_city.cur_script == SCRIPT_PEWTERCITY_YOUNGSTER_SHOWS_PLAYER_GYM && !text_box_up(game)
+    });
+    play_until(&mut game, 40_000, text_box_up);
+    let guide = overworld_of(&game).sprites()[PEWTERCITY_YOUNGSTER as usize];
+    // `($1 << 4) | SPRITE_FACING_LEFT`.
+    assert_eq!(guide.image_index, 0x18, "pointing at the door");
+}
+
+/// The Celadon Poliwrath and the mansion's three pets hold their text open until the cry is over.
+#[test]
+fn the_celadon_poliwrath_and_the_mansion_pets_close_their_text_only_after_the_cry() {
+    use poke_core::symbols::pokered_map_scripts::{TEXT_CELADONCITY_POLIWRATH, TEXT_CELADONMANSION1F_MEOWTH};
+    for (map, x, y, text_id) in [
+        (Map::CeladonCity, 31, 12, TEXT_CELADONCITY_POLIWRATH),
+        (Map::CeladonMansion1F, 1, 5, TEXT_CELADONMANSION1F_MEOWTH),
+    ] {
+        let mut game = game(map, x, y, SpriteFacing::Left, 3, |_| {});
+        play_until(&mut game, 600, free);
+        wait_to_face(&mut game, text_id);
+        command(&mut game, Command::Interact);
+        let mut cried = false;
+        play_until(&mut game, 5000, |game| {
+            cried |= (4..8).any(|channel| game.audio().channel_sound_id(channel) != 0);
+            free(game)
+        });
+        assert!(cried, "{map:?}");
+        assert!(game.audio().sound_finished(), "{map:?}: the cry is over before the box closes");
+    }
+}
+
+/// Beaten, the Cerulean rival's movement bytes are set to `$ff` before he walks off, so his map
+/// object's facing does not carry into the walk.
+#[test]
+fn the_cerulean_rival_walks_off_with_his_movement_bytes_set_to_ff() {
+    use poke_core::symbols::pokered_map_scripts::SCRIPT_CERULEANCITY_RIVAL_DEFEATED;
+    use poke_core::symbols::pokered_symbols::CERULEANCITY_RIVAL;
+    use poke_core::symbols::pokered_toggles::TOGGLE_CERULEAN_RIVAL;
+    let mut game = game(Map::CeruleanCity, 20, 6, SpriteFacing::Up, 8, |world| {
+        world.events.set(EVENT_BEAT_CERULEAN_ROCKET_THIEF);
+        world.scripts.maps.cerulean_city.cur_script = SCRIPT_CERULEANCITY_RIVAL_DEFEATED;
+        show(world, TOGGLE_CERULEAN_RIVAL);
+    });
+    for _ in 0..40_000 {
+        let rival = overworld_of(&game).sprites()[CERULEANCITY_RIVAL as usize];
+        // Walking: `SPRITESTATEDATA1_MOVEMENTSTATUS` 3.
+        if rival.movement_status & 0x7F == 3 {
+            assert_eq!(rival.movement2, 0xFF, "`SetSpriteMovementBytesToFF`'s, which `MoveSprite_` leaves");
+            return;
+        }
+        let input = match game.status() {
+            Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
+            _ => Input::None,
+        };
+        game.frame(input);
+    }
+    panic!("he never walked off");
+}
+
+/// Oak turns to the new champion and is held there, `SetSpriteFacingDirectionAndDelay`'s six frames
+/// and a `Delay3`, before his text opens.
+#[test]
+fn oak_is_held_turned_to_the_champion_before_he_speaks() {
+    use poke_core::symbols::pokered_symbols::HALLOFFAME_OAK;
+    use crate::systems::overworld::sprites::SPRITE_FACING_LEFT;
+    let mut game = game(Map::HallOfFame, 4, 7, SpriteFacing::Up, 5, |_| {});
+    let mut turned = None;
+    for frame in 0..3000 {
+        if text_box_up(&game) {
+            let turned = turned.expect("Oak turned before he spoke");
+            assert_eq!(frame - turned, 6 + 3);
+            return;
+        }
+        if turned.is_none() && overworld_of(&game).sprites()[HALLOFFAME_OAK as usize].facing == SPRITE_FACING_LEFT {
+            turned = Some(frame);
+        }
+        game.frame(Input::None);
+    }
+    panic!("Oak never spoke");
+}
+
+/// A full bag turns the Celadon gramps' TM41 away, and he offers it again rather than counting it
+/// given: the event follows `GiveItem`'s carry, not a TM41 already in the bag at 99.
+#[test]
+fn the_celadon_gramps_keeps_tm41_for_a_player_whose_bag_is_full() {
+    let mut game = game(Map::CeladonCity, 22, 17, SpriteFacing::Up, 6, |world| {
+        world.bag.add(ItemId::Tm41Softboiled, 99);
+        for id in 1..crate::systems::inventory::BAG_ITEM_CAPACITY {
+            world.bag.add(ItemId::from_repr(id).unwrap(), 1);
+        }
+    });
+    play_until(&mut game, 600, free);
+    assert!(first_words(&mut game, "Hello, there!"));
+    assert!(!game.world().events.is_set(EVENT_GOT_TM41));
+    assert_eq!(game.world().bag.quantity_of(ItemId::Tm41Softboiled), 99);
+    assert!(first_words(&mut game, "Hello, there!"), "he offers it again rather than explaining it");
+}
+
+/// `PokemonTower7FNPCCoordMovementTable` read from each Rocket's own rows onward: all twelve squares
+/// find their own row, a later Rocket's square found from an earlier one walks the later one's way,
+/// and a square no row names before the bank ends leaves him standing.
+#[test]
+fn the_tower_7f_rockets_find_their_way_out_anywhere_in_the_table() {
+    use super::pokemon_tower_7f::leave_movement;
+    use crate::modes::overworld::movement::{NPC_MOVEMENT_DOWN as D, NPC_MOVEMENT_LEFT as L, NPC_MOVEMENT_RIGHT as R};
+    let down: &[u8] = &[D, D, D, D, D, 0xFF];
+    let rows: [(u8, (u8, u8), &[u8]); 12] = [
+        (1, (9, 12), &[R, D, D, D, D, D, L, 0xFF]), (1, (10, 11), &[D, R, D, D, D, D, 0xFF]),
+        (1, (11, 11), down), (1, (12, 11), down),
+        (2, (12, 10), &[L, D, D, D, D, D, D, 0xFF]), (2, (11, 9), &[D, D, D, L, D, D, 0xFF]),
+        (2, (10, 9), down), (2, (9, 9), down),
+        (3, (9, 8), &[R, D, D, D, D, D, D, 0xFF]), (3, (10, 7), down), (3, (11, 7), down), (3, (12, 7), down),
+    ];
+    for (slot, (x, y), path) in rows {
+        assert_eq!(leave_movement(slot, x, y), Some(path), "Rocket {slot} from ({x}, {y})");
+        for earlier in 1..slot {
+            assert_eq!(leave_movement(earlier, x, y), Some(path), "Rocket {earlier} from Rocket {slot}'s ({x}, {y})");
+        }
+    }
+    assert_eq!(leave_movement(2, 13, 9), None, "behind Rocket 2");
+}
+
+/// The first quiz machine, below the gate `CinnabarGymGateCoords` lists first: `CATERPIE evolves
+/// into BUTTERFREE?`, whose answer is YES, stood in front of from below.
+const QUIZ_1: (u8, u8) = (15, 8);
+const QUIZ_1_GATE: (usize, usize) = (9, 3);
+const SHUT_GATE: u8 = 0x54;
+const OPEN_GATE: u8 = 0x0E;
+
+fn in_battle(game: &Game) -> bool {
+    game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_)))
+}
+
+/// `CinnabarGymQuiz_AskQuestion`: the right answer opens its gate there and then, and sends nobody
+/// out.
+#[test]
+fn a_right_answer_to_the_cinnabar_quiz_opens_its_gate() {
+    use poke_core::symbols::pokered_map_scripts::SCRIPT_CINNABARGYM_DEFAULT;
+    let mut game = game(Map::CinnabarGym, QUIZ_1.0, QUIZ_1.1, SpriteFacing::Up, 5, |_| {});
+    play_until(&mut game, 600, free);
+    assert_eq!(block_at(&game, QUIZ_1_GATE.0, QUIZ_1_GATE.1), SHUT_GATE);
+    press_a(&mut game);
+    let mut fought = false;
+    play_answering(&mut game, 20_000, &mut vec![0], |game| {
+        fought |= in_battle(game);
+        free(game)
+    });
+    assert!(!fought);
+    assert!(game.world().events.is_set(EVENT_CINNABAR_GYM_GATE0_UNLOCKED + 1));
+    assert!(!game.world().events.is_set(EVENT_BEAT_CINNABAR_GYM_TRAINER_1), "the trainer is not beaten for it");
+    assert_eq!(block_at(&game, QUIZ_1_GATE.0, QUIZ_1_GATE.1), OPEN_GATE);
+    assert_eq!(game.world().scripts.maps.cinnabar_gym.cur_script, SCRIPT_CINNABARGYM_DEFAULT);
+}
+
+/// `.wrongAnswer`: the gate stays shut and its own Super Nerd walks up and fights, and beating him
+/// opens it instead.
+#[test]
+fn a_wrong_answer_to_the_cinnabar_quiz_sends_its_gates_trainer_out() {
+    use poke_core::symbols::pokered_map_scripts::SCRIPT_CINNABARGYM_DEFAULT;
+    let mut game = game(Map::CinnabarGym, QUIZ_1.0, QUIZ_1.1, SpriteFacing::Up, 5, one_shot);
+    play_until(&mut game, 600, free);
+    press_a(&mut game);
+    let mut bad_call = false;
+    play_answering(&mut game, 20_000, &mut vec![1], |game| {
+        bad_call |= on_screen(game, "Sorry! Bad call!");
+        in_battle(game)
+    });
+    assert!(bad_call);
+    assert!(!game.world().events.is_set(EVENT_CINNABAR_GYM_GATE0_UNLOCKED + 1), "no gate for a wrong answer");
+    assert_eq!(block_at(&game, QUIZ_1_GATE.0, QUIZ_1_GATE.1), SHUT_GATE);
+    play_until(&mut game, 80_000, |game| {
+        game.world().scripts.maps.cinnabar_gym.cur_script == SCRIPT_CINNABARGYM_DEFAULT
+            && game.world().events.is_set(EVENT_BEAT_CINNABAR_GYM_TRAINER_1)
+            && free(game)
+    });
+    assert!(game.world().events.is_set(EVENT_CINNABAR_GYM_GATE0_UNLOCKED + 1));
+    assert_eq!(block_at(&game, QUIZ_1_GATE.0, QUIZ_1_GATE.1), OPEN_GATE);
+}
+
+/// Blaine's `.gymVictory` marks every trainer beaten and redraws the gates, which
+/// `UpdateCinnabarGymGateTileBlocks_` draws from their own events: a gate answered stays open, one
+/// never answered stays shut. What the victory changes is that a wrong answer sends nobody out.
+#[test]
+fn blaines_victory_redraws_the_gates_and_stands_the_trainers_down() {
+    use poke_core::symbols::pokered_map_scripts::{SCRIPT_CINNABARGYM_BLAINE_POST_BATTLE, SCRIPT_CINNABARGYM_DEFAULT};
+    let mut game = game(Map::CinnabarGym, 3, 4, SpriteFacing::Up, 5, |world| {
+        world.events.set(EVENT_CINNABAR_GYM_GATE0_UNLOCKED + 1);
+        world.scripts.maps.cinnabar_gym.cur_script = SCRIPT_CINNABARGYM_BLAINE_POST_BATTLE;
+    });
+    play_until(&mut game, 20_000, |game| {
+        game.world().scripts.maps.cinnabar_gym.cur_script == SCRIPT_CINNABARGYM_DEFAULT && free(game)
+    });
+    assert_eq!(block_at(&game, QUIZ_1_GATE.0, QUIZ_1_GATE.1), OPEN_GATE);
+    assert_eq!(block_at(&game, 6, 3), SHUT_GATE, "the second gate was never answered");
+
+    let mut world = game.world().clone();
+    world.location.x = QUIZ_1.0;
+    world.location.y = QUIZ_1.1;
+    world.location.facing = SpriteFacing::Up;
+    world.events.clear(EVENT_CINNABAR_GYM_GATE0_UNLOCKED + 1);
+    let mut game = Game::new(world, GameRng::seeded(5), Pacing::Faithful);
+    game.push(Mode::Overworld(Overworld::new()));
+    play_until(&mut game, 600, free);
+    press_a(&mut game);
+    let mut fought = false;
+    play_answering(&mut game, 20_000, &mut vec![1], |game| {
+        fought |= in_battle(game);
+        free(game)
+    });
+    for _ in 0..200 {
+        fought |= in_battle(&game);
+        game.frame(Input::None);
+    }
+    assert!(!fought, "a trainer already beaten is not sent out");
+    assert!(!game.world().events.is_set(EVENT_CINNABAR_GYM_GATE0_UNLOCKED + 1));
+}
+
+/// `PrintCardKeyText`: with the key the door in front becomes floor there and then, and the floor's
+/// gate callback remembers it in the gate's own event, so a fresh load draws it open. Without the
+/// key the door says so and stays shut.
+#[test]
+fn a_card_key_opens_a_silph_co_door_for_good() {
+    const CLOSED_DOOR: u8 = 0x5F;
+    let open = |key: bool| {
+        let mut game = game(Map::SilphCo5F, 7, 6, SpriteFacing::Up, 5, |world| {
+            one_shot(world);
+            if key {
+                world.bag.add(ItemId::CardKey, 1);
+            }
+        });
+        play_until(&mut game, 600, free);
+        assert_eq!(block_at(&game, 3, 2), CLOSED_DOOR);
+        press_a(&mut game);
+        let (mut bingo, mut darn) = (false, false);
+        play_until(&mut game, 4000, |game| {
+            bingo |= on_screen(game, "Bingo!");
+            darn |= on_screen(game, "Darn! It needs a");
+            free(game)
+        });
+        for _ in 0..10 {
+            game.frame(Input::None);
+        }
+        assert_eq!((bingo, darn), (key, !key));
+        game
+    };
+
+    let refused = open(false);
+    assert_eq!(block_at(&refused, 3, 2), CLOSED_DOOR);
+    assert!(!refused.world().events.is_set(EVENT_SILPH_CO_5_UNLOCKED_DOOR1));
+
+    let opened = open(true);
+    assert_eq!(block_at(&opened, 3, 2), 0x0E);
+    assert!(opened.world().events.is_set(EVENT_SILPH_CO_5_UNLOCKED_DOOR1));
+    assert!(!opened.world().events.is_set(EVENT_SILPH_CO_5_UNLOCKED_DOOR2), "only the door opened");
+    let mut reloaded = Game::new(opened.world().clone(), GameRng::seeded(5), Pacing::Faithful);
+    reloaded.push(Mode::Overworld(Overworld::new()));
+    play_until(&mut reloaded, 600, free);
+    assert_eq!(block_at(&reloaded, 3, 2), 0x0E, "the door stays open");
+    assert_eq!(block_at(&reloaded, 3, 6), CLOSED_DOOR);
+}
+
+/// A party the Elite Four and the champion go down to one move at a time: level 100, faster than
+/// any of them, with the PP for a whole team, and with the Earth Badge to be obeyed.
+fn champion_party(world: &mut World) {
+    world.badges = 0xFF;
+    let mut mewtwo = mon(PokemonSpecies::Mewtwo, 100);
+    mewtwo.mon.mon.moves[0] = Some(poke_core::move_name::PokemonMoveName::Psychic);
+    mewtwo.mon.mon.pp[0] = 0x3F;
+    world.party = vec![mewtwo];
+}
+
+/// Talks to the Elite Four member in front and plays the battle out. The loop polls the pad before
+/// it runs the map's script, so the room redraws its exit a pass after the player is free.
+fn beat_elite_four_member(game: &mut Game, beaten: u16) {
+    play_until(game, 600, free);
+    command(game, Command::Interact);
+    play_until(game, 20_000, in_battle);
+    play_until(game, 200_000, |game| game.world().events.is_set(beaten) && free(game));
+    for _ in 0..10 {
+        game.frame(Input::None);
+    }
+}
+
+/// `LoreleisRoomLoreleiEndBattleScript`: `EndTrainerBattle` re-arms the room's load flag, so the
+/// exit is drawn open on the next pass, and a fresh load draws it open from her event.
+#[test]
+fn beating_lorelei_opens_her_exit_and_it_stays_open() {
+    use poke_core::symbols::pokered_map_scripts::SCRIPT_LORELEISROOM_DEFAULT;
+    let mut game = game(Map::LoreleisRoom, 5, 3, SpriteFacing::Up, 5, |world| {
+        champion_party(world);
+        world.events.set(EVENT_AUTOWALKED_INTO_LORELEIS_ROOM);
+    });
+    play_until(&mut game, 600, free);
+    assert_eq!(block_at(&game, 2, 0), 0x24, "shut until she is beaten");
+    beat_elite_four_member(&mut game, EVENT_BEAT_LORELEIS_ROOM_TRAINER_0);
+    assert_eq!(block_at(&game, 2, 0), 0x05);
+    assert_eq!(game.world().scripts.maps.loreleis_room.cur_script, SCRIPT_LORELEISROOM_DEFAULT);
+
+    let mut reloaded = Game::new(game.world().clone(), GameRng::seeded(5), Pacing::Faithful);
+    reloaded.push(Mode::Overworld(Overworld::new()));
+    play_until(&mut reloaded, 600, free);
+    assert_eq!(block_at(&reloaded, 2, 0), 0x05);
+}
+
+/// `AgathasRoomAgathaEndBattleScript` arms the champion's room once her words are over, so the rival
+/// is waiting when the player climbs into it.
+#[test]
+fn beating_agatha_arms_the_champions_room() {
+    let mut game = game(Map::AgathasRoom, 5, 3, SpriteFacing::Up, 5, |world| {
+        champion_party(world);
+        world.events.set(EVENT_AUTOWALKED_INTO_AGATHAS_ROOM);
+    });
+    assert_ne!(game.world().scripts.maps.champions_room.cur_script, SCRIPT_CHAMPIONSROOM_PLAYER_ENTERS);
+    beat_elite_four_member(&mut game, EVENT_BEAT_AGATHAS_ROOM_TRAINER_0);
+    assert_eq!(game.world().scripts.maps.champions_room.cur_script, SCRIPT_CHAMPIONSROOM_PLAYER_ENTERS);
+    assert_eq!(block_at(&game, 2, 0), 0x0E, "her exit is open");
+}
+
+/// `LancesRoomLanceAfterBattleText`'s `text_asm` is what sets `EVENT_BEAT_LANCE`: after his trainer
+/// flag, once his words are out. The square beside him that made him speak is quiet after.
+#[test]
+fn lances_words_after_the_battle_mark_him_beaten() {
+    let mut game = game(Map::LancesRoom, 6, 2, SpriteFacing::Up, 5, |world| {
+        champion_party(world);
+        world.events.set(EVENT_LANCES_ROOM_LOCK_DOOR);
+    });
+    play_until(&mut game, 20_000, in_battle);
+    let mut flag_first = false;
+    play_until(&mut game, 200_000, |game| {
+        let events = &game.world().events;
+        flag_first |= events.is_set(EVENT_BEAT_LANCES_ROOM_TRAINER_0) && !events.is_set(EVENT_BEAT_LANCE);
+        events.is_set(EVENT_BEAT_LANCE) && free(game)
+    });
+    assert!(flag_first, "the trainer flag comes before his words");
+    for _ in 0..300 {
+        assert!(!text_box_up(&game), "he says nothing more");
+        game.frame(Input::None);
+    }
+}
+
+/// `ResetLoreleiScript`: a player whose party faints to her blacks out with her room set back to its
+/// default script and her flag unset, `RunMapScript` running the room once with `wIsInBattle` at
+/// `$ff` before the warp.
+#[test]
+fn losing_to_lorelei_sets_her_room_back_to_its_default_script() {
+    use poke_core::symbols::pokered_map_scripts::SCRIPT_LORELEISROOM_DEFAULT;
+    let mut game = game(Map::LoreleisRoom, 5, 3, SpriteFacing::Up, 5, |world| {
+        world.party = vec![mon(PokemonSpecies::Magikarp, 2)];
+        world.party[0].mon.mon.hp = 1;
+        world.events.set(EVENT_AUTOWALKED_INTO_LORELEIS_ROOM);
+        world.location.last_blackout_map = Map::ViridianCity;
+    });
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Interact);
+    play_until(&mut game, 20_000, in_battle);
+    play_until(&mut game, 60_000, |game| game.world().location.map != Map::LoreleisRoom && free(game));
+    let world = game.world();
+    assert_eq!(world.location.map, Map::ViridianCity);
+    assert_eq!(world.scripts.maps.loreleis_room.cur_script, SCRIPT_LORELEISROOM_DEFAULT);
+    assert!(!world.events.is_set(EVENT_BEAT_LORELEIS_ROOM_TRAINER_0));
+}
+
+/// `.stopPlayerFromLeaving`: a player already walked in who steps back onto the doorway is told not
+/// to run away and walked one square back up.
+#[test]
+fn loreleis_room_turns_back_a_player_who_steps_onto_the_doorway() {
+    use poke_core::symbols::pokered_map_scripts::SCRIPT_LORELEISROOM_DEFAULT;
+    let mut game = game(Map::LoreleisRoom, 4, 9, SpriteFacing::Down, 5, |world| {
+        world.events.set(EVENT_AUTOWALKED_INTO_LORELEIS_ROOM);
+    });
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Step(Direction::Down));
+    let mut warned = false;
+    play_until(&mut game, 4000, |game| {
+        warned |= on_second_line(game, "Don't run away!");
+        warned && free(game) && game.world().location.y == 9
+    });
+    let world = game.world();
+    assert_eq!((world.location.map, world.location.x, world.location.y), (Map::LoreleisRoom, 4, 9));
+    assert_eq!(world.scripts.maps.loreleis_room.cur_script, SCRIPT_LORELEISROOM_DEFAULT);
+}
+
+/// From the champion's battle to the title screen: Oak's walk, the ceremony, the credits, the one
+/// save `HallOfFameResetEventsAndSaveScript` takes, THE END held, and the press that is `jp Init`,
+/// which leaves nothing of the game running under power-on.
+#[test]
+fn beating_the_champion_ends_on_the_title_screen_with_the_game_saved() {
+    use crate::input::Joypad;
+    use crate::modes::movie::Movie;
+    let mut game = game(Map::ChampionsRoom, 3, 7, SpriteFacing::Up, 5, |world| {
+        champion_party(world);
+        world.scripts.maps.champions_room.cur_script = SCRIPT_CHAMPIONSROOM_PLAYER_ENTERS;
+    });
+    play_until(&mut game, 40_000, in_battle);
+    play_until(&mut game, 300_000, |game| game.modes().iter().any(|mode| matches!(mode, Mode::Movie(_))));
+    assert!(game.world().events.is_set(EVENT_BEAT_CHAMPION_RIVAL));
+
+    let mut saves = Vec::new();
+    for _ in 0..100_000 {
+        if game.status() == Status::Waiting(Decision::TitleScreen) {
+            break;
+        }
+        let input = match game.status() {
+            Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
+            _ => Input::None,
+        };
+        saves.extend(game.frame(input).save);
+    }
+    assert_eq!(game.status(), Status::Waiting(Decision::TitleScreen), "THE END waits for a press");
+    assert_eq!(saves.len(), 1, "the ceremony saves once");
+    let saved = Game::load(&saves[0], Pacing::Faithful).unwrap();
+    assert_eq!(saved.world().hall_of_fame_teams, 1);
+    assert!(!saved.world().events.is_set(EVENT_BEAT_LANCE), "the gauntlet can be fought again");
+    assert_eq!(saved.world().location.last_blackout_map, Map::PalletTown);
+
+    game.frame(Input::Buttons(Joypad::A));
+    assert!(matches!(game.modes(), [Mode::Movie(Movie::PowerOn(_))]), "only power-on is left: {} modes", game.modes().len());
+    for _ in 0..10_000 {
+        if game.status() == Status::Waiting(Decision::TitleScreen) {
+            break;
+        }
+        game.frame(Input::None);
+    }
+    assert_eq!(game.status(), Status::Waiting(Decision::TitleScreen), "the intro plays into the title");
+}
+
+/// A bag with every slot taken by something other than `gift`.
+fn full_bag(world: &mut World) {
+    for id in 0x20..0x20 + crate::systems::inventory::BAG_ITEM_CAPACITY {
+        world.bag.add(ItemId::from_repr(id).unwrap(), 1);
+    }
+}
+
+/// Talks to whoever is in front until the overworld is back, and whether `words` were on the first
+/// line of the box at any point.
+fn talk_hearing(game: &mut Game, words: &str) -> bool {
+    command(game, Command::Interact);
+    let mut heard = false;
+    play_until(game, 40_000, |game| {
+        heard |= on_screen(game, words) || on_second_line(game, words);
+        free(game)
+    });
+    heard
+}
+
+/// Each story gift a full bag turns away: `GiveItem`'s carry clear leaves the event unset, so the
+/// same offer is made again on the next visit.
+fn a_full_bag_is_offered_again(mut game: Game, gift: ItemId, event: u16, offer: &str, no_room: &str) -> Game {
+    play_until(&mut game, 600, free);
+    assert!(talk_hearing(&mut game, no_room), "{gift:?}: {no_room}");
+    assert!(!game.world().events.is_set(event), "{gift:?}");
+    assert_eq!(game.world().bag.quantity_of(gift), 0);
+    assert!(talk_hearing(&mut game, offer), "{gift:?} is offered again");
+    assert!(!game.world().events.is_set(event));
+    game
+}
+
+#[test]
+fn bill_keeps_the_ss_ticket_for_a_player_whose_bag_is_full() {
+    use poke_core::symbols::pokered_toggles::{TOGGLE_BILL_1, TOGGLE_CERULEAN_GUARD_1, TOGGLE_CERULEAN_GUARD_2};
+    let game = game(Map::BillsHouse, 4, 5, SpriteFacing::Up, 3, |world| {
+        world.events.set(EVENT_MET_BILL);
+        world.events.set(EVENT_MET_BILL_2);
+        show(world, TOGGLE_BILL_1);
+        show(world, TOGGLE_CERULEAN_GUARD_2);
+        full_bag(world);
+    });
+    let game = a_full_bag_is_offered_again(game, ItemId::SSTicket, EVENT_GOT_SS_TICKET, "BILL: Yeehah!", "much stuff, bud!");
+    assert!(game.world().location.is_hidden(TOGGLE_CERULEAN_GUARD_1 as u8), "the dock is still guarded");
+    assert!(!game.world().location.is_hidden(TOGGLE_CERULEAN_GUARD_2 as u8));
+}
+
+#[test]
+fn mr_fuji_keeps_the_poke_flute_for_a_player_whose_bag_is_full() {
+    use poke_core::symbols::pokered_toggles::TOGGLE_MR_FUJIS_HOUSE_MR_FUJI;
+    let game = game(Map::MrFujisHouse, 3, 2, SpriteFacing::Up, 6, |world| {
+        world.events.set(EVENT_RESCUED_MR_FUJI);
+        show(world, TOGGLE_MR_FUJIS_HOUSE_MR_FUJI);
+        full_bag(world);
+    });
+    a_full_bag_is_offered_again(game, ItemId::PokeFlute, EVENT_GOT_POKE_FLUTE, "MR.FUJI:", "room for this!");
+}
+
+#[test]
+fn the_captain_keeps_hm01_for_a_player_whose_bag_is_full() {
+    let game = game(Map::SSAnneCaptainsRoom, 4, 3, SpriteFacing::Up, 5, full_bag);
+    a_full_bag_is_offered_again(game, ItemId::Hm01Cut, EVENT_GOT_HM01, "CAPTAIN: Ooargh...", "no room for this!");
+}
+
+#[test]
+fn the_silph_president_keeps_the_master_ball_for_a_player_whose_bag_is_full() {
+    let game = game(Map::SilphCo11F, 7, 6, SpriteFacing::Up, 5, |world| {
+        world.events.set(EVENT_BEAT_SILPH_CO_GIOVANNI);
+        full_bag(world);
+    });
+    a_full_bag_is_offered_again(game, ItemId::MasterBall, EVENT_GOT_MASTER_BALL, "PRESIDENT: Thank", "room for this.");
+}
+
+/// The warden takes the teeth before he tries to give HM04, so a bag full with them in it has room
+/// by then. Only a bag filled after the teeth went is turned away, and he thanks the player again.
+#[test]
+fn the_warden_keeps_hm04_only_for_a_bag_filled_after_the_teeth() {
+    let mut with_teeth = game(Map::WardensHouse, 2, 4, SpriteFacing::Up, 5, |world| {
+        for id in 0x20..0x20 + crate::systems::inventory::BAG_ITEM_CAPACITY - 1 {
+            world.bag.add(ItemId::from_repr(id).unwrap(), 1);
+        }
+        world.bag.add(ItemId::GoldTeeth, 1);
+    });
+    play_until(&mut with_teeth, 600, free);
+    command(&mut with_teeth, Command::Interact);
+    play_until(&mut with_teeth, 20_000, free);
+    assert!(with_teeth.world().events.is_set(EVENT_GOT_HM04), "the teeth made the room");
+    assert_eq!(with_teeth.world().bag.quantity_of(ItemId::Hm04Strength), 1);
+
+    let game = game(Map::WardensHouse, 2, 4, SpriteFacing::Up, 5, |world| {
+        world.events.set(EVENT_GAVE_GOLD_TEETH);
+        full_bag(world);
+    });
+    a_full_bag_is_offered_again(game, ItemId::Hm04Strength, EVENT_GOT_HM04, "WARDEN: Thanks,", "stuffed full!");
+}
+
+/// `GameCornerClerk1Text` turns the player away before any money changes hands: NO, no Coin Case, a
+/// case with 9990 or more in it, or less than ¥1000.
+#[test]
+fn the_game_corner_clerk_sells_coins_only_to_a_player_who_can_take_them() {
+    let ask = |answer: u8, words: &str, setup: fn(&mut World)| {
+        let mut game = game(Map::GameCorner, 5, 7, SpriteFacing::Up, 5, |world| {
+            world.bag.add(ItemId::CoinCase, 1);
+            world.money = [0x00, 0x10, 0x00];
+            world.coins = [0x00, 0x00];
+            setup(world);
+        });
+        play_until(&mut game, 600, free);
+        let (money, coins) = (game.world().money, game.world().coins);
+        command(&mut game, Command::Interact);
+        let mut said = false;
+        play_answering(&mut game, 8000, &mut vec![answer], |game| {
+            said |= on_screen(game, words);
+            free(game)
+        });
+        assert!(said, "{words}");
+        (game, money, coins)
+    };
+    for (answer, words, setup) in [
+        (1, "No? Please come", (|_| {}) as fn(&mut World)),
+        (0, "You don't have a", |world| world.bag = crate::systems::inventory::Inventory::bag(Vec::new())),
+        (0, "Oops! Your COIN", |world| world.coins = [0x99, 0x90]),
+        (0, "You can't afford", |world| world.money = [0x00, 0x09, 0x99]),
+    ] {
+        let (game, money, coins) = ask(answer, words, setup);
+        assert_eq!((game.world().money, game.world().coins), (money, coins), "{words}");
+    }
+    let (sold, _, _) = ask(0, "Thanks! Here are", |world| world.coins = [0x99, 0x89]);
+    assert_eq!((sold.world().money, sold.world().coins), ([0x00, 0x00, 0x00], [0x99, 0x99]), "9989 still has room");
+}
+
+/// `CeladonMansion3FGameDesignerText`: the diploma is for every mon but Mew, and one short of that
+/// hears only his usual words.
+#[test]
+fn the_game_designer_hands_the_diploma_only_to_a_complete_pokedex() {
+    let talk = |owned: usize| {
+        let mut game = game(Map::CeladonMansion3F, 2, 4, SpriteFacing::Up, 3, |world| {
+            for dex in 0..owned {
+                world.pokedex.owned[dex / 8] |= 1 << (dex % 8);
+            }
+        });
+        play_until(&mut game, 600, free);
+        command(&mut game, Command::Interact);
+        let mut diploma = false;
+        play_until(&mut game, 8000, |game| {
+            diploma |= game.screen().sprites[0].attributes == crate::gfx::layers::Object::BEHIND_BG;
+            free(game)
+        });
+        diploma
+    };
+    assert!(talk(150), "every mon but Mew");
+    assert!(!talk(149));
+}
+
 

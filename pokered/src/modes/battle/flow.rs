@@ -31,6 +31,7 @@ use crate::systems::battle::turn_order::first_to_move;
 use crate::systems::battle::ai::{select_enemy_move, trainer_ai, AiAction, CANNOT_MOVE};
 use crate::systems::battle::{effect, status, Battle, BattleKind, BattleMon, CriticalHitOrOhko, Side,
                              Status1, Status2, Status3, BASE_STAT_LEVEL, PP_MASK};
+use crate::systems::hp_bar::HpBarColour;
 use crate::systems::learn_move::format_moves_string;
 use crate::systems::math::{add_bcd, divide, multiply};
 use crate::systems::pp::max_pp;
@@ -145,9 +146,10 @@ impl BattleMode {
     /// `DrawPlayerHUDAndHPBar` or `DrawEnemyHUDAndHPBar` of the mon as it stands at this step.
     pub(super) fn push_hud(&mut self, side: Side) {
         let mon = Box::new(self.b().side(side).mon.clone());
+        let mons = self.mon_palettes();
         self.push(match side {
-            Side::Player => Present::DrawPlayerHud { mon, nick: self.player_nick.clone() },
-            Side::Enemy => Present::DrawEnemyHud { mon, nick: self.enemy_nick.clone() },
+            Side::Player => Present::DrawPlayerHud { mon, nick: self.player_nick.clone(), mons },
+            Side::Enemy => Present::DrawEnemyHud { mon, nick: self.enemy_nick.clone(), mons },
         });
     }
 
@@ -482,11 +484,7 @@ impl BattleMode {
                     self.menu = Some(Menu::switch_stats_cancel(slot));
                     self.push(Present::Menu);
                 }
-                _ => {
-                    self.push(Present::ClearSprites);
-                    self.push(Present::LoadScreen2);
-                    self.goto(Step::DisplayBattleMenu);
-                }
+                _ => self.quit_party_menu(),
             },
             Step::ShiftAnswered => {
                 let yes = self.outcome.take() == Some(Outcome::Chosen(0))
@@ -526,6 +524,9 @@ impl BattleMode {
                 }
             }
             Step::ReplaceFaintedEnemyMon => {
+                // `GetBattleHealthBarColor` of `$30` pixels, which is green.
+                let mons = self.mon_palettes();
+                self.push(Present::HealthBarColour { side: Side::Enemy, colour: HpBarColour::Green, mons });
                 self.action_taken = true;
                 self.push(Present::DrawEnemyPokeballs);
                 self.call(Step::EnemySendOut { first: false }, Step::AfterReplaceFaintedEnemyMon);
@@ -571,6 +572,7 @@ impl BattleMode {
         load_enemy_mon_data(&mut battle, &mut ctx.world.pokedex, species, level, 0, ctx.rng);
         self.enemy_nick = species.name();
         self.battle = Some(battle);
+        self.pal_species = [0, species as u8];
         // `RESTLESS_SOUL` is Marowak's own constant, so every Marowak is shown as a ghost.
         let ghost_pic = species == PokemonSpecies::Marowak || self.is_ghost_battle(ctx);
         if ghost_pic {
@@ -639,12 +641,15 @@ impl BattleMode {
     /// `SlidePlayerAndEnemySilhouettesOnScreen`: the player's back pic, the text box, the head's
     /// rows cleared for OAM to draw, and the slide.
     fn silhouettes(&mut self) {
+        // `_InitBattleCommon`'s `SET_PAL_BATTLE_BLACK`, and the slide's `SET_PAL_BATTLE` at the end.
+        self.push(Present::SetPalBattleBlack);
         self.push(Present::LoadPlayerBackPic { old_man: self.battle_type == BattleType::OldMan });
         self.push(Present::Pic { x: 1, y: 5, first: BACK_PIC_TILE });
         self.push(Present::TextBox(BattleBox::MessageBox));
         self.push(Present::Clear { x: 1, y: 5, width: 7, height: 3 });
         self.push(Present::Silhouettes);
         self.push(Present::Pic { x: 1, y: 5, first: BACK_PIC_TILE });
+        self.push_set_pal_battle();
     }
 
     /// What `BattleTransition` reads: the opponent, `wCurEnemyLevel`, the first party mon that can
@@ -657,7 +662,7 @@ impl BattleMode {
     /// `InitOpponent` for a trainer: the music, the party and the prize, the pic, and the trainer's
     /// challenge.
     fn init_opponent(&mut self, class: u8, number: u8, lone_attack: u8, rival_starter: u8, ctx: &mut Ctx) {
-        // `PlayBattleMusic`, reading a gym leader's `wGymLeaderNo` from its lone move.
+        // `PlayBattleMusic`: `wGymLeaderNo` is the byte `lone_attack` carries.
         let music = match class {
             _ if lone_attack != 0 => sounds::MUSIC_GYM_LEADER_BATTLE,
             RIVAL3 => sounds::MUSIC_FINAL_BATTLE,
@@ -680,6 +685,7 @@ impl BattleMode {
         battle.ai_count = 0xFF;
         battle.enemy.mon.party_pos = 0xFF;
         self.battle = Some(battle);
+        self.pal_species = [0, 0];
 
         self.push(Present::Frames(1));
         let last_level = self.b().enemy_party.last().map_or(0, |mon| mon.level);
@@ -735,6 +741,7 @@ impl BattleMode {
             .expect("a mon to send out");
         let next = &battle.enemy_party[which as usize];
         let (species, level) = (next.mon.species, next.level);
+        self.pal_species[1] = species as u8;
         load_enemy_mon_data(self.battle.as_mut().expect("a battle"), &mut ctx.world.pokedex, species, level, which, ctx.rng);
         self.enemy_nick = species.name();
         self.last_switch_in_enemy_hp = self.b().enemy.mon.hp;
@@ -758,6 +765,7 @@ impl BattleMode {
     fn enemy_sent_out(&mut self, switch: Option<u8>, ctx: &mut Ctx) {
         self.push(Present::ClearSprites);
         self.push(Present::Clear { x: 0, y: 0, width: 11, height: 4 });
+        self.push_set_pal_battle();
         self.push(Present::TextWith {
             commands: far("_TrainerSentOutText"),
             strings: vec![(TextBuffer::TrainerName, self.trainer_name.clone()),
@@ -830,6 +838,7 @@ impl BattleMode {
         let slot = self.b().player_mon_number as usize;
         let named = ctx.world.party[slot].clone();
         self.player_nick = named.nick.clone();
+        self.pal_species[0] = named.mon.mon.species as u8;
         let badges = ctx.world.badges;
         let battle = self.battle_mut();
         battle.player.mon = BattleMon::from_party(&named.mon);
@@ -885,6 +894,7 @@ impl BattleMode {
         battle.player.minimized = 0;
         battle.enemy.status1.remove(Status1::USING_TRAPPING_MOVE);
         let species = battle.player.mon.species;
+        self.push_set_pal_battle();
         // `wBoostExpByExpAll` is `wAnimationType`, zeroed just above.
         self.animation_type = animation_type::NONE;
         self.play_move_animation(anim::POOF_ANIM, Side::Enemy);
@@ -1031,11 +1041,7 @@ impl BattleMode {
                         self.reload_enemy_pic();
                         self.goto(Step::PartyMenuFromBattle);
                     }
-                    _ => {
-                        self.push(Present::ClearSprites);
-                        self.push(Present::LoadScreen2);
-                        self.goto(Step::DisplayBattleMenu);
-                    }
+                    _ => self.quit_party_menu(),
                 }
             }
         }
@@ -1071,6 +1077,14 @@ impl BattleMode {
         }
     }
 
+    /// `.quitPartyMenu`: the battle's screen and, by `RunDefaultPaletteCommand`, its palettes back.
+    fn quit_party_menu(&mut self) {
+        self.push(Present::ClearSprites);
+        self.push(Present::LoadScreen2);
+        self.push_set_pal_battle();
+        self.goto(Step::DisplayBattleMenu);
+    }
+
     /// `.partyMonDeselected`: the submenu blanked, and the party menu again.
     fn party_mon_deselected(&mut self) {
         self.push(Present::ClearRun { x: 11, y: 11, count: 6 * SCREEN_TILES_X + 9 });
@@ -1094,6 +1108,8 @@ impl BattleMode {
         self.action_taken = true;
         self.push(Present::ClearSprites);
         self.push(Present::LoadScreen1);
+        // `RunDefaultPaletteCommand`, which in a battle is `SET_PAL_BATTLE`, for the mon still out.
+        self.push_set_pal_battle();
         self.switch_player_mon(slot, ctx);
     }
 
@@ -2014,7 +2030,7 @@ impl BattleMode {
 
     fn after_faint_enemy(&mut self, ctx: &mut Ctx) {
         if !ctx.world.party.iter().any(|mon| mon.mon.mon.hp != 0) {
-            return self.handle_player_black_out();
+            return self.handle_player_black_out(ctx);
         }
         if self.b().player.mon.hp != 0 {
             self.push_hud(Side::Player);
@@ -2052,8 +2068,7 @@ impl BattleMode {
             strings: vec![(TextBuffer::TrainerName, self.trainer_name.clone())],
             numbers: vec![],
         });
-        self.push(Present::LoadTrainerPic(class));
-        self.push(Present::ScrollTrainerIn { columns: 1 });
+        self.scroll_trainer_pic_after_battle(class);
         self.push(Present::Frames(40));
         if let Some(words) = self.end_battle_text.clone() {
             let mut commands = far("_TrainerNameText");
@@ -2094,7 +2109,7 @@ impl BattleMode {
 
     fn after_remove_fainted_player_mon(&mut self, ctx: &mut Ctx) {
         if !ctx.world.party.iter().any(|mon| mon.mon.mon.hp != 0) {
-            return self.handle_player_black_out();
+            return self.handle_player_black_out(ctx);
         }
         if self.b().enemy.mon.hp == 0 {
             self.call_faint_enemy_pokemon(ctx);
@@ -2135,14 +2150,37 @@ impl BattleMode {
         self.load_battle_mon_from_party(ctx);
         hud::load_hud_tiles(&mut ctx.screen.tiles);
         self.push(Present::LoadScreen1);
+        self.push_set_pal_battle();
         self.call(Step::SendOutMon, Step::AfterChooseNextMon);
     }
 
-    /// `HandlePlayerBlackOut`, outside the first rival battle.
-    fn handle_player_black_out(&mut self) {
+    /// `HandlePlayerBlackOut`. `OPP_RIVAL1` scrolls back in to gloat first, and in Oak's lab that is
+    /// all: no blackout text, and `BIT_ALWAYS_ON_BIKE` is left alone.
+    fn handle_player_black_out(&mut self, ctx: &mut Ctx) {
+        if let Opponent::Trainer { class: RIVAL1, .. } = self.opponent {
+            // `ClearScreenArea` at 21 columns: each row runs one tile into the next.
+            self.push(Present::Clear { x: 0, y: 0, width: SCREEN_TILES_X, height: 8 });
+            self.push(Present::Clear { x: 0, y: 8, width: 1, height: 1 });
+            self.scroll_trainer_pic_after_battle(RIVAL1);
+            self.push(Present::Frames(40));
+            self.far_text("_Rival1WinText", Side::Player);
+            if ctx.world.location.map == poke_core::map::Map::OaksLab {
+                return self.goto(Step::BattleOver);
+            }
+        }
+        self.push(Present::SetPalBattleBlack);
         self.far_text("_PlayerBlackedOutText2", Side::Player);
+        ctx.world.location.always_on_bike = false;
         self.push(Present::Clear { x: 0, y: 0, width: SCREEN_TILES_X, height: SCREEN_TILES_Y });
         self.goto(Step::BattleOver);
+    }
+
+    /// `_ScrollTrainerPicAfterBattle`: no enemy mon for `SetPal_Battle` to colour, and the pic.
+    fn scroll_trainer_pic_after_battle(&mut self, class: u8) {
+        self.pal_species[1] = 0;
+        self.push_set_pal_battle();
+        self.push(Present::LoadTrainerPic(class));
+        self.push(Present::ScrollTrainerIn { columns: 1 });
     }
 
     fn end_of_battle(&mut self, ctx: &mut Ctx) {

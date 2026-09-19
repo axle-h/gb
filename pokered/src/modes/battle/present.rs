@@ -3,12 +3,14 @@
 use poke_core::text_script::{TextBuffer, TextCommand, TextNumber};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{Sound, SoundId};
+use crate::gfx::sgb::{determine_palette_id, PaletteCommand};
 use crate::gfx::text_boxes::TextBoxId;
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
 use crate::input::Joypad;
 use crate::mode::{Ctx, Mode, Transition};
 use crate::modes::text_box::TextBox;
-use crate::systems::battle::{BattleMon, Side};
+use crate::systems::battle::{BattleMon, Side, Status3};
+use crate::systems::hp_bar::HpBarColour;
 use super::animation::{AnimBattle, Animation, Routine};
 use super::hud::{self, Bar, HpBar};
 use super::transition::{self, BattleTransition, Choice, Silhouettes};
@@ -57,9 +59,15 @@ pub enum Present {
     Music(Sound),
     /// `UpdateHPBar2` from `old` to `new`, of the side's max HP.
     HpBar { side: Side, old: u16, new: u16 },
-    /// The HUDs of the mon as the step left it, since a later step may change it first.
-    DrawPlayerHud { mon: Box<BattleMon>, nick: Vec<u8> },
-    DrawEnemyHud { mon: Box<BattleMon>, nick: Vec<u8> },
+    /// The HUDs of the mon as the step left it, since a later step may change it first, each
+    /// ending on `GetBattleHealthBarColor`.
+    DrawPlayerHud { mon: Box<BattleMon>, nick: Vec<u8>, mons: MonPalettes },
+    DrawEnemyHud { mon: Box<BattleMon>, nick: Vec<u8>, mons: MonPalettes },
+    /// `GetBattleHealthBarColor` of a colour worked out by hand, as `ReplaceFaintedEnemyMon` does.
+    HealthBarColour { side: Side, colour: HpBarColour, mons: MonPalettes },
+    /// `RunPaletteCommand` of `SET_PAL_BATTLE_BLACK` and of `SET_PAL_BATTLE`.
+    SetPalBattleBlack,
+    SetPalBattle(MonPalettes),
     Clear { x: usize, y: usize, width: usize, height: usize },
     /// `FillMemory` of blanks over `count` tiles from `(x, y)`, running on past each row's end.
     ClearRun { x: usize, y: usize, count: usize },
@@ -109,6 +117,31 @@ pub enum Present {
     Menu,
 }
 
+/// `wPlayerHPBarColor` and `wEnemyHPBarColor`, which `InitBattleVariables` zeroes to green.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HpBarColours {
+    pub player: HpBarColour,
+    pub enemy: HpBarColour,
+}
+
+impl Default for HpBarColours {
+    fn default() -> Self {
+        Self { player: HpBarColour::Green, enemy: HpBarColour::Green }
+    }
+}
+
+/// The two `DeterminePaletteID`s `SetPal_Battle` works out, as the step that asked left the mons.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonPalettes {
+    pub player: u8,
+    pub enemy: u8,
+}
+
+/// `SetPal_Battle`'s packet: both bars and both mons.
+pub fn set_pal_battle(colours: HpBarColours, mons: MonPalettes) -> PaletteCommand {
+    PaletteCommand::Battle { player_hp_bar: colours.player, enemy_hp_bar: colours.enemy, player: mons.player, enemy: mons.enemy }
+}
+
 /// The text boxes a battle draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BattleBox {
@@ -150,6 +183,38 @@ pub enum Waiting {
 }
 
 impl BattleMode {
+    /// `SetPal_Battle`'s mon palettes now: a transformed mon is grey, whatever it looks like.
+    pub(super) fn mon_palettes(&self) -> MonPalettes {
+        let battle = self.b();
+        let transformed = |side: Side| battle.side(side).status3.contains(Status3::TRANSFORMED);
+        self.mon_palettes_as([transformed(Side::Player), transformed(Side::Enemy)])
+    }
+
+    /// `SetPal_Battle`'s mon palettes with each side's `TRANSFORMED` bit given.
+    pub(super) fn mon_palettes_as(&self, transformed: [bool; 2]) -> MonPalettes {
+        MonPalettes {
+            player: determine_palette_id(transformed[0], self.pal_species[0]),
+            enemy: determine_palette_id(transformed[1], self.pal_species[1]),
+        }
+    }
+
+    pub(super) fn push_set_pal_battle(&mut self) {
+        let mons = self.mon_palettes();
+        self.queue.push_back(Present::SetPalBattle(mons));
+    }
+
+    /// `GetBattleHealthBarColor`: the palette sent again only when the bar changed colour.
+    fn battle_health_bar_colour(&mut self, side: Side, colour: HpBarColour, mons: MonPalettes, ctx: &mut Ctx) {
+        let stored = match side {
+            Side::Player => &mut self.hp_bar_colours.player,
+            Side::Enemy => &mut self.hp_bar_colours.enemy,
+        };
+        if *stored != colour {
+            *stored = colour;
+            ctx.screen.sgb.run(&set_pal_battle(self.hp_bar_colours, mons));
+        }
+    }
+
     fn draw_enemy_pokeballs(&mut self, ctx: &mut Ctx) {
         hud::place_enemy_hud_tiles(&mut ctx.screen.ui);
         let battle = self.battle.as_ref().expect("a battle");
@@ -240,13 +305,18 @@ impl BattleMode {
                     self.waiting = Waiting::HpBar(bar);
                 }
             }
-            Present::DrawPlayerHud { mon, nick } => {
+            Present::DrawPlayerHud { mon, nick, mons } => {
                 let colour = hud::draw_player_hud(ui, &mon, &nick);
+                self.battle_health_bar_colour(Side::Player, colour, mons, ctx);
                 self.update_low_health_alarm(ctx, colour, mon.hp == 0);
             }
-            Present::DrawEnemyHud { mon, nick } => {
-                hud::draw_enemy_hud(ui, &mon, &nick);
+            Present::DrawEnemyHud { mon, nick, mons } => {
+                let colour = hud::draw_enemy_hud(ui, &mon, &nick);
+                self.battle_health_bar_colour(Side::Enemy, colour, mons, ctx);
             }
+            Present::HealthBarColour { side, colour, mons } => self.battle_health_bar_colour(side, colour, mons, ctx),
+            Present::SetPalBattleBlack => ctx.screen.sgb.run(&PaletteCommand::BattleBlack),
+            Present::SetPalBattle(mons) => ctx.screen.sgb.run(&set_pal_battle(self.hp_bar_colours, mons)),
             Present::Clear { x, y, width, height } => hud::clear_area(ui, x, y, width, height),
             Present::ClearRun { x, y, count } => {
                 for at in y * SCREEN_TILES_X + x..y * SCREEN_TILES_X + x + count {
@@ -291,7 +361,8 @@ impl BattleMode {
                     return None;
                 }
                 let animations_on = ctx.world.options.battle_animation;
-                self.waiting = Waiting::Animation(Box::new(Animation::new(routine, turn, AnimBattle { animations_on, ..battle })));
+                let battle = AnimBattle { animations_on, hp_bar_colours: self.hp_bar_colours, ..battle };
+                self.waiting = Waiting::Animation(Box::new(Animation::new(routine, turn, battle)));
             }
             Present::SlideDown { x, y, row } => {
                 // Each step copies the picture's rows down one, top row first blanked.

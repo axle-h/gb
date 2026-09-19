@@ -10,15 +10,13 @@
 //! [`LearnMove::from_level_up`] for `LearnMoveFromLevelUp`. It answers `Outcome::Chosen(1)` when
 //! the move was learned and `Chosen(0)` when not, the cartridge's `b`. In a battle the caller copies
 //! the moves and PP to its battle mon when the mon is the one out.
-//!
-//! Faithful rather than exact: `OneTwoAndText`'s `text_asm` plays `SFX_SWAP` between `1, 2 and...`
-//! and ` Poof!`, which the text box does not play; the two halves are one script here.
 
 use poke_core::move_name::PokemonMoveName;
 use poke_core::moves::MoveData;
 use poke_core::symbols::{pokered_symbols, DmgPointer};
 use poke_core::text_script::{decode, TextBuffer, TextCommand};
 use serde::{Deserialize, Serialize};
+use crate::audio::data::sounds;
 use crate::command::Decision;
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
 use crate::input::Joypad;
@@ -149,13 +147,12 @@ impl LearnMove {
             return self.text(Phase::HmCantDelete, script(pokered_symbols::HMCantDeleteText));
         }
         ctx.world.text.strings.insert(TextBuffer::NameBuffer, forgotten.name());
-        // `OneTwoAndText` ends in a `text_asm` that plays a sound and carries on with `PoofText`,
+        // `OneTwoAndText` ends in a `text_asm` that plays `SFX_SWAP` and carries on with `PoofText`,
         // which runs on into `ForgotAndText`.
-        let mut commands: Vec<TextCommand> = script(pokered_symbols::OneTwoAndText).into_iter()
-            .filter(|command| !matches!(command, TextCommand::Asm(_)))
-            .collect();
+        let mut commands = script(pokered_symbols::OneTwoAndText);
         commands.extend(script(pokered_symbols::PoofText));
-        self.text(Phase::Forgetting(row), commands)
+        self.phase = Phase::Forgetting(row);
+        Transition::Push(Mode::TextBox(TextBox::script(commands).with_asm_sound(sounds::SFX_SWAP)))
     }
 }
 
@@ -284,6 +281,36 @@ mod tests {
         press(&mut game, Joypad::A);
         until(&mut game, None);
         assert_eq!(moves(&game), ([Some(Gust), Some(WingAttack), Some(Cut), Some(QuickAttack)], [0xC5, 35, 0xC5, 0xC5]));
+    }
+
+    /// `OneTwoAndText`'s `text_asm`: `SFX_SWAP` between `1, 2 and...` and ` Poof!`, which goes on
+    /// the same line.
+    #[test]
+    fn the_swap_sound_plays_between_one_two_and_and_poof() {
+        let world = World { party: vec![pidgey(FULL)], ..World::default() };
+        let mut game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::LearnMove(LearnMove::new(0, WingAttack)));
+        until(&mut game, Some(Decision::TwoOption));
+        press(&mut game, Joypad::A);
+        until(&mut game, Some(Decision::ForgetMove));
+        press(&mut game, Joypad::A);
+        let swapping = |game: &Game| (4..8).any(|channel| game.audio().channel_sound_id(channel) == sounds::SFX_SWAP.0);
+        let line = |game: &Game| game.ui().row(14)[1..18].to_vec();
+        for _ in 0..400 {
+            if swapping(&game) {
+                break;
+            }
+            game.frame(Input::None);
+        }
+        assert!(swapping(&game), "SFX_SWAP never played");
+        let one_two = encode("1, 2 and...").unwrap();
+        assert_eq!(line(&game)[..one_two.len()], one_two[..], "after the first half");
+        assert_eq!(line(&game)[one_two.len()], UiSurface::BLANK, "and before the second");
+        for _ in 0..100 {
+            game.frame(Input::None);
+        }
+        let poof = encode("1, 2 and... Poof!").unwrap();
+        assert_eq!(line(&game)[..poof.len()], poof[..], "Poof! goes on where the text stopped");
     }
 
     #[test]

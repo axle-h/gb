@@ -1,5 +1,5 @@
 //! `Route16Gate1F_Script`: the southern gate of the Cycling Road, which takes the player off the
-//! bike the road forces on them and walks anyone carrying one up to the guard's counter.
+//! bike the road forces on them and walks anyone without one up to the guard's counter.
 
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_local_labels::Route16Gate1FGuardText;
@@ -39,9 +39,9 @@ pub fn script(rt: &mut Script) -> Flow {
     }
 }
 
-/// `Route16Gate1FDefaultScript`: the guard stops nobody who has no bicycle to ride.
+/// `Route16Gate1FDefaultScript`: the guard lets a player with a bicycle by and stops one on foot.
 fn default_script(rt: &mut Script) -> Flow {
-    if !rt.is_item_in_bag(ItemId::Bicycle) {
+    if rt.is_item_in_bag(ItemId::Bicycle) {
         return Flow::Return;
     }
     let Some(index) = rt.are_player_coords_in_array(&STOPS_PLAYER) else {

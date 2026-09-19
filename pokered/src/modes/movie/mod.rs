@@ -5,7 +5,7 @@
 //! is under it is whatever was there before power-on, which for a host is nothing.
 //!
 //! [`Movie::hall_of_fame`] is the whole of the script that calls `HallOfFamePC`, so it saves the
-//! game and restarts the console rather than returning to what pushed it. The save it leaves is
+//! game and restarts the console rather than returning to the overworld it took the place of. The save it leaves is
 //! taken in the Hall of Fame, the one room CONTINUE does not resume in.
 
 mod hall_of_fame;

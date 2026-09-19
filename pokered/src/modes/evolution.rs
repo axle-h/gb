@@ -18,7 +18,8 @@
 //! for `TryEvolvingMon` (Rare Candy, stones). It answers `Outcome::Chosen(1)` when anything evolved
 //! (`wEvolutionOccurred`); `PlayDefaultMusic` after an evolution outside a battle is the caller's.
 //!
-//! Not modelled: the palette writes and `ClearSprites`, and `wLowHealthAlarm`.
+//! The screen goes black and back only on the SGB, through `SET_PAL_POKEMON_WHOLE_SCREEN`: nothing
+//! here touches `rBGP`, so a DMG shows no whiteout.
 
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::{pokered_symbols, DmgPointer};

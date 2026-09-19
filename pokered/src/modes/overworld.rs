@@ -26,6 +26,7 @@ pub mod script;
 mod battles;
 pub mod escape;
 mod field_moves;
+pub mod fishing;
 mod fly;
 pub mod bike_surf;
 pub mod events;
@@ -407,6 +408,12 @@ impl Overworld {
         ctx.pad.held = Joypad::empty();
         ctx.pad.pressed = Joypad::empty();
         ctx.pad.released = Joypad::empty();
+        self.rt.gym_leader_no = 0;
+        self.rt.step_counter = 0;
+        self.rt.events.card_key_door = (0, 0);
+        // The fill from `wWhichTrade` to `wStandingOnWarpPadOrHole`, where `wHiddenEventIndex` is
+        // the one byte read before it is written: the slot machines' count starts again on a new map.
+        self.rt.events.hidden_event_index = 0;
         if self.rt.wild_encounter_cooldown {
             self.rt.no_random_battle_steps = battles::NO_RANDOM_BATTLE_STEPS;
         }
@@ -743,6 +750,9 @@ impl Overworld {
             ctx.pad.pressed = Joypad::empty();
             ctx.pad.released = Joypad::empty();
         }
+        if self.on_cycling_road_slope(ctx.world) && !ctx.pad.held.intersects(PAD_CTRL_PAD | Joypad::A | Joypad::B) {
+            ctx.pad.held = Joypad::DOWN;
+        }
         if !self.scripted || ctx.pad.held.intersects(self.rt.override_simulated) {
             return;
         }
@@ -799,10 +809,21 @@ impl Overworld {
         Transition::Stay
     }
 
+    /// Whether the player, and nothing scripted, would have the next poll.
+    fn free_to_poll(&self, ctx: &Ctx) -> bool {
+        !self.scripted && !self.exiting_door && !self.joypad_disabled && ctx.pad.ignore.is_empty()
+            && !self.rt.paths.scripted_npc_movement && self.rt.npc_movement_script_table == 0
+    }
+
+    /// `JoypadOverworld`'s Cycling Road: with no trainer engaging, a poll that finds nothing held
+    /// finds Down.
+    fn on_cycling_road_slope(&self, world: &World) -> bool {
+        world.location.map == Map::Route17 && !self.rt.trainer_battle
+    }
+
     /// `.noDirectionButtonsPressed`.
     fn no_direction_buttons_pressed(&mut self, ctx: &mut Ctx) -> Transition {
-        self.polled = !self.scripted && !self.exiting_door && !self.joypad_disabled && ctx.pad.ignore.is_empty()
-            && !self.rt.paths.scripted_npc_movement && self.rt.npc_movement_script_table == 0;
+        self.polled = self.free_to_poll(ctx);
         self.turning = false;
         self.update_sprites(ctx);
         self.standing.check_for_180_degree_turn = 1;
@@ -1313,6 +1334,9 @@ impl ModeUpdate for Overworld {
             // Stopped where the cartridge's loop had just polled, so its sprites are already updated.
             self.polled = true;
         } else {
+            // `EnterMap`'s `BIT_CUR_MAP_LOADED_1` and `_2`: a map continued from a save redraws what
+            // its events changed, the Cinnabar gates and the Silph Co doors among them.
+            self.rt.cur_map_loaded = [true; 2];
             self.update_sprites(ctx);
         }
         self.load_gb_pal(ctx);
@@ -1356,6 +1380,11 @@ impl ModeUpdate for Overworld {
             }
             Phase::Script => self.script_frame(ctx),
         };
+        // The slope answers a poll that finds nothing held, so the turn is offered before it, and a
+        // host that sends nothing rolls on at the cartridge's pace.
+        if matches!(self.phase, Phase::Loop(_)) && !self.moving() && self.on_cycling_road_slope(ctx.world) && self.free_to_poll(ctx) {
+            self.polled = true;
+        }
         if matches!(transition, Transition::Stay) {
             self.present(ctx);
         }
@@ -1469,6 +1498,10 @@ impl OverworldDriver {
         if world.location.facing == direction.facing() {
             return Err(Refusal::Invalid(format!("the player already faces {:?}", direction)));
         }
+        // The slope answers every poll, so `.noDirectionButtonsPressed` never arms a turn there.
+        if overworld.on_cycling_road_slope(world) {
+            return Err(Refusal::Invalid("on the Cycling Road's slope a press rides rather than turns".into()));
+        }
         if overworld.standing.last_stop_direction == direction as u8 {
             return Err(Refusal::Invalid(format!("a press {:?} would walk rather than turn", direction)));
         }
@@ -1581,6 +1614,27 @@ mod tests {
     }
 
     #[test]
+    fn the_cycling_road_carries_an_idle_player_downhill_and_offers_a_turn_at_every_square() {
+        let mut game = game_at(Map::Route17, 8, 20);
+        let mut offered = 0;
+        for _ in 0..160 {
+            game.frame(Input::None);
+            if game.status() == Status::Waiting(Decision::Overworld) {
+                offered += 1;
+            }
+        }
+        let (_, x, y) = at(&game);
+        assert_eq!(x, 8);
+        assert_eq!(y, 29, "nine squares in 160 frames");
+        assert!(offered >= 9, "a turn between each square, {offered}");
+
+        settle(&mut game);
+        let (_, _, y) = at(&game);
+        command(&mut game, Command::Step(Direction::Up));
+        assert_eq!(at(&game), (Map::Route17, 8, y - 1), "a press answers the turn before the slope does");
+    }
+
+    #[test]
     fn a_step_is_sixteen_frames_and_a_turn_costs_a_pass_more() {
         let mut game = game_at(Map::PalletTown, 5, 9);
         command(&mut game, Command::Step(Direction::Up));
@@ -1610,6 +1664,34 @@ mod tests {
         command(&mut game, Command::Step(Direction::Down));
         assert_eq!(at(&game), (Map::PalletTown, 5, 6), "out of the door and a step down");
         assert_eq!(game.world().location.facing, SpriteFacing::Down);
+    }
+
+    /// `ClearVariablesOnEnterMap` zeroes `wGymLeaderNo`, or a beaten leader would silence every
+    /// trainer's encounter music from then on.
+    #[test]
+    fn a_new_map_forgets_the_gym_leader() {
+        let mut world = World::default();
+        world.location = Location { map: Map::PalletTown, x: 5, y: 6, facing: SpriteFacing::Up, last_map: Map::PalletTown, ..Location::default() };
+        let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
+        let mut overworld = Overworld::new();
+        overworld.rt.no_battles = true;
+        overworld.rt.gym_leader_no = 1;
+        game.push(Mode::Overworld(overworld));
+        settle(&mut game);
+        command(&mut game, Command::Step(Direction::Up));
+        assert_eq!(at(&game).0, Map::RedsHouse1F);
+        let Some(Mode::Overworld(overworld)) = game.modes().last() else { panic!("the overworld") };
+        assert_eq!(overworld.rt.gym_leader_no, 0);
+    }
+
+    /// While the slope carries the player, no poll finds nothing held, so a press always rides.
+    #[test]
+    fn the_cycling_road_refuses_a_turn() {
+        let mut game = game_at(Map::Route17, 8, 20);
+        let frame = game.frame(Input::Command(Command::Face(Direction::Left)));
+        assert!(matches!(frame.reply, Some(Reply::Refused(Refusal::Invalid(_)))), "{:?}", frame.reply);
+        command(&mut game, Command::Step(Direction::Left));
+        assert_eq!(at(&game).1, 7, "a step still goes");
     }
 
     #[test]
@@ -1737,6 +1819,111 @@ mod tests {
         let ridden = command(&mut game, Command::Step(Direction::Up));
         assert_eq!(at(&game), (Map::PalletTown, 5, 7));
         assert!(ridden < walked, "{ridden} frames on the bike against {walked} on foot");
+    }
+
+    /// Beside Pallet Town's water with a party and `rod`, facing it, and the rod chosen from the bag.
+    fn cast(rod: poke_core::item::ItemId, seed: u64) -> Game {
+        use crate::modes::start_menu::StartMenuEntry;
+        use crate::systems::add_mon::{new_party_mon, Origin};
+        let game = game_at(Map::PalletTown, 4, 13);
+        let mut world = game.world().clone();
+        world.bag = crate::systems::inventory::Inventory::bag(vec![poke_core::bag::BagItem::new(rod, 1)]);
+        world.player_name = poke_core::charmap::encode("RED").unwrap();
+        let mon = new_party_mon(poke_core::species::PokemonSpecies::Pidgey, 20, 0, &Origin::Trainer, &mut GameRng::tape(vec![]));
+        world.party = vec![crate::party::Named { mon, ot: world.player_name.clone(), nick: poke_core::charmap::encode("BIRD").unwrap() }];
+        let mut game = Game::new(world, GameRng::seeded(seed), Pacing::Faithful);
+        game.push(Mode::Overworld(Overworld::new()));
+        settle(&mut game);
+        command(&mut game, Command::Face(Direction::Down));
+        game.frame(Input::Command(Command::OpenStartMenu));
+        until(&mut game, Decision::StartMenu);
+        game.frame(Input::Command(Command::ChooseStartMenuEntry(StartMenuEntry::Item)));
+        until(&mut game, Decision::List);
+        game.frame(Input::Command(Command::ChooseListEntry(0)));
+        until(&mut game, Decision::UseToss);
+        game.frame(Input::Command(Command::ChooseOption(0)));
+        game
+    }
+
+    fn until(game: &mut Game, decision: Decision) {
+        for _ in 0..2000 {
+            if game.status() == Status::Waiting(decision.clone()) {
+                return;
+            }
+            game.frame(Input::None);
+        }
+        panic!("never waited for {decision:?}: {:?}", game.status());
+    }
+
+    fn overworld(game: &Game) -> &Overworld {
+        let Some(Mode::Overworld(overworld)) = game.modes().first() else { panic!("the overworld") };
+        overworld
+    }
+
+    #[test]
+    fn the_old_rod_hooks_a_magikarp_after_the_cast_and_the_bite_and_the_battle_follows() {
+        let mut game = cast(poke_core::item::ItemId::OldRod, 7);
+        let mut frames = 0;
+        while game.status() != Status::Waiting(Decision::Text) {
+            game.frame(Input::None);
+            frames += 1;
+            assert!(frames < 2000);
+        }
+        let bite = poke_core::charmap::encode("It's a bite!").unwrap();
+        assert_eq!(game.ui().row(16)[1..1 + bite.len()], bite[..]);
+        assert!(frames > 80 + 10 + 100 + 30 + 60, "the waits, the shakes and the bubble: {frames}");
+        assert!(game.ui().cover(12, 2).is_none(), "over the map rather than the menu");
+        assert_eq!(game.screen().sprites[39].tile, 0xFD, "the rod, facing down");
+        let rt = &overworld(&game).rt;
+        assert_eq!((rt.cur_opponent, rt.cur_enemy_level), (poke_core::species::PokemonSpecies::Magikarp as u8, 5));
+        game.frame(Input::Command(Command::Advance));
+        for _ in 0..30 {
+            game.frame(Input::None);
+            if matches!(game.modes().last(), Some(Mode::Battle(_))) {
+                return;
+            }
+        }
+        panic!("no battle: {:?}", game.modes().last().map(|m| m.status()));
+    }
+
+    #[test]
+    fn the_good_rod_sometimes_gets_not_even_a_nibble_and_the_map_comes_back() {
+        let (mut bites, mut nibbles) = (0, 0);
+        for seed in 0..12 {
+            let mut game = cast(poke_core::item::ItemId::GoodRod, seed);
+            until(&mut game, Decision::Text);
+            let nibble = poke_core::charmap::encode("Not even a nibble!").unwrap();
+            if game.ui().row(14)[1..1 + nibble.len()] == nibble[..] {
+                nibbles += 1;
+                assert_eq!(overworld(&game).rt.cur_opponent, 0);
+                game.frame(Input::Command(Command::Advance));
+                settle(&mut game);
+                assert_eq!(game.modes().len(), 1, "the start menu closed");
+                assert!(game.ui().cover(1, 14).is_none(), "the map is back");
+                assert!(!overworld(&game).jumping, "the rod put away");
+            } else {
+                bites += 1;
+                assert_ne!(overworld(&game).rt.cur_opponent, 0);
+            }
+        }
+        assert!(bites > 0 && nibbles > 0, "{bites} bites and {nibbles} nibbles");
+    }
+
+    #[test]
+    fn a_new_map_forgets_the_step_counter_the_card_key_door_and_the_hidden_event_index() {
+        let mut world = World::default();
+        world.location = Location { map: Map::PalletTown, x: 5, y: 6, facing: SpriteFacing::Up, last_map: Map::PalletTown, ..Location::default() };
+        let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
+        let mut overworld = Overworld::new().with_step_counter(3);
+        overworld.rt.no_battles = true;
+        overworld.rt.events.card_key_door = (2, 3);
+        overworld.rt.events.hidden_event_index = 5;
+        game.push(Mode::Overworld(overworld));
+        settle(&mut game);
+        command(&mut game, Command::Step(Direction::Up));
+        assert_eq!(at(&game).0, Map::RedsHouse1F);
+        let rt = &self::overworld(&game).rt;
+        assert_eq!((rt.step_counter, rt.events.card_key_door, rt.events.hidden_event_index), (0, (0, 0), 0));
     }
 
     #[test]

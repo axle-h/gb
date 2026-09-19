@@ -8,6 +8,7 @@ use poke_core::species::PokemonSpecies;
 use poke_core::text_script::TextBuffer;
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
+use crate::gfx::sgb::PaletteCommand;
 use crate::gfx::mon_icons::{animate_party_mon, clear_sprites, load_mon_party_sprite_gfx, write_mon_party_sprite_oam};
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
@@ -304,6 +305,8 @@ impl NamingScreen {
 impl ModeUpdate for NamingScreen {
     fn enter(&mut self, ctx: &mut Ctx) {
         ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
+        // `SET_PAL_GENERIC`, which nothing puts back: the caller's `LoadGBPal` is the DMG's palette.
+        ctx.screen.sgb.run(&PaletteCommand::Generic);
         ctx.screen.tiles.load_hp_bar_and_status_tiles();
         ctx.screen.tiles.load_ed_tile();
         load_mon_party_sprite_gfx(&mut ctx.screen.tiles);
@@ -398,6 +401,17 @@ mod tests {
 
     fn typed(game: &Game) -> Vec<u8> {
         game.world().text.string(TextBuffer::StringBuffer)
+    }
+
+    #[test]
+    fn the_screen_sends_the_generic_palette() {
+        let mut game = Game::new(World::default(), GameRng::seeded(0), Pacing::Faithful);
+        game.screen_mut().sgb.run(&PaletteCommand::TownMap);
+        game.push(Mode::NamingScreen(NamingScreen::new(NamingScreenType::Player, None)));
+        until_waiting(&mut game);
+        let mut generic = crate::gfx::sgb::SgbState::default();
+        generic.run(&PaletteCommand::Generic);
+        assert_eq!(game.screen().sgb.palette_ids(), generic.palette_ids());
     }
 
     #[test]

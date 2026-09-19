@@ -1,5 +1,6 @@
 //! `DisplayTownMap` and `LoadTownMap_Fly`: the world map from the bag, and the same picture used to
-//! pick a town to fly to.
+//! pick a town to fly to. `LoadTownMap_Nest`, the Pokédex's AREA, is the same picture again with an
+//! icon on every place a species can be met wild, and waits for A or B.
 //!
 //! Both are the picture (`LoadTownMap`), a marker sprite on one square, and that square's name along
 //! the top row. The bag's screen walks `TownMapOrder`, a list of 47 places that is nothing like map
@@ -15,6 +16,7 @@
 
 use poke_core::map::Map;
 use poke_core::map_objects::FIRST_INDOOR_MAP;
+use poke_core::species::PokemonSpecies;
 use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
 use poke_core::symbols::{pokered_symbols, DmgPointer};
 use serde::{Deserialize, Serialize};
@@ -52,6 +54,10 @@ const ARROW_BEAT: u8 = 15;
 /// tile, which is why the screen loads `TownMapUpArrow` over it.
 const UP_ARROW: (usize, u8) = (18, 0xED);
 const DOWN_ARROW: (usize, u8) = (19, 0xEE);
+/// `NUM_WILDMONS`, the slots in a grass or a water block.
+const NUM_WILDMONS: usize = 10;
+/// Cerulean Cave's square, which `DisplayWildLocations` never marks.
+const CERULEAN_CAVE: u8 = 0x19;
 /// `'@'`, which ends a name in the cartridge's tables.
 const TERMINATOR: u8 = 0x50;
 
@@ -72,6 +78,9 @@ pub struct TownMap {
     phase: Phase,
     /// Whether the pad has been read since the screen was drawn.
     polled: bool,
+    /// `LoadTownMap_Nest`'s species, by its index.
+    #[serde(default)]
+    nest: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,7 +94,12 @@ impl TownMap {
     /// `DisplayTownMap`, which the Town Map item and `TownMapText` both open.
     pub fn item() -> Self {
         Self { fly: false, which: 0, list: Vec::new(), at: 0, anim: 0, backup: Vec::new(),
-               phase: Phase::Input, polled: false }
+               phase: Phase::Input, polled: false, nest: None }
+    }
+
+    /// `LoadTownMap_Nest` for `species`.
+    pub fn nest(species: PokemonSpecies) -> Self {
+        Self { nest: Some(species as u8), ..Self::item() }
     }
 
     /// `LoadTownMap_Fly`.
@@ -177,6 +191,33 @@ impl TownMap {
         ctx.screen.sgb.run(&PaletteCommand::Default);
     }
 
+    /// `DisplayWildLocations` and the title over it. A place is marked by one object with the nest
+    /// icon on its square, from OAM slot 0 up; with none marked the box saying so goes up instead of
+    /// the player's marker.
+    fn open_nest(&mut self, ctx: &mut Ctx, species: u8) {
+        let mut marked = 0;
+        for map in zero_out_duplicates(find_wild_locations_of_mon(species)) {
+            // A zeroed duplicate and Pallet Town look the same, and neither is marked.
+            let Some((coords, _)) = (map != 0).then(|| load_town_map_entry(map)).flatten() else { continue };
+            if coords == CERULEAN_CAVE || marked == ctx.screen.sprites.len() {
+                continue;
+            }
+            let (y, x) = town_map_coords_to_oam_coords(coords);
+            ctx.screen.sprites[marked] = Object { y, x, tile: BIRD_BASE_TILE, attributes: 0 };
+            marked += 1;
+        }
+        if marked == 0 {
+            ctx.screen.ui.text_box_border(1, 7, 15, 2);
+            ctx.screen.ui.place(2, 9, &poke_core::charmap::encode(" AREA UNKNOWN").expect("`AreaUnknownText` encodes"));
+        } else {
+            self.draw_player_or_bird_sprite(ctx, ctx.world.location.map as u8, 0);
+        }
+        self.backup = ctx.screen.sprites.clone();
+        let name = PokemonSpecies::from_repr(species).map(|species| species.name()).unwrap_or_default();
+        ctx.screen.ui.place(1, 0, &name);
+        ctx.screen.ui.place(1 + name.len(), 0, &poke_core::charmap::encode("'s NEST").expect("`MonsNestText` encodes"));
+    }
+
     /// `BuildFlyLocationsList`, then the fly screen's own graphics and its `To`.
     fn open_fly(&mut self, ctx: &mut Ctx) {
         let tileset = ctx.screen.map.tileset.unwrap_or_default();
@@ -228,6 +269,9 @@ impl ModeUpdate for TownMap {
         if self.fly {
             return self.open_fly(ctx);
         }
+        if let Some(species) = self.nest {
+            return self.open_nest(ctx, species);
+        }
         let map = ctx.world.location.map as u8;
         let name = self.draw_player_or_bird_sprite(ctx, map, 0);
         ctx.screen.ui.place(1, 0, &name);
@@ -255,6 +299,15 @@ impl ModeUpdate for TownMap {
             return Transition::Stay;
         }
         self.polled = false;
+        // `WaitForTextScrollButtonPress`, which makes no sound of its own.
+        if self.nest.is_some() {
+            if watched.intersects(Joypad::A | Joypad::B) {
+                self.exit_town_map(ctx);
+                return Transition::Pop(Outcome::Done);
+            }
+            self.polled = true;
+            return Transition::Stay;
+        }
         if self.fly {
             if watched.contains(Joypad::A) {
                 // `.pressedA`: `BIT_FLY_WARP` and `BIT_USED_FLY`, which the overworld's next pass takes.
@@ -297,6 +350,54 @@ impl ModeUpdate for TownMap {
 /// The bytes between two labels of the same table.
 fn rom_bytes(from: DmgPointer, to: DmgPointer) -> &'static [u8] {
     &rom_slice(from)[..(to.address - from.address) as usize]
+}
+
+/// `FindWildLocationsOfMon`: a map for every grass or water slot of its table that holds `species`,
+/// in map order and with a map repeated for each slot. `WildDataPointers` ends at a pointer of `-1`.
+fn find_wild_locations_of_mon(species: u8) -> Vec<u8> {
+    let pointers = pokered_symbols::WildDataPointers;
+    let table = rom_slice(pointers);
+    let mut maps = Vec::new();
+    for (map, pointer) in table.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).enumerate() {
+        if pointer >> 8 == 0xFF {
+            break;
+        }
+        let data = rom_slice(DmgPointer { bank: pointers.bank, address: pointer });
+        let mut at = 0;
+        // `CheckMapForMon`, over the grass block and then the water block.
+        for _ in 0..2 {
+            let rate = data[at];
+            at += 1;
+            if rate == 0 {
+                continue;
+            }
+            for slot in 0..NUM_WILDMONS {
+                if data[at + 2 * slot + 1] == species {
+                    maps.push(map as u8);
+                }
+            }
+            at += 2 * NUM_WILDMONS;
+        }
+    }
+    maps
+}
+
+/// `ZeroOutDuplicatesInList`: every later copy of a map becomes 0, so each is marked once.
+fn zero_out_duplicates(mut maps: Vec<u8>) -> Vec<u8> {
+    for i in 0..maps.len() {
+        let map = maps[i];
+        for later in &mut maps[i + 1..] {
+            if *later == map {
+                *later = 0;
+            }
+        }
+    }
+    maps
+}
+
+/// `TownMapCoordsToOAMCoords`: the object's `y` and `x` for a square, with no centring.
+fn town_map_coords_to_oam_coords(coords: u8) -> (u8, u8) {
+    (((coords & 0xF0) >> 1) + 24, ((coords & 0x0F) << 3) + 24)
 }
 
 /// `TownMapOrder`: the places the bag's screen walks, in the order it walks them.
@@ -359,6 +460,17 @@ mod tables {
 
     /// An outside map has a row of its own; a building belongs to the group it is in, so Oak's lab
     /// marks the same square as the town around it.
+    /// Route 1's grass holds Pidgey in more than one slot, and the list keeps the map once.
+    #[test]
+    fn a_species_is_found_once_per_slot_and_marked_once_per_map() {
+        let found = find_wild_locations_of_mon(PokemonSpecies::Pidgey as u8);
+        let route_1 = found.iter().filter(|&&map| map == Map::Route1 as u8).count();
+        assert!(route_1 > 1, "a map a slot, {route_1} for Route 1");
+        let marked = zero_out_duplicates(found);
+        assert_eq!(marked.iter().filter(|&&map| map == Map::Route1 as u8).count(), 1);
+        assert!(find_wild_locations_of_mon(PokemonSpecies::Bulbasaur as u8).is_empty());
+    }
+
     #[test]
     fn a_map_s_square_and_name_come_off_the_two_tables() {
         let (coords, name) = load_town_map_entry(Map::PalletTown as u8).unwrap();

@@ -51,7 +51,8 @@ pub struct TwoOptionMenu {
     /// `hl`: the border's upper left corner.
     at: (usize, usize),
     input: MenuInput,
-    saved: Vec<u8>,
+    /// The region under the box, `None` where the map showed through.
+    saved: Vec<Option<u8>>,
     chosen: u8,
     phase: Phase,
     /// `NO_YES_MENU`'s pushed `wMiscFlags`: whether the button sound was already off.
@@ -111,7 +112,7 @@ impl TwoOptionMenu {
     fn save_tiles(&mut self, ui: &UiSurface) {
         let (right, bottom) = self.region();
         self.saved = (self.at.1..bottom).flat_map(|y| (self.at.0..right).map(move |x| (x, y)))
-            .map(|(x, y)| ui.get(x, y))
+            .map(|(x, y)| ui.cover(x, y))
             .collect();
     }
 
@@ -120,8 +121,10 @@ impl TwoOptionMenu {
         let mut saved = self.saved.iter();
         for y in self.at.1..bottom {
             for x in self.at.0..right {
-                if let Some(&tile) = saved.next() {
-                    ui.set(x, y, tile);
+                match saved.next() {
+                    Some(&Some(tile)) => ui.set(x, y, tile),
+                    Some(None) => ui.uncover(x, y, 1, 1),
+                    None => {}
                 }
             }
         }
@@ -350,6 +353,19 @@ mod tests {
         answer(&mut game, Joypad::A);
         assert_eq!(game.ui().get(12, 6), UiSurface::BLANK, "inside the saved 6 by 5, restored");
         assert_ne!(game.ui().get(20 - 1, 6), UiSurface::BLANK, "the right edge is past it and stays");
+    }
+
+    /// A square where the map showed through before the box opened shows the map again after it,
+    /// and one the UI covered gets its tile back.
+    #[test]
+    fn the_saved_region_gives_back_the_map_where_the_map_showed() {
+        let mut game = Game::new(World::default(), GameRng::seeded(0), Pacing::Faithful);
+        game.screen_mut().ui.set(YES_NO_AT.0 + 1, YES_NO_AT.1 + 1, 0x80);
+        game.push(Mode::TwoOptionMenu(TwoOptionMenu::new(TwoOptionMenuId::YesNo, YES_NO_AT, false)));
+        until_waiting(&mut game);
+        answer(&mut game, Joypad::A);
+        assert_eq!(game.ui().cover(YES_NO_AT.0 + 1, YES_NO_AT.1 + 1), Some(0x80));
+        assert_eq!(game.ui().cover(YES_NO_AT.0 + 2, YES_NO_AT.1 + 1), None, "the map shows through again");
     }
 
     #[test]

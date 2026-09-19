@@ -269,3 +269,37 @@ fn the_prize_vendor_sells_a_tm_for_coins_and_refuses_when_they_are_short() {
         assert_eq!(world.coins, if bought { [0x07, 0x00] } else { coins });
     }
 }
+
+/// A Rattata left at level 5 that has grown to 8, and the day care man asked for it back.
+fn day_care_grown(setup: impl FnOnce(&mut World)) -> Game {
+    let mut game = game(Map::Daycare, 2, 4, SpriteFacing::Up, |world| {
+        let mut rattata = crate::systems::add_mon::deposit(mon(PokemonSpecies::Rattata, 5).mon);
+        let growth = rattata.base_stats().growth_rate;
+        rattata.exp = crate::systems::experience::calc_experience(growth, 8);
+        world.day_care = Some(Named { mon: rattata, ot: encode("RED").unwrap(), nick: encode("SPOT").unwrap() });
+        setup(world);
+    });
+    game.frame(Input::Command(Command::Interact));
+    game
+}
+
+/// `.leaveMonInDayCare`: the man puts the level back to the one it went in at whenever the mon is
+/// not taken, the box level having been moved to the grown one only while he talks. A full party is
+/// turned away before the price, NO and too little money after it; none of them pays.
+#[test]
+fn the_day_care_keeps_a_mon_it_does_not_hand_back_at_the_level_it_went_in_at() {
+    let kept = |setup: fn(&mut World), answer: u8| {
+        let mut game = day_care_grown(setup);
+        let money = game.world().money;
+        play_until(&mut game, 5000, &mut |_| answer, free);
+        let world = game.world();
+        let mon = &world.day_care.as_ref().expect("still in the day care").mon;
+        assert_eq!(mon.box_level, 5);
+        assert_eq!(mon.exp, crate::systems::experience::calc_experience(mon.base_stats().growth_rate, 8), "the growth is kept");
+        assert_eq!(world.money, money, "nothing paid");
+        world.party.len()
+    };
+    assert_eq!(kept(|world| world.party = vec![mon(PokemonSpecies::Pidgey, 40); 6], 0), 6, "no room");
+    assert_eq!(kept(|_| {}, 1), 1, "NO");
+    assert_eq!(kept(|world| world.money = [0x00, 0x03, 0x99], 0), 1, "¥399 for ¥400");
+}

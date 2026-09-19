@@ -29,8 +29,19 @@ pub struct State {
     pub guide_at: Option<SpritePosition>,
 }
 
+/// Which of the two guides has walked the player somewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Guide {
+    Museum,
+    Gym,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Label {
+    /// `SetSpriteFacingDirectionAndDelay`'s frames, then `PlayDefaultMusic` once the guide's own
+    /// tune is over.
+    GuideFaced(Guide),
+    GuideMusicPlayed(Guide),
     MuseumGuideArrived,
     GymGuideArrived,
     /// `PewterCitySuperNerd1Text`'s and `PewterCitySuperNerd2Text`'s yes/no.
@@ -45,28 +56,24 @@ pub fn script(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
     match rt.maps().pewter_city.cur_script {
         SCRIPT_PEWTERCITY_DEFAULT => default_script(rt),
-        SCRIPT_PEWTERCITY_SUPER_NERD1_SHOWS_PLAYER_MUSEUM => {
-            guide_arrives(rt, PEWTERCITY_SUPER_NERD1, SPRITE_FACING_UP, 0x30, TEXT_PEWTERCITY_SUPER_NERD1_ITS_RIGHT_HERE,
-                Label::MuseumGuideArrived)
-        }
+        SCRIPT_PEWTERCITY_SUPER_NERD1_SHOWS_PLAYER_MUSEUM => guide_arrives(rt, Guide::Museum),
         SCRIPT_PEWTERCITY_HIDE_SUPER_NERD1 => {
             hide_guide(rt, TOGGLE_MUSEUM_GUY, SCRIPT_PEWTERCITY_RESET_SUPER_NERD1)
         }
         SCRIPT_PEWTERCITY_RESET_SUPER_NERD1 => {
             reset_guide(rt, PEWTERCITY_SUPER_NERD1, TOGGLE_MUSEUM_GUY)
         }
-        SCRIPT_PEWTERCITY_YOUNGSTER_SHOWS_PLAYER_GYM => {
-            guide_arrives(rt, PEWTERCITY_YOUNGSTER, SPRITE_FACING_LEFT, 0x10, TEXT_PEWTERCITY_YOUNGSTER_GO_TAKE_ON_BROCK,
-                Label::GymGuideArrived)
-        }
+        SCRIPT_PEWTERCITY_YOUNGSTER_SHOWS_PLAYER_GYM => guide_arrives(rt, Guide::Gym),
         SCRIPT_PEWTERCITY_HIDE_YOUNGSTER => hide_guide(rt, TOGGLE_GYM_GUY, SCRIPT_PEWTERCITY_RESET_YOUNGSTER),
         SCRIPT_PEWTERCITY_RESET_YOUNGSTER => reset_guide(rt, PEWTERCITY_YOUNGSTER, TOGGLE_GYM_GUY),
         _ => Flow::Return,
     }
 }
 
-/// `PewterCityDefaultScript` and `PewterCityCheckPlayerLeavingEastScript`.
+/// `PewterCityDefaultScript` and `PewterCityCheckPlayerLeavingEastScript`. The museum's script is
+/// put back to its start on every pass, which is what has its clerk charge again on a second visit.
 fn default_script(rt: &mut Script) -> Flow {
+    rt.maps().museum_1f.cur_script = 0;
     rt.reset_event(EVENT_BOUGHT_MUSEUM_TICKET);
     if rt.check_event(EVENT_BEAT_BROCK) || rt.are_player_coords_in_array(&LEAVING_EAST).is_none() {
         return Flow::Return;
@@ -75,15 +82,27 @@ fn default_script(rt: &mut Script) -> Flow {
     rt.display_text_id(TEXT_PEWTERCITY_YOUNGSTER).ret()
 }
 
+impl Guide {
+    /// The guide's sprite, the way he faces the door, the frame he points in, his words there, and
+    /// where his script carries on.
+    fn arrival(self) -> (u8, u8, u8, u8, Label) {
+        match self {
+            Guide::Museum => (PEWTERCITY_SUPER_NERD1, SPRITE_FACING_UP, 0x30, TEXT_PEWTERCITY_SUPER_NERD1_ITS_RIGHT_HERE,
+                Label::MuseumGuideArrived),
+            Guide::Gym => (PEWTERCITY_YOUNGSTER, SPRITE_FACING_LEFT, 0x10, TEXT_PEWTERCITY_YOUNGSTER_GO_TAKE_ON_BROCK,
+                Label::GymGuideArrived),
+        }
+    }
+}
+
 /// `PewterCitySuperNerd1ShowsPlayerMuseumScript` and `PewterCityYoungsterShowsPlayerGymScript`: the
-/// guide points at the door, and `image_index` picks the frame he points in.
-fn guide_arrives(rt: &mut Script, slot: u8, facing: u8, image_index: u8, text_id: u8, then: Label) -> Flow {
+/// guide turns to the door and points at it, and the town's own music comes back.
+fn guide_arrives(rt: &mut Script, guide: Guide) -> Flow {
     if rt.npc_movement_script_running() {
         return Flow::Return;
     }
-    rt.set_sprite_facing(slot, facing);
-    rt.set_sprite_image_index(slot, image_index | facing);
-    rt.display_text_id(text_id).then(then)
+    let (slot, facing, ..) = guide.arrival();
+    rt.set_sprite_facing_direction_and_delay(slot, facing).then(Label::GuideFaced(guide))
 }
 
 /// `PewterCityHideSuperNerd1Script` and `PewterCityHideYoungsterScript`.
@@ -136,6 +155,16 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
+        Label::GuideFaced(guide) => {
+            let (slot, facing, image_index, ..) = guide.arrival();
+            rt.set_sprite_image_index(slot, image_index | facing);
+            rt.play_default_music().then(Label::GuideMusicPlayed(guide))
+        }
+        Label::GuideMusicPlayed(guide) => {
+            let (.., text_id, then) = guide.arrival();
+            rt.set_no_sprite_updates();
+            rt.display_text_id(text_id).then(then)
+        }
         // `$3c`, `$30`, 12, 17: the square below the museum's door.
         Label::MuseumGuideArrived => {
             let at = SpritePosition { screen_y: 0x3C, screen_x: 0x30, map_y: 12, map_x: 17 };

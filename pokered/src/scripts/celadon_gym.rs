@@ -116,16 +116,13 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::BadgeInfo => {
             rt.set_event(EVENT_BEAT_ERIKA);
-            let text_id = match rt.give_item(ItemId::Tm21MegaDrain, 1) {
-                true => TEXT_CELADONGYM_RECEIVED_TM21,
-                false => TEXT_CELADONGYM_TM21_NO_ROOM,
-            };
-            rt.display_text_id(text_id).then(Label::ReceivedTm21)
+            match rt.give_item(ItemId::Tm21MegaDrain, 1) {
+                true => rt.display_text_id(TEXT_CELADONGYM_RECEIVED_TM21).then(Label::ReceivedTm21),
+                false => rt.display_text_id(TEXT_CELADONGYM_TM21_NO_ROOM).then(Label::GymVictory),
+            }
         }
         Label::ReceivedTm21 => {
-            if rt.is_item_in_bag(ItemId::Tm21MegaDrain) {
-                rt.set_event(EVENT_GOT_TM21);
-            }
+            rt.set_event(EVENT_GOT_TM21);
             resume(rt, Label::GymVictory)
         }
         // `.gymVictory`: her seven trainers are all marked beaten, so nobody stops the way out.
