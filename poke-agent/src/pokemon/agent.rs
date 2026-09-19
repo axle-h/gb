@@ -1222,6 +1222,14 @@ impl PokemonAgent {
         self.set_state(AgentState::Idle);
     }
 
+    /// Leave a push that did not land, reporting it when it was a one-shove row the model chose.
+    fn end_boulder_push(&mut self, reason: OverworldActionAbortedReason, at: Option<Point8>) {
+        match self.boulder_push_row.take() {
+            Some(row) => self.abort_overworld(row, reason, at),
+            None => self.set_state(AgentState::Idle),
+        }
+    }
+
     pub fn take_overworld_action(&mut self, action: OverworldAction) {
         self.answer_no = matches!(action.tile,
             MetaTile::Switch { object: crate::pokemon::tile::HiddenObject::Quiz { yes: false }, .. });
@@ -1366,6 +1374,13 @@ impl PokemonAgent {
             }
         } else if let AgentState::RunningScript { rollback_deadline: rollback_delay } = self.state {
             if rollback_delay.is_exhausted() {
+                // A one-shove row's shove comes back here too, and its own state reads the board.
+                if self.boulder_push_row.is_some()
+                    && matches!(self.backup_state, Some(AgentState::PushingBoulder { .. }))
+                {
+                    self.restore_state_from_backup();
+                    return;
+                }
                 self.backup_state = None;
                 // A Strength goal's shove comes back here and goes back to the solver.
                 if let Some((_, boulder, target, hole)) = self.boulder_goal {
@@ -2180,10 +2195,12 @@ CascadeBadge; not cutting".to_string(),
                     return Ok(());
                 }
                 // A vending row names its drink: the cursor to it, then A, once. The menu is
-                // `VendingMachineMenu`'s, drawn with its first row at (1, 5).
+                // `VendingMachineMenu`'s, drawn with its first row at (1, 5), and is on screen only
+                // once its list is: the last purchase leaves the same geometry behind.
                 if let Some(drink) = self.vending_pick
                     && let Some(menu) = api.menu_state()
                         .filter(|menu| (menu.top_menu_item_x, menu.top_menu_item_y) == (1, 5) && menu.current_item <= 3)
+                    && api.on_screen_text(false).is_some_and(|text| text.contains("FRESH WATER"))
                 {
                     let button = match menu.current_item.cmp(&drink) {
                         std::cmp::Ordering::Less => JoypadButton::Down,
@@ -3280,7 +3297,7 @@ CascadeBadge; not cutting".to_string(),
                     api.release_all_buttons();
                     // The goal ends too: a battle may move the player off the floor.
                     self.boulder_goal = None;
-                    self.set_state(AgentState::Idle);
+                    self.end_boulder_push(OverworldActionAbortedReason::from_game_mode(game_state.mode), None);
                     return Ok(());
                 }
                 let map = &game_state.map;
@@ -3342,7 +3359,7 @@ CascadeBadge; not cutting".to_string(),
                             None => "Strength needs a party member that knows it, and the \
                                      RainbowBadge; not pushing".to_string(),
                         }});
-                        self.set_state(AgentState::Idle);
+                        self.end_boulder_push(OverworldActionAbortedReason::Unknown, Some(map.player_position));
                         return Ok(());
                     };
                     self.set_state(AgentState::UsingFieldMove {
@@ -3356,16 +3373,22 @@ CascadeBadge; not cutting".to_string(),
                     JoypadButton::Left => JoypadButton::Right, JoypadButton::Right => JoypadButton::Left,
                     other => other,
                 };
+                let at = Some(map.player_position);
                 let Some(behind) = step_pos(boulder, opposite) else {
                     api.release_all_buttons();
-                    self.set_state(AgentState::Idle);
+                    self.end_boulder_push(OverworldActionAbortedReason::Unknown, at);
                     return Ok(());
                 };
 
                 if map.player_position != behind {
                     match map.route_to_push_tile(behind).and_then(|r| r.first().copied()) {
                         Some(btn) => { api.release_all_buttons(); api.press_button(btn); }
-                        None => { api.release_all_buttons(); self.set_state(AgentState::Idle); return Ok(()); }
+                        None => {
+                            api.release_all_buttons();
+                            let row = MetaTile::BoulderPush { boulder, dir };
+                            self.end_boulder_push(OverworldActionAbortedReason::NoRoute(row), at);
+                            return Ok(());
+                        }
                     }
                 } else {
                     api.release_all_buttons();

@@ -64,6 +64,8 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
 - A map script can cancel a warp the tiles call fine. `map_warp_gate_specs` is deliberately tiny:
   withholding a real door is how a floor loses its only exit, so only a refusal proved in the
   cartridge's own source goes in. `WarpTrigger::Unknown` is never dropped either — unsure is not no.
+- A Seafoam hole leads where the current below leaves the player (`strong_current_below`), and the
+  landing reads as `GameMode::Script` until the current lets go (`read_game_mode`).
 - `actions()` emits one crossing per adjacent map *per kind*, land and water: one row per edge
   perturbs the scripted run's timing, and collapsing the kinds hides every neighbour whose land
   crossing is nearer than its water one.

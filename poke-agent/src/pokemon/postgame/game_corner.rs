@@ -382,11 +382,13 @@ pub struct PrizeState {
     press: bool,
     entered_menu: bool,
     ticks: u16,
+    /// Consecutive ticks a person has stood between the player and the vendor.
+    blocked: u16,
 }
 
 impl PrizeState {
     pub fn new(prize: Prize, api: &PokemonApi<'_>) -> Self {
-        Self { prize, start_coins: read_coins(api), press: true, entered_menu: false, ticks: 0 }
+        Self { prize, start_coins: read_coins(api), press: true, entered_menu: false, ticks: 0, blocked: 0 }
     }
 }
 
@@ -452,17 +454,18 @@ pub fn prize_tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PrizeSt
             Some([]) => {
                 api.release_all_buttons();
                 if s.press { api.press_button(JoypadButton::A); }
-                agent.set_state(AgentState::RedeemingPrize(PrizeState { press: !s.press, ticks: s.ticks + 1, ..s }));
+                agent.set_state(AgentState::RedeemingPrize(PrizeState { press: !s.press, ticks: s.ticks + 1, blocked: 0, ..s }));
             }
             Some(&[btn, ..]) => {
                 api.release_all_buttons();
                 api.press_button(btn);
-                agent.set_state(AgentState::RedeemingPrize(PrizeState { press: true, ticks: s.ticks + 1, ..s }));
+                agent.set_state(AgentState::RedeemingPrize(PrizeState { press: true, ticks: s.ticks + 1, blocked: 0, ..s }));
             }
-            // The room's gambler paces in front of the counters: wait for him to move on.
-            None if s.ticks < BLOCKED_TICKS => {
+            // The room's gambler paces in front of the counters: wait for him to move on, counting
+            // only the wait, or a long walk over leaves none of it.
+            None if s.blocked < BLOCKED_TICKS => {
                 api.release_all_buttons();
-                agent.set_state(AgentState::RedeemingPrize(PrizeState { ticks: s.ticks + 1, ..s }));
+                agent.set_state(AgentState::RedeemingPrize(PrizeState { ticks: s.ticks + 1, blocked: s.blocked + 1, ..s }));
             }
             _ => abort(agent, api, format!("can't reach the {:?} vendor at {tile}", s.prize)),
         }

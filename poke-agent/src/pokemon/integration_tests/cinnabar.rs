@@ -23,6 +23,7 @@ fn seafoam_articuno_is_reachable_offline() {
             surfing: true,
             sprites_loaded: true,
             script_cancelled_warps: Vec::new(),
+            strong_current_below: false,
             standing_on_warp: true,
         };
         let mut tm = MetaTileMap::new(&current);

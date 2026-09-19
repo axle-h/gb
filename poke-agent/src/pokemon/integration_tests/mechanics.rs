@@ -2193,6 +2193,7 @@ fn a_coordinate_that_underflows_a_map_edge_is_not_a_position() {
             surfing: false,
             sprites_loaded: true,
             script_cancelled_warps: Vec::new(),
+            strong_current_below: false,
             standing_on_warp: true,
         })
     };
@@ -2238,6 +2239,7 @@ fn a_map_the_cartridge_has_not_finished_loading_offers_no_rows() {
             surfing: false,
             sprites_loaded: true,
             script_cancelled_warps: Vec::new(),
+            strong_current_below: false,
             standing_on_warp: true,
         })
     };
@@ -2399,6 +2401,7 @@ fn a_seafoam_staircase_the_script_cancels_is_not_a_row() {
             surfing: false,
             sprites_loaded: true,
             script_cancelled_warps: script_cancelled_warps(mmu, Map::SeafoamIslandsB4F),
+            strong_current_below: false,
             standing_on_warp: true,
         })
     };
@@ -2460,6 +2463,7 @@ fn the_wardens_boulder_can_be_shoved_off_the_square_the_rare_candy_is_reached_fr
             surfing: false,
             sprites_loaded: true,
             script_cancelled_warps: Vec::new(),
+            strong_current_below: false,
             standing_on_warp: false,
         });
         map.can_strength = true;
@@ -2525,6 +2529,7 @@ fn a_warp_reached_by_surfing_is_entered_rather_than_leant_on() {
                 surfing,
                 sprites_loaded: true,
                 script_cancelled_warps: Vec::new(),
+                strong_current_below: false,
                 standing_on_warp: true,
             });
             tm.can_surf = true;
@@ -2585,6 +2590,7 @@ fn an_impossible_warp_is_one_the_cartridge_really_will_not_open() {
             surfing: false,
             sprites_loaded: true,
             script_cancelled_warps: Vec::new(),
+            strong_current_below: false,
             standing_on_warp: true,
         });
         for (i, tile) in tile_map.meta_tiles.iter().enumerate() {
@@ -2704,6 +2710,7 @@ fn a_water_crossing_is_a_row_of_its_own_beside_the_bridge_to_the_same_map() {
             surfing: false,
             sprites_loaded: true,
             script_cancelled_warps: Vec::new(),
+            strong_current_below: false,
             standing_on_warp: false,
         });
         // `game_state()` sets `can_surf` from the party; the map builder does not.
@@ -2760,6 +2767,7 @@ fn a_trainer_on_open_water_is_a_row_once_surf_is_up() {
             surfing: true,
             sprites_loaded: true,
             script_cancelled_warps: Vec::new(),
+            strong_current_below: false,
             standing_on_warp: false,
         });
         // `game_state()` sets `can_surf` from the party; the map builder does not.

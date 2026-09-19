@@ -172,6 +172,7 @@ fn every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot() {
         surfing: false,
         sprites_loaded: true,
         script_cancelled_warps: Vec::new(),
+        strong_current_below: false,
         standing_on_warp: true,
     });
 

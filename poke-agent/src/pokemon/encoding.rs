@@ -211,6 +211,24 @@ impl PokemonEncoding for MMU {
                     {
                         return GameMode::Script;
                     }
+                    // Seafoam's lowest floors walk the player down their currents from a map script.
+                    // `CheckForceBikeOrSurf` takes it out of its default state only once the fall
+                    // into the floor has played, with every button ignored until then. B3F's
+                    // `MoveObjectScript` returns without resetting once the current is calmed.
+                    use crate::pokemon::map::Map;
+                    let script = match self.read_pointer(&pokered_symbols::wCurMap) {
+                        map if map == Map::SeafoamIslandsB3F as u8 => Some(
+                            match self.read_pointer(&pokered_symbols::wSeafoamIslandsB3FCurScript) {
+                                2 if !crate::pokemon::map_metadata::strong_current_below(self, Map::SeafoamIslandsB2F) => 0,
+                                script => script,
+                            }),
+                        map if map == Map::SeafoamIslandsB4F as u8 =>
+                            Some(self.read_pointer(&pokered_symbols::wSeafoamIslandsB4FCurScript)),
+                        _ => None,
+                    };
+                    if script.is_some_and(|script| script != 0 || joy_ignore == 0xFF) {
+                        return GameMode::Script;
+                    }
                     // BIT_SCRIPTED_NPC_MOVEMENT (bit 0) is set by MoveSprite for scripted NPC
                     // walks (e.g. Oak running toward the player in Pallet Town).
                     if flags5 & 0x01 != 0 && joy_ignore & 0xF0 != 0 {

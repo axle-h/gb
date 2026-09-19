@@ -470,6 +470,48 @@ fn seafoams_boulders_are_pushed_by_their_rows_down_to_articuno() {
     }
 }
 
+/// A Seafoam hole with the current below it still strong says where the current carries the player,
+/// and the next turn is asked only once it has.
+#[test]
+fn a_seafoam_hole_says_where_the_current_below_leaves_the_player() {
+    let turns: Arc<Mutex<Vec<(String, Vec<(String, String)>)>>> = Arc::default();
+    let log = Arc::clone(&turns);
+    let brain = move |request: &TurnRequest| {
+        if request.is_battle() {
+            return Reply::call("choose_battle_action", serde_json::json!({ "id": "run", "summary": "not now" }));
+        }
+        if !request.has_tool("choose_action") {
+            return Reply::Calls(vec![Call::wait(10)]);
+        }
+        let rows = request.menu_rows();
+        let here = request.situation().lines()
+            .find_map(|line| line.strip_prefix("Location: ")).unwrap_or_default().to_string();
+        let hole = rows.iter().find(|(id, _)| id == "SeafoamIslandsB3F:6,16:Warp").map(|(id, _)| id.clone());
+        log.lock().expect("not poisoned").push((here, rows));
+        match hole {
+            Some(id) => Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "down the hole" })),
+            None => Reply::Calls(vec![Call::wait(30)]),
+        }
+    };
+    let mut run = LlmRun::builder(include_bytes!("../data/seafoam-b3f.bin"))
+        .named("seafoam-current")
+        .game_time(Duration::from_mins(10))
+        .start(Box::new(brain));
+
+    let below = run.tick_until(PATIENCE, |_| {
+        turns.lock().expect("not poisoned").iter().any(|(here, _)| here.starts_with("SeafoamIslandsB4F"))
+    });
+    let turns = turns.lock().expect("not poisoned");
+    let (_, first) = turns.first().expect("no overworld turn was asked");
+    let row = first.iter().find(|(id, _)| id == "SeafoamIslandsB3F:6,16:Warp")
+        .unwrap_or_else(|| panic!("the hole is not a row: {first:?}"));
+    assert!(row.1.contains("SeafoamIslandsB4F, arriving at (7, 10)"), "the hole's row: {}", row.1);
+    assert!(below, "never asked a turn on B4F: {:?}", turns.iter().map(|(here, _)| here).collect::<Vec<_>>());
+    let landed = turns.iter().map(|(here, _)| here).find(|here| !here.starts_with("SeafoamIslandsB3F"));
+    assert!(landed.is_some_and(|here| here.starts_with("SeafoamIslandsB4F at (7, 10)")),
+        "the first turn off B3F must be asked where the current stops, not {landed:?}");
+}
+
 /// An item ball with tall grass on every side is still a row, and a model can pick it up.
 #[test]
 fn an_item_ringed_by_tall_grass_can_be_picked_up() {
@@ -650,4 +692,79 @@ fn probe_policy_menu() {
         println!("turn {n}: {} rows", rows.len());
         for row in rows { println!("   {row}"); }
     }
+}
+
+/// A one-shove row reports how it went even when its shove runs long enough to read as a script,
+/// as every shove on Seafoam B3F does.
+#[test]
+fn a_one_shove_row_says_it_landed_after_a_long_shove() {
+    const ROW: &str = "SeafoamIslandsB3F:5,14:PushBoulderLeft";
+    let told: Arc<Mutex<Option<String>>> = Arc::default();
+    let log = Arc::clone(&told);
+    let brain = move |request: &TurnRequest| {
+        if request.is_battle() {
+            return Reply::call("choose_battle_action", serde_json::json!({ "id": "run", "summary": "not now" }));
+        }
+        if !request.has_tool("choose_action") {
+            return Reply::Calls(vec![Call::wait(10)]);
+        }
+        let outcome = request.situation().lines()
+            .find(|line| line.contains("the boulder at (5, 14)") && (line.starts_with("- ✓") || line.starts_with("- ✗")))
+            .map(str::to_string);
+        if outcome.is_some() {
+            *log.lock().expect("not poisoned") = outcome;
+            return Reply::Calls(vec![Call::wait(30)]);
+        }
+        match request.menu_ids().into_iter().find(|id| id == ROW) {
+            Some(id) => Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "one shove" })),
+            None => Reply::Calls(vec![Call::wait(30)]),
+        }
+    };
+    let mut run = LlmRun::builder(include_bytes!("../data/seafoam-b3f.bin"))
+        .named("one-shove")
+        .game_time(Duration::from_mins(10))
+        .start(Box::new(brain));
+    run.tick_until(PATIENCE, |_| told.lock().expect("not poisoned").is_some());
+    let told = told.lock().expect("not poisoned").clone();
+    assert!(told.as_deref().is_some_and(|line| line.contains("✓ reached")), "{ROW}: the model was told {told:?}");
+}
+
+/// A second vending machine straight after a first: the first purchase leaves the menu's geometry
+/// in RAM, and the second must still read its greeting before it picks.
+#[test]
+fn a_second_vending_machine_sells_its_own_drink() {
+    use crate::pokemon::integration_tests::godmode::Intent;
+    const PATH: &[&str] = &["CeladonMart1F", "CeladonMart2F", "CeladonMart3F", "CeladonMart4F", "CeladonMart5F", "CeladonMartRoof"];
+    let told = Arc::new(Mutex::new(false));
+    let log = Arc::clone(&told);
+    let mut leg = 0;
+    let mut picks = vec!["CeladonMartRoof:11,2:VendingMachine2", "CeladonMartRoof:10,2:VendingMachine1"];
+    let brain = move |request: &TurnRequest| {
+        if request.is_battle() {
+            return Reply::call("choose_battle_action", serde_json::json!({ "id": "run", "summary": "not now" }));
+        }
+        if !request.has_tool("choose_action") {
+            return Reply::Calls(vec![Call::wait(10)]);
+        }
+        if request.situation().contains("SODA POP popped out") {
+            *log.lock().expect("not poisoned") = true;
+        }
+        while leg + 1 < PATH.len() && Intent::Enter(PATH[leg]).satisfied_by(request) { leg += 1; }
+        if !Intent::Enter(PATH[leg]).satisfied_by(request) {
+            return match Intent::Enter(PATH[leg]).resolve(request) {
+                Some(id) => Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "up" })),
+                None => Reply::Calls(vec![Call::wait(30)]),
+            };
+        }
+        match picks.pop() {
+            Some(id) => Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "a drink" })),
+            None => Reply::Calls(vec![Call::wait(30)]),
+        }
+    };
+    let mut run = LlmRun::builder(include_bytes!("../data/postgame-game-corner.bin"))
+        .named("two-vending-machines")
+        .game_time(Duration::from_mins(20))
+        .start(Box::new(brain));
+    let sold = run.tick_until(PATIENCE, |_| *told.lock().expect("not poisoned"));
+    assert!(sold, "the second machine never sold its SODA POP");
 }

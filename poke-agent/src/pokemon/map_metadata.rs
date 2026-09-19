@@ -305,15 +305,25 @@ impl MapMetadata {
         }
     }
 
-    /// Seafoam Islands' floor holes, two a floor, as warps to the `DungeonWarpData` landing below.
-    pub fn apply_seafoam_holes(&self, result: &mut [MetaTile]) {
+    /// Seafoam Islands' floor holes, two a floor, as warps to the `DungeonWarpData` landing below,
+    /// or to where the current carries the player on from it (`strong_current_below`).
+    pub fn apply_seafoam_holes(&self, result: &mut [MetaTile], strong_current_below: bool) {
         let holes: &[((u8, u8), Map, (u8, u8))] = match self.map {
             Map::SeafoamIslands1F  => &[((17, 6), Map::SeafoamIslandsB1F, (18, 7)),
                                         ((24, 6), Map::SeafoamIslandsB1F, (23, 7))],
             Map::SeafoamIslandsB1F => &[((18, 6), Map::SeafoamIslandsB2F, (19, 7)),
                                         ((23, 6), Map::SeafoamIslandsB2F, (22, 7))],
+            // `SeafoamIslandsB3FMoveObjectScript` surfs the player into B3F's (20, 17) warp, and
+            // `SeafoamIslandsB4FDefaultScript` pushes them two squares up from where it lands.
+            Map::SeafoamIslandsB2F if strong_current_below =>
+                                      &[((19, 6), Map::SeafoamIslandsB4F, (20, 15)),
+                                        ((22, 6), Map::SeafoamIslandsB4F, (20, 15))],
             Map::SeafoamIslandsB2F => &[((19, 6), Map::SeafoamIslandsB3F, (18, 7)),
                                         ((22, 6), Map::SeafoamIslandsB3F, (19, 7))],
+            // `SeafoamIslandsB4FMoveObjectScript`: both landings are surfed up and right to (7, 10).
+            Map::SeafoamIslandsB3F if strong_current_below =>
+                                      &[((3, 16), Map::SeafoamIslandsB4F, (7, 10)),
+                                        ((6, 16), Map::SeafoamIslandsB4F, (7, 10))],
             Map::SeafoamIslandsB3F => &[((3, 16), Map::SeafoamIslandsB4F, (4, 14)),
                                         ((6, 16), Map::SeafoamIslandsB4F, (5, 14))],
             _ => return,
@@ -459,6 +469,17 @@ pub(crate) fn script_cancelled_warps(mmu: &MMU, map: Map) -> Vec<Point8> {
             && spec.live_while_held.is_none_or(|item| mmu.read_bag().contains(&item));
         (!live).then_some(spec.at)
     }).collect()
+}
+
+/// Whether the Seafoam floor below `map` still runs its strong current: until both boulders from
+/// `map` are down its holes (`EVENT_SEAFOAM3_*` for B2F, `EVENT_SEAFOAM4_*` for B3F).
+pub(crate) fn strong_current_below(mmu: &MMU, map: Map) -> bool {
+    let calmed = |byte: u16| mmu.read(pokered_symbols::wEventFlags.address + byte) & 0x03 == 0x03;
+    match map {
+        Map::SeafoamIslandsB2F => !calmed(313),
+        Map::SeafoamIslandsB3F => !calmed(314),
+        _ => false,
+    }
 }
 
 /// The largest door block on `map`, so the tileset load covers it.
@@ -640,6 +661,7 @@ impl MapMetadataCache {
             water_encounter_rate: mmu.read_pointer(&pokered_symbols::wWaterRate),
             closed_doors: closed_door_blocks(mmu, map),
             script_cancelled_warps: script_cancelled_warps(mmu, map),
+            strong_current_below: strong_current_below(mmu, map),
             standing_on_warp: mmu.read_pointer(&pokered_symbols::wMovementFlags) & BIT_STANDING_ON_WARP != 0,
             card_key_locked: map_has_card_key_doors(map) && !mmu.read_bag().contains(&crate::pokemon::item::ItemId::CardKey),
             header_loaded: map_header_is_loaded(mmu, map),
@@ -691,6 +713,7 @@ impl MapMetadataReader for MMU {
                 water_encounter_rate: self.read_pointer(&pokered_symbols::wWaterRate),
                 closed_doors: closed_door_blocks(self, map),
                 script_cancelled_warps: script_cancelled_warps(self, map),
+                strong_current_below: strong_current_below(self, map),
                 standing_on_warp: self.read_pointer(&pokered_symbols::wMovementFlags) & BIT_STANDING_ON_WARP != 0,
             card_key_locked: map_has_card_key_doors(map) && !self.read_bag().contains(&crate::pokemon::item::ItemId::CardKey),
                 header_loaded: map_header_is_loaded(self, map),
@@ -1144,6 +1167,8 @@ pub struct CurrentMap {
     pub standing_on_warp: bool,
     /// Squares whose warp this map's script is cancelling, in raw coordinates.
     pub script_cancelled_warps: Vec<Point8>,
+    /// See [`strong_current_below`].
+    pub strong_current_below: bool,
 }
 
 impl CurrentMap {
@@ -1157,7 +1182,7 @@ impl CurrentMap {
         // Each of these is inert on every other map.
         self.metadata.apply_mansion_holes(&mut result);
         self.metadata.apply_victory_road_holes(&mut result);
-        self.metadata.apply_seafoam_holes(&mut result);
+        self.metadata.apply_seafoam_holes(&mut result, self.strong_current_below);
         self.metadata.apply_seafoam_currents(&mut result);
         result
     }
@@ -1307,6 +1332,7 @@ mod test {
             surfing: false,
             sprites_loaded: true,
             script_cancelled_warps: Vec::new(),
+            strong_current_below: false,
             standing_on_warp: true,
         };
         let tile_map = MetaTileMap::new(&current_map);
@@ -1401,6 +1427,7 @@ mod test {
             surfing: false,
             sprites_loaded: true,
             script_cancelled_warps: Vec::new(),
+            strong_current_below: false,
             standing_on_warp: true,
         };
         let tile_map = MetaTileMap::new(&current_map);

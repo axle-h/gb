@@ -552,8 +552,13 @@ pub struct ExploringBrain {
     pub here: String,
     /// PC operations the walk has tried, by map.
     pc_ops_tried: std::collections::BTreeSet<(String, &'static str)>,
-    /// Floors each lift has been ridden to, which no menu row leads to either.
-    rides: std::collections::BTreeSet<(String, crate::pokemon::map::Map)>,
+    /// Maps already paced for encounters, by kind: a pacing row is renamed by every step, so
+    /// without this the walk paces again after every move and spends its budget there.
+    paced: std::collections::BTreeSet<(String, String)>,
+    /// Times each lift has been ridden to each floor, which no menu row leads to either.
+    rides: std::collections::BTreeMap<(String, crate::pokemon::map::Map), usize>,
+    /// Set by a ride and cleared off the lift, so a visit rides once and then walks out.
+    ridden: bool,
     /// Consecutive turns the menu has offered nothing at all, and the flies spent escaping it.
     pub rowless_turns: usize,
     /// Consecutive turns on which the menu had rows and the brain chose nothing: every row visited
@@ -583,6 +588,14 @@ fn is_a_way_out(id: &str) -> bool {
 }
 
 #[cfg(feature = "slow-tests")]
+/// A row that walks up and down for a wild encounter: `(map, kind)`.
+fn pacing(id: &str) -> Option<(String, String)> {
+    let kind = id.rsplit(':').next()?;
+    matches!(kind, "Pace" | "PaceOnWater")
+        .then(|| (id.split(':').next().unwrap_or_default().to_string(), kind.to_string()))
+}
+
+#[cfg(feature = "slow-tests")]
 impl Default for ExploringBrain {
     fn default() -> Self {
         Self::new()
@@ -604,7 +617,9 @@ impl ExploringBrain {
             here: String::new(),
             turns: 0,
             pc_ops_tried: std::collections::BTreeSet::new(),
-            rides: std::collections::BTreeSet::new(),
+            paced: std::collections::BTreeSet::new(),
+            rides: std::collections::BTreeMap::new(),
+            ridden: false,
             rowless_turns: 0,
             stalled_turns: 0,
             stalled_worst: 0,
@@ -747,14 +762,21 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
             }
         }
 
-        // A lift, once to each floor: on a floor only a lift reaches, it is the one way on.
+        // A lift, to the floor it has been ridden to least: on a floor only a lift reaches, it is
+        // the one way on, and the way out may be on a floor already seen.
+        let lift_here = request.location().is_some_and(|here| <crate::pokemon::map::Map as strum::IntoEnumIterator>::iter()
+            .any(|map| format!("{map:?}") == here && crate::pokemon::tile_map::elevator_for(map).is_some()));
+        self.ridden &= lift_here;
         if let Some(here) = request.location()
+            && !self.ridden
             && request.has_tool("use_field_move")
             && let Some(lift) = <crate::pokemon::map::Map as strum::IntoEnumIterator>::iter().find(|map| format!("{map:?}") == here)
             && let Some((_, floors)) = crate::pokemon::tile_map::elevator_for(lift)
-            && let Some(&floor) = floors.iter().find(|&&floor| !self.rides.contains(&(here.clone(), floor)))
+            && let Some(&floor) = floors.iter()
+                .min_by_key(|&&floor| self.rides.get(&(here.clone(), floor)).copied().unwrap_or(0))
         {
-            self.rides.insert((here, floor));
+            *self.rides.entry((here, floor)).or_insert(0) += 1;
+            self.ridden = true;
             let arguments = serde_json::json!({
                 "move": "elevator", "map": format!("{floor:?}"), "summary": "ride the lift",
             });
@@ -791,10 +813,12 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
 
         // Prefer the first unvisited row that stays on the map, so a map is exhausted before it is
         // left; then the way out most likely to lead to work.
-        let unvisited = |id: &String| self.seen.get(id).copied() == Some(0);
+        let unvisited = |id: &String| self.seen.get(id).copied() == Some(0)
+            && pacing(id).is_none_or(|key| !self.paced.contains(&key));
 
         // A row the world puts back, which the walk must be willing to take again.
-        let re_takeable = |id: &String| !matches!(id.rsplit(':').next(), Some("Grass" | "Empty"));
+        let re_takeable = |id: &String| !matches!(id.rsplit(':').next(), Some("Grass" | "Empty"))
+            && pacing(id).is_none();
         let chosen = rows
             .iter()
             .map(|(id, _)| id)
@@ -834,6 +858,9 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
             Some(id) => {
                 self.stalled_turns = 0;
                 *self.seen.entry(id.clone()).or_insert(0) += 1;
+                if let Some(key) = pacing(&id) {
+                    self.paced.insert(key);
+                }
                 // …and the same crossing against the map it leads to, whichever branch chose it.
                 if is_a_way_out(&id)
                     && let Some(description) = rows.iter().find(|(i, _)| *i == id).map(|(_, d)| d)
@@ -841,9 +868,9 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
                 {
                     *self.exits.entry(crossing).or_insert(0) += 1;
                 }
-                // `resume_after_battle` everywhere except the two rows that exist to start a
+                // `resume_after_battle` everywhere except the rows that exist to start a
                 // battle.
-                let resume = !matches!(id.rsplit(':').next(), Some("Grass" | "Empty"));
+                let resume = !matches!(id.rsplit(':').next(), Some("Grass" | "Empty")) && pacing(&id).is_none();
                 Reply::call(
                     "choose_action",
                     serde_json::json!({ "id": id, "resume_after_battle": resume }),
@@ -1320,7 +1347,22 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
     let mut beat_turns = 0usize;
     let mut beat_visited = 0usize;
     let name = start.name;
+    // The longest stretch of game time with no turn asked, and where: a wedge otherwise ends the
+    // walk on its budget looking like any other.
+    /// A walk quiet for longer than this has wedged; battles and pacing are asked well inside it.
+    const QUIET_LIMIT: Duration = Duration::from_secs(30 * 60);
+    let (mut last_turns, mut last_turn_at) = (0usize, Duration::ZERO);
+    let mut quietest: (Duration, String) = (Duration::ZERO, String::new());
     let settled = run.tick_until(Duration::from_secs(wall_secs), |run| {
+        {
+            let game = run.fixture().total_cycles.to_duration();
+            let brain = brain.0.lock().expect("not poisoned");
+            if brain.turns != last_turns {
+                (last_turns, last_turn_at) = (brain.turns, game);
+            } else if game - last_turn_at > quietest.0 {
+                quietest = (game - last_turn_at, brain.here.clone());
+            }
+        }
         spent_the_budget |= run.fixture().total_cycles.to_duration() >= budget;
         if beat.elapsed().as_secs() >= BEAT_SECS {
             beat = std::time::Instant::now();
@@ -1460,7 +1502,11 @@ fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> Wa
         .filter(|entry| entry.verdict == Verdict::Unreached)
         .map(|entry| entry.id.clone())
         .collect();
-    let failures = log.failures();
+    let mut failures = log.failures();
+    if quietest.0 > QUIET_LIMIT {
+        failures.push(format!("no turn was asked for {:.0} game-minutes on {}: the agent wedged there",
+                              quietest.0.as_secs_f64() / 60.0, quietest.1));
+    }
 
     println!("{}", rom_cross_check(run.fixture().gb.core().mmu(), &ids));
 
