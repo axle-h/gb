@@ -4,9 +4,10 @@
 //! machines and `TradeMons`) is read out of that table, so something that moves upstream fails a
 //! test here rather than going missing from the run.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gb::mmu::MMU;
+use poke_core::map_objects::MapObjects;
 use poke_core::pointer::DmgPointer;
 use gb::ram::ROM;
 use strum::IntoEnumIterator;
@@ -14,7 +15,7 @@ use strum::IntoEnumIterator;
 use crate::pokemon::GameState;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::Map;
-use crate::pokemon::map_header::MapHeaderReader;
+use crate::pokemon::map_header::{MapConnectionDirection, MapHeader, MapHeaderReader};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::symbols::{pokered_events, pokered_symbols, pokered_toggles, DmgPointerRead};
 
@@ -104,6 +105,10 @@ impl Legend {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Entry {
     Map(Map),
+    /// A doorway on `map`, named by the lowest `warp_event` index of the tiles that make it up.
+    Warp { map: Map, index: u8 },
+    /// A map edge: walking off `map` in `direction` and onto the map its header names there.
+    Connection { map: Map, direction: MapConnectionDirection },
     /// A `trainer` header: `index` within `map`'s script.
     Trainer { map: Map, index: u8 },
     /// An item ball: `object` is its 1-based object number on `map`.
@@ -196,6 +201,39 @@ pub(crate) fn map_objects(mmu: &MMU, map: Map) -> Vec<MapObject> {
     found
 }
 
+/// Every map a run could stand on, which is every header the game did not leave spare.
+fn reachable_maps() -> impl Iterator<Item = Map> {
+    Map::iter().filter(|map| classify(*map, &format!("{map:?}")) == MapBucket::Reachable)
+}
+
+/// Which `warp_event` of `map` each of its warps belongs to once a doorway's tiles are one door.
+///
+/// A doorway two tiles wide is two `warp_event`s landing identically, and one of the pair is often
+/// unsteppable, so warps that share a destination and touch are one entry, named by the lowest
+/// index among them. Indexing matches `wWarpedFromWhichWarp`, which counts from zero.
+fn warp_doors(map: Map) -> Vec<u8> {
+    let Ok(objects) = MapObjects::read(map) else { return Vec::new() };
+    let mut door: Vec<u8> = (0..objects.warps.len() as u8).collect();
+    for (i, left) in objects.warps.iter().enumerate() {
+        for (j, right) in objects.warps.iter().enumerate().take(i) {
+            let touching = left.x.abs_diff(right.x) + left.y.abs_diff(right.y) == 1;
+            let same = (left.destination_map, left.destination_warp) == (right.destination_map, right.destination_warp);
+            if touching && same {
+                let (a, b) = (door[i].min(door[j]), door[i].max(door[j]));
+                door.iter_mut().filter(|it| **it == b).for_each(|it| *it = a);
+            }
+        }
+    }
+    door
+}
+
+/// Every connection `map`'s header declares, as the pair a crossing is recognised by.
+fn map_connections(map: Map) -> Vec<(MapConnectionDirection, Map)> {
+    MapHeader::read(map)
+        .map(|header| header.connections().iter().map(|it| (it.direction, it.map)).collect())
+        .unwrap_or_default()
+}
+
 /// `ToggleableObjectStates`: each toggle flag's `(map, object)` and whether it starts shown, in
 /// table order.
 fn toggle_index(mmu: &MMU) -> Vec<(u8, u8, bool)> {
@@ -232,8 +270,14 @@ pub fn checklist(mmu: &MMU) -> Vec<Item> {
     let mut items = Vec::new();
     let mut push = |entry, check| items.push(Item { entry, check });
 
-    for map in Map::iter().filter(|map| classify(*map, &format!("{map:?}")) == MapBucket::Reachable) {
+    for map in reachable_maps() {
         push(Entry::Map(map), Check::Visited(map));
+        for index in BTreeSet::from_iter(warp_doors(map)) {
+            push(Entry::Warp { map, index }, Check::Observed);
+        }
+        for (direction, _) in map_connections(map) {
+            push(Entry::Connection { map, direction }, Check::Observed);
+        }
     }
 
     for &(name, index, header) in pokered_symbols::TRAINER_HEADERS {
@@ -245,7 +289,7 @@ pub fn checklist(mmu: &MMU) -> Vec<Item> {
     }
 
     let toggles = toggle_index(mmu);
-    for map in Map::iter().filter(|map| classify(*map, &format!("{map:?}")) == MapBucket::Reachable) {
+    for map in reachable_maps() {
         for object in map_objects(mmu, map) {
             // Two people are declared with an item of 0, and are no ball.
             let Some(item) = object.item.filter(|&item| item != 0) else { continue };
@@ -365,6 +409,13 @@ pub struct Ledger {
     /// stay set for the rest of the game, but the Hall of Fame clears the Indigo Plateau's events
     /// before it saves, so the four Elite Four trainers are beaten and then unbeaten a moment later.
     flagged: Vec<(u16, u8, bool)>,
+    /// Last tick's map and warp record, so a map change can be told apart from the door that caused
+    /// it. `None` until the first tick seeds it, because a fresh save reads as warp zero of map zero.
+    was: Option<(u8, (u8, u8))>,
+    /// Each map's warps collapsed to doors, by raw map id, indexed as `wWarpedFromWhichWarp` counts.
+    doors: HashMap<u8, Vec<u8>>,
+    /// Each map's declared connections, by raw map id.
+    edges: HashMap<u8, Vec<(MapConnectionDirection, Map)>>,
 }
 
 impl Ledger {
@@ -380,6 +431,8 @@ impl Ledger {
         Self {
             toggled: of(|check| match *check { Check::Toggled { address, mask } => Some((address, mask)), _ => None }),
             flagged: of(|check| match *check { Check::Flag { address, mask } => Some((address, mask)), _ => None }),
+            doors: reachable_maps().map(|map| (map as u8, warp_doors(map))).collect(),
+            edges: reachable_maps().map(|map| (map as u8, map_connections(map))).collect(),
             ..Self::default()
         }
     }
@@ -393,6 +446,34 @@ impl Ledger {
         }
         for (address, mask, seen_set) in self.flagged.iter_mut() {
             *seen_set |= mmu.read(*address) & *mask != 0;
+        }
+        self.cross(mmu);
+    }
+
+    /// Tick off the door or the map edge just crossed.
+    ///
+    /// The cartridge writes the warp it is leaving through before it writes the map it is going to,
+    /// so a changed warp record is a door taken and a changed map without one is a map edge walked
+    /// over. An edge is only ticked where the header declares that neighbour, which is what keeps
+    /// the two apart if a tick ever lands between those two writes.
+    fn cross(&mut self, mmu: &MMU) {
+        let now = (mmu.read(pokered_symbols::wCurMap.address),
+                   (mmu.read(pokered_symbols::wWarpedFromWhichMap.address),
+                    mmu.read(pokered_symbols::wWarpedFromWhichWarp.address)));
+        if let Some(was) = self.was.replace(now) {
+            if now.1 != was.1 {
+                let (from, warp) = now.1;
+                if let (Some(map), Some(&index)) =
+                    (Map::from_repr(from), self.doors.get(&from).and_then(|doors| doors.get(warp as usize))) {
+                    self.observed.insert(Entry::Warp { map, index });
+                }
+            } else if now.0 != was.0 {
+                let onto = Map::from_repr(now.0);
+                if let Some(&(direction, _)) = self.edges.get(&was.0)
+                    .and_then(|edges| edges.iter().find(|(_, to)| Some(*to) == onto)) {
+                    self.observed.insert(Entry::Connection { map: Map::from_repr(was.0).expect("a map it stood on"), direction });
+                }
+            }
         }
     }
 
@@ -439,6 +520,7 @@ mod tests {
         let list = super::checklist(gb.core().mmu());
 
         assert_eq!(count(&list, |e| matches!(e, Entry::Map(_))), 220, "the sweep's denominator");
+        assert_eq!(count(&list, |e| matches!(e, Entry::Connection { .. })), 78, "39 edges, each declared from both sides");
         assert_eq!(count(&list, |e| matches!(e, Entry::Trainer { .. })), pokered_symbols::TRAINER_HEADERS.len());
         assert_eq!(count(&list, |e| matches!(e, Entry::Machine(_))), 55, "fifty TMs and five HMs");
         assert_eq!(count(&list, |e| matches!(e, Entry::Badge(_))), 8);
@@ -462,6 +544,73 @@ mod tests {
         assert!(keys.iter().any(|ids| ids.len() == 2), "the fossil choice is one entry with two arms");
         assert!(keys.iter().flatten().all(|id| *id <= ItemId::MaxElixer as u8), "a floor or a machine is a key item: {keys:?}");
         assert_eq!(count(&list, |e| matches!(e, Entry::Way(_))), ways().len());
+    }
+
+    /// A doorway is one entry however many tiles wide it is, and a door is never also an edge.
+    #[test]
+    fn doors_and_edges() {
+        let gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        let list = super::checklist(gb.core().mmu());
+        let raw: usize = reachable_maps().map(|map| warp_doors(map).len()).sum();
+        assert_eq!(raw, 802, "warp events on maps a run can stand on");
+        assert_eq!(count(&list, |e| matches!(e, Entry::Warp { .. })), 665, "those warps as doorways");
+
+        // The Viridian Mart's two-tile doorway is one door, and both of its tiles name it.
+        assert_eq!(warp_doors(Map::ViridianMart), vec![0, 0]);
+
+        // A map change is read as an edge only where no warp fired, which is sound only because
+        // nothing warps to a map its own header already borders.
+        for map in reachable_maps() {
+            let neighbours: Vec<Map> = map_connections(map).into_iter().map(|(_, to)| to).collect();
+            for warp in MapObjects::read(map).expect("a reachable map has objects").warps {
+                let to = Map::from_repr(warp.destination_map);
+                assert!(!to.is_some_and(|to| neighbours.contains(&to)), "{map} warps to its own neighbour {to:?}");
+            }
+        }
+    }
+
+    /// A door is ticked off the warp the cartridge records, and a map edge off the change it leaves
+    /// no record of at all.
+    #[test]
+    fn a_crossing_is_read_from_the_warp_record() {
+        use gb::ram::RAM;
+        let mut fixture = TestFixture::new(
+            include_bytes!("../data/start-of-game-state.bin"), Duration::from_secs(10), vec![]);
+        let state = fixture.game_state();
+        let list = super::checklist(fixture.gb.core().mmu());
+        let mut ledger = Ledger::new(&list);
+        fn step(fixture: &mut TestFixture, ledger: &mut Ledger, state: &GameState, map: Map, record: (Map, u8)) {
+            let mmu = fixture.gb.core_mut().mmu_mut();
+            mmu.write(pokered_symbols::wCurMap.address, map as u8);
+            mmu.write(pokered_symbols::wWarpedFromWhichMap.address, record.0 as u8);
+            mmu.write(pokered_symbols::wWarpedFromWhichWarp.address, record.1);
+            ledger.observe(state, fixture.gb.core().mmu());
+        }
+        let crossed = |fixture: &TestFixture, ledger: &Ledger, entry: Entry| {
+            ledger.done(&Item { entry, check: Check::Observed }, fixture.gb.core().mmu(), &state)
+        };
+
+        // The first tick only seeds: a fresh save reads as warp zero of map zero.
+        step(&mut fixture, &mut ledger, &state, Map::PalletTown, (Map::PalletTown, 0));
+        assert!(!crossed(&fixture, &ledger, Entry::Warp { map: Map::PalletTown, index: 0 }), "the seeding tick crossed a door");
+
+        // Oak's lab is the third warp of Pallet Town; walking back out leaves the lab's own record.
+        step(&mut fixture, &mut ledger, &state, Map::OaksLab, (Map::PalletTown, 2));
+        assert!(crossed(&fixture, &ledger, Entry::Warp { map: Map::PalletTown, index: 2 }), "the door taken was not ticked");
+        assert!(!crossed(&fixture, &ledger, Entry::Warp { map: Map::OaksLab, index: 0 }), "the far side was ticked too");
+
+        // North out of Pallet Town: the map changes and the warp record does not.
+        step(&mut fixture, &mut ledger, &state, Map::PalletTown, (Map::OaksLab, 0));
+        step(&mut fixture, &mut ledger, &state, Map::Route1, (Map::OaksLab, 0));
+        assert!(crossed(&fixture, &ledger, Entry::Connection { map: Map::PalletTown, direction: MapConnectionDirection::North }),
+                "the map edge walked over was not ticked");
+        assert!(!crossed(&fixture, &ledger, Entry::Connection { map: Map::Route1, direction: MapConnectionDirection::South }),
+                "the edge was ticked from both sides at once");
+
+        // A map that arrives from nowhere its header borders is no edge, whatever the save says.
+        step(&mut fixture, &mut ledger, &state, Map::CinnabarIsland, (Map::OaksLab, 0));
+        assert!(!crossed(&fixture, &ledger, Entry::Connection { map: Map::Route1, direction: MapConnectionDirection::North }),
+                "an undeclared neighbour was read as a map edge");
     }
 
     /// A finished save shows the flags done and a fresh one shows nothing.

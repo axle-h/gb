@@ -5,7 +5,7 @@
 //! battle strength and money (`Cheats::story`), and Master Balls and Rare Candies where a step
 //! asks for them. Everything else is earned through the menu.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -2650,6 +2650,34 @@ fn completion_run() {
     let excused = out_of_reach();
     let missing: Vec<Entry> = played.ledger.lock().expect("not poisoned").missing(&list, mmu, &state)
         .into_iter().filter(|entry| !excused.contains(entry)).collect();
-    println!("[completion-run] {} of {} entries met", list.len() - missing.len() - excused.len(), list.len());
+
+    // The doors and the map edges are counted rather than asserted while the run still flies
+    // between regions: a flight crosses neither, so most of both go uncrossed by construction.
+    let walked = |kind: fn(&Entry) -> bool| {
+        let all = list.iter().filter(|item| kind(&item.entry)).count();
+        (all - missing.iter().filter(|entry| kind(entry)).count(), all)
+    };
+    let (doors, all_doors) = walked(|entry| matches!(entry, Entry::Warp { .. }));
+    let (edges, all_edges) = walked(|entry| matches!(entry, Entry::Connection { .. }));
+    println!("[completion-run] {doors} of {all_doors} doors and {edges} of {all_edges} map edges crossed");
+
+    // Named, not just counted: the route that closes the gap is written from this list.
+    let mut uncrossed: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in &missing {
+        match entry {
+            Entry::Warp { map, index } => uncrossed.entry(map.to_string()).or_default().push(index.to_string()),
+            Entry::Connection { map, direction } => uncrossed.entry(map.to_string()).or_default().push(format!("{direction:?}")),
+            _ => {}
+        }
+    }
+    for (map, mut left) in uncrossed {
+        left.sort();
+        println!("[completion-run] {map} left {}", left.join(", "));
+    }
+
+    let rest = list.len() - all_doors - all_edges;
+    let missing: Vec<Entry> = missing.into_iter()
+        .filter(|entry| !matches!(entry, Entry::Warp { .. } | Entry::Connection { .. })).collect();
+    println!("[completion-run] {} of {rest} entries met", rest - missing.len() - excused.len());
     assert!(missing.is_empty(), "the run left {} entries: {missing:?}", missing.len());
 }
