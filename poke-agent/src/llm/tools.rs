@@ -1785,24 +1785,33 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
             let (dx, dy) = crate::pokemon::map_header::strip_offset(to_map);
             format!("take the warp to {to_map}, arriving at ({}, {})", to_position.x + dx, to_position.y + dy)
         }
-        // The menu holds one row per neighbour, so it says how many ways in there are.
-        MetaTile::Connection { to_map, .. } => {
+        // A map edge says where it lands, as a warp does: two openings into the same neighbour can
+        // come out in pockets of it that cannot reach one another, and a row naming only the map
+        // beyond is a row nothing can choose between.
+        MetaTile::Connection { to_map, to_position } => {
+            let (dx, dy) = crate::pokemon::map_header::strip_offset(to_map);
+            let lands = format!("walk into {to_map}, arriving at ({}, {})",
+                                to_position.x + dx, to_position.y + dy);
             let others: Vec<String> = state.map.crossings(to_map).into_iter()
                 .filter(|crossing| crossing.reachable && crossing.at != action.destination)
                 // Minted by `overworld_id`, so prose ids and resolvable ids cannot drift apart.
-                .map(|crossing| overworld_id(state, &OverworldAction {
-                    map: state.map.map,
-                    origin: state.map.player_position,
-                    destination: crossing.at,
-                    tile: MetaTile::Connection { to_map, to_position: crossing.to_position },
-                    route: vec![],
-                }))
+                .map(|crossing| {
+                    let id = overworld_id(state, &OverworldAction {
+                        map: state.map.map,
+                        origin: state.map.player_position,
+                        destination: crossing.at,
+                        tile: MetaTile::Connection { to_map, to_position: crossing.to_position },
+                        route: vec![],
+                    });
+                    format!("`{id}` lands at ({}, {})", crossing.to_position.x + dx,
+                            crossing.to_position.y + dy)
+                })
                 .collect();
             match others.is_empty() {
-                true => format!("walk into {to_map}"),
+                true => lands,
                 false => format!(
-                    "walk into {to_map}. This map has {} other opening{} into {to_map}, and each \
-                     one lands you somewhere different on it: {}",
+                    "{lands}. This map has {} other opening{} into {to_map}, each landing \
+                     somewhere different on it, and any of them can be chosen by id: {}",
                     others.len(),
                     if others.len() == 1 { "" } else { "s" },
                     others.join(", "),
@@ -2233,6 +2242,12 @@ mod tests {
             if id != offered[0].id {
                 assert!(offered[0].description.contains(&id), "{} omits {id}", offered[0].description);
             }
+            // And said where it lands: openings into one map that come out in pockets of it that
+            // cannot reach each other are otherwise word for word the same row.
+            let (dx, dy) = crate::pokemon::map_header::strip_offset(Map::Route13);
+            let lands = format!("({}, {})", crossing.to_position.x + dx, crossing.to_position.y + dy);
+            assert!(offered[0].description.contains(&lands),
+                    "{} omits where {id} lands", offered[0].description);
             let resolved = resolve_overworld(&state, &id).unwrap_or_else(|| panic!("{id} resolves"));
             assert_eq!(resolved.destination, crossing.at);
             assert!(!resolved.route.is_empty(), "{id} comes with a walk to it");

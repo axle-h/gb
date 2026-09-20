@@ -1103,7 +1103,9 @@ impl MetaTileMap {
         }
 
         // One crossing per adjacent map per kind: one per edge perturbs the scripted run's timing,
-        // and one per map hides a water crossing behind a nearer land one.
+        // and one per map hides a water crossing behind a nearer land one. Where a map has more
+        // than one opening into the same neighbour, the row it does mint names the others and
+        // where each of them lands, so the one that is wanted can still be asked for by id.
         for to_map in &self.connection_targets {
             let by_land = nearest(&|t| match t {
                 MetaTile::Connection { to_map: m, .. } => m == to_map,

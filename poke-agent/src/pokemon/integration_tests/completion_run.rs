@@ -70,6 +70,11 @@ pub enum Step {
     Train { row: &'static str, until: &'static str, way: Way, flee: &'static [&'static str] },
     /// Walk to `map` over the transitions the brain has been offered so far.
     GoTo(&'static str),
+    /// Leave by this crossing, named by its row id. A map with more than one opening into the
+    /// same neighbour mints a row for only the nearest, and names the rest in that row's prose;
+    /// where the openings land in pockets that cannot reach each other, which one is taken is the
+    /// whole decision, so it is asked for rather than left to whichever is nearer.
+    Cross(&'static str),
     /// Take every person, item, tree and passage inside `maps` not yet taken, walking to the
     /// nearest part of them with anything left, until nothing is; `patience` caps the turns.
     Explore { maps: &'static [&'static str], patience: usize },
@@ -914,6 +919,14 @@ impl CompletionBrain {
                             .find(|(way, _, to)| *to == pocket.map && !self.pocket_edges.contains_key(&(here.clone(), way.clone())))
                             .map(|(_, id, _)| id.clone())))
                 }
+                Step::Cross(id) => {
+                    // Done once the map has changed, as a `Go` is: choosing the crossing is a walk
+                    // to it, and every turn on the way stands on the map the id names.
+                    match request.location().as_deref() == id.split(':').next() {
+                        true => Some(id.to_string()),
+                        false => { self.at += 1; continue }
+                    }
+                }
                 Step::Explore { maps, patience } => {
                     /// Turns an exploring may go without seeing anywhere new or taking anything.
                     /// A pocket is known by the exits it offers, so a map that offers different
@@ -1455,6 +1468,77 @@ fn visit(building: &'static str, town: &'static str) -> [Step; 3] {
     [Step::GoTo(building), Step::Clear(&[]), Step::GoTo(town)]
 }
 
+// The legs between towns, hop by hop. A phase starts with the brain's graph empty and a turn
+// offers only the passages out of the pocket the run stands in, so every map on the way has to be
+// named: a `GoTo` over a region the phase has not walked yet has nothing to route over.
+//
+// Saffron's four gates are buildings standing in the middle of their route rather than doors into
+// the city: both of a gate's doors come out on the same route, one on each side of it, and the
+// city is entered over the map edge beyond. So a leg through one names the far door by where it
+// lands, which is what tells the two apart.
+
+/// Celadon to Saffron, through Route 7's gate.
+fn celadon_to_saffron() -> Vec<Step> {
+    use Step::*;
+    vec![GoTo("Route7"), GoTo("Route7Gate"), Take("Route7, arriving at (19, "), GoTo("SaffronCity")]
+}
+
+fn saffron_to_celadon() -> Vec<Step> {
+    use Step::*;
+    // Saffron's west wall has two openings and only the northern one comes out beside the gate;
+    // the other lands in a strip of Route 7 that leads nowhere but back into the city.
+    vec![Cross("SaffronCity:0,19:Connection"), GoTo("Route7Gate"),
+         Take("Route7, arriving at (12, "), GoTo("CeladonCity")]
+}
+
+/// Saffron to Cerulean, through Route 5's gate.
+fn saffron_to_cerulean() -> Vec<Step> {
+    use Step::*;
+    vec![GoTo("Route5"), GoTo("Route5Gate"), Take("Route5, arriving at (10, 30)"), GoTo("CeruleanCity")]
+}
+
+fn cerulean_to_saffron() -> Vec<Step> {
+    use Step::*;
+    vec![GoTo("Route5"), GoTo("Route5Gate"), Take("Route5, arriving at (10, 34)"), GoTo("SaffronCity")]
+}
+
+/// Saffron to Vermilion, through Route 6's gate.
+fn saffron_to_vermilion() -> Vec<Step> {
+    use Step::*;
+    vec![GoTo("Route6"), GoTo("Route6Gate"), Take("Route6, arriving at (10, 8)"), GoTo("VermilionCity")]
+}
+
+fn vermilion_to_saffron() -> Vec<Step> {
+    use Step::*;
+    vec![GoTo("Route6"), GoTo("Route6Gate"), Take("Route6, arriving at (10, 2)"), GoTo("SaffronCity")]
+}
+
+/// Saffron to Lavender, through Route 8's gate.
+fn saffron_to_lavender() -> Vec<Step> {
+    use Step::*;
+    vec![GoTo("Route8"), GoTo("Route8Gate"), Take("Route8, arriving at (9, "), GoTo("LavenderTown")]
+}
+
+fn lavender_to_saffron() -> Vec<Step> {
+    use Step::*;
+    vec![GoTo("Route8"), GoTo("Route8Gate"), Take("Route8, arriving at (2, "), GoTo("SaffronCity")]
+}
+
+/// Celadon to Lavender under Saffron rather than through it, which is the way while the guard at
+/// each of Saffron's gates is still waiting for his drink. Both stairwells are on the far side of
+/// their route's gate from the city, so neither gate is touched.
+fn celadon_to_lavender() -> Vec<Step> {
+    use Step::*;
+    vec![GoTo("Route7"), GoTo("UndergroundPathRoute7"), GoTo("UndergroundPathWestEast"),
+          GoTo("UndergroundPathRoute8"), GoTo("Route8"), GoTo("LavenderTown")]
+}
+
+fn lavender_to_celadon() -> Vec<Step> {
+    use Step::*;
+    vec![GoTo("Route8"), GoTo("UndergroundPathRoute8"), GoTo("UndergroundPathWestEast"),
+          GoTo("UndergroundPathRoute7"), GoTo("Route7"), GoTo("CeladonCity")]
+}
+
 /// Pewter to Bill: Route 3, Mt Moon, Cerulean and the Cascade Badge, Nugget Bridge and Route 25.
 pub fn to_bill() -> Vec<Step> {
     use Step::*;
@@ -1586,6 +1670,10 @@ pub fn to_celadon() -> Vec<Step> {
         GoTo("DiglettsCaveRoute2"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute11"), GoTo("Route11"),
         GoTo("VermilionCity"), GoTo("Route6"), GoTo("UndergroundPathRoute6"), GoTo("UndergroundPathNorthSouth"),
         GoTo("UndergroundPathRoute5"), GoTo("Route5"), GoTo("CeruleanCity"),
+        // The Fan Club's voucher buys the bicycle, and the cycling road south of Celadon is the
+        // only way to Fuchsia on foot, so the bike is fetched on the one walk through Cerulean
+        // that happens after Vermilion.
+        GoTo("BikeShop"), Clear(&[]), GoTo("CeruleanCity"),
         GoTo("CeruleanTrashedHouse"), GoTo("CeruleanCity"),
         // The tree on the main terrace is the other way down to Route 5, and the only one to the
         // Day Care.
@@ -1629,8 +1717,8 @@ fn completion_phase_celadon() {
         Map::LavenderCuboneHouse, Map::MrFujisHouse, Map::NameRatersHouse, Map::PokemonTower1F,
         Map::PokemonTower2F, Map::Route12Gate1F, Map::Route12Gate2F, Map::Route8, Map::Route8Gate,
         Map::UndergroundPathRoute8, Map::UndergroundPathWestEast, Map::UndergroundPathRoute7, Map::Route7,
-        Map::Route7Gate,
-    ], &[Entry::Way(Way::WildOnACaveFloor)]);
+        Map::Route7Gate, Map::BikeShop,
+    ], &[Entry::Way(Way::WildOnACaveFloor), Entry::KeyItem(vec![ItemId::Bicycle as u8])]);
     cut(&mut played, "completion-celadon");
     // On the water by the Power Plant, for the phase after Surf.
     let later = [Entry::Trainer { map: Map::Route10, index: 0 }];
@@ -1639,7 +1727,7 @@ fn completion_phase_celadon() {
 }
 
 /// Celadon: the Mart and its roof, the Mansion's Eevee, the Game Corner's prizes, Erika, and Route
-/// 16's Fly house; then Fly back to Cerulean for the Bicycle.
+/// 16's Fly house.
 pub fn to_the_rainbow_badge() -> Vec<Step> {
     use Step::*;
     vec![
@@ -1691,10 +1779,9 @@ pub fn to_the_rainbow_badge() -> Vec<Step> {
         Take("Route16Gate1F, arriving at (7, 2)"), Take("Route16, arriving at (17, 4)"),
         Explore { maps: &["Route16", "Route16FlyHouse"], patience: 100 },
         GoTo("Route16"), Take("Route16Gate1F, arriving at (0, 2)"), Take("Route16, arriving at (24, 4)"),
+        // Fly is a field move the model has to be able to use, and the tour uses it once, where the
+        // cartridge makes it the natural thing: the flight back to Viridian for the last badge.
         Teach { item: "Hm02Fly", species: "Farfetchd" },
-        Field(r#"{"move":"fly","map":"CeruleanCity"}"#),
-        GoTo("BikeShop"), Clear(&[]), GoTo("CeruleanCity"),
-        Field(r#"{"move":"fly","map":"CeladonCity"}"#),
         GoTo("CeladonCity"),
     ]
 }
@@ -1710,13 +1797,12 @@ fn completion_phase_rainbow_badge() {
         Map::CeladonMansion1F, Map::CeladonMansion2F, Map::CeladonMansion3F, Map::CeladonMansionRoof,
         Map::CeladonMansionRoofHouse, Map::CeladonDiner, Map::CeladonHotel, Map::CeladonChiefHouse,
         Map::GameCorner, Map::GameCornerPrizeRoom, Map::CeladonGym, Map::Route16FlyHouse, Map::Route16Gate1F,
-        Map::BikeShop,
     ], &[Entry::Badge(3), Entry::Way(Way::GiftEevee), Entry::Way(Way::EvolvedByStone),
          Entry::Way(Way::GameCornerPrize), Entry::Way(Way::PcChangeBox),
          Entry::Machine(ItemId::Hm02Fly as u8), Entry::Machine(ItemId::Tm13IceBeam as u8),
          Entry::Machine(ItemId::Tm48RockSlide as u8), Entry::Machine(ItemId::Tm49TriAttack as u8),
          Entry::Machine(ItemId::Tm15HyperBeam as u8), Entry::Machine(ItemId::Tm23DragonRage as u8),
-         Entry::Machine(ItemId::Tm50Substitute as u8), Entry::KeyItem(vec![ItemId::Bicycle as u8])]);
+         Entry::Machine(ItemId::Tm50Substitute as u8)]);
     cut(&mut played, "completion-rainbow");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
@@ -1725,7 +1811,7 @@ fn completion_phase_rainbow_badge() {
 /// the flute wakes.
 pub fn to_the_poke_flute() -> Vec<Step> {
     use Step::*;
-    vec![
+    let mut steps = vec![
         Collect(true),
         GoTo("GameCorner"), Take("look behind the poster"),
         GoTo("RocketHideoutB1F"),
@@ -1743,7 +1829,9 @@ pub fn to_the_poke_flute() -> Vec<Step> {
                   patience: 900 },
         GoTo("RocketHideoutElevator"), Field(r#"{"move":"elevator","map":"RocketHideoutB2F"}"#),
         GoTo("RocketHideoutB1F"), GoTo("GameCorner"), GoTo("CeladonCity"),
-        Field(r#"{"move":"fly","map":"LavenderTown"}"#), GoTo("LavenderTown"),
+    ];
+    steps.extend(celadon_to_lavender());
+    steps.extend([
         // The tower fills the bag, and Mr Fuji hands over nothing it has no room for.
         Tidy,
         GoTo("PokemonTower1F"),
@@ -1756,15 +1844,21 @@ pub fn to_the_poke_flute() -> Vec<Step> {
         UseItemOn { item: "PokeFlute", row: "Snorlax" },
         Explore { maps: &["Route12"], patience: 400 },
         GoTo("Route12SuperRodHouse"), Clear(&[]), GoTo("Route12"),
-        Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"),
+        // Back north through the gate that splits the route, and under Saffron to Celadon.
+        GoTo("Route12Gate1F"), Take("Route12, arriving at (11, 16)"), GoTo("LavenderTown"),
+    ]);
+    steps.extend(lavender_to_celadon());
+    steps.extend([
         GoTo("Route16"), UseItemOn { item: "PokeFlute", row: "Snorlax" },
         // The gate's stairs are in its lower hall, past where the Snorlax slept.
         GoTo("Route16Gate1F"), GoTo("Route16Gate2F"), Clear(&[]), GoTo("Route16Gate1F"), Clear(&[]),
-        // Out of the gate's lower hall onto the cycling road's side, where the bikers are.
+        // Out of the gate's lower hall onto the cycling road's side, where the bikers are. That
+        // side is a pocket of its own, so the way back to Celadon is the hall it came out of.
         Take("Route16, arriving at (17, 1"), Clear(&[]),
-        // That side leads on to Route 17, and Fly is refused indoors, so fly from here.
-        Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"),
-    ]
+        Take("Route16Gate1F, arriving at (0, 8)"), Take("Route16, arriving at (24, 1"),
+        GoTo("CeladonCity"),
+    ]);
+    steps
 }
 
 #[test]
@@ -1796,6 +1890,11 @@ pub fn to_the_marsh_badge() -> Vec<Step> {
                              "SilphCo11F"];
     let mut steps = vec![
         Collect(true),
+        // The Copycat trades TM31 for a Poké Doll, sold on Celadon Mart's fourth floor, and the
+        // run is still in Celadon: the shop comes before the walk east rather than a trip back.
+        GoTo("CeladonMart1F"), GoTo("CeladonMart2F"), GoTo("CeladonMart3F"), GoTo("CeladonMart4F"),
+        Talk("Clerk"), Buy(&[("PokeDoll", 1)]),
+        GoTo("CeladonMart3F"), GoTo("CeladonMart2F"), GoTo("CeladonMart1F"), GoTo("CeladonCity"),
         // The guard takes the drink as the player walks past him, without being talked to, and
         // the gate's far door names the map it was entered from until he does.
         // Both doors lead back onto Route 7: the guard is what blocks the room between them, and
@@ -1804,13 +1903,6 @@ pub fn to_the_marsh_badge() -> Vec<Step> {
         Take("Route7, arriving at (19, "), GoTo("SaffronCity"),
     ];
     steps.extend([
-        // The Copycat trades TM31 for a Poké Doll, sold on Celadon Mart's fourth floor, and she is
-        // one of the doors the exploring below opens.
-        Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"),
-        GoTo("CeladonMart1F"), GoTo("CeladonMart2F"), GoTo("CeladonMart3F"), GoTo("CeladonMart4F"),
-        Talk("Clerk"), Buy(&[("PokeDoll", 1)]),
-        GoTo("CeladonMart3F"), GoTo("CeladonMart2F"), GoTo("CeladonMart1F"), GoTo("CeladonCity"),
-        Field(r#"{"move":"fly","map":"SaffronCity"}"#), GoTo("SaffronCity"),
         Explore { maps: &["SaffronCity", "SaffronPokecenter", "SaffronMart", "SaffronPidgeyHouse",
                           "MrPsychicsHouse", "CopycatsHouse1F", "CopycatsHouse2F", "FightingDojo"],
                   patience: 800 },
@@ -1831,10 +1923,8 @@ pub fn to_the_marsh_badge() -> Vec<Step> {
         Take("warp to SilphCo3F, arriving at (11, 11)"),
         GoTo("SilphCoElevator"), Field(r#"{"move":"elevator","map":"SilphCo1F"}"#),
         GoTo("SilphCo1F"), GoTo("SaffronCity"),
-        // Sabrina's gym opens once Silph Co is clear of Rockets. Flying out and back lands the
-        // run at the Centre, since people standing in the streets pocket the city.
-        Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"),
-        Field(r#"{"move":"fly","map":"SaffronCity"}"#), GoTo("SaffronCity"),
+        // Sabrina's gym opens once Silph Co is clear of Rockets, and freeing the president is what
+        // clears the streets the Rockets were standing in.
         GoTo("SaffronGym"), Explore { maps: &["SaffronGym"], patience: 600 }, GoTo("SaffronCity"),
         // Freeing the president sends the Rockets home, and the doors they stood in open. The
         // Dojo's master has to be beaten before either of his Poké Balls will open.
@@ -1868,12 +1958,14 @@ fn completion_phase_marsh_badge() {
 /// Fuchsia: the cycling road down Route 16 to 18, the city behind its trees, and Koga.
 pub fn to_the_soul_badge() -> Vec<Step> {
     use Step::*;
-    vec![
+    let mut steps = vec![
         Collect(true),
-        // The phase before ended indoors, and Fly is refused under a roof.
+        // The phase before ended wherever its exploring left off.
         GoTo("SaffronCity"),
+    ];
+    steps.extend(saffron_to_celadon());
+    steps.extend([
         // The cycling road is the way south, and the guard only lets a cyclist by.
-        Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"),
         GoTo("Route16"), GoTo("Route16Gate1F"), Clear(&[]),
         Take("Route16, arriving at (17, 1"),
         GoTo("Route17"), Explore { maps: &["Route17"], patience: 400 },
@@ -1883,7 +1975,8 @@ pub fn to_the_soul_badge() -> Vec<Step> {
         Explore { maps: &["FuchsiaCity", "FuchsiaPokecenter", "FuchsiaMart", "FuchsiaBillsGrandpasHouse",
                           "FuchsiaGoodRodHouse", "WardensHouse", "FuchsiaMeetingRoom"], patience: 800 },
         GoTo("FuchsiaGym"), Explore { maps: &["FuchsiaGym"], patience: 400 }, GoTo("FuchsiaCity"),
-    ]
+    ]);
+    steps
 }
 
 #[test]
@@ -1918,8 +2011,8 @@ fn a_walk_given_up_on_every_time_is_not_tried_for_ever() {
     ], 45, Duration::from_secs(900));
 }
 
-/// The Safari Zone: the warden's teeth, the Surf in its secret house, and then the water the
-/// phases before it could only look at from dry land.
+/// The Safari Zone: the warden's teeth, the Surf in its secret house, and Strength from the
+/// warden once his teeth are back.
 pub fn to_surf() -> Vec<Step> {
     use Step::*;
     const SAFARI: &[&str] = &["SafariZoneGate", "SafariZoneCenter", "SafariZoneEast", "SafariZoneNorth",
@@ -1959,21 +2052,9 @@ pub fn to_surf() -> Vec<Step> {
         AtPc(Pc::Deposit("Abra")), AtPc(Pc::Withdraw("Kangaskhan")),
         GoTo("FuchsiaCity"),
         Teach { item: "Hm03Surf", species: "Kangaskhan" },
-        // What the phases before could only look at from dry land.
-        Field(r#"{"move":"fly","map":"LavenderTown"}"#), GoTo("LavenderTown"),
-        // Route 12 carries on south of its gate, so the gate is part of walking the route. The
-        // walk can end inside it, and Fly is refused indoors, so the way out comes before the way on.
-        GoTo("Route12"), Explore { maps: &["Route12", "Route12Gate1F"], patience: 400 },
-        GoTo("Route12"),
-        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
-        GoTo("Route24"), GoTo("Route25"), Explore { maps: &["Route25"], patience: 300 },
-        // Walking back down from Nugget Bridge does not land where the walk up started: Cerulean's
-        // north west corner is a pocket of water and bank that the city proper cannot be reached
-        // from, and Route 4 opens into the same one. Flying in lands at the Pokemon Centre.
-        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
-        GoTo("CeruleanTrashedHouse"), Take("CeruleanCity, arriving at (28, 10)"),
-        GoTo("Route9"), GoTo("Route10"), Explore { maps: &["Route10"], patience: 400 },
-        Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"),
+        // The water the phases before could only look at from dry land is in the north and the
+        // south, and the run is in Fuchsia: each stretch is taken by the phase that walks past it
+        // rather than flown to from here.
     ]
 }
 
@@ -1995,11 +2076,7 @@ fn completion_phase_surf() {
         Map::SafariZoneWest, Map::SafariZoneCenterRestHouse, Map::SafariZoneEastRestHouse,
         Map::SafariZoneNorthRestHouse, Map::SafariZoneWestRestHouse, Map::SafariZoneSecretHouse,
         Map::WardensHouse,
-    ], &[Entry::Machine(ItemId::Hm03Surf as u8), Entry::KeyItem(vec![ItemId::GoldTeeth as u8]),
-         // Deferred by the phases that could only reach these from dry land.
-         Entry::Trainer { map: Map::Route10, index: 0 },
-         Entry::ItemBall { map: Map::Route12, object: 9, item: ItemId::Tm16PayDay as u8 },
-         Entry::ItemBall { map: Map::Route25, object: 10, item: ItemId::Tm19SeismicToss as u8 }])
+    ], &[Entry::Machine(ItemId::Hm03Surf as u8), Entry::KeyItem(vec![ItemId::GoldTeeth as u8])])
         .into_iter().filter(|entry| !out_of_reach.contains(entry)).collect::<Vec<_>>();
     cut(&mut played, "completion-surf");
     assert!(missing.is_empty(), "the phase left {missing:?}");
@@ -2034,15 +2111,15 @@ pub fn to_the_volcano_badge() -> Vec<Step> {
         // South over the water: the sea routes, which no phase before this one could cross.
         GoTo("Route19"), Explore { maps: &["Route19"], patience: 500 },
         GoTo("Route20"), Explore { maps: &["Route20"], patience: 600 },
-        // Route 20 is two halves with the Seafoam islands between them, and nothing west of them
-        // can be reached from the Route 19 end: the water stops at the islands' east door. So the
-        // island is reached the way the cartridge intends, down Route 21 from Pallet, and the
-        // route's west half is walked back from Cinnabar's own shore.
-        Field(r#"{"move":"fly","map":"PalletTown"}"#), GoTo("PalletTown"),
+        // Route 20 is a north channel and a south channel with the islands between them: the
+        // north one runs east to Route 19 and the south one west to Cinnabar, and they do not
+        // meet. The islands' ground floor is the crossing between the two.
+        GoTo("SeafoamIslands1F"), Take("Route20, arriving at (59, 9)"),
+        Explore { maps: &["Route20"], patience: 600 },
+        GoTo("CinnabarIsland"),
+        // Route 21 runs north from Cinnabar to Pallet, and is walked both ways for its two edges.
         GoTo("Route21"), Explore { maps: &["Route21"], patience: 500 },
-        GoTo("CinnabarIsland"),
-        GoTo("Route20"), Explore { maps: &["Route20"], patience: 600 },
-        GoTo("CinnabarIsland"),
+        GoTo("PalletTown"), GoTo("Route21"), GoTo("CinnabarIsland"),
         Explore { maps: &["CinnabarIsland", "CinnabarPokecenter", "CinnabarMart"], patience: 400 },
         // The lab is four maps: the hall and three back rooms.
         GoTo("CinnabarLab"), Clear(&[]),
@@ -2136,7 +2213,7 @@ pub fn to_seafoam() -> Vec<Step> {
         Collect(true),
         Talk("Articuno"),
         Explore { maps: SEAFOAM, patience: 600 },
-        GoTo("Route20"),
+        GoTo("SeafoamIslands1F"), Take("Route20, arriving at (59, 9)"), GoTo("CinnabarIsland"),
     ]
 }
 
@@ -2159,10 +2236,9 @@ pub fn to_the_earth_badge() -> Vec<Step> {
     use Step::*;
     vec![
         Collect(true), Tidy,
-        // The islands are the bridge between Route 20's two halves, so the phase before came out of
-        // their east door, on the Fuchsia side, where the only rows are the water, the swimmers and
-        // the way back in. Cinnabar is not reachable from that half at all, and the flight does not
-        // need it to be.
+        // The one flight of the tour, and the one the cartridge makes the natural thing: Viridian
+        // is the whole world away from Cinnabar, and the gym that was shut when the run first
+        // walked past it is the last badge. Every other leg is walked.
         Field(r#"{"move":"fly","map":"ViridianCity"}"#), GoTo("ViridianCity"),
         // Giovanni is only in the gym once Silph Co has sent the Rockets home. The arrow tiles are
         // the floor itself rather than an obstacle: `MetaTileMap` slides a route over them, so the
