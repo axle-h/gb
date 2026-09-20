@@ -70,11 +70,11 @@ pub enum Step {
     Train { row: &'static str, until: &'static str, way: Way, flee: &'static [&'static str] },
     /// Walk to `map` over the transitions the brain has been offered so far.
     GoTo(&'static str),
-    /// Leave by this crossing, named by its row id. A map with more than one opening into the
-    /// same neighbour mints a row for only the nearest, and names the rest in that row's prose;
-    /// where the openings land in pockets that cannot reach each other, which one is taken is the
-    /// whole decision, so it is asked for rather than left to whichever is nearer.
-    Cross(&'static str),
+    /// Leave by the opening into `map` that lands nearest `landing`. An opening is a stretch of
+    /// map edge rather than a door, so which tile of it the menu names, and where that tile
+    /// lands, both move with the player; what holds still is which stretch is which. A landing
+    /// well inside the one that is wanted therefore picks it out from wherever the run stands.
+    Cross { map: &'static str, landing: (u8, u8) },
     /// Take every person, item, tree and passage inside `maps` not yet taken, walking to the
     /// nearest part of them with anything left, until nothing is; `patience` caps the turns.
     Explore { maps: &'static [&'static str], patience: usize },
@@ -175,9 +175,7 @@ fn id_at(id: &str) -> Option<(u8, u8)> {
 /// Where the run came into this map, from the turn's own line. The prompt writes it only for an
 /// arrival it still holds and only on the map that arrival belongs to, so its absence is ordinary.
 fn entered_at(situation: &str) -> Option<(u8, u8)> {
-    let rest = situation.split("Entered this map at (").nth(1)?;
-    let (x, rest) = rest.split_once(", ")?;
-    Some((x.parse().ok()?, rest.split(')').next()?.parse().ok()?))
+    coords_after(situation, "Entered this map at (")
 }
 
 /// The row to leave this map by for `target`. More than one exit can name the same map: a house
@@ -186,6 +184,34 @@ fn entered_at(situation: &str) -> Option<(u8, u8)> {
 /// knows leads somewhere, so where the turn says where that was, the exit nearest it wins. With no
 /// such line, or no exit carrying a coordinate, the first match stands, which is what
 /// `Intent::Enter` does on its own.
+/// The coordinates written after `lead`, for the one place a description writes them.
+fn coords_after(text: &str, lead: &str) -> Option<(u8, u8)> {
+    let rest = text.split(lead).nth(1)?;
+    let (x, rest) = rest.split_once(", ")?;
+    Some((x.parse().ok()?, rest.split(')').next()?.parse().ok()?))
+}
+
+/// The row for the opening into `target` that lands nearest `landing`. The menu mints one row per
+/// neighbour, for whichever opening is nearest, and names the others and their landings in that
+/// row's prose, so both are read out of the one row.
+fn crossing_toward(request: &TurnRequest, target: &str, landing: (u8, u8)) -> Option<String> {
+    let (id, what) = request.menu_rows().into_iter()
+        .find(|(id, what)| id.ends_with(":Connection") && names_map(what, target))?;
+    let mut openings = vec![];
+    if let Some(at) = coords_after(&what, "arriving at (") {
+        openings.push((id, at));
+    }
+    let parts: Vec<&str> = what.split('`').collect();
+    for pair in parts.windows(2).skip(1).step_by(2) {
+        if let Some(at) = coords_after(pair[1], "lands at (") {
+            openings.push((pair[0].to_string(), at));
+        }
+    }
+    openings.into_iter()
+        .min_by_key(|(_, at)| at.0.abs_diff(landing.0) as u16 + at.1.abs_diff(landing.1) as u16)
+        .map(|(id, _)| id)
+}
+
 fn enter_toward(request: &TurnRequest, target: &'static str) -> Option<String> {
     let first = Intent::Enter(target).resolve(request);
     let Some(came_in_at) = entered_at(request.situation()) else { return first };
@@ -357,7 +383,10 @@ impl CompletionBrain {
     }
 
     pub fn finished(&self) -> bool {
-        self.at >= self.steps.len()
+        // A machine sent to be taught is checked on the next overworld turn, and a phase that ends
+        // on the call never reaches it: the fixture is cut with the move still on its way to the
+        // slot, and the phase after opens with a party that cannot do what it was taught.
+        self.at >= self.steps.len() && self.taught.is_none()
     }
 
     fn saw(&self, way: Way) {
@@ -919,13 +948,9 @@ impl CompletionBrain {
                             .find(|(way, _, to)| *to == pocket.map && !self.pocket_edges.contains_key(&(here.clone(), way.clone())))
                             .map(|(_, id, _)| id.clone())))
                 }
-                Step::Cross(id) => {
-                    // Done once the map has changed, as a `Go` is: choosing the crossing is a walk
-                    // to it, and every turn on the way stands on the map the id names.
-                    match request.location().as_deref() == id.split(':').next() {
-                        true => Some(id.to_string()),
-                        false => { self.at += 1; continue }
-                    }
+                Step::Cross { map: target, landing } => {
+                    if request.location().as_deref() == Some(*target) { self.at += 1; continue }
+                    crossing_toward(request, target, *landing)
                 }
                 Step::Explore { maps, patience } => {
                     /// Turns an exploring may go without seeing anywhere new or taking anything.
@@ -1147,7 +1172,7 @@ impl CompletionBrain {
                             }
                         }
                         Step::Hunt { .. } | Step::Train { .. } | Step::Clear(_) | Step::GoTo(_) | Step::Explore { .. }
-                        | Step::TrashCans | Step::Coins(_) | Step::Safari => {}
+                        | Step::TrashCans | Step::Coins(_) | Step::Safari | Step::Cross { .. } => {}
                         Step::Trade(_) => self.at += 1,
                         // A hop toward the row is not the row.
                         Step::Take(fragment) => {
@@ -1486,8 +1511,8 @@ fn celadon_to_saffron() -> Vec<Step> {
 fn saffron_to_celadon() -> Vec<Step> {
     use Step::*;
     // Saffron's west wall has two openings and only the northern one comes out beside the gate;
-    // the other lands in a strip of Route 7 that leads nowhere but back into the city.
-    vec![Cross("SaffronCity:0,19:Connection"), GoTo("Route7Gate"),
+    // the other lands in a strip of Route 7 whose one row is the way back into the city.
+    vec![Cross { map: "Route7", landing: (20, 0) }, GoTo("Route7Gate"),
          Take("Route7, arriving at (12, "), GoTo("CeladonCity")]
 }
 
@@ -2104,22 +2129,38 @@ pub fn to_the_volcano_badge() -> Vec<Step> {
     use Step::*;
     const MANSION: &[&str] = &["PokemonMansion1F", "PokemonMansion2F", "PokemonMansion3F",
                                "PokemonMansionB1F"];
-    vec![
+    let mut steps = vec![
         Collect(true),
         // The zone left the bag full, and a full bag refuses a pickup and a gift in silence.
         Tidy,
         // South over the water: the sea routes, which no phase before this one could cross.
         GoTo("Route19"), Explore { maps: &["Route19"], patience: 500 },
         GoTo("Route20"), Explore { maps: &["Route20"], patience: 600 },
-        // Route 20 is a north channel and a south channel with the islands between them: the
-        // north one runs east to Route 19 and the south one west to Cinnabar, and they do not
-        // meet. The islands' ground floor is the crossing between the two.
-        GoTo("SeafoamIslands1F"), Take("Route20, arriving at (59, 9)"),
-        Explore { maps: &["Route20"], patience: 600 },
-        GoTo("CinnabarIsland"),
-        // Route 21 runs north from Cinnabar to Pallet, and is walked both ways for its two edges.
+        GoTo("Route19"), GoTo("FuchsiaCity"),
+    ];
+    // Route 20 is a north channel and a south channel with the islands between them, and they do
+    // not meet: the north one runs east to Route 19 and the south one west to Cinnabar, and
+    // neither the islands' ground floor nor the floor below it joins the two. So Cinnabar is
+    // reached the way the cartridge intends, down Route 21 from Pallet, and on foot that is the
+    // whole world away: the eastern routes up to Lavender, through Saffron to Vermilion, Diglett's
+    // Cave to Route 2, and down through Viridian. Not the cycling road, which only goes south: its
+    // ledge onto Route 18 is a crossing the menu offers and the walk cannot take.
+    steps.extend([
+        GoTo("Route15"), GoTo("Route15Gate1F"), Take("Route15, arriving at (15, "),
+        GoTo("Route14"), GoTo("Route13"), GoTo("Route12"),
+        GoTo("Route12Gate1F"), Take("Route12, arriving at (11, 16)"), GoTo("LavenderTown"),
+    ]);
+    steps.extend(lavender_to_saffron());
+    steps.extend(saffron_to_vermilion());
+    steps.extend([
+        GoTo("Route11"), GoTo("DiglettsCaveRoute11"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute2"),
+        GoTo("Route2"), GoTo("Route2Gate"), Take("Route2, arriving at (15, 40)"),
+        GoTo("ViridianCity"), GoTo("Route1"), GoTo("PalletTown"),
         GoTo("Route21"), Explore { maps: &["Route21"], patience: 500 },
-        GoTo("PalletTown"), GoTo("Route21"), GoTo("CinnabarIsland"),
+        GoTo("CinnabarIsland"),
+        // The south channel, which only Cinnabar's own shore opens onto.
+        GoTo("Route20"), Explore { maps: &["Route20"], patience: 600 },
+        GoTo("CinnabarIsland"),
         Explore { maps: &["CinnabarIsland", "CinnabarPokecenter", "CinnabarMart"], patience: 400 },
         // The lab is four maps: the hall and three back rooms.
         GoTo("CinnabarLab"), Clear(&[]),
@@ -2165,7 +2206,8 @@ pub fn to_the_volcano_badge() -> Vec<Step> {
         Talk("QuizYes11"), Explore { maps: &["CinnabarGym"], patience: 900 },
         Talk("Blaine"),
         GoTo("CinnabarIsland"),
-    ]
+    ]);
+    steps
 }
 
 #[test]
@@ -2199,7 +2241,10 @@ pub fn to_seafoam() -> Vec<Step> {
         // The floors are thick with wilds, and every new species is a catch that spends the turns
         // the boulders need, so the collecting waits for the bird the phase came for.
         Collect(false), Tidy,
-        // Cinnabar's own shore reaches Route 20's west half, and the islands' door with it.
+        // The walk west filled the box, and a full box refuses every ball: a legendary met with
+        // nothing to throw is run from, and that hides it for the rest of the game.
+        GoTo("CinnabarPokecenter"), AtPc(Pc::ChangeBox(5)), GoTo("CinnabarIsland"),
+        // Cinnabar's own shore is on Route 20's south channel, and the islands' east door with it.
         GoTo("Route20"), GoTo("SeafoamIslands1F"),
         Explore { maps: SEAFOAM, patience: 1200 },
         // B3F's two holes, each filled by the one boulder that can reach it. The row names both,
@@ -2210,10 +2255,17 @@ pub fn to_seafoam() -> Vec<Step> {
         // Down the hole just filled, into the west lake: the staircases land on the other side,
         // which the current walls off from the bird.
         Take("SeafoamIslandsB4F, arriving at (5, 14)"),
+        // Hunted rather than talked to, as the other legendaries are: a talk is done the moment
+        // its row is chosen, and the throw then rides on the collecting arm instead.
+        Hunt { species: "Articuno", row: "Articuno", ball: "MasterBall",
+               way: Way::Legendary(Legend::Articuno), on: "SeafoamIslandsB4F" },
         Collect(true),
-        Talk("Articuno"),
         Explore { maps: SEAFOAM, patience: 600 },
-        GoTo("SeafoamIslands1F"), Take("Route20, arriving at (59, 9)"), GoTo("CinnabarIsland"),
+        // The islands are a funnel: each door opens into a pocket of its own, both pockets drain
+        // into the floors between, and nothing drains back. Whichever door the run came in by, the
+        // way out is the west one, onto Route 20's north channel and back to Fuchsia.
+        GoTo("SeafoamIslands1F"), Take("Route20, arriving at (49, 5)"),
+        GoTo("Route19"), GoTo("FuchsiaCity"),
     ]
 }
 
@@ -2237,7 +2289,7 @@ pub fn to_the_earth_badge() -> Vec<Step> {
     vec![
         Collect(true), Tidy,
         // The one flight of the tour, and the one the cartridge makes the natural thing: Viridian
-        // is the whole world away from Cinnabar, and the gym that was shut when the run first
+        // is the whole world away from Fuchsia, and the gym that was shut when the run first
         // walked past it is the last badge. Every other leg is walked.
         Field(r#"{"move":"fly","map":"ViridianCity"}"#), GoTo("ViridianCity"),
         // Giovanni is only in the gym once Silph Co has sent the Rockets home. The arrow tiles are
@@ -2253,7 +2305,9 @@ fn completion_phase_earth_badge() {
     use crate::pokemon::map::Map;
     let mut played = play(include_bytes!("../data/completion-seafoam.bin"), "completion-earth",
                           to_the_earth_badge(), 300, Duration::from_secs(1800));
-    let missing = missing_on(&mut played, &[Map::ViridianGym], &[Entry::Badge(7)]);
+    // Giovanni hands over his machine once he is beaten, and the bag has room for it here.
+    let missing = missing_on(&mut played, &[Map::ViridianGym],
+                             &[Entry::Badge(7), Entry::Machine(ItemId::Tm27Fissure as u8)]);
     cut(&mut played, "completion-earth");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
@@ -2265,10 +2319,9 @@ pub fn to_the_power_plant() -> Vec<Step> {
         Collect(false), Tidy,
         // Two catches to make, and a full box refuses every ball: a static met with nothing to
         // throw is run from, which hides it for good.
-        GoTo("ViridianPokecenter"), AtPc(Pc::ChangeBox(3)), GoTo("ViridianCity"),
+        GoTo("CeruleanPokecenter"), AtPc(Pc::ChangeBox(3)), GoTo("CeruleanCity"),
         // The robbed house's back door is the only way onto the half of Cerulean that Route 9
         // opens off, which is how every phase before this one has reached that side.
-        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
         GoTo("CeruleanTrashedHouse"), Take("CeruleanCity, arriving at (28, 10)"),
         GoTo("Route9"), GoTo("Route10"), GoTo("PowerPlant"),
         // Six Voltorb and two Electrode stand where item balls would, and the turn offers each as
@@ -2295,7 +2348,7 @@ pub fn to_the_power_plant() -> Vec<Step> {
 #[test]
 fn completion_phase_power_plant() {
     use crate::pokemon::map::Map;
-    let mut played = play(include_bytes!("../data/completion-earth.bin"), "completion-power-plant",
+    let mut played = play(include_bytes!("../data/completion-mewtwo.bin"), "completion-power-plant",
                           to_the_power_plant(), 300, Duration::from_secs(1800));
     let missing = missing_on(&mut played, &[Map::PowerPlant],
         &[Entry::Way(Way::PowerPlantBall), Entry::Way(Way::Legendary(Legend::Zapdos))]);
@@ -2310,7 +2363,6 @@ pub fn to_victory_road() -> Vec<Step> {
     const ROAD: &[&str] = &["VictoryRoad1F", "VictoryRoad2F", "VictoryRoad3F"];
     vec![
         Collect(false), Tidy,
-        Field(r#"{"move":"fly","map":"ViridianCity"}"#), GoTo("ViridianCity"),
         // The phases before filled the party and the box, and a full box refuses every ball, so the
         // bird would be met with nothing to throw.
         GoTo("ViridianPokecenter"), AtPc(Pc::ChangeBox(4)), GoTo("ViridianCity"),
@@ -2355,7 +2407,7 @@ pub fn to_victory_road() -> Vec<Step> {
 #[test]
 fn completion_phase_victory_road() {
     use crate::pokemon::map::Map;
-    let mut played = play(include_bytes!("../data/completion-power-plant.bin"), "completion-victory-road",
+    let mut played = play(include_bytes!("../data/completion-earth.bin"), "completion-victory-road",
                           to_victory_road(), 600, Duration::from_secs(3000));
     let missing = missing_on(&mut played, &[
         Map::Route22, Map::Route22Gate, Map::Route23, Map::VictoryRoad1F, Map::VictoryRoad2F,
@@ -2407,13 +2459,13 @@ pub fn to_mewtwo() -> Vec<Step> {
     const UPPER: &[&str] = &["CeruleanCave1F", "CeruleanCave2F"];
     vec![
         Collect(false),
-        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
-        // The cave stands on the water of Cerulean's north west pocket, and the city proper cannot
-        // reach it: the way in is down from Nugget Bridge.
-        GoTo("Route24"), Take("CeruleanCity"),
+        // The cave stands on the water of Cerulean's north west pocket, which the city proper
+        // cannot reach: the way in is down from Nugget Bridge, and the phase before ended there.
         GoTo("CeruleanCave1F"),
         // A cave floor is one of the two places an encounter has to be paced for.
         Hunt { species: "*", row: "Pace", ball: "MasterBall", way: Way::WildOnACaveFloor, on: "CeruleanCave1F" },
+        // The Slowbro the trade over Route 18 wants; the cave's water is the Super Rod's.
+        Hunt { species: "Slowbro", row: "Fish", ball: "MasterBall", way: Way::SuperRod, on: "CeruleanCave1F" },
         // The two upper floors first, which is where the way down is: 1F's ladder to B1F stands
         // behind an elevation boundary and is reached by way of 2F. Mewtwo is on the floor below,
         // so an exploring cannot walk up to it here, and one that did would start the battle and
@@ -2425,16 +2477,18 @@ pub fn to_mewtwo() -> Vec<Step> {
         Explore { maps: CAVE, patience: 400 },
         GoTo("CeruleanCave1F"), Clear(&[]), GoTo("CeruleanCave2F"), Clear(&[]),
         GoTo("CeruleanCaveB1F"), Clear(&[]),
-        // Fly is refused underground, so the way out is walked; the pocket it comes out in is
-        // Cerulean's own map, and the flight from there lands at the Pokémon Centre.
+        // The pocket the way out comes back to is a cul-de-sac: its own shore, Route 4 behind a
+        // ledge, and the water up to Nugget Bridge. So the way back into the city proper is over
+        // the water and in again by the opening the streets are on.
         GoTo("CeruleanCity"), Tidy,
+        GoTo("Route24"), Cross { map: "CeruleanCity", landing: (40, 0) },
     ]
 }
 
 #[test]
 fn completion_phase_mewtwo() {
     use crate::pokemon::map::Map;
-    let mut played = play(include_bytes!("../data/completion-hall-of-fame.bin"), "completion-mewtwo",
+    let mut played = play(include_bytes!("../data/completion-north.bin"), "completion-mewtwo",
                           to_mewtwo(), 600, Duration::from_secs(3000));
     let missing = missing_on(&mut played, &[
         Map::CeruleanCave1F, Map::CeruleanCave2F, Map::CeruleanCaveB1F,
@@ -2453,16 +2507,34 @@ pub fn to_the_eastern_routes() -> Vec<Step> {
     // finished while the half beyond its gate building has never been seen.
     const EAST: &[&str] = &["Route12", "Route12Gate1F", "Route12Gate2F", "Route13", "Route14",
                             "Route15", "Route15Gate1F", "Route15Gate2F"];
-    vec![
+    let mut steps = vec![
         Collect(false),
+        // Route 10 is two halves with Rock Tunnel between them, and the Power Plant is on the
+        // north one: the tunnel is the way down to Lavender.
+        GoTo("RockTunnel1F"),
+        Explore { maps: &["RockTunnel1F", "RockTunnelB1F"], patience: 400 },
+        GoTo("RockTunnel1F"), Take("Route10, arriving at (9, 5"),
         // Walked from the Lavender end, which is the way the ledges run: Route 15's north lane
-        // holds a trainer and the TM Rage, and coming up from Fuchsia reaches neither.
-        Field(r#"{"move":"fly","map":"LavenderTown"}"#), GoTo("LavenderTown"),
+        // holds a trainer and the TM Rage, and coming up from Fuchsia reaches neither. Route 12's
+        // own water is here too, which no phase before this could surf.
+        GoTo("LavenderTown"),
         GoTo("Route12"),
         Explore { maps: EAST, patience: 1200 },
         // And back up from the other end: the lanes are one way, so each direction reaches a half
         // the other cannot, and Route 15's two halves are the gate building's two doors.
-        Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"), GoTo("Route15"),
+        // The way round to the other end, because there is no way through: the lanes are ledged
+        // apart and each map's three openings into the next come out in lanes that cannot reach
+        // one another. North to Lavender, west under Saffron, and down the cycling road, which
+        // runs one way and that way is south.
+        GoTo("Route12"), GoTo("Route12Gate1F"), Take("Route12, arriving at (11, 16)"),
+        GoTo("LavenderTown"),
+    ];
+    steps.extend(lavender_to_saffron());
+    steps.extend(saffron_to_celadon());
+    steps.extend([
+        GoTo("Route16"), GoTo("Route16Gate1F"), Take("Route16, arriving at (17, 1"),
+        GoTo("Route17"), GoTo("Route18"), GoTo("Route18Gate1F"), Take("Route18, arriving at (40, "),
+        GoTo("FuchsiaCity"), GoTo("Route15"),
         Explore { maps: EAST, patience: 1200 },
         // Route 15's north strip is entered from Route 14 and left by a ledge, so neither
         // exploring stands on it: the walk west across it is the only way its trainer and its TM
@@ -2473,17 +2545,18 @@ pub fn to_the_eastern_routes() -> Vec<Step> {
         GoTo("Route14"), Take("cut down the tree at (4, 42)"),
         Take("Route15"), Clear(&[]),
         Tidy,
-    ]
+    ]);
+    steps
 }
 
 #[test]
 fn completion_phase_eastern_routes() {
     use crate::pokemon::map::Map;
-    let mut played = play(include_bytes!("../data/completion-mewtwo.bin"), "completion-east",
+    let mut played = play(include_bytes!("../data/completion-power-plant.bin"), "completion-east",
                           to_the_eastern_routes(), 900, Duration::from_secs(3600));
     let missing = missing_on(&mut played, &[
         Map::Route13, Map::Route14, Map::Route15, Map::Route15Gate1F, Map::Route15Gate2F,
-    ], &[]);
+    ], &[Entry::ItemBall { map: Map::Route12, object: 9, item: ItemId::Tm16PayDay as u8 }]);
     cut(&mut played, "completion-east");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
@@ -2497,16 +2570,13 @@ pub fn to_the_safari_game() -> Vec<Step> {
         // For the Cinnabar lab's Tangela, in the grass the eastern routes ended beside. The party is
         // still full, so it goes to the box.
         Hunt { species: "Venonat", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "Route15" },
-        Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"), GoTo("FuchsiaPokecenter"),
+        GoTo("FuchsiaCity"), GoTo("FuchsiaPokecenter"),
         // The trades ahead need party room, and the bag is full of key items nothing needs again.
         // Slot 3 is whatever the collecting caught last, which depends on the encounters met.
         AtPc(Pc::DepositSlot(3)), AtPc(Pc::Deposit("MrMime")), AtPc(Pc::Deposit("Flareon")),
     ];
     // A Fish row casts the best rod in the bag, so the Super Rod waits in the PC for the Good Rod.
-    for item in ["TownMap", "SSTicket", "OldRod", "CoinCase", "LiftKey", "SilphScope", "PokeFlute",
-                 "CardKey", "SecretKey", "SuperRod"] {
-        steps.push(Field(Box::leak(format!(r#"{{"move":"pc_items","op":"deposit","item":"{item}"}}"#).into_boxed_str())));
-    }
+    steps.push(Field(r#"{"move":"pc_items","op":"deposit","item":"SuperRod"}"#));
     steps.extend([
         GoTo("FuchsiaCity"), GoTo("SafariZoneGate"), GoTo("SafariZoneCenter"),
         // One for the underground trade, and one a Rare Candy makes the Nidorino Route 11 wants.
@@ -2516,6 +2586,7 @@ pub fn to_the_safari_game() -> Vec<Step> {
         GoTo("FuchsiaCity"),
         // Fuchsia's own water is not in reach of a cast, and Route 19's beach is the next map south.
         Hunt { species: "Poliwag", row: "Fish", ball: "MasterBall", way: Way::GoodRod, on: "Route19" },
+        Hunt { species: "Tentacool", row: "PaceOnWater", ball: "MasterBall", way: Way::WildWhileSurfing, on: "Route19" },
     ]);
     steps
 }
@@ -2527,25 +2598,39 @@ fn completion_phase_safari_game() {
     let missing = missing_on(&mut played, &[], &[
         Entry::Way(Way::SafariCatch), Entry::Way(Way::SafariBait), Entry::Way(Way::SafariRock),
         Entry::Way(Way::SafariRun), Entry::Way(Way::SafariOutOfSteps), Entry::Way(Way::GoodRod),
+        Entry::Way(Way::WildWhileSurfing),
     ]);
     cut(&mut played, "completion-safari");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
 
-/// The north's loose ends: the gifts a full bag refused in Viridian and at Route 2's gate, Pikachu
-/// in the forest and the stone that makes it the Raichu Cinnabar wants, the Old Amber from the
-/// museum's back room, a Nidorino by Rare Candy, then Cerulean's trade, the Day Care, the trade
-/// under Route 5, Route 4's last trainer and a Slowbro fished from Cerulean Cave.
+/// The north, walked from the Hall of Fame's own doorstep: the gifts a full bag refused in
+/// Viridian and at Route 2's gate, Pikachu in the forest and the stone that makes it the Raichu
+/// Cinnabar wants, the Old Amber from the museum's back room, then Mt Moon to Cerulean, its trade,
+/// Routes 9 and 10 by water, the Day Care, and Nugget Bridge.
 pub fn to_the_north_errands() -> Vec<Step> {
     use Step::*;
-    vec![
+    let mut steps = vec![
         Collect(false), Tidy,
-        Field(r#"{"move":"fly","map":"ViridianCity"}"#), GoTo("ViridianCity"),
-        GoTo("ViridianPokecenter"), AtPc(Pc::Deposit("Poliwag")), GoTo("ViridianCity"),
+        // The game hands the run back in Pallet Town, and the north is walked from there.
+        GoTo("Route1"), GoTo("ViridianCity"),
+        // Slot 3 is whatever the collecting caught last, and the party has to have room for the
+        // Pikachu: a catch into a full party goes to the box, where a stone cannot reach it.
+        GoTo("ViridianPokecenter"), AtPc(Pc::DepositSlot(3)),
+        // The bag is nineteen twentieths key items by now, and a gift with no room for it is
+        // refused in silence. What is wanted again is fetched back where it is wanted.
+        Field(r#"{"move":"pc_items","op":"deposit","item":"TownMap"}"#),
+        Field(r#"{"move":"pc_items","op":"deposit","item":"SSTicket"}"#),
+        Field(r#"{"move":"pc_items","op":"deposit","item":"OldRod"}"#),
+        Field(r#"{"move":"pc_items","op":"deposit","item":"CoinCase"}"#),
+        Field(r#"{"move":"pc_items","op":"deposit","item":"LiftKey"}"#),
+        Field(r#"{"move":"pc_items","op":"deposit","item":"SilphScope"}"#),
+        Field(r#"{"move":"pc_items","op":"deposit","item":"PokeFlute"}"#),
+        Field(r#"{"move":"pc_items","op":"deposit","item":"CardKey"}"#),
+        Field(r#"{"move":"pc_items","op":"deposit","item":"SecretKey"}"#),
+        GoTo("ViridianCity"),
         Talk("Fisher"),
         GoTo("ViridianGym"), Talk("Giovanni"), GoTo("ViridianCity"),
-        // Level 22 from the Safari Zone, so one candy is the level-up that evolves it.
-        Evolve { item: "RareCandy", species: "NidoranMale" },
         GoTo("Route2"), GoTo("Route2Gate"), Talk("OaksAide"),
         GoTo("Route2"), GoTo("ViridianForestSouthGate"), GoTo("ViridianForest"),
         Hunt { species: "Pikachu", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "ViridianForest" },
@@ -2554,105 +2639,138 @@ pub fn to_the_north_errands() -> Vec<Step> {
         // The scientist with the amber stands in the back room, behind the counter from the front,
         // and its door is behind a tree.
         Take("cut down the tree at (26, 4)"), Take("Museum1F, arriving at (16, 7)"), Talk("Scientist2"), GoTo("PewterCity"),
-        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
-        GoTo("CeruleanPokecenter"), AtPc(Pc::Deposit("Raichu")),
-        Field(r#"{"move":"pc_items","op":"withdraw","item":"SuperRod"}"#), GoTo("CeruleanCity"),
-        // Route 10's water is in the Super Rod's Poliwhirl group, and Route 9 is reached from the
-        // terrace behind the robbed house.
+        // East the long way round rather than back through Mt Moon, whose floors come out on the
+        // half of Route 4 that Cerulean cannot be walked back from: Diglett's Cave to Route 11,
+        // then up through Vermilion and Saffron.
+        GoTo("Route2"), GoTo("DiglettsCaveRoute2"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute11"),
+        GoTo("Route11"), GoTo("VermilionCity"),
+    ];
+    steps.extend(vermilion_to_saffron());
+    steps.extend(saffron_to_cerulean());
+    steps.extend([
+        GoTo("CeruleanPokecenter"), AtPc(Pc::Deposit("Raichu")), GoTo("CeruleanCity"),
+        // Route 9 opens off the terrace behind the robbed house, and the house is the only way on
+        // and off it.
         GoTo("CeruleanTrashedHouse"), Take("CeruleanCity, arriving at (28, 10)"),
         GoTo("Route9"), GoTo("Route10"),
         Hunt { species: "Poliwhirl", row: "Fish", ball: "MasterBall", way: Way::SuperRod, on: "Route10" },
-        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
+        // The swimmer off Route 10's bank, whom the phases before could only look at.
+        Explore { maps: &["Route10"], patience: 400 },
+        GoTo("Route9"), GoTo("CeruleanCity"),
+        GoTo("CeruleanTrashedHouse"), Take("CeruleanCity, arriving at (28, 12)"),
         GoTo("CeruleanTradeHouse"), Trade("Gambler"), GoTo("CeruleanCity"),
         GoTo("CeruleanPokecenter"), AtPc(Pc::Deposit("Jynx")), GoTo("CeruleanCity"),
         // The tree on the main terrace is the way down to Route 5 and the Day Care.
         // Route 5's ledges drop only south, so the Day Care comes before the path's pocket below it.
         Take("cut down the tree"), GoTo("Route5"),
         GoTo("Daycare"), DayCare(None), GoTo("Route5"),
-        GoTo("UndergroundPathRoute5"), Trade("LittleGirl"), GoTo("Route5"),
-        GoTo("Route5Gate"), GoTo("Route5"),
-        Field(r#"{"move":"fly","map":"CeruleanCity"}"#), GoTo("CeruleanCity"),
-        GoTo("CeruleanPokecenter"), AtPc(Pc::Deposit("NidoranFemale")), AtPc(Pc::Deposit("Squirtle")),
-        GoTo("CeruleanCity"),
-        // Cerulean's north west corner is reached only down from Nugget Bridge, and Route 4's far
-        // half and Cerulean Cave both open off it.
-        GoTo("Route24"), Take("CeruleanCity"), GoTo("Route4"), Talk("CooltrainerFemale2"),
-        GoTo("CeruleanCity"), GoTo("CeruleanCave1F"),
-        Hunt { species: "Slowbro", row: "Fish", ball: "MasterBall", way: Way::SuperRod, on: "CeruleanCave1F" },
-        GoTo("CeruleanCity"),
-    ]
+        GoTo("Route5Gate"), GoTo("Route5"), GoTo("CeruleanCity"),
+        GoTo("CeruleanPokecenter"), AtPc(Pc::Deposit("Squirtle")), GoTo("CeruleanCity"),
+        // Nugget Bridge and the water off Route 25, then back down into the north west pocket,
+        // which is where the cave is and where the phase after starts.
+        GoTo("Route24"), GoTo("Route25"), Explore { maps: &["Route25"], patience: 300 },
+        GoTo("Route24"), Take("CeruleanCity"),
+        // Route 4's ledges drop east, so its last trainer stands where only the Cerulean end
+        // reaches her: walking out of Mt Moon lands past her with no way back up.
+        GoTo("Route4"), Talk("CooltrainerFemale2"), GoTo("CeruleanCity"),
+    ]);
+    steps
 }
 
 #[test]
 fn completion_phase_north_errands() {
     use crate::pokemon::map::Map;
-    let mut played = play(include_bytes!("../data/completion-safari.bin"), "completion-north",
+    let mut played = play(include_bytes!("../data/completion-hall-of-fame.bin"), "completion-north",
                           to_the_north_errands(), 600, Duration::from_secs(3000));
     let missing = missing_on(&mut played, &[Map::Route5Gate], &[
         Entry::Trainer { map: Map::Route4, index: 0 },
-        Entry::Machine(ItemId::Tm42DreamEater as u8), Entry::Machine(ItemId::Tm27Fissure as u8),
+        Entry::Machine(ItemId::Tm42DreamEater as u8),
         Entry::Machine(ItemId::Hm05Flash as u8), Entry::KeyItem(vec![ItemId::OldAmber as u8]),
         Entry::Trade(crate::pokemon::species::PokemonSpecies::Poliwhirl),
-        Entry::Trade(crate::pokemon::species::PokemonSpecies::NidoranMale),
-        Entry::Way(Way::EvolvedByRareCandy), Entry::Way(Way::DayCareWithdrawn), Entry::Way(Way::SuperRod),
+        Entry::Way(Way::DayCareWithdrawn), Entry::Way(Way::SuperRod),
+        Entry::ItemBall { map: Map::Route25, object: 10, item: ItemId::Tm19SeismicToss as u8 },
+        Entry::Trainer { map: Map::Route10, index: 0 },
     ]);
     cut(&mut played, "completion-north");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
 
-/// The middle of the map: Lt. Surge's machine, Saffron's two unwalked gates, Route 11's trade and
-/// its aide, Celadon's TM41, the Copycat's Poké Doll, and the Slowbro trade over Route 18.
+/// The middle of the map, walked back up from Fuchsia: the Slowbro trade over Route 18, the Exp.
+/// All on Route 15, the eastern routes north to Lavender, Celadon's TM41 and the Copycat's Poké
+/// Doll, the trade under Route 5, Lt. Surge's machine, and Route 11's trade and its aide.
 pub fn to_the_middle_errands() -> Vec<Step> {
     use Step::*;
-    vec![
+    let mut steps = vec![
         Collect(false), Tidy,
-        Field(r#"{"move":"fly","map":"VermilionCity"}"#), GoTo("VermilionCity"),
-        GoTo("VermilionGym"), Talk("LtSurge"), GoTo("VermilionCity"),
-        // Walking through the gate comes out on Route 6's strip under Saffron, so the way back is flown.
-        GoTo("Route6"), GoTo("Route6Gate"), GoTo("Route6"),
-        Field(r#"{"move":"fly","map":"VermilionCity"}"#), GoTo("VermilionCity"),
-        GoTo("Route11"), GoTo("Route11Gate1F"), GoTo("Route11Gate2F"), Trade("Youngster"), Talk("OaksAide"),
-        GoTo("Route11Gate1F"), GoTo("Route11"),
-        Field(r#"{"move":"fly","map":"CeladonCity"}"#), GoTo("CeladonCity"), Talk("Gramps3"),
+        GoTo("FuchsiaCity"),
+        GoTo("Route18"), GoTo("Route18Gate1F"), GoTo("Route18Gate2F"), Trade("Youngster"),
+        GoTo("Route18Gate1F"), GoTo("Route18"), GoTo("FuchsiaCity"),
+        // Level 22 from the Safari Zone, so one candy is the level-up that evolves it.
+        Evolve { item: "RareCandy", species: "NidoranMale" },
+        // Route 15's gate holds the last aide, who wants fifty species owned.
+        GoTo("Route15"), GoTo("Route15Gate1F"), GoTo("Route15Gate2F"), Talk("OaksAide"),
+        // North up the eastern routes, which is the only way back: the cycling road goes one way,
+        // and its ledge onto Route 18 is a crossing the menu offers and the walk cannot take.
+        GoTo("Route15Gate1F"), Take("Route15, arriving at (15, "),
+        GoTo("Route14"), GoTo("Route13"), GoTo("Route12"),
+        GoTo("Route12Gate1F"), Take("Route12, arriving at (11, 16)"), GoTo("LavenderTown"),
+    ];
+    steps.extend(lavender_to_saffron());
+    steps.extend(saffron_to_celadon());
+    steps.extend([
+        Talk("Gramps3"),
         GoTo("CeladonMart1F"), GoTo("CeladonMart2F"), GoTo("CeladonMart3F"), GoTo("CeladonMart4F"),
         Talk("Clerk"), Buy(&[("PokeDoll", 1)]),
         GoTo("CeladonMart3F"), GoTo("CeladonMart2F"), GoTo("CeladonMart1F"), GoTo("CeladonCity"),
-        Field(r#"{"move":"fly","map":"SaffronCity"}"#), GoTo("SaffronCity"),
+    ]);
+    steps.extend(celadon_to_saffron());
+    steps.extend([
         GoTo("CopycatsHouse1F"), GoTo("CopycatsHouse2F"), Talk("Copycat"),
         GoTo("CopycatsHouse1F"), GoTo("SaffronCity"),
-        Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"),
-        GoTo("Route18"), GoTo("Route18Gate1F"), GoTo("Route18Gate2F"), Trade("Youngster"),
-        // The stairs down come out on the gate's west door, the cycling road's side.
-        GoTo("Route18Gate1F"), GoTo("Route18"),
-        Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"),
-    ]
+        // The trade under Route 5, whose stairwell is north of the gate that splits the route.
+        GoTo("Route5"), GoTo("Route5Gate"), Take("Route5, arriving at (10, 30)"),
+        GoTo("UndergroundPathRoute5"), Trade("LittleGirl"), GoTo("Route5"),
+        GoTo("Route5Gate"), Take("Route5, arriving at (10, 34)"), GoTo("SaffronCity"),
+    ]);
+    steps.extend(saffron_to_vermilion());
+    steps.extend([
+        GoTo("VermilionGym"), Talk("LtSurge"), GoTo("VermilionCity"),
+        GoTo("Route11"), GoTo("Route11Gate1F"), GoTo("Route11Gate2F"), Trade("Youngster"), Talk("OaksAide"),
+        GoTo("Route11Gate1F"), GoTo("Route11"),
+    ]);
+    steps
 }
 
 #[test]
 fn completion_phase_middle_errands() {
     use crate::pokemon::map::Map;
     use crate::pokemon::species::PokemonSpecies;
-    let mut played = play(include_bytes!("../data/completion-north.bin"), "completion-middle",
+    let mut played = play(include_bytes!("../data/completion-safari.bin"), "completion-middle",
                           to_the_middle_errands(), 600, Duration::from_secs(3000));
     let missing = missing_on(&mut played, &[Map::Route6Gate, Map::Route11Gate1F, Map::Route11Gate2F], &[
         Entry::Machine(ItemId::Tm24Thunderbolt as u8), Entry::Machine(ItemId::Tm41Softboiled as u8),
         Entry::Machine(ItemId::Tm31Mimic as u8), Entry::KeyItem(vec![ItemId::Itemfinder as u8]),
+        Entry::KeyItem(vec![ItemId::ExpAll as u8]),
         Entry::Trade(PokemonSpecies::Nidorino), Entry::Trade(PokemonSpecies::Slowbro),
+        Entry::Trade(PokemonSpecies::NidoranMale), Entry::Way(Way::EvolvedByRareCandy),
     ]);
     cut(&mut played, "completion-middle");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
 
-/// Cinnabar's loose ends and the last aide: a catch while surfing, the Mansion's Ponyta, the lab's
-/// three trades, the Old Amber revived, the machines the Metronome scientist and Blaine held back
-/// for want of bag room, and the Exp. All over Route 15, which wants fifty species owned.
+/// Cinnabar's loose ends, which close the tour's loop: the Mansion's Ponyta, the lab's three
+/// trades, the Old Amber revived, and the machines the Metronome scientist and Blaine held back
+/// for want of bag room.
 pub fn to_the_cinnabar_errands() -> Vec<Step> {
     use Step::*;
     vec![
         Collect(false), Tidy,
-        GoTo("Route19"),
-        Hunt { species: "Tentacool", row: "PaceOnWater", ball: "MasterBall", way: Way::WildWhileSurfing, on: "Route19" },
-        Field(r#"{"move":"fly","map":"CinnabarIsland"}"#), GoTo("CinnabarIsland"),
+        // The tour's last leg, and the one that closes its loop: Diglett's Cave to Route 2, down
+        // through Viridian to Pallet, and Route 21 to the island, which is the only way to it.
+        GoTo("Route11"), GoTo("DiglettsCaveRoute11"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute2"),
+        GoTo("Route2"), GoTo("Route2Gate"), Take("Route2, arriving at (15, 40)"),
+        GoTo("ViridianCity"), GoTo("Route1"), GoTo("PalletTown"),
+        GoTo("Route21"), GoTo("CinnabarIsland"),
         GoTo("CinnabarPokecenter"),
         AtPc(Pc::Deposit("Nidorina")), AtPc(Pc::Deposit("Lickitung")), AtPc(Pc::Deposit("Tentacool")),
         AtPc(Pc::Withdraw("Venonat")), AtPc(Pc::Withdraw("Raichu")),
@@ -2679,11 +2797,8 @@ pub fn to_the_cinnabar_errands() -> Vec<Step> {
         GoTo("CinnabarLab"), GoTo("CinnabarLabFossilRoom"), Talk("Scientist1"),
         GoTo("CinnabarLab"), GoTo("CinnabarIsland"),
         GoTo("CinnabarGym"), Talk("Blaine"), GoTo("CinnabarIsland"),
-        Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"),
         // The machines this phase collected filled the bag again.
         Tidy,
-        GoTo("Route15"), GoTo("Route15Gate1F"), GoTo("Route15Gate2F"), Talk("OaksAide"),
-        GoTo("Route15Gate1F"),
         // The traded Seel arrives at 34, its evolution level, so the next one it gains evolves it.
         KeepFromEvolving("Seel"),
     ]
@@ -2695,11 +2810,11 @@ fn completion_phase_cinnabar_errands() {
     let mut played = play(include_bytes!("../data/completion-middle.bin"), "completion-cinnabar-errands",
                           to_the_cinnabar_errands(), 600, Duration::from_secs(3000));
     let missing = missing_on(&mut played, &[], &[
-        Entry::Way(Way::WildWhileSurfing), Entry::Way(Way::RevivedOldAmber),
+        Entry::Way(Way::RevivedOldAmber),
         Entry::Trade(PokemonSpecies::Ponyta), Entry::Trade(PokemonSpecies::Raichu),
         Entry::Trade(PokemonSpecies::Venonat),
         Entry::Machine(ItemId::Tm35Metronome as u8), Entry::Machine(ItemId::Tm38FireBlast as u8),
-        Entry::KeyItem(vec![ItemId::ExpAll as u8]), Entry::Way(Way::EvolutionCancelled),
+        Entry::Way(Way::EvolutionCancelled),
         Entry::Trainer { map: crate::pokemon::map::Map::PokemonMansion3F, index: 1 },
     ]);
     cut(&mut played, "completion-cinnabar-errands");
@@ -2714,9 +2829,9 @@ fn completion_run() {
     let phases = vec![
         to_the_boulder_badge(), to_bill(), to_the_thunder_badge(), to_celadon(), to_the_rainbow_badge(),
         to_the_poke_flute(), to_the_marsh_badge(), to_the_soul_badge(), to_surf(), to_the_volcano_badge(),
-        to_seafoam(), to_the_earth_badge(), to_the_power_plant(), to_victory_road(), to_the_hall_of_fame(),
-        to_mewtwo(), to_the_eastern_routes(), to_the_safari_game(), to_the_north_errands(),
-        to_the_middle_errands(), to_the_cinnabar_errands(),
+        to_seafoam(), to_the_earth_badge(), to_victory_road(), to_the_hall_of_fame(),
+        to_the_north_errands(), to_mewtwo(), to_the_power_plant(), to_the_eastern_routes(),
+        to_the_safari_game(), to_the_middle_errands(), to_the_cinnabar_errands(),
     ];
     let mut played = play_phases(include_bytes!("../data/start-of-game-state.bin"), "completion-run",
                                  phases, 10_800, Duration::from_secs(4 * 3600));
