@@ -1192,14 +1192,23 @@ impl PokemonAgent {
                     answer
                 }
             } {
-                None => {} // still deciding — wait
+                // Nothing is held while the policy decides: the A that opened this list is still
+                // down, and a press the model never gave is one the list is free to read as the
+                // move to forget.
+                None => api.release_all_buttons(),
                 Some(Some(slot)) => {
                     let slot = slot as u8;
                     if cursor_index < slot { api.toggle_button(JoypadButton::Down); }
                     else if cursor_index > slot { api.toggle_button(JoypadButton::Up); }
                     else { api.toggle_button(JoypadButton::A); }
                 }
-                Some(None) => api.toggle_button(JoypadButton::B), // decline (best effort)
+                // Held rather than toggled: the prompt stands for a few ticks and a toggle spends
+                // half of them released, so whether the game polls the press at all comes down to
+                // how long the policy took to answer.
+                Some(None) => {
+                    api.release_all_buttons();
+                    api.press_button(JoypadButton::B);
+                }
             },
             None => api.toggle_button(JoypadButton::A),
         }
