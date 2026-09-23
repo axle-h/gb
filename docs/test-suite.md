@@ -70,6 +70,9 @@ cargo test --release --workspace --features slow-tests -- probe_ --ignored --noc
   the phase before it ended: re-cutting an early one invalidates every later one. `completion_run`
   reads none of them; it plays every phase's steps from the fresh save.
 - `soak-*.bin` are not in the chain and are re-cut wholesale by `regen_soak_checkpoints`.
+- A phase that sticks saves where it stuck to `$TMPDIR/<name>-stuck.bin`, and `dump_fixture_states`
+  reads any state named in `GB_DUMP_STATES` (`:`-separated) instead of the committed chain: map,
+  party, bag, dex count and the current box, which is where a re-ordered route's answers are.
 - `every_committed_fixture_decodes` (default tier, in `gb`) loads all of them, so a save-state layout
   break fails in two seconds rather than an hour into `slow-tests`.
 

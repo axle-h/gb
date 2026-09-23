@@ -303,7 +303,8 @@ impl TestFixture {
     }
 }
 
-/// Diagnostic: print each committed fixture's map, badges, money, party and bag.
+/// Diagnostic: print each committed fixture's map, badges, money, party and bag. `GB_DUMP_STATES`,
+/// a `:`-separated list of paths, reads those instead — a phase saves where it stuck.
 #[test]
 #[cfg(feature = "slow-tests")]
 #[ignore = "diagnostic, not a test; run with --ignored --nocapture"]
@@ -350,16 +351,25 @@ fn dump_fixture_states() {
         ("completion-soul", include_bytes!("../data/completion-soul.bin")),
         ("completion-surf", include_bytes!("../data/completion-surf.bin")),
     ];
-    for (name, bytes) in FIXTURES {
+    let named: Vec<(String, Vec<u8>)> = match std::env::var("GB_DUMP_STATES") {
+        Ok(paths) => paths.split(':').filter(|path| !path.is_empty())
+            .map(|path| (path.to_string(), std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"))))
+            .collect(),
+        Err(_) => FIXTURES.iter().map(|(name, bytes)| (name.to_string(), bytes.to_vec())).collect(),
+    };
+    for (name, bytes) in &named {
         let mut fixture = TestFixture::new(bytes, Duration::from_mins(1), vec![]);
         let s = fixture.game_state();
-        println!("== {name}: {} @ {} | badges {:?} | ¥{}", s.map.map, s.map.player_position, s.badges, s.money);
+        println!("== {name}: {} @ {} | badges {:?} | ¥{} | dex {} owned", s.map.map,
+                 s.map.player_position, s.badges, s.money, s.pokedex_owned.species().len());
         for (i, p) in s.pokemon.iter().enumerate() {
             let moves: Vec<String> = p.moves.iter().flatten().map(|m| format!("{:?}(pp{})", m.name, m.pp)).collect();
             println!("   slot{i}: {:?} lv{} {}/{}hp — {}", p.species, p.level, p.current_hp, p.stats.hp, moves.join(", "));
         }
         let bag: Vec<String> = s.bag.iter().map(|it| format!("{:?}x{}", it.id, it.quantity)).collect();
         println!("   bag[{}/20]: {}", s.bag.iter().count(), bag.join(", "));
+        let boxed: Vec<String> = s.boxed_pokemon.iter().map(|p| format!("{:?}", p.species)).collect();
+        println!("   box {} holds: {}", s.current_box + 1, boxed.join(", "));
     }
 }
 

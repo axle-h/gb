@@ -231,21 +231,23 @@ fn a_rare_candy_evolution_runs_or_is_stopped_as_the_model_says() {
     for (evolve, becomes) in [(false, PokemonSpecies::NidoranMale), (true, PokemonSpecies::Nidorino)] {
         let seen = Arc::new(Mutex::new(Seen::default()));
         let brain = walk_in_then(&["Route19"], vec![field_move(serde_json::json!({
-            "move": "use_item", "item": "RareCandy", "slot": 3, "evolve": evolve }))], Arc::clone(&seen));
+            "move": "use_item", "item": "RareCandy", "slot": 4, "evolve": evolve }))], Arc::clone(&seen));
         let mut run = LlmRun::builder(SAFARI)
             .named("rare-candy")
             .game_time(Duration::from_secs(10 * 60))
             .start(Box::new(brain));
-        let before = run.fixture().game_state().pokemon[3].clone();
+        // The fixture's party is the three the tour keeps, the seat its collecting fills, and the
+        // two Nidoran the Safari Zone caught for the trades ahead.
+        let before = run.fixture().game_state().pokemon[4].clone();
         assert_eq!((before.species, before.level), (PokemonSpecies::NidoranMale, 22),
-            "slot 3 should be the Safari Zone's Nidoran, a level short of what evolves it");
+            "slot 4 should be the Safari Zone's Nidoran, a level short of what evolves it");
 
         let fed = run.tick_until(PATIENCE, |run| {
             let state = run.fixture().game_state();
-            state.mode == crate::pokemon::encoding::GameMode::Overworld && state.pokemon[3].level > before.level
+            state.mode == crate::pokemon::encoding::GameMode::Overworld && state.pokemon[4].level > before.level
         });
         assert!(fed, "the Rare Candy was never used (evolve: {evolve})");
-        assert_eq!(run.fixture().game_state().pokemon[3].species, becomes, "evolve: {evolve}");
+        assert_eq!(run.fixture().game_state().pokemon[4].species, becomes, "evolve: {evolve}");
         assert!(!seen.lock().expect("not poisoned").was_stuck, "the watchdog fired feeding a Rare Candy");
     }
 }

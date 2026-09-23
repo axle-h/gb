@@ -1687,9 +1687,12 @@ pub fn to_celadon() -> Vec<Step> {
         // that happens after Vermilion.
         GoTo("BikeShop"), Clear(&[]), GoTo("CeruleanCity"),
         GoTo("CeruleanTrashedHouse"), GoTo("CeruleanCity"),
-        // The tree on the main terrace is the other way down to Route 5, and the only one to the
-        // Day Care.
-        Take("cut down the tree"), GoTo("Route5"), GoTo("Daycare"), DayCare(Some("Squirtle")),
+        // Cerulean has three ways down onto Route 5 and the Day Care stands in the pocket only the
+        // middle one reaches, which is the one the tree on the main terrace opens. Its landings
+        // run from (6, 1) to (10, 1), and the middle of that is what tells it from its neighbours
+        // at (4, 1) and (15, 1) wherever the walk stands when it asks.
+        Take("cut down the tree"), Cross { map: "Route5", landing: (9, 1) },
+        GoTo("Daycare"), DayCare(Some("Squirtle")),
         GoTo("Route5"), GoTo("CeruleanCity"),
         GoTo("Route24"), GoTo("Route25"), Take("cut down the tree"), Talk("TMSeismicToss"),
         GoTo("Route24"), GoTo("CeruleanCity"),
@@ -2209,6 +2212,7 @@ fn completion_phase_volcano_badge() {
         Map::CinnabarLabFossilRoom, Map::PokemonMansion1F, Map::PokemonMansion2F,
         Map::PokemonMansion3F, Map::PokemonMansionB1F, Map::CinnabarGym,
     ], &[Entry::Badge(6), Entry::CinnabarQuiz, Entry::Way(Way::RevivedFossil),
+         Entry::Machine(ItemId::Tm35Metronome as u8),
          Entry::KeyItem(vec![ItemId::SecretKey as u8])]);
     cut(&mut played, "completion-volcano");
     // 3F's scientist stands behind a block only the switch on opens, and this phase leaves the
@@ -2554,10 +2558,14 @@ pub fn to_the_safari_game() -> Vec<Step> {
         // For the Cinnabar lab's Tangela, in the grass the eastern routes ended beside. The party is
         // still full, so it goes to the box.
         Hunt { species: "Venonat", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "Route15" },
+        // The eastern routes ended on Route 15's north strip, which is walled off from the rest of
+        // the route: its only way out is the gate, and the doors on the far side of it are the
+        // ones that come out facing Fuchsia.
+        GoTo("Route15Gate1F"), Take("Route15, arriving at (8, "),
         GoTo("FuchsiaCity"), GoTo("FuchsiaPokecenter"),
-        // The trades ahead need party room, and the bag is full of key items nothing needs again.
-        // Slot 3 is whatever the collecting caught last, which depends on the encounters met.
-        AtPc(Pc::DepositSlot(3)), AtPc(Pc::Deposit("MrMime")), AtPc(Pc::Deposit("Flareon")),
+        // The trades ahead need party room for two Nidoran, and the bag is full of key items
+        // nothing needs again. The party comes in full, and the collecting adds to the box.
+        AtPc(Pc::Deposit("MrMime")), AtPc(Pc::Deposit("Flareon")),
     ];
     // A Fish row casts the best rod in the bag, so the Super Rod waits in the PC for the Good Rod.
     steps.push(Field(r#"{"move":"pc_items","op":"deposit","item":"SuperRod"}"#));
@@ -2644,9 +2652,10 @@ pub fn to_the_north_errands() -> Vec<Step> {
         GoTo("CeruleanTrashedHouse"), Take("CeruleanCity, arriving at (28, 12)"),
         GoTo("CeruleanTradeHouse"), Trade("Gambler"), GoTo("CeruleanCity"),
         GoTo("CeruleanPokecenter"), AtPc(Pc::Deposit("Jynx")), GoTo("CeruleanCity"),
-        // The tree on the main terrace is the way down to Route 5 and the Day Care.
-        // Route 5's ledges drop only south, so the Day Care comes before the path's pocket below it.
-        Take("cut down the tree"), GoTo("Route5"),
+        // The tree on the main terrace is the way down to Route 5, into the pocket the Day Care
+        // stands in. Route 5's ledges drop only south, so the Day Care comes before the path's
+        // pocket below it.
+        Take("cut down the tree"), Cross { map: "Route5", landing: (9, 1) },
         GoTo("Daycare"), DayCare(None), GoTo("Route5"),
         GoTo("Route5Gate"), GoTo("Route5"), GoTo("CeruleanCity"),
         GoTo("CeruleanPokecenter"), AtPc(Pc::Deposit("Squirtle")), GoTo("CeruleanCity"),
@@ -2686,9 +2695,17 @@ pub fn to_the_middle_errands() -> Vec<Step> {
     use Step::*;
     let mut steps = vec![
         Collect(false), Tidy,
+        GoTo("FuchsiaCity"), GoTo("FuchsiaPokecenter"),
+        // The Slowbro the trade over Route 18 wants was caught in Cerulean Cave, into the box the
+        // north errands left current. The party comes in full, and slot 3 is the seat the
+        // collecting fills, so that is the one that makes room. Lickitung and the Nidorino a candy
+        // makes are the two species that take the count to the fifty the Route 15 aide asks for.
+        AtPc(Pc::ChangeBox(4)), AtPc(Pc::DepositSlot(3)), AtPc(Pc::Withdraw("Slowbro")),
         GoTo("FuchsiaCity"),
         GoTo("Route18"), GoTo("Route18Gate1F"), GoTo("Route18Gate2F"), Trade("Youngster"),
-        GoTo("Route18Gate1F"), GoTo("Route18"), GoTo("FuchsiaCity"),
+        // The gate stands on Route 18 with two doors on each side of it, and only the eastern
+        // pair comes out on the half that reaches Fuchsia.
+        GoTo("Route18Gate1F"), Take("Route18, arriving at (40, "), GoTo("FuchsiaCity"),
         // Level 22 from the Safari Zone, so one candy is the level-up that evolves it.
         Evolve { item: "RareCandy", species: "NidoranMale" },
         // Route 15's gate holds the last aide, who wants fifty species owned.
@@ -2696,7 +2713,9 @@ pub fn to_the_middle_errands() -> Vec<Step> {
         // North up the eastern routes, which is the only way back: the cycling road goes one way,
         // and its ledge onto Route 18 is a crossing the menu offers and the walk cannot take.
         GoTo("Route15Gate1F"), Take("Route15, arriving at (15, "),
-        GoTo("Route14"), GoTo("Route13"), GoTo("Route12"),
+        // Route 13's lanes are ledged apart and the nearest of its three openings from Route 14
+        // is the one lane that reaches nothing: the other two are the road to Route 12.
+        GoTo("Route14"), Cross { map: "Route13", landing: (1, 9) }, GoTo("Route12"),
         GoTo("Route12Gate1F"), Take("Route12, arriving at (11, 16)"), GoTo("LavenderTown"),
     ];
     steps.extend(lavender_to_saffron());
@@ -2743,8 +2762,7 @@ fn completion_phase_middle_errands() {
 }
 
 /// Cinnabar's loose ends, which close the tour's loop: the Mansion's Ponyta, the lab's three
-/// trades, the Old Amber revived, and the machines the Metronome scientist and Blaine held back
-/// for want of bag room.
+/// trades, the Old Amber revived, and the TM Blaine held back for want of bag room.
 pub fn to_the_cinnabar_errands() -> Vec<Step> {
     use Step::*;
     vec![
@@ -2756,8 +2774,11 @@ pub fn to_the_cinnabar_errands() -> Vec<Step> {
         GoTo("ViridianCity"), GoTo("Route1"), GoTo("PalletTown"),
         GoTo("Route21"), GoTo("CinnabarIsland"),
         GoTo("CinnabarPokecenter"),
-        AtPc(Pc::Deposit("Nidorina")), AtPc(Pc::Deposit("Lickitung")), AtPc(Pc::Deposit("Tentacool")),
-        AtPc(Pc::Withdraw("Venonat")), AtPc(Pc::Withdraw("Raichu")),
+        // Three slots for the lab's three trades: the Raichu and the Venonat it wants, and the
+        // Ponyta out of the mansion. The Venonat went into the box the safari errands left
+        // current, which is not the one the middle errands did.
+        AtPc(Pc::Deposit("Nidorina")), AtPc(Pc::Deposit("Lickitung")), AtPc(Pc::Deposit("NidoranFemale")),
+        AtPc(Pc::Withdraw("Raichu")), AtPc(Pc::ChangeBox(3)), AtPc(Pc::Withdraw("Venonat")),
         // The gym's door is locked to anyone not carrying the key, Blaine beaten or not.
         Field(r#"{"move":"pc_items","op":"withdraw","item":"SecretKey"}"#),
         GoTo("CinnabarIsland"),
@@ -2773,7 +2794,6 @@ pub fn to_the_cinnabar_errands() -> Vec<Step> {
         Take("PokemonMansion2F, arriving at (6, 1)"), GoTo("PokemonMansion1F"),
         GoTo("CinnabarIsland"),
         GoTo("CinnabarLab"), GoTo("CinnabarLabTradeRoom"), Trade("Gramps"), Trade("Beauty"),
-        GoTo("CinnabarLab"), GoTo("CinnabarLabMetronomeRoom"), Talk("Scientist1"),
         GoTo("CinnabarLab"), GoTo("CinnabarLabFossilRoom"), Trade("Scientist2"),
         // As with the fossil, the Pokemon is handed over only after a walk out of the room and back.
         Talk("Scientist1"),
@@ -2797,7 +2817,7 @@ fn completion_phase_cinnabar_errands() {
         Entry::Way(Way::RevivedOldAmber),
         Entry::Trade(PokemonSpecies::Ponyta), Entry::Trade(PokemonSpecies::Raichu),
         Entry::Trade(PokemonSpecies::Venonat),
-        Entry::Machine(ItemId::Tm35Metronome as u8), Entry::Machine(ItemId::Tm38FireBlast as u8),
+        Entry::Machine(ItemId::Tm38FireBlast as u8),
         Entry::Way(Way::EvolutionCancelled),
         Entry::Trainer { map: crate::pokemon::map::Map::PokemonMansion3F, index: 1 },
     ]);
