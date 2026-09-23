@@ -2011,7 +2011,7 @@ CascadeBadge; not cutting".to_string(),
                     let action = game_state.map.actions().into_iter()
                         // Not `==`: a boulder goal's row names a moving boulder.
                         .find(|a| a.tile.is_same_row_as(&destination))
-                        // `actions()` offers only the nearest crossing.
+                        // A row names one square per opening, and a recipe may name any of them.
                         .or_else(|| match destination {
                             MetaTile::Connection { to_map, to_position } =>
                                 game_state.map.connection_action(to_map, to_position),

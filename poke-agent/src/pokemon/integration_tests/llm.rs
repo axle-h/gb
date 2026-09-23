@@ -578,3 +578,51 @@ fn what_the_enemy_did_is_reported_rather_than_only_what_we_did() {
         assert!(listed < 3, "the move list leaked into a message box: {line:?}");
     }
 }
+
+/// Saffron's west wall has two openings into Route 7, a wall apart, and each is a row of its own:
+/// a turn that offered one row for the pair could not say which of them was meant, and the walk
+/// that wanted the other had nothing to ask for.
+#[test]
+fn each_opening_into_a_neighbour_is_a_row_the_turn_can_take() {
+    use std::sync::Mutex;
+
+    /// Standing inside Saffron's northern west-wall opening, with both of them a step away.
+    const SAFFRON: &[u8] = include_bytes!("../data/at-saffron.bin");
+    /// Where the southern opening comes out on Route 7, as its row says.
+    const SOUTHERN_LANDING: (u8, u8) = (20, 12);
+
+    #[derive(Default)]
+    struct TheFurtherOpening(Arc<Mutex<Vec<String>>>);
+
+    impl Brain for TheFurtherOpening {
+        fn respond(&mut self, request: &TurnRequest) -> Reply {
+            // The rows into Route 7 are word for word the same but for where they land.
+            let rows: Vec<(String, String)> = request.menu_rows().into_iter()
+                .filter(|(_, what)| what.contains("walk into Route7"))
+                .collect();
+            self.0.lock().expect("not poisoned").extend(rows.iter().map(|(id, _)| id.clone()));
+            match rows.iter().find(|(_, what)| what.contains(&format!("({}, {})", SOUTHERN_LANDING.0, SOUTHERN_LANDING.1))) {
+                Some((id, _)) => Reply::call("choose_action", serde_json::json!({
+                    "id": id, "summary": "out by the southern opening, the one that lands where I want" })),
+                None => Reply::call("wait", serde_json::json!({ "ticks": 1, "summary": "waiting" })),
+            }
+        }
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut run = LlmRun::builder(SAFFRON).named("saffron-two-openings")
+        .game_time(Duration::from_secs(600)).start(Box::new(TheFurtherOpening(Arc::clone(&seen))));
+    let left = run.tick_until(PATIENCE, |run| run.map() == Map::Route7 || run.endpoint.requests_served() > 2);
+    let seen = seen.lock().expect("not poisoned").clone();
+    let offered: std::collections::BTreeSet<&String> = seen.iter().collect();
+    assert_eq!(offered.len(), 2, "both openings are rows of their own: {seen:?}");
+    let refused: Vec<String> = run.endpoint.requests().iter()
+        .flat_map(|request| request.messages.clone())
+        .filter(|message| message.role == "tool" && message.text.contains("not one of this turn's actions"))
+        .map(|message| message.text.split(". ").next().unwrap_or_default().to_string())
+        .collect();
+    assert!(refused.is_empty(), "the turn refused a row it had offered: {refused:?}");
+    assert!(left, "never crossed into Route 7, having been offered {offered:?}");
+    let at = run.fixture().game_state().map.player_position;
+    assert_eq!((at.x, at.y), SOUTHERN_LANDING, "crossed by the nearer opening rather than the one chosen");
+}

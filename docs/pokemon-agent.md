@@ -66,9 +66,10 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   cartridge's own source goes in. `WarpTrigger::Unknown` is never dropped either — unsure is not no.
 - A Seafoam hole leads where the current below leaves the player (`strong_current_below`), and the
   landing reads as `GameMode::Script` until the current lets go (`read_game_mode`).
-- `actions()` emits one crossing per adjacent map *per kind*, land and water: one row per edge
-  perturbs the scripted run's timing, and collapsing the kinds hides every neighbour whose land
-  crossing is nearer than its water one.
+- `actions()` emits one crossing per *opening* on land — a wall across a map edge makes two ways
+  into one neighbour, landing in parts of it that may not reach each other — and one per map on
+  water, since `crossings` reads land only and a nearer land row must not hide a water one. One row
+  per edge *tile* is what perturbs the scripted run's timing; one per opening does not.
 - A person or item with only tall grass beside it is reached from the grass, and only then:
   floor is tried first, so no row that already existed moves.
 - A `Pace` row stands only where the cartridge rolls an encounter off grass: any floor of an indoor
@@ -147,10 +148,9 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
 - A battle item that asks which Pokémon has a row per member it would help (`helps_in_battle`), so
   rows of one item compare equal; a scripted heal pins `target` to the one out, or its choice moves.
 - A wedged scripted run is silent — no watchdog, and `/api/events` goes on looking healthy.
-- `route_toward` scores every reachable crossing into a neighbour, not only the nearest one
-  `actions()` offers, or a route out of a pocket takes the pocket's own crossing back in for ever.
-  `with_every_crossing` keeps the menu's rows first so a tie is theirs: `full_playthrough` replays
-  their choices.
+- `route_toward` scores every row, which is every reachable opening into a neighbour, or a route
+  out of a pocket takes the pocket's own crossing back in for ever. The nearest is first, because
+  `full_playthrough` replays the choices a tie used to settle.
 
 ## Prose the model and the page read
 

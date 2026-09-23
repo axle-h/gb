@@ -39,6 +39,9 @@ argument lives in the code.
 - `not_on_the_menu`'s "that id is for another map" clause must test against `Map::iter()`. Testing
   "the first id contains a colon" made the commonest refusal in a battle — an item the bag has run
   out of — answer with three false statements about maps.
+- `classify` takes the ids the situation was rendered from and nothing else, so anything a turn
+  names has to be a row of its own. Naming an id in a row's prose instead put the walk in front of
+  a wall with no way past: the turn advertised it and `choose_action` refused it, turn after turn.
 - A refused battle id carries the cartridge's rule, read off the menu rather than the game, and says
   nothing where the menu cannot settle which rule it is. The turn's own `### On screen` line names
   the row, so a bare "not one of this turn's actions" is a contradiction with no way out.

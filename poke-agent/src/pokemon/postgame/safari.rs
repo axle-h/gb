@@ -275,7 +275,7 @@ fn step_toward(world_graph: &WorldGraph, map: &MetaTileMap, actions: &[Overworld
     };
     let landing = (next == Map::SafariZoneWest).then_some(WEST_LANDING);
     crossing_to(next, landing)
-        .or_else(|| DeterministicPolicy::route_toward(world_graph, map, actions, to))
+        .or_else(|| DeterministicPolicy::route_toward(world_graph, actions, to))
 }
 
 /// The overworld half of [`PolicyStep::SafariExit`]: walk out, and pop on the gate mat.

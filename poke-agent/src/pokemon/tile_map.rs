@@ -1102,20 +1102,21 @@ impl MetaTileMap {
             actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Sprite(sprite.name), route });
         }
 
-        // One crossing per adjacent map per kind: one per edge perturbs the scripted run's timing,
-        // and one per map hides a water crossing behind a nearer land one. Where a map has more
-        // than one opening into the same neighbour, the row it does mint names the others and
-        // where each of them lands, so the one that is wanted can still be asked for by id.
+        // One row per opening on land, nearest first: a wall across a map edge makes two ways into
+        // the same neighbour, landing in parts of it that may not reach each other, and one row
+        // for the pair cannot say which is meant. One per edge *tile* is what perturbs the
+        // scripted run's timing. Water keeps one row per map, since `crossings` reads land only
+        // and a nearer land row must not hide it.
         for to_map in &self.connection_targets {
-            let by_land = nearest(&|t| match t {
-                MetaTile::Connection { to_map: m, .. } => m == to_map,
-                _ => false,
-            });
+            let openings = self.crossings_from(*to_map, &full_dist).into_iter()
+                .filter(|crossing| crossing.reachable)
+                .map(|crossing| (MetaTile::Connection { to_map: *to_map, to_position: crossing.to_position },
+                                 crossing.at));
             let by_water = nearest(&|t| match t {
                 MetaTile::ConnectionWater(m) => self.can_surf && m == to_map,
                 _ => false,
             });
-            for (tile, dest) in [by_land, by_water].into_iter().flatten() {
+            for (tile, dest) in openings.chain(by_water) {
                 let (_, came_from) = best_dist_from(&dest).unwrap();
                 let mut route = reconstruct(dest, came_from);
 
@@ -1429,8 +1430,13 @@ impl MetaTileMap {
     /// Every distinct way off this map into `to_map`, one [`Crossing`] per run of touching edge
     /// tiles, nearest-reachable first and then in reading order.
     pub fn crossings(&self, to_map: Map) -> Vec<Crossing> {
-        use std::collections::{HashSet, VecDeque};
         let (dist, _) = self.bfs_from_player();
+        self.crossings_from(to_map, &dist)
+    }
+
+    /// [`Self::crossings`] on a search already made, for the caller that makes one anyway.
+    fn crossings_from(&self, to_map: Map, dist: &HashMap<Point8, u32>) -> Vec<Crossing> {
+        use std::collections::{HashSet, VecDeque};
         let at = |i: usize| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 };
         let landing = |p: Point8| match self.meta_tiles[p.x as usize + p.y as usize * self.width] {
             MetaTile::Connection { to_map: m, to_position } if m == to_map => Some(to_position),

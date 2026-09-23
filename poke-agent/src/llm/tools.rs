@@ -1785,38 +1785,13 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
             let (dx, dy) = crate::pokemon::map_header::strip_offset(to_map);
             format!("take the warp to {to_map}, arriving at ({}, {})", to_position.x + dx, to_position.y + dy)
         }
-        // A map edge says where it lands, as a warp does: two openings into the same neighbour can
-        // come out in pockets of it that cannot reach one another, and a row naming only the map
-        // beyond is a row nothing can choose between.
+        // A map edge says where it lands, as a warp does: a map with two openings into the same
+        // neighbour has a row for each, and they come out in parts of it that may not reach one
+        // another, so the landing is the only thing that tells the rows apart.
         MetaTile::Connection { to_map, to_position } => {
             let (dx, dy) = crate::pokemon::map_header::strip_offset(to_map);
-            let lands = format!("walk into {to_map}, arriving at ({}, {})",
-                                to_position.x + dx, to_position.y + dy);
-            let others: Vec<String> = state.map.crossings(to_map).into_iter()
-                .filter(|crossing| crossing.reachable && crossing.at != action.destination)
-                // Minted by `overworld_id`, so prose ids and resolvable ids cannot drift apart.
-                .map(|crossing| {
-                    let id = overworld_id(state, &OverworldAction {
-                        map: state.map.map,
-                        origin: state.map.player_position,
-                        destination: crossing.at,
-                        tile: MetaTile::Connection { to_map, to_position: crossing.to_position },
-                        route: vec![],
-                    });
-                    format!("`{id}` lands at ({}, {})", crossing.to_position.x + dx,
-                            crossing.to_position.y + dy)
-                })
-                .collect();
-            match others.is_empty() {
-                true => lands,
-                false => format!(
-                    "{lands}. This map has {} other opening{} into {to_map}, each landing \
-                     somewhere different on it, and any of them can be chosen by id: {}",
-                    others.len(),
-                    if others.len() == 1 { "" } else { "s" },
-                    others.join(", "),
-                ),
-            }
+            format!("walk into {to_map}, arriving at ({}, {})",
+                    to_position.x + dx, to_position.y + dy)
         }
         MetaTile::ConnectionWater(to_map) => format!("surf into {to_map}"),
         MetaTile::Grass => "walk into tall grass to find wild Pokémon".to_string(),
@@ -1955,19 +1930,7 @@ fn door_side(map: &crate::pokemon::tile_map::MetaTileMap, at: Point8) -> Option<
 
 /// Match an id against a fresh action list; `None` means the action is gone.
 pub fn resolve_overworld(state: &GameState, id: &str) -> Option<OverworldAction> {
-    use crate::pokemon::tile::MetaTile;
-    if let Some(action) = state.map.actions().into_iter().find(|action| overworld_id(state, action) == id) {
-        return Some(action);
-    }
-    let map = &state.map;
-    map.meta_tiles.iter().enumerate().find_map(|(index, tile)| {
-        let MetaTile::Connection { to_map, to_position } = *tile else { return None };
-        let at = Point8 { x: (index % map.width) as u8, y: (index / map.width) as u8 };
-        // Minted as the menu would; the route is a throwaway that `connection_action` replaces.
-        let candidate = OverworldAction {
-            map: map.map, origin: map.player_position, destination: at, tile: *tile, route: vec![] };
-        (overworld_id(state, &candidate) == id).then(|| map.connection_action(to_map, to_position))?
-    })
+    state.map.actions().into_iter().find(|action| overworld_id(state, action) == id)
 }
 
 /// Keyed on what the action is: a bag slot shifts when an item runs out, and PP changes on use.
@@ -2210,9 +2173,9 @@ mod tests {
         }
     }
 
-    /// The model can ask for a crossing the menu did not offer.
+    /// Every opening into a neighbour is a row, and one that cannot be walked to is no row at all.
     #[test]
-    fn a_crossing_the_menu_did_not_offer_can_still_be_chosen() {
+    fn every_opening_into_a_neighbour_is_a_row_of_its_own() {
         use crate::pokemon::tile::MetaTile;
         let mut state = state_from(include_bytes!("../pokemon/data/pocket-route14.bin"));
         state.map.player_position = Point8 { x: 10, y: 4 };
@@ -2222,38 +2185,28 @@ mod tests {
         assert!(reachable.len() > 1, "the road has several openings east: {reachable:?}");
 
         let menu = overworld_menu(&state, None);
-        let offered: Vec<&MenuItem> = menu.iter()
-            .filter(|row| row.id.ends_with(":Connection")).collect();
-        // Still one row per adjacent map: this map borders Route 13 and Route 15.
-        assert_eq!(offered.len(), 2, "one row per neighbour, not one per tile: {offered:?}");
-        let offered: Vec<&MenuItem> = offered.into_iter()
-            .filter(|row| row.description.contains(&format!("{}", Map::Route13))).collect();
-        assert_eq!(offered.len(), 1, "{offered:?}");
-        assert!(offered[0].description.contains("2 other openings"),
-                "and it says the others are there: {}", offered[0].description);
+        let rows: Vec<&MenuItem> = menu.iter().filter(|row| row.id.ends_with(":Connection")).collect();
+        // This map borders Route 13, by three openings, and Route 15 by one.
+        assert_eq!(rows.len(), reachable.len() + 1, "one row per opening, not per neighbour: {rows:?}");
 
+        let (dx, dy) = crate::pokemon::map_header::strip_offset(Map::Route13);
         for crossing in reachable {
             let id = overworld_id(&state, &OverworldAction {
                 map: state.map.map, origin: state.map.player_position, destination: crossing.at,
                 tile: MetaTile::Connection { to_map: Map::Route13, to_position: crossing.to_position },
                 route: vec![],
             });
-            // Named in the row unless it is the row, and choosable either way.
-            if id != offered[0].id {
-                assert!(offered[0].description.contains(&id), "{} omits {id}", offered[0].description);
-            }
-            // And said where it lands: openings into one map that come out in pockets of it that
-            // cannot reach each other are otherwise word for word the same row.
-            let (dx, dy) = crate::pokemon::map_header::strip_offset(Map::Route13);
+            let row = rows.iter().find(|row| row.id == id).unwrap_or_else(|| panic!("no row for {id}: {rows:?}"));
+            // Openings into one map that come out in parts of it that cannot reach each other are
+            // otherwise word for word the same row.
             let lands = format!("({}, {})", crossing.to_position.x + dx, crossing.to_position.y + dy);
-            assert!(offered[0].description.contains(&lands),
-                    "{} omits where {id} lands", offered[0].description);
+            assert!(row.description.contains(&lands), "{} omits where it lands", row.description);
             let resolved = resolve_overworld(&state, &id).unwrap_or_else(|| panic!("{id} resolves"));
             assert_eq!(resolved.destination, crossing.at);
             assert!(!resolved.route.is_empty(), "{id} comes with a walk to it");
         }
 
-        // An unreachable crossing is still refused.
+        // An unreachable crossing is neither offered nor resolved.
         let pocket = state.map.crossings(Map::Route13).into_iter()
             .find(|crossing| !crossing.reachable).expect("the pocket rows are not reachable from the road");
         let id = overworld_id(&state, &OverworldAction {
@@ -2261,6 +2214,7 @@ mod tests {
             tile: MetaTile::Connection { to_map: Map::Route13, to_position: pocket.to_position },
             route: vec![],
         });
+        assert!(!rows.iter().any(|row| row.id == id), "{id} cannot be walked to, so it is no row");
         assert!(resolve_overworld(&state, &id).is_none(), "{id} cannot be walked to");
     }
 

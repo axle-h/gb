@@ -14,7 +14,6 @@ use crate::pokemon::damage::{expected_damage, is_damaging_move, pick_best_move};
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::data::PokemonNamePicker;
 use crate::pokemon::tile::MetaTile;
-use crate::pokemon::tile_map::MetaTileMap;
 pub use crate::pokemon::item::ItemId;
 use crate::pokemon::map::{Map, MapSprite};
 use crate::pokemon::species::PokemonSpecies;
@@ -1950,36 +1949,13 @@ impl DeterministicPolicy {
     }
 
     /// Route one hop toward `target` over the incremental world graph.
-    pub(crate) fn route_toward(world_graph: &WorldGraph, map: &MetaTileMap, actions: &[OverworldAction],
+    pub(crate) fn route_toward(world_graph: &WorldGraph, actions: &[OverworldAction],
                                target: Map) -> Option<OverworldAction> {
-        // A transition on this map is the shortest path, and the graph could miss it.
+        // A transition on this map is the shortest path, and the graph could miss it. Out of a
+        // pocket the nearest crossing is the pocket's own, so the graph scores every row, and
+        // every opening is a row.
         Self::enter_map_action(actions, target, None)
-            .or_else(|| world_graph.pick_shortest_path_action(&Self::with_every_crossing(map, actions), target))
-    }
-
-    /// `actions`, then every other reachable crossing into the same neighbours: out of a pocket the
-    /// nearest crossing is the pocket's own. Offered rows stay first so a tie keeps them.
-    fn with_every_crossing(map: &MetaTileMap, actions: &[OverworldAction]) -> Vec<OverworldAction> {
-        let mut candidates = actions.to_vec();
-        let mut neighbours: Vec<Map> = vec![];
-        for action in actions {
-            if let MetaTile::Connection { to_map, .. } = action.tile
-                && !neighbours.contains(&to_map)
-            {
-                neighbours.push(to_map);
-            }
-        }
-        for to_map in neighbours {
-            for crossing in map.crossings(to_map).into_iter().filter(|crossing| crossing.reachable) {
-                let tile = MetaTile::Connection { to_map, to_position: crossing.to_position };
-                if !candidates.iter().any(|action| action.tile == tile)
-                    && let Some(action) = map.connection_action(to_map, crossing.to_position)
-                {
-                    candidates.push(action);
-                }
-            }
-        }
-        candidates
+            .or_else(|| world_graph.pick_shortest_path_action(actions, target))
     }
 
     /// The row that puts a boulder on switch or hole `target`, or `None` while there is none.
@@ -2086,11 +2062,11 @@ impl Policy for DeterministicPolicy {
                 self.heal_hops = 0;
                 // Latched, or the low-PP check re-arms the same circle on the next encounter.
                 self.heal_unreachable = true;
-            } else if let Some(action) = Self::route_toward(world_graph, &state.map, &actions, pokecenter)
+            } else if let Some(action) = Self::route_toward(world_graph, &actions, pokecenter)
                 // Failing that, the Centre's town: towns join by walkable connections.
                 .or_else(|| pokecenter.pokemon_center_town()
                     .filter(|&town| town != state.map.map)
-                    .and_then(|town| Self::route_toward(world_graph, &state.map, &actions, town)))
+                    .and_then(|town| Self::route_toward(world_graph, &actions, town)))
             {
                 self.heal_route_stuck = 0;
                 self.heal_hops += 1;
@@ -2115,7 +2091,7 @@ impl Policy for DeterministicPolicy {
             let front_reroutes = self.queue.front().is_some_and(step_finds_its_own_way_back);
             if self.heal_return.is_some() || from == state.map.map || front_reroutes {
                 if self.heal_return.is_none() { self.heal_came_from = None; }
-            } else if let Some(action) = Self::route_toward(world_graph, &state.map, &actions, from) {
+            } else if let Some(action) = Self::route_toward(world_graph, &actions, from) {
                 self.heal_route_stuck = 0;
                 return Some(action);
             } else {
@@ -2140,7 +2116,8 @@ impl Policy for DeterministicPolicy {
                     if let Some(action) = Self::enter_map_action(&actions, to_map, to_position) {
                         return Some(action);
                     }
-                    // A landing `actions()` does not offer, as it offers only the nearest.
+                    // A landing no row names: a row names one square per opening, and a
+                    // step list may ask for any square of it.
                     if let Some(pos) = to_position {
                         if let Some(action) = state.map.connection_action(to_map, pos) {
                             return Some(action);
@@ -2151,7 +2128,7 @@ impl Policy for DeterministicPolicy {
                         }
                     }
                     // Recovery: the direct transition isn't on the current map.
-                    Self::route_toward(world_graph, &state.map, &actions, to_map)
+                    Self::route_toward(world_graph, &actions, to_map)
                 },
                 PolicyStep::EnterMapIfReachable { to_map } => {
                     if state.map.map == to_map {
@@ -2169,14 +2146,14 @@ impl Policy for DeterministicPolicy {
                         continue;
                     }
                     Self::enter_map_action(&actions, to_map, None)
-                        .or_else(|| Self::route_toward(world_graph, &state.map, &actions, to_map))
+                        .or_else(|| Self::route_toward(world_graph, &actions, to_map))
                 },
                 PolicyStep::Goto { map: target, strict } => {
                     if state.map.map == target {
                         self.queue.pop_front();
                         continue;
                     }
-                    let action = Self::route_toward(world_graph, &state.map, &actions, target);
+                    let action = Self::route_toward(world_graph, &actions, target);
                     if !strict && action.is_some() {
                         // A non-strict goto action can be interrupted
                         self.queue.pop_front();
@@ -2185,7 +2162,7 @@ impl Policy for DeterministicPolicy {
                 },
                 PolicyStep::CatchPokemon { species, on_map, .. } => {
                     if state.map.map != on_map {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, on_map);
+                        let action = Self::route_toward(world_graph, &actions, on_map);
                         if action.is_none() {
                             self.abandon_catch(species, &format!("no path to {on_map}"));
                             self.queue.pop_front();
@@ -2251,7 +2228,7 @@ impl Policy for DeterministicPolicy {
                 PolicyStep::SweepDex { on_map, min_share, .. } => {
                     use crate::pokemon::postgame::aides;
                     if state.map.map != on_map {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, on_map);
+                        let action = Self::route_toward(world_graph, &actions, on_map);
                         if action.is_none() {
                             println!("[policy] want to sweep {on_map}, but no path there!");
                             self.queue.pop_front();
@@ -2321,7 +2298,7 @@ impl Policy for DeterministicPolicy {
                                 println!("[policy] grind mon (slot {slot}) fainted — routing to {center} to heal (trip #{})",
                                     self.grind_heal_trips);
                                 self.heal_return = Some(center);
-                                return Self::route_toward(world_graph, &state.map, &actions, center);
+                                return Self::route_toward(world_graph, &actions, center);
                             }
                         }
                     } else {
@@ -2330,7 +2307,7 @@ impl Policy for DeterministicPolicy {
                         continue;
                     }
                     if state.map.map != on_map {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, on_map);
+                        let action = Self::route_toward(world_graph, &actions, on_map);
                         if action.is_none() {
                             println!("[policy] want to grind until level {} in {}, but no path there!", target_level, on_map);
                             self.queue.pop_front();
@@ -2380,7 +2357,7 @@ impl Policy for DeterministicPolicy {
                         continue;
                     } else if state.map.map != leader.map() {
                         // A loss blacks out to a Centre, so this never pops on a defeat.
-                        match Self::route_toward(world_graph, &state.map, &actions, leader.map()) {
+                        match Self::route_toward(world_graph, &actions, leader.map()) {
                             Some(action) => { self.gym_route_stuck = 0; Some(action) }
                             None if actions.iter().any(|a| matches!(a.tile, MetaTile::Cut { .. })) => {
                                 println!("[policy] no route to {} — cutting the regrown trees on {}",
@@ -2452,7 +2429,7 @@ impl Policy for DeterministicPolicy {
                 PolicyStep::BattleTrainer { trainer } => {
                     use crate::pokemon::map_metadata::PlayerFacingDirection;
                     if state.map.map != trainer.map() {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, trainer.map());
+                        let action = Self::route_toward(world_graph, &actions, trainer.map());
                         if action.is_none() { self.queue.pop_front(); continue; }
                         action
                     } else if let Some(sprite) = state.map.sprites.iter().find(|s| !s.hidden && s.name == trainer.name) {
@@ -2515,7 +2492,7 @@ impl Policy for DeterministicPolicy {
                         // Not actionable yet (walking on, or hidden by a script): wait.
                         None
                     } else {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, map);
+                        let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             println!("[policy] want to interact with {} on {}, but no path there!", sprite, map);
                             self.queue.pop_front();
@@ -2543,7 +2520,7 @@ impl Policy for DeterministicPolicy {
                         }
                         None
                     } else {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, map);
+                        let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             self.interact_skip_waits = 0;
                             self.queue.pop_front();
@@ -2554,7 +2531,7 @@ impl Policy for DeterministicPolicy {
                 }
                 PolicyStep::UsePc { map } => {
                     if state.map.map != map {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, map);
+                        let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             println!("[policy] want to use the PC on {}, but no path there!", map);
                             self.queue.pop_front();
@@ -2573,7 +2550,7 @@ impl Policy for DeterministicPolicy {
                 PolicyStep::Fish { map, .. } => {
                     // Routing only; `pick_field_move` hands each cast to the driver.
                     if state.map.map != map {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, map);
+                        let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             println!("[policy] want to fish on {map}, but no path there!");
                             self.fish_casts = 0;
@@ -2608,7 +2585,7 @@ impl Policy for DeterministicPolicy {
                     None => { self.queue.pop_front(); continue }
                 },
                 PolicyStep::RedeemPrize { .. } if state.map.map != Map::GameCornerPrizeRoom => {
-                    let action = Self::route_toward(world_graph, &state.map, &actions, Map::GameCornerPrizeRoom);
+                    let action = Self::route_toward(world_graph, &actions, Map::GameCornerPrizeRoom);
                     if action.is_none() {
                         println!("[policy] want a prize, but no path to the prize room!");
                         self.queue.pop_front();
@@ -2621,7 +2598,7 @@ impl Policy for DeterministicPolicy {
                 PolicyStep::UseBagItem { .. } => None,  // `pick_field_move` owns the menus
                 PolicyStep::UseItemsInBattle { on_map, items } => {
                     if state.map.map != on_map {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, on_map);
+                        let action = Self::route_toward(world_graph, &actions, on_map);
                         if action.is_none() {
                             println!("[policy] want a battle on {on_map} to use items in, but no path there!");
                             self.battle_item_baseline = None;
@@ -2672,7 +2649,7 @@ impl Policy for DeterministicPolicy {
                 PolicyStep::SellToMart { map, .. } | PolicyStep::UseItemPc { map, .. } | PolicyStep::UsePcBox { map, .. } => {
                     // Routing only.
                     if state.map.map != map {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, map);
+                        let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             println!("[policy] want the PC on {}, but no path there!", map);
                             self.queue.pop_front();
@@ -2686,7 +2663,7 @@ impl Policy for DeterministicPolicy {
                 PolicyStep::CollectItem(sprite) => {
                     let map = sprite.map();
                     if state.map.map != map {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, map);
+                        let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             println!("[policy] want to collect {} on {}, but no path there!", sprite, map);
                             self.collect_item_waits = 0;
@@ -2732,7 +2709,7 @@ impl Policy for DeterministicPolicy {
                 }
                 PolicyStep::BuyFromMart { item, map } => {
                     if state.map.map != map {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, map);
+                        let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             println!("[policy] want to buy {} from {} but no path there!", item, map);
                             self.queue.pop_front();
@@ -2812,7 +2789,7 @@ impl Policy for DeterministicPolicy {
                     Self::boulder_goal_action(state, &actions, hole, boulder, true),
                 PolicyStep::CutTree { map } => {
                     if state.map.map != map {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, map);
+                        let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             println!("[policy] want to cut a tree on {map} but no path there!");
                             self.queue.pop_front();
@@ -2832,7 +2809,7 @@ impl Policy for DeterministicPolicy {
                 }
                 PolicyStep::SolveTrashCans => {
                     if state.map.map != Map::VermilionGym {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, Map::VermilionGym);
+                        let action = Self::route_toward(world_graph, &actions, Map::VermilionGym);
                         if action.is_none() {
                             println!("[policy] want to solve trash cans but can't reach Vermilion Gym!");
                             self.queue.pop_front();
@@ -2846,7 +2823,7 @@ impl Policy for DeterministicPolicy {
                 }
                 PolicyStep::FlipSwitch { map, .. } => {
                     if state.map.map != map {
-                        let action = Self::route_toward(world_graph, &state.map, &actions, map);
+                        let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
                             println!("[policy] want to flip a switch on {map} but can't reach it!");
                             self.queue.pop_front();
@@ -3810,8 +3787,12 @@ mod heal_detour_tests {
         let offered: Vec<MetaTile> = state.map.actions().into_iter().map(|a| a.tile)
             .filter(|tile| matches!(tile, MetaTile::Connection { to_map: Map::Route14, .. })).collect();
         let (pocket, main) = (p(19, 6), p(19, 8));
-        assert_eq!(offered, [MetaTile::Connection { to_map: Map::Route14, to_position: pocket }],
+        // The pocket's own crossing is the nearest, and so the one a row for the map alone would
+        // have been: the graph has to score the other rows too, or the walk goes back into it.
+        assert_eq!(offered.first(), Some(&MetaTile::Connection { to_map: Map::Route14, to_position: pocket }),
                    "the fixture no longer lands beside the pocket's crossing");
+        assert!(offered.contains(&MetaTile::Connection { to_map: Map::Route14, to_position: main }),
+                "the way on is a row of its own: {offered:?}");
 
         let mut graph = WorldGraph::new();
         graph.observe_edges(Map::Route14, pocket, &[(p(21, 6), Map::Route13, p(0, 6), Connection)]);
@@ -3820,7 +3801,7 @@ mod heal_detour_tests {
             (p(0, 7), Map::Route14, pocket, Connection),
             (p(0, 9), Map::Route14, main, Connection),
         ]);
-        let action = DeterministicPolicy::route_toward(&graph, &state.map, &state.map.actions(), Map::Route15)
+        let action = DeterministicPolicy::route_toward(&graph, &state.map.actions(), Map::Route15)
             .expect("Route 15 is two crossings away");
         assert_eq!(action.tile, MetaTile::Connection { to_map: Map::Route14, to_position: main });
     }

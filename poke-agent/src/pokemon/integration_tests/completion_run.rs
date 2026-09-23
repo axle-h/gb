@@ -70,10 +70,9 @@ pub enum Step {
     Train { row: &'static str, until: &'static str, way: Way, flee: &'static [&'static str] },
     /// Walk to `map` over the transitions the brain has been offered so far.
     GoTo(&'static str),
-    /// Leave by the opening into `map` that lands nearest `landing`. An opening is a stretch of
-    /// map edge rather than a door, so which tile of it the menu names, and where that tile
-    /// lands, both move with the player; what holds still is which stretch is which. A landing
-    /// well inside the one that is wanted therefore picks it out from wherever the run stands.
+    /// Leave by the opening into `map` that lands nearest `landing`. Each opening is a row of its
+    /// own and they read alike but for where they land, and the square a row names moves with the
+    /// player, so the landing is what picks one out from wherever the run stands.
     Cross { map: &'static str, landing: (u8, u8) },
     /// Take every person, item, tree and passage inside `maps` not yet taken, walking to the
     /// nearest part of them with anything left, until nothing is; `patience` caps the turns.
@@ -191,23 +190,11 @@ fn coords_after(text: &str, lead: &str) -> Option<(u8, u8)> {
     Some((x.parse().ok()?, rest.split(')').next()?.parse().ok()?))
 }
 
-/// The row for the opening into `target` that lands nearest `landing`. The menu mints one row per
-/// neighbour, for whichever opening is nearest, and names the others and their landings in that
-/// row's prose, so both are read out of the one row.
+/// The row for the opening into `target` that lands nearest `landing`.
 fn crossing_toward(request: &TurnRequest, target: &str, landing: (u8, u8)) -> Option<String> {
-    let (id, what) = request.menu_rows().into_iter()
-        .find(|(id, what)| id.ends_with(":Connection") && names_map(what, target))?;
-    let mut openings = vec![];
-    if let Some(at) = coords_after(&what, "arriving at (") {
-        openings.push((id, at));
-    }
-    let parts: Vec<&str> = what.split('`').collect();
-    for pair in parts.windows(2).skip(1).step_by(2) {
-        if let Some(at) = coords_after(pair[1], "lands at (") {
-            openings.push((pair[0].to_string(), at));
-        }
-    }
-    openings.into_iter()
+    request.menu_rows().into_iter()
+        .filter(|(id, what)| id.ends_with(":Connection") && names_map(what, target))
+        .filter_map(|(id, what)| coords_after(&what, "arriving at (").map(|at| (id, at)))
         .min_by_key(|(_, at)| at.0.abs_diff(landing.0) as u16 + at.1.abs_diff(landing.1) as u16)
         .map(|(id, _)| id)
 }
@@ -2520,12 +2507,10 @@ pub fn to_the_eastern_routes() -> Vec<Step> {
         GoTo("LavenderTown"),
         GoTo("Route12"),
         Explore { maps: EAST, patience: 1200 },
-        // And back up from the other end: the lanes are one way, so each direction reaches a half
-        // the other cannot, and Route 15's two halves are the gate building's two doors.
-        // The way round to the other end, because there is no way through: the lanes are ledged
-        // apart and each map's three openings into the next come out in lanes that cannot reach
-        // one another. North to Lavender, west under Saffron, and down the cycling road, which
-        // runs one way and that way is south.
+        // And back up from the other end, the long way round, because there is no way through: the
+        // lanes are ledged apart and each map's openings into the next come out in lanes that
+        // cannot reach one another. North to Lavender, west under Saffron, and down the cycling
+        // road, which runs one way and that way is south.
         GoTo("Route12"), GoTo("Route12Gate1F"), Take("Route12, arriving at (11, 16)"),
         GoTo("LavenderTown"),
     ];
@@ -2536,13 +2521,12 @@ pub fn to_the_eastern_routes() -> Vec<Step> {
         GoTo("Route17"), GoTo("Route18"), GoTo("Route18Gate1F"), Take("Route18, arriving at (40, "),
         GoTo("FuchsiaCity"), GoTo("Route15"),
         Explore { maps: EAST, patience: 1200 },
-        // Route 15's north strip is entered from Route 14 and left by a ledge, so neither
-        // exploring stands on it: the walk west across it is the only way its trainer and its TM
-        // are ever offered.
-        // Route 15's north strip, with a trainer and the TM Rage on it, is walled off from the rest
-        // of the route and opens only onto Route 14 -- and the Route 14 side of it is a pocket of
-        // three tiles behind a tree. Nothing reaches it that does not cut that tree.
-        GoTo("Route14"), Take("cut down the tree at (4, 42)"),
+        // Route 15's north strip, with a trainer and the TM Rage on it, is entered from Route 14
+        // and left by a ledge, so neither exploring ever stands on it — and the Route 14 side of
+        // it is a pocket of three tiles behind a tree. Nothing reaches it that does not cut that
+        // tree.
+        GoTo("Route15"), Cross { map: "Route14", landing: (4, 42) },
+        Take("cut down the tree at (4, 42)"),
         Take("Route15"), Clear(&[]),
         Tidy,
     ]);
