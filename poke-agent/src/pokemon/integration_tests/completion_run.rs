@@ -1398,7 +1398,22 @@ pub fn missing_on(played: &mut Played, maps: &[crate::pokemon::map::Map], also: 
     let list = checklist(played.run.fixture().gb.core().mmu());
     let ledger = played.ledger.lock().expect("not poisoned");
     let mmu = played.run.fixture().gb.core().mmu();
-    ledger.missing(&list, mmu, &state).into_iter()
+    let missing = ledger.missing(&list, mmu, &state);
+
+    // Every door and map edge the phase stood beside and did not cross, printed rather than
+    // asserted: a door here is often the next phase's to cross, and only the whole run can say one
+    // went unwalked.
+    let stood_on: HashSet<crate::pokemon::map::Map> = missing.iter()
+        .filter_map(|entry| match entry { Entry::Map(map) => Some(*map), _ => None }).collect();
+    for entry in &missing {
+        match entry {
+            Entry::Warp { map, .. } | Entry::Connection { map, .. } if !stood_on.contains(map) =>
+                println!("[phase] {entry:?} uncrossed"),
+            _ => {}
+        }
+    }
+
+    missing.into_iter()
         .filter(|entry| also.contains(entry) || match entry {
             Entry::Map(map) | Entry::Trainer { map, .. } | Entry::ItemBall { map, .. } => maps.contains(map),
             _ => false,
@@ -1419,6 +1434,9 @@ pub fn to_the_boulder_badge() -> Vec<Step> {
     vec![
         Go(&["RedsHouse1F"]), Clear(&[]),
         Go(&["PalletTown"]), Clear(&[]),
+        // In at the front door and back up the stairs: the run comes down them once, at the start,
+        // and the doors it walks then are the far sides of these.
+        Go(&["RedsHouse1F"]), Go(&["RedsHouse2F"]), Go(&["RedsHouse1F"]), Go(&["PalletTown"]),
         // Oak stops the walk north and takes the player to his lab.
         Take("Route1"),
         Gift("SquirtlePokeBall"),
@@ -1509,11 +1527,6 @@ fn saffron_to_cerulean() -> Vec<Step> {
     vec![GoTo("Route5"), GoTo("Route5Gate"), Take("Route5, arriving at (10, 30)"), GoTo("CeruleanCity")]
 }
 
-fn cerulean_to_saffron() -> Vec<Step> {
-    use Step::*;
-    vec![GoTo("Route5"), GoTo("Route5Gate"), Take("Route5, arriving at (10, 34)"), GoTo("SaffronCity")]
-}
-
 /// Saffron to Vermilion, through Route 6's gate.
 fn saffron_to_vermilion() -> Vec<Step> {
     use Step::*;
@@ -1557,9 +1570,14 @@ pub fn to_bill() -> Vec<Step> {
     let mut steps = vec![
         GoTo("Route3"), Clear(&[]),
         GoTo("Route4"), Clear(&[]),
+        // Each edge is a crossing of its own in the direction it is walked, and the road west is
+        // walked nowhere else: every later leg comes at Cerulean from the south.
+        GoTo("Route3"), GoTo("PewterCity"), GoTo("Route3"), GoTo("Route4"),
         // The Magikarp salesman, who counts as a way of obtaining a Pokémon.
         GoTo("MtMoonPokecenter"), Clear(&[]),
-        GoTo("Route4"), GoTo("MtMoon1F"),
+        // In at the mountain's door and straight back out of it, because every other way out of
+        // Mt Moon comes out on the far half of Route 4.
+        GoTo("Route4"), GoTo("MtMoon1F"), GoTo("Route4"), GoTo("MtMoon1F"),
         Explore { maps: &["MtMoon1F", "MtMoonB1F", "MtMoonB2F"], patience: 600 },
         // The exploring stops once the pockets it has stood in hold nothing more, and a thing
         // further off on a floor was never in one of those menus. A Clear pass over each floor
@@ -1567,6 +1585,8 @@ pub fn to_bill() -> Vec<Step> {
         GoTo("MtMoon1F"), Clear(&[]), GoTo("MtMoonB1F"), Clear(&[]), GoTo("MtMoonB2F"), Clear(&[]),
         // Route 4 is two halves, and only B2F's east ladder comes out on the far one.
         GoTo("MtMoonB2F"), Take("MtMoonB1F, arriving at (23, 3)"), Take("Route4"), Tidy, Clear(&[]),
+        // And in again by the door that comes out here, which is a door of its own.
+        GoTo("MtMoonB1F"), Take("Route4"),
         GoTo("CeruleanCity"), Clear(&[]),
     ];
     for building in ["CeruleanPokecenter", "CeruleanMart", "CeruleanBadgeHouse", "CeruleanTradeHouse",
@@ -1574,6 +1594,10 @@ pub fn to_bill() -> Vec<Step> {
         steps.extend(visit(building, "CeruleanCity"));
     }
     steps.extend([
+        // The badge house has a back door onto the terrace above it, and the terrace is reached
+        // from nowhere else, so the way back is the door it was left by.
+        GoTo("CeruleanBadgeHouse"), Take("CeruleanCity, arriving at (10, 10)"),
+        Take("CeruleanBadgeHouse, arriving at (2, 0)"), GoTo("CeruleanCity"),
         GoTo("Route24"), Clear(&[]),
         // For the Route 2 trade house, which wants an Abra.
         Hunt { species: "Abra", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "" },
@@ -1662,7 +1686,8 @@ fn completion_phase_thunder_badge() {
         Map::VermilionTradeHouse, Map::VermilionDock, Map::SSAnne1F, Map::SSAnne2F, Map::SSAnne3F,
         Map::SSAnneB1F, Map::SSAnneBow, Map::SSAnneKitchen, Map::SSAnneCaptainsRoom, Map::SSAnne1FRooms,
         Map::SSAnne2FRooms, Map::SSAnneB1FRooms, Map::VermilionGym,
-    ], &[Entry::Badge(2), Entry::Way(Way::OldRod), Entry::Machine(ItemId::Hm01Cut as u8)]);
+    ], &[Entry::Badge(2), Entry::Way(Way::OldRod), Entry::Machine(ItemId::Hm01Cut as u8),
+         Entry::Machine(ItemId::Tm24Thunderbolt as u8)]);
     cut(&mut played, "completion-thunder");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
@@ -1701,7 +1726,13 @@ pub fn to_celadon() -> Vec<Step> {
         GoTo("Route10"), Explore { maps: &["Route10", "RockTunnelPokecenter"], patience: 200 },
         GoTo("RockTunnel1F"), Explore { maps: &["RockTunnel1F", "RockTunnelB1F"], patience: 600 },
         GoTo("RockTunnel1F"), Take("Route10, arriving at (9, 5"), Clear(&[]),
+        // In at the tunnel's south door and out of its north one, which no walk through it takes:
+        // every pass so far has come down from the north and left by the south.
+        GoTo("RockTunnel1F"), Take("Route10, arriving at (9, 17)"),
+        GoTo("RockTunnel1F"), Take("Route10, arriving at (9, 5"),
         GoTo("LavenderTown"), Clear(&[]),
+        // North out of the town and back: the road in came off the tunnel's own end.
+        GoTo("Route10"), GoTo("LavenderTown"),
     ];
     for building in ["LavenderPokecenter", "LavenderMart", "LavenderCuboneHouse", "MrFujisHouse", "NameRatersHouse"] {
         steps.extend(visit(building, "LavenderTown"));
@@ -1768,8 +1799,19 @@ pub fn to_the_rainbow_badge() -> Vec<Step> {
         Take("buy a LEMONADE"), Talk("LittleGirl"),
         // One more, for the guards at Saffron's gates.
         Take("buy a FRESH WATER"),
-        GoTo("CeladonMart5F"), GoTo("CeladonMartElevator"), Field(r#"{"move":"elevator","map":"CeladonMart1F"}"#),
-        GoTo("CeladonMart1F"), GoTo("CeladonCity"),
+        // Getting out of the lift crosses the lift's own door and not the floor's; a floor's door
+        // is crossed by walking into the lift from it, so the ride down is taken a floor at a time.
+        GoTo("CeladonMart5F"),
+        GoTo("CeladonMartElevator"), Field(r#"{"move":"elevator","map":"CeladonMart4F"}"#), GoTo("CeladonMart4F"),
+        // And the stairs down from the fifth floor, which every walk up the shop climbs the other way.
+        GoTo("CeladonMart5F"), GoTo("CeladonMart4F"),
+        GoTo("CeladonMartElevator"), Field(r#"{"move":"elevator","map":"CeladonMart3F"}"#), GoTo("CeladonMart3F"),
+        GoTo("CeladonMartElevator"), Field(r#"{"move":"elevator","map":"CeladonMart2F"}"#), GoTo("CeladonMart2F"),
+        GoTo("CeladonMartElevator"), Field(r#"{"move":"elevator","map":"CeladonMart1F"}"#), GoTo("CeladonMart1F"),
+        GoTo("CeladonMartElevator"), Field(r#"{"move":"elevator","map":"CeladonMart2F"}"#), GoTo("CeladonMart2F"),
+        GoTo("CeladonMart1F"),
+        // The mart's other street door, at the far end of its ground floor.
+        Take("CeladonCity, arriving at (11, 13)"),
         GoTo("CeladonMansion1F"),
         Explore { maps: &["CeladonMansion1F", "CeladonMansion2F", "CeladonMansion3F", "CeladonMansionRoof",
                           "CeladonMansionRoofHouse"], patience: 200 },
@@ -1777,6 +1819,18 @@ pub fn to_the_rainbow_badge() -> Vec<Step> {
         Evolve { item: "FireStone", species: "Eevee" },
         GoTo("CeladonMansionRoof"), GoTo("CeladonMansion3F"), GoTo("CeladonMansion2F"), GoTo("CeladonMansion1F"),
         GoTo("CeladonCity"),
+        // The mansion has two stairwells and two street doors, and the exploring walks one of
+        // each: the front door opens onto the half of the ground floor the back door cannot reach,
+        // and the stairs off it run all the way up. Each hop names where it lands, because the two
+        // stairwells read alike otherwise.
+        Take("CeladonMansion1F, arriving at (4, 11)"),
+        Take("CeladonMansion2F, arriving at (7, 1)"),
+        Take("CeladonMansion3F, arriving at (6, 1)"),
+        Take("CeladonMansionRoof, arriving at (6, 1)"),
+        Take("CeladonMansion3F, arriving at (7, 1)"),
+        Take("CeladonMansion2F, arriving at (6, 1)"),
+        Take("CeladonMansion1F, arriving at (7, 1)"),
+        Take("CeladonCity, arriving at (25, 9)"),
         GoTo("CeladonDiner"), Clear(&[]), GoTo("CeladonCity"),
         GoTo("CeladonHotel"), Clear(&[]), GoTo("CeladonCity"),
         GoTo("CeladonChiefHouse"), Clear(&[]), GoTo("CeladonCity"),
@@ -1854,6 +1908,9 @@ pub fn to_the_poke_flute() -> Vec<Step> {
                           "PokemonTower5F", "PokemonTower6F", "PokemonTower7F"], patience: 900 },
         // Mr Fuji's thanks puts the player in his house, with the flute.
         GoTo("LavenderTown"), Tidy, GoTo("MrFujisHouse"), Clear(&[]), GoTo("LavenderTown"),
+        // Mr Fuji's thanks put the run in his house rather than back down the tower, so the stairs
+        // off the top floor are walked on a climb of their own.
+        GoTo("PokemonTower7F"), GoTo("PokemonTower6F"), GoTo("LavenderTown"),
         // Route 12 is two halves either side of its gate, and the Snorlax sleeps on the south one.
         GoTo("Route12"), GoTo("Route12Gate1F"), Take("Route12, arriving at (11, 2"),
         UseItemOn { item: "PokeFlute", row: "Snorlax" },
@@ -1936,11 +1993,36 @@ pub fn to_the_marsh_badge() -> Vec<Step> {
         Explore { maps: SILPH, patience: 1500 },
         Take("warp to SilphCo7F, arriving at (5, 7)"),
         Take("warp to SilphCo3F, arriving at (11, 11)"),
-        GoTo("SilphCoElevator"), Field(r#"{"move":"elevator","map":"SilphCo1F"}"#),
+        // Getting out of the lift crosses the lift's own door and not the floor's: a floor's door
+        // is crossed by walking into the lift from it, so the ride down is taken a floor at a time.
+        GoTo("SilphCoElevator"),
+        Field(r#"{"move":"elevator","map":"SilphCo11F"}"#), GoTo("SilphCo11F"), GoTo("SilphCoElevator"),
+        Field(r#"{"move":"elevator","map":"SilphCo10F"}"#), GoTo("SilphCo10F"), GoTo("SilphCoElevator"),
+        Field(r#"{"move":"elevator","map":"SilphCo9F"}"#), GoTo("SilphCo9F"), GoTo("SilphCoElevator"),
+        Field(r#"{"move":"elevator","map":"SilphCo8F"}"#), GoTo("SilphCo8F"), GoTo("SilphCoElevator"),
+        Field(r#"{"move":"elevator","map":"SilphCo7F"}"#), GoTo("SilphCo7F"), GoTo("SilphCoElevator"),
+        Field(r#"{"move":"elevator","map":"SilphCo6F"}"#), GoTo("SilphCo6F"), GoTo("SilphCoElevator"),
+        Field(r#"{"move":"elevator","map":"SilphCo5F"}"#), GoTo("SilphCo5F"), GoTo("SilphCoElevator"),
+        Field(r#"{"move":"elevator","map":"SilphCo4F"}"#), GoTo("SilphCo4F"), GoTo("SilphCoElevator"),
+        Field(r#"{"move":"elevator","map":"SilphCo3F"}"#), GoTo("SilphCo3F"), GoTo("SilphCoElevator"),
+        Field(r#"{"move":"elevator","map":"SilphCo2F"}"#), GoTo("SilphCo2F"), GoTo("SilphCoElevator"),
+        Field(r#"{"move":"elevator","map":"SilphCo1F"}"#), GoTo("SilphCo1F"), GoTo("SilphCoElevator"),
+        Field(r#"{"move":"elevator","map":"SilphCo2F"}"#), GoTo("SilphCo2F"),
         GoTo("SilphCo1F"), GoTo("SaffronCity"),
         // Sabrina's gym opens once Silph Co is clear of Rockets, and freeing the president is what
         // clears the streets the Rockets were standing in.
         GoTo("SaffronGym"), Explore { maps: &["SaffronGym"], patience: 600 }, GoTo("SaffronCity"),
+        // Three of the gym's thirty pads are the way back along a link the exploring only rode
+        // one way, and a room is reached by its pads alone: each hop below names where it lands,
+        // which is the only thing telling one pad in a room from another, and the pads the run
+        // has taken before are the way round to the three it has not.
+        GoTo("SaffronGym"),
+        Take("SaffronGym, arriving at (19, 17)"), Take("SaffronGym, arriving at (19, 3)"),
+        Take("SaffronGym, arriving at (1, 3)"), Take("SaffronGym, arriving at (1, 11)"),
+        Take("SaffronGym, arriving at (9, 5)"), Take("SaffronGym, arriving at (5, 3)"),
+        Take("SaffronGym, arriving at (1, 11)"), Take("SaffronGym, arriving at (5, 17)"),
+        Take("SaffronGym, arriving at (15, 17)"), Take("SaffronGym, arriving at (11, 15)"),
+        GoTo("SaffronCity"),
         // Freeing the president sends the Rockets home, and the doors they stood in open. The
         // Dojo's master has to be beaten before either of his Poké Balls will open.
         GoTo("FightingDojo"), Talk("KarateMaster"), Clear(&[]), GoTo("SaffronCity"),
@@ -2073,11 +2155,42 @@ pub fn to_surf() -> Vec<Step> {
     ]
 }
 
-/// What the game will not hand over, named so that it is out of reach for a reason somebody can
-/// read. The Safari Zone's Nugget stands on an island and `TilePairCollisionsWater` refuses the
-/// step from its banks, so nothing routes to it and Surf is no help.
-fn out_of_reach() -> [Entry; 1] {
-    [Entry::ItemBall { map: crate::pokemon::map::Map::SafariZoneCenter, object: 1, item: ItemId::Nugget as u8 }]
+/// What the game will not hand over, named so that each is out of reach for a reason somebody can
+/// read rather than filtered away.
+fn out_of_reach() -> Vec<Entry> {
+    use crate::pokemon::map::Map;
+    use crate::pokemon::map_header::MapConnectionDirection;
+    let door = |map, index| Entry::Warp { map, index };
+    let mut out = vec![
+        // The Safari Zone's Nugget stands on an island and `TilePairCollisionsWater` refuses the
+        // step from its banks, so nothing routes to it and Surf is no help.
+        Entry::ItemBall { map: Map::SafariZoneCenter, object: 1, item: ItemId::Nugget as u8 },
+        // Three warps the disassembly itself marks `; inaccessible`: a door into Celadon Mart's
+        // fifth floor standing in a wall of the city, and two of Silph Co's teleport pads.
+        door(Map::CeladonCity, 8), door(Map::SilphCo1F, 4), door(Map::SilphCo11F, 2),
+    ];
+    // The Elite Four's rooms are each walked one way. Lorelei, Bruno and Agatha turn the player
+    // back from the door with "Don't run away!", Lance's entrance is walled up behind the run on
+    // the way in, the Champion's room starts the rival the moment it is entered and ends with Oak
+    // walking the player north, and the Hall of Fame ends in the credits and a reset.
+    out.extend([Map::LoreleisRoom, Map::BrunosRoom, Map::AgathasRoom, Map::LancesRoom,
+                Map::ChampionsRoom, Map::HallOfFame].map(|room| door(room, 0)));
+    // Route 22 and Route 23 declare a border the cartridge calls unnecessary and the gate between
+    // them is the way across: Route 22's side of it is a ledge and a mountain, and Route 23's is a
+    // wall.
+    out.extend([Entry::Connection { map: Map::Route22, direction: MapConnectionDirection::North },
+                Entry::Connection { map: Map::Route23, direction: MapConnectionDirection::South }]);
+    // The stairs off B4F's south east corner. They stand on the one square of a channel that is
+    // not water: a walk comes down them and can only leave by surfing, and the cartridge fires no
+    // warp under a surfing player, so nothing ever steps back onto them.
+    out.push(door(Map::SeafoamIslandsB4F, 0));
+    // North up the cycling road, which the walk offers and cannot carry out: the step onto the
+    // border flips `wCurMap` before it finishes, the walk reads that as arrival and stops holding
+    // the button, and the cartridge walks the player back. Hold the button a dozen ticks longer
+    // from the same save and the crossing sticks, so the defect is the walk's and not the map's.
+    out.extend([Entry::Connection { map: Map::Route18, direction: MapConnectionDirection::North },
+                Entry::Connection { map: Map::Route17, direction: MapConnectionDirection::North }]);
+    out
 }
 
 #[test]
@@ -2237,6 +2350,9 @@ pub fn to_seafoam() -> Vec<Step> {
         GoTo("CinnabarPokecenter"), AtPc(Pc::ChangeBox(5)), GoTo("CinnabarIsland"),
         // Cinnabar's own shore is on Route 20's south channel, and the islands' east door with it.
         GoTo("Route20"), GoTo("SeafoamIslands1F"),
+        // Out of the east door and in again: the floors below drain west, so a walk that comes in
+        // by this door never takes it, and the pocket it opens into is the one it comes out of.
+        Take("Route20, arriving at (59, 9)"), GoTo("SeafoamIslands1F"),
         Explore { maps: SEAFOAM, patience: 1200 },
         // B3F's two holes, each filled by the one boulder that can reach it. The row names both,
         // and arming Strength is the row's own business.
@@ -2256,6 +2372,8 @@ pub fn to_seafoam() -> Vec<Step> {
         // into the floors between, and nothing drains back. Whichever door the run came in by, the
         // way out is the west one, onto Route 20's north channel and back to Fuchsia.
         GoTo("SeafoamIslands1F"), Take("Route20, arriving at (49, 5)"),
+        // And in by that door, which is a door of its own and opens onto the pocket just left.
+        Take("SeafoamIslands1F, arriving at (4, 17)"), Take("Route20, arriving at (49, 5)"),
         GoTo("Route19"), GoTo("FuchsiaCity"),
     ]
 }
@@ -2360,11 +2478,21 @@ pub fn to_victory_road() -> Vec<Step> {
         GoTo("Route22"), Explore { maps: &["Route22"], patience: 300 },
         GoTo("Route22Gate"), Clear(&[]),
         GoTo("Route23"), Explore { maps: &["Route23"], patience: 300 },
+        // And back down through the gate: it stands between two routes rather than inside one, so
+        // each of its doors and each of the tiles that open them is a crossing of its own.
+        Take("Route22Gate, arriving at (4, 0)"), Take("Route22, arriving"),
+        GoTo("Route22Gate"), GoTo("Route23"),
         GoTo("VictoryRoad1F"),
+        // The road has a door at each end of Route 23's shelf and the walk through uses one of
+        // each pair: in at the lower one and out at the upper. Out of the lower one and back in
+        // while the run is still beside it, because the shelf's two ends do not join.
+        Take("Route23, arriving at (4, 32)"), Take("VictoryRoad1F, arriving at (8, 17)"),
         // Four Strength goals and a hole across three floors, in the order the way up needs them.
         Repeat("switch at (17, 13)"), Explore { maps: &["VictoryRoad1F"], patience: 400 },
         GoTo("VictoryRoad2F"),
         Repeat("switch at (1, 16)"),
+        // The shove ends wherever the boulder took the walk, which is sometimes down a hole.
+        GoTo("VictoryRoad2F"),
         // 1F's north pocket is only reached down 2F's west ladder, and its two balls stand on a ledge
         // behind a boulder that serves no switch. Shoved all the way along, it ends beside the TM on
         // the square the Rare Candy is taken from, so the floor is left and re-entered to put it
@@ -2391,7 +2519,12 @@ pub fn to_victory_road() -> Vec<Step> {
         Take("VictoryRoad3F, arriving at (27, 15)"),
         Take("VictoryRoad2F, arriving at (27, 7)"),
         Explore { maps: ROAD, patience: 1200 },
-        GoTo("Route23"), GoTo("IndigoPlateau"), GoTo("IndigoPlateauLobby"), Clear(&[]),
+        GoTo("Route23"),
+        // And in at the upper door, which the walk out comes through.
+        Take("VictoryRoad2F, arriving at (29, 7)"), GoTo("Route23"),
+        GoTo("IndigoPlateau"), GoTo("IndigoPlateauLobby"), Clear(&[]),
+        // Out of the lobby and off the plateau, then back: the walk up crosses neither.
+        GoTo("IndigoPlateau"), GoTo("Route23"), GoTo("IndigoPlateau"), GoTo("IndigoPlateauLobby"),
     ]
 }
 
@@ -2519,6 +2652,10 @@ pub fn to_the_eastern_routes() -> Vec<Step> {
         GoTo("LavenderTown"),
     ];
     steps.extend(lavender_to_saffron());
+    // East out of the city and back. Every other leg through Saffron arrives from Route 8 and
+    // leaves by another gate, so the road east and the gate's own west door go unwalked.
+    steps.extend(saffron_to_lavender());
+    steps.extend(lavender_to_saffron());
     steps.extend(saffron_to_celadon());
     steps.extend([
         GoTo("Route16"), GoTo("Route16Gate1F"), Take("Route16, arriving at (17, 1"),
@@ -2634,7 +2771,12 @@ pub fn to_the_north_errands() -> Vec<Step> {
         // East the long way round rather than back through Mt Moon, whose floors come out on the
         // half of Route 4 that Cerulean cannot be walked back from: Diglett's Cave to Route 11,
         // then up through Vermilion and Saffron.
-        GoTo("Route2"), GoTo("DiglettsCaveRoute2"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute11"),
+        // The forest walked from the north end: every pass through it comes up from Route 2's
+        // south half, so its south doors and the north gate's own way in go unwalked.
+        GoTo("Route2"), GoTo("ViridianForestNorthGate"), GoTo("ViridianForest"),
+        GoTo("ViridianForestSouthGate"), GoTo("Route2"),
+        GoTo("Route2Gate"), Take("Route2, arriving at (16, 36)"),
+        GoTo("DiglettsCaveRoute2"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute11"),
         GoTo("Route11"), GoTo("VermilionCity"),
     ];
     steps.extend(vermilion_to_saffron());
@@ -2737,9 +2879,19 @@ pub fn to_the_middle_errands() -> Vec<Step> {
     ]);
     steps.extend(saffron_to_vermilion());
     steps.extend([
+        // Lt. Surge hands his machine over at the end of his battle, and again on being talked to
+        // if the bag had no room for it then. Which of the two it was is the bag's business.
         GoTo("VermilionGym"), Talk("LtSurge"), GoTo("VermilionCity"),
         GoTo("Route11"), GoTo("Route11Gate1F"), GoTo("Route11Gate2F"), Trade("Youngster"), Talk("OaksAide"),
-        GoTo("Route11Gate1F"), GoTo("Route11"),
+        // The gate stands in the middle of Route 11 with a door on each side of it, and only the
+        // eastern half touches Route 12. Both halves of that border are walked, and the east door
+        // is walked back in at, which the trip out of it does not.
+        GoTo("Route11Gate1F"), Take("Route11, arriving at (59, 8)"),
+        GoTo("Route12"), GoTo("Route11"),
+        Take("Route11Gate1F, arriving at (7, 4)"), Take("Route11, arriving at (50, 8)"),
+        // Ending in the town rather than on the route, because the route's two halves look alike
+        // to the phase that starts here and only the western one opens onto Diglett's Cave.
+        GoTo("VermilionCity"),
     ]);
     steps
 }
@@ -2751,7 +2903,7 @@ fn completion_phase_middle_errands() {
     let mut played = play(include_bytes!("../data/completion-safari.bin"), "completion-middle",
                           to_the_middle_errands(), 600, Duration::from_secs(3000));
     let missing = missing_on(&mut played, &[Map::Route6Gate, Map::Route11Gate1F, Map::Route11Gate2F], &[
-        Entry::Machine(ItemId::Tm24Thunderbolt as u8), Entry::Machine(ItemId::Tm41Softboiled as u8),
+        Entry::Machine(ItemId::Tm41Softboiled as u8),
         Entry::Machine(ItemId::Tm31Mimic as u8), Entry::KeyItem(vec![ItemId::Itemfinder as u8]),
         Entry::KeyItem(vec![ItemId::ExpAll as u8]),
         Entry::Trade(PokemonSpecies::Nidorino), Entry::Trade(PokemonSpecies::Slowbro),
@@ -2790,7 +2942,12 @@ pub fn to_the_cinnabar_errands() -> Vec<Step> {
         // which the switch on shuts at 2F's end, so the switch is 3F's own, pressed once there and
         // once more before going back down.
         GoTo("PokemonMansion2F"), Take("PokemonMansion3F, arriving at (6, 1)"),
-        Talk("Statue1"), Talk("Scientist"), Talk("Statue1"),
+        Talk("Statue1"), Talk("Scientist"),
+        // 2F's east corner is walled off from the rest of that floor, so the stairs down from 3F's
+        // corner are the only way onto it and back up them the only way off. 3F's corner is behind
+        // the switch as well, which is why this is done while it is on.
+        Take("PokemonMansion2F, arriving at (25, 14)"), Take("PokemonMansion3F, arriving at (25, 14)"),
+        Talk("Statue1"),
         Take("PokemonMansion2F, arriving at (6, 1)"), GoTo("PokemonMansion1F"),
         GoTo("CinnabarIsland"),
         GoTo("CinnabarLab"), GoTo("CinnabarLabTradeRoom"), Trade("Gramps"), Trade("Beauty"),
@@ -2805,6 +2962,9 @@ pub fn to_the_cinnabar_errands() -> Vec<Step> {
         Tidy,
         // The traded Seel arrives at 34, its evolution level, so the next one it gains evolves it.
         KeepFromEvolving("Seel"),
+        // North over the water to Pallet Town, where the tour started: the island is reached down
+        // Route 21 and nowhere else, so both of that route's edges are crossings of their own.
+        GoTo("Route21"), GoTo("PalletTown"),
     ]
 }
 
@@ -2846,8 +3006,8 @@ fn completion_run() {
     let missing: Vec<Entry> = played.ledger.lock().expect("not poisoned").missing(&list, mmu, &state)
         .into_iter().filter(|entry| !excused.contains(entry)).collect();
 
-    // The doors and the map edges are counted rather than asserted while the run still flies
-    // between regions: a flight crosses neither, so most of both go uncrossed by construction.
+    // Counted as well as asserted, because the count is what says how much of the world a run
+    // that goes green actually walks.
     let walked = |kind: fn(&Entry) -> bool| {
         let all = list.iter().filter(|item| kind(&item.entry)).count();
         (all - missing.iter().filter(|entry| kind(entry)).count(), all)
@@ -2870,9 +3030,10 @@ fn completion_run() {
         println!("[completion-run] {map} left {}", left.join(", "));
     }
 
+    let elsewhere = |entry: &Entry| !matches!(entry, Entry::Warp { .. } | Entry::Connection { .. });
     let rest = list.len() - all_doors - all_edges;
-    let missing: Vec<Entry> = missing.into_iter()
-        .filter(|entry| !matches!(entry, Entry::Warp { .. } | Entry::Connection { .. })).collect();
-    println!("[completion-run] {} of {rest} entries met", rest - missing.len() - excused.len());
+    let others = missing.iter().filter(|entry| elsewhere(entry)).count();
+    println!("[completion-run] {} of {rest} entries met",
+             rest - others - excused.iter().filter(|entry| elsewhere(entry)).count());
     assert!(missing.is_empty(), "the run left {} entries: {missing:?}", missing.len());
 }

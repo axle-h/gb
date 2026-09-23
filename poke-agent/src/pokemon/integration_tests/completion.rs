@@ -208,17 +208,19 @@ fn reachable_maps() -> impl Iterator<Item = Map> {
 
 /// Which `warp_event` of `map` each of its warps belongs to once a doorway's tiles are one door.
 ///
-/// A doorway two tiles wide is two `warp_event`s landing identically, and one of the pair is often
-/// unsteppable, so warps that share a destination and touch are one entry, named by the lowest
-/// index among them. Indexing matches `wWarpedFromWhichWarp`, which counts from zero.
+/// Two warps are one door when they land on the same tile, because the menu mints a row per
+/// landing and walks to the nearest tile of it, so the others are no decision. Two side by side
+/// leading to the same map are one too: that is a doorway two tiles wide, whether its tiles land
+/// together or on the two tiles opposite. A door is named by the lowest index among them, and
+/// indexing matches `wWarpedFromWhichWarp`, which counts from zero.
 fn warp_doors(map: Map) -> Vec<u8> {
     let Ok(objects) = MapObjects::read(map) else { return Vec::new() };
     let mut door: Vec<u8> = (0..objects.warps.len() as u8).collect();
     for (i, left) in objects.warps.iter().enumerate() {
         for (j, right) in objects.warps.iter().enumerate().take(i) {
-            let touching = left.x.abs_diff(right.x) + left.y.abs_diff(right.y) == 1;
-            let same = (left.destination_map, left.destination_warp) == (right.destination_map, right.destination_warp);
-            if touching && same {
+            if left.destination_map != right.destination_map { continue }
+            let doorway = left.x.abs_diff(right.x) + left.y.abs_diff(right.y) == 1;
+            if doorway || left.destination_warp == right.destination_warp {
                 let (a, b) = (door[i].min(door[j]), door[i].max(door[j]));
                 door.iter_mut().filter(|it| **it == b).for_each(|it| *it = a);
             }
@@ -553,7 +555,7 @@ mod tests {
         let list = super::checklist(gb.core().mmu());
         let raw: usize = reachable_maps().map(|map| warp_doors(map).len()).sum();
         assert_eq!(raw, 802, "warp events on maps a run can stand on");
-        assert_eq!(count(&list, |e| matches!(e, Entry::Warp { .. })), 665, "those warps as doorways");
+        assert_eq!(count(&list, |e| matches!(e, Entry::Warp { .. })), 600, "those warps as doorways");
 
         // The Viridian Mart's two-tile doorway is one door, and both of its tiles name it.
         assert_eq!(warp_doors(Map::ViridianMart), vec![0, 0]);
@@ -565,6 +567,39 @@ mod tests {
             for warp in MapObjects::read(map).expect("a reachable map has objects").warps {
                 let to = Map::from_repr(warp.destination_map);
                 assert!(!to.is_some_and(|to| neighbours.contains(&to)), "{map} warps to its own neighbour {to:?}");
+            }
+        }
+    }
+
+    /// Two warps side by side leading to the same map are the two tiles of one doorway, which is
+    /// what lets the collapse ignore which warp each of them lands on: no such pair lands more than
+    /// a tile apart on the far side.
+    #[test]
+    fn the_two_tiles_of_a_doorway_land_together() {
+        let warps: HashMap<Map, Vec<poke_core::map_objects::Warp>> = reachable_maps()
+            .map(|map| (map, MapObjects::read(map).map(|it| it.warps).unwrap_or_default())).collect();
+        for (&map, here) in &warps {
+            for (i, left) in here.iter().enumerate() {
+                for right in here.iter().take(i) {
+                    if left.x.abs_diff(right.x) + left.y.abs_diff(right.y) != 1
+                        || left.destination_map != right.destination_map { continue }
+                    // A `LAST_MAP` pair lands back on whichever map the run came in from, so it is
+                    // judged against every map that warps here.
+                    let sides: Vec<Map> = match Map::from_repr(left.destination_map) {
+                        Some(to) => vec![to],
+                        None => warps.iter()
+                            .filter(|(_, from)| from.iter().any(|w| w.destination_map == map as u8))
+                            .map(|(&from, _)| from).collect(),
+                    };
+                    for side in sides {
+                        let Some(there) = warps.get(&side) else { continue };
+                        let (Some(a), Some(b)) = (there.get(left.destination_warp as usize),
+                                                  there.get(right.destination_warp as usize)) else { continue };
+                        assert!(a.x.abs_diff(b.x) + a.y.abs_diff(b.y) <= 1,
+                                "{map}'s warps at ({}, {}) and ({}, {}) land apart on {side}",
+                                left.x, left.y, right.x, right.y);
+                    }
+                }
             }
         }
     }
