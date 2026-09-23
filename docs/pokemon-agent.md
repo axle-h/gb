@@ -10,6 +10,9 @@ can break in silence.
 - `poll_policy` is the single seam every decision goes through and it resets the clock the watchdog
   reads; calling `service_tools` from a new site makes the watchdog believe the run is wedged.
 - The emulator never pauses while the model thinks, so a pause spanning a tool call deadlocks.
+- Letting go of the pad is not standing still on Route 17: `JoypadOverworld` forces a Down press
+  there whenever no direction and neither A nor B is held, so every idle tick costs a square
+  southward (`hold_against_the_cycling_road`).
 - The watchdog is blind to a policy that answers `None` for ever, because `since_last_policy_poll`
   resets on every poll whatever the answer. Guard that class on actions taken, never on silence.
 - One agent tick is 20 ms of game time and `update` coalesces rather than catching up, so

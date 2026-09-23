@@ -1585,6 +1585,27 @@ impl PokemonAgent {
     }
 
     pub fn update(&mut self, api: &mut PokemonApi, delta_cycles: MachineCycles) -> Result<(), String> {
+        let driven = self.drive(api, delta_cycles);
+        self.hold_against_the_cycling_road(api);
+        driven
+    }
+
+    /// The Cycling Road coasts. `JoypadOverworld` writes a Down press into `hJoyHeld` on Route 17
+    /// whenever no direction and neither A nor B is held, so a walk that lets go of the pad is
+    /// carried south, off the route and back onto Route 18. Holding B is what a rider does and is
+    /// the one button that means nothing else in the overworld.
+    fn hold_against_the_cycling_road(&self, api: &mut PokemonApi) {
+        use crate::pokemon::symbols::DmgPointerRead;
+        use strum::IntoEnumIterator;
+        // The map byte first: this runs on every call, and everywhere else it is the only read.
+        if api.mmu().read_pointer(&pokered_symbols::wCurMap) != Map::Route17 as u8 { return }
+        if api.game_mode() != Some(GameMode::Overworld) || api.trainer_battle_pending() { return }
+        let held = api.read_joypad_state();
+        if JoypadButton::iter().any(|button| held.is_button_pressed(button)) { return }
+        api.press_button(JoypadButton::B);
+    }
+
+    fn drive(&mut self, api: &mut PokemonApi, delta_cycles: MachineCycles) -> Result<(), String> {
         self.cycles += delta_cycles;
         if self.cycles < AGENT_RESOLUTION { return Ok(()); }
 

@@ -55,7 +55,10 @@ pub enum Step {
     Gift(&'static str),
     /// Every person and item ball on this map not already chosen here, once each, except these.
     Clear(&'static [&'static str]),
-    /// The row whose description contains this, until the menu stops offering it.
+    /// The row whose description contains this, until the menu stops offering it. What a door
+    /// wants where somebody paces between its two tiles: the row is minted from whichever tile is
+    /// nearer, so its id moves as they move, and a reply naming the id the turn was rendered with
+    /// can land after it has gone.
     Repeat(&'static str),
     /// A `use_field_move`, by its JSON arguments.
     Field(&'static str),
@@ -2067,6 +2070,10 @@ pub fn to_the_soul_badge() -> Vec<Step> {
         Take("Route16, arriving at (17, 1"),
         GoTo("Route17"), Explore { maps: &["Route17"], patience: 400 },
         GoTo("Route18"), Explore { maps: &["Route18", "Route18Gate1F", "Route18Gate2F"], patience: 300 },
+        // And back up the road before going on. Every leg over it runs south, because that is the
+        // way its ledges drop and the way it carries a rider who lets go of the pad, so the edges
+        // it is left by northward are crossings nothing else takes.
+        GoTo("Route17"), GoTo("Route16"), GoTo("Route17"), GoTo("Route18"),
         // Fuchsia is carved into pockets by eight cuttable trees, so the doors are the walk's.
         GoTo("FuchsiaCity"),
         Explore { maps: &["FuchsiaCity", "FuchsiaPokecenter", "FuchsiaMart", "FuchsiaBillsGrandpasHouse",
@@ -2184,12 +2191,6 @@ fn out_of_reach() -> Vec<Entry> {
     // not water: a walk comes down them and can only leave by surfing, and the cartridge fires no
     // warp under a surfing player, so nothing ever steps back onto them.
     out.push(door(Map::SeafoamIslandsB4F, 0));
-    // North up the cycling road, which the walk offers and cannot carry out: the step onto the
-    // border flips `wCurMap` before it finishes, the walk reads that as arrival and stops holding
-    // the button, and the cartridge walks the player back. Hold the button a dozen ticks longer
-    // from the same save and the crossing sticks, so the defect is the walk's and not the map's.
-    out.extend([Entry::Connection { map: Map::Route18, direction: MapConnectionDirection::North },
-                Entry::Connection { map: Map::Route17, direction: MapConnectionDirection::North }]);
     out
 }
 
@@ -2257,7 +2258,7 @@ pub fn to_the_volcano_badge() -> Vec<Step> {
     steps.extend(saffron_to_vermilion());
     steps.extend([
         GoTo("Route11"), GoTo("DiglettsCaveRoute11"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute2"),
-        GoTo("Route2"), GoTo("Route2Gate"), Take("Route2, arriving at (15, 40)"),
+        GoTo("Route2"), GoTo("Route2Gate"), Repeat("Route2, arriving at (15, 40)"),
         GoTo("ViridianCity"), GoTo("Route1"), GoTo("PalletTown"),
         GoTo("Route21"), Explore { maps: &["Route21"], patience: 500 },
         GoTo("CinnabarIsland"),
@@ -2775,7 +2776,7 @@ pub fn to_the_north_errands() -> Vec<Step> {
         // south half, so its south doors and the north gate's own way in go unwalked.
         GoTo("Route2"), GoTo("ViridianForestNorthGate"), GoTo("ViridianForest"),
         GoTo("ViridianForestSouthGate"), GoTo("Route2"),
-        GoTo("Route2Gate"), Take("Route2, arriving at (16, 36)"),
+        GoTo("Route2Gate"), Repeat("Route2, arriving at (16, 36)"),
         GoTo("DiglettsCaveRoute2"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute11"),
         GoTo("Route11"), GoTo("VermilionCity"),
     ];
@@ -2922,7 +2923,7 @@ pub fn to_the_cinnabar_errands() -> Vec<Step> {
         // The tour's last leg, and the one that closes its loop: Diglett's Cave to Route 2, down
         // through Viridian to Pallet, and Route 21 to the island, which is the only way to it.
         GoTo("Route11"), GoTo("DiglettsCaveRoute11"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute2"),
-        GoTo("Route2"), GoTo("Route2Gate"), Take("Route2, arriving at (15, 40)"),
+        GoTo("Route2"), GoTo("Route2Gate"), Repeat("Route2, arriving at (15, 40)"),
         GoTo("ViridianCity"), GoTo("Route1"), GoTo("PalletTown"),
         GoTo("Route21"), GoTo("CinnabarIsland"),
         GoTo("CinnabarPokecenter"),
