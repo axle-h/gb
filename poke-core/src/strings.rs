@@ -14,7 +14,6 @@ impl PokemonString {
             if b == Self::TERMINATOR {
                 break;
             }
-            println!("{:2x}", b);
             vec.push(b);
         }
         PokemonString(vec)
