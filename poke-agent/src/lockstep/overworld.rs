@@ -43,21 +43,21 @@ fn local_label(label: &str) -> crate::pokemon::symbols::DmgPointer {
 }
 
 /// The cartridge, with every `Random` the NPC movement routines take recorded for the recreation.
-struct Cartridge {
-    gb: GameBoy,
-    tape: Vec<u8>,
+pub(super) struct Cartridge {
+    pub(super) gb: GameBoy,
+    pub(super) tape: Vec<u8>,
     frames: u32,
 }
 
 impl Cartridge {
-    fn from_state(state: &[u8]) -> Self {
+    pub(super) fn from_state(state: &[u8]) -> Self {
         let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
         gb.load_state(state).unwrap();
         gb.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
         Self { gb, tape: Vec::new(), frames: 0 }
     }
 
-    fn read(&self, at: u16) -> u8 {
+    pub(super) fn read(&self, at: u16) -> u8 {
         self.gb.core().mmu().read(at)
     }
 
@@ -89,7 +89,7 @@ impl Cartridge {
     /// To the start of the next VBlank. `true` if the loop polled the pad with nothing moving,
     /// nothing scripted and the joypad enabled; then this frame runs on to the end of that pass,
     /// which a lag frame can push past the VBlank.
-    fn frame(&mut self) -> bool {
+    pub(super) fn frame(&mut self) -> bool {
         let vblank = breakpoint(sym::VBlank);
         if self.run_to(&[vblank, breakpoint(local_label("OverworldLoopLessDelay.noDirectionButtonsPressed"))]) == vblank {
             self.frames += 1;
@@ -116,7 +116,7 @@ impl Cartridge {
          mmu.read_pointer(&sym::wYCoord), SpriteFacing::from_repr(self.read(sym::wSpriteStateData1.address + 9)).unwrap())
     }
 
-    fn sprites(&self) -> Sprites {
+    pub(super) fn sprites(&self) -> Sprites {
         let mmu = self.gb.core().mmu();
         std::array::from_fn(|slot| {
             let at = slot as u16 * STATE_BYTES;
@@ -208,7 +208,7 @@ impl Cartridge {
         Seen { frames, location, count, lcd: self.lcd(), animated, sprites }
     }
 
-    fn world(&self) -> pokered::world::World {
+    pub(super) fn world(&self) -> pokered::world::World {
         let mmu = self.gb.core().mmu();
         let mut world = super::item_menu::the_world(&self.gb);
         let (map, x, y, facing) = self.location();
@@ -234,7 +234,7 @@ impl Cartridge {
         world
     }
 
-    fn standing(&self) -> Standing {
+    pub(super) fn standing(&self) -> Standing {
         let mmu = self.gb.core().mmu();
         Standing {
             player_direction: mmu.read_pointer(&sym::wPlayerDirection),

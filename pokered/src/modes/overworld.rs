@@ -292,6 +292,16 @@ impl Overworld {
         self.turning
     }
 
+    /// `BIT_STANDING_ON_WARP`: a completed step landed on a warp entry.
+    pub fn standing_on_warp(&self) -> bool {
+        self.standing.standing_on_warp
+    }
+
+    /// `wMapPalOffset`: non-zero on a dark map, which is both FLASH's precondition and its proof.
+    pub fn map_pal_offset(&self) -> u8 {
+        self.map_pal_offset
+    }
+
     fn player(&self) -> &SpriteState {
         &self.sprites[0]
     }

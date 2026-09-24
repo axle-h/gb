@@ -118,6 +118,12 @@ impl EventFlags {
     pub fn clear(&mut self, event: u16) {
         self.0[event as usize / 8] &= !(1 << (event % 8));
     }
+
+    /// `wEventFlags` as the cartridge lays it out, for a reader that works in bytes and masks
+    /// rather than in event numbers.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 /// What a text command reads. The cartridge points at scratch WRAM a caller filled, and several of

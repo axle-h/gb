@@ -391,11 +391,28 @@ fn map_door_specs(map: Map) -> &'static [DoorSpec] {
     }
 }
 
-fn closed_door_blocks(mmu: &MMU, map: Map) -> Vec<DoorBlock> {
-    let base = pokered_symbols::wEventFlags.address;
+/// What the three gates below read. The recreation holds both as typed fields and the emulator has
+/// them in WRAM, so the gates themselves are shared rather than written twice.
+pub trait EventGates {
+    /// Byte `index` of `wEventFlags`.
+    fn event_byte(&self, index: u16) -> u8;
+    fn bag_holds(&self, item: crate::pokemon::item::ItemId) -> bool;
+}
+
+impl EventGates for MMU {
+    fn event_byte(&self, index: u16) -> u8 {
+        self.read(pokered_symbols::wEventFlags.address + index)
+    }
+
+    fn bag_holds(&self, item: crate::pokemon::item::ItemId) -> bool {
+        self.read_bag().contains(&item)
+    }
+}
+
+pub(crate) fn closed_door_blocks(gates: &impl EventGates, map: Map) -> Vec<DoorBlock> {
     map_door_specs(map).iter().filter_map(|spec| {
         let open = spec.open_clauses.iter().any(|clause| {
-            clause.iter().all(|&(byte, bit)| mmu.read(base + byte) & bit != 0)
+            clause.iter().all(|&(byte, bit)| gates.event_byte(byte) & bit != 0)
         });
         (!open).then_some(DoorBlock {
             block_x: spec.block_x, block_y: spec.block_y, block_id: spec.closed_block_id,
@@ -461,20 +478,19 @@ fn with_live_exits(mmu: &MMU, metadata: &MapMetadata) -> MapMetadata {
 }
 
 /// The squares on `map` whose warp a script is cancelling now, in raw coordinates.
-pub(crate) fn script_cancelled_warps(mmu: &MMU, map: Map) -> Vec<Point8> {
-    let base = pokered_symbols::wEventFlags.address;
+pub(crate) fn script_cancelled_warps(gates: &impl EventGates, map: Map) -> Vec<Point8> {
     map_warp_gate_specs(map).iter().filter_map(|spec| {
         let live = spec.live_when_all_set.iter()
-            .all(|&(byte, bit)| mmu.read(base + byte) & bit != 0)
-            && spec.live_while_held.is_none_or(|item| mmu.read_bag().contains(&item));
+            .all(|&(byte, bit)| gates.event_byte(byte) & bit != 0)
+            && spec.live_while_held.is_none_or(|item| gates.bag_holds(item));
         (!live).then_some(spec.at)
     }).collect()
 }
 
 /// Whether the Seafoam floor below `map` still runs its strong current: until both boulders from
 /// `map` are down its holes (`EVENT_SEAFOAM3_*` for B2F, `EVENT_SEAFOAM4_*` for B3F).
-pub(crate) fn strong_current_below(mmu: &MMU, map: Map) -> bool {
-    let calmed = |byte: u16| mmu.read(pokered_symbols::wEventFlags.address + byte) & 0x03 == 0x03;
+pub(crate) fn strong_current_below(gates: &impl EventGates, map: Map) -> bool {
+    let calmed = |byte: u16| gates.event_byte(byte) & 0x03 == 0x03;
     match map {
         Map::SeafoamIslandsB2F => !calmed(313),
         Map::SeafoamIslandsB3F => !calmed(314),
@@ -732,6 +748,12 @@ pub fn map_uses_runtime_blocks(map: Map) -> bool {
         | Map::VictoryRoad1F | Map::VictoryRoad2F | Map::VictoryRoad3F
         | Map::LoreleisRoom | Map::BrunosRoom | Map::AgathasRoom | Map::LancesRoom | Map::ChampionsRoom
         | Map::VermilionGym)
+}
+
+/// [`MapMetadata`] for one of the maps a script rewrites the blocks of, given the live block map
+/// rather than the cartridge's. `rom` is read for the header and the tileset only.
+pub fn metadata_from_live_blocks(rom: &MMU, map: Map, blocks: Vec<u8>) -> Result<MapMetadata, String> {
+    rom.finish_map_metadata(map, rom.read_map_header(map)?, blocks)
 }
 
 /// The two halves of `MapMetadataReader`.

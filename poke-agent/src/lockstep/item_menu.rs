@@ -68,7 +68,9 @@ pub(super) fn the_bag(gb: &GameBoy) -> Inventory {
 }
 
 /// Everything these screens read: the name, the events, the text speed, the money and the coins,
-/// the bag, the party.
+/// the bag, the party. Only those: a test comparing anything else, such as the badges, the rival's
+/// name, the Pokedex or a party member's OT, has to fill it itself, or the difference it sees is
+/// this world's rather than what it is testing. The party here carries no OT; `status_screen`'s does.
 pub(super) fn the_world(gb: &GameBoy) -> World {
     let mmu = gb.core().mmu();
     let mut world = World {
