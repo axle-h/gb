@@ -1389,7 +1389,13 @@ impl MetaTileMap {
                 continue;
             }
             let front = self.raw_tile_ids[x as usize + y as usize * self.width];
-            if crate::pokemon::map_header::TileSetId::warp_carpet_tile_ids(facing).contains(&front) {
+            let warps = match self.map {
+                // `IsSSAnneBowWarpTileInFrontOfPlayer`: the bow ignores the carpet lists and takes
+                // only $15, whichever way the player faces.
+                Map::SSAnneBow => front == 0x15,
+                _ => crate::pokemon::map_header::TileSetId::warp_carpet_tile_ids(facing).contains(&front),
+            };
+            if warps {
                 return WarpTrigger::HoldDirection(facing_button(facing));
             }
         }

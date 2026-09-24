@@ -293,7 +293,7 @@ fn probe_stall_actions() {
         println!("  sprite {:?} hidden={} @ {}", sprite.name, sprite.hidden, sprite.position);
     }
     for action in s.map.actions() {
-        println!("  action {:?} → {} ({} steps)", action.tile, action.destination, action.route.len());
+        println!("  action {:?} → {} ({} steps: {:?})", action.tile, action.destination, action.route.len(), action.route);
     }
     // And the menu the model is shown, which is what a missing row is missing from.
     for row in crate::llm::tools::overworld_menu(&s, None) {

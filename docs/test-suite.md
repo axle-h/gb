@@ -13,7 +13,7 @@ cargo test --release --workspace --features slow-tests   # everything, about an 
 
 # The two pre-push gates. Run both after every major work item.
 cargo test --release -p poke-agent --features slow-tests --lib -- full_playthrough
-cargo test --release -p poke-agent --features slow-tests --lib -- godmode_run
+cargo test --release -p poke-agent --features slow-tests --lib -- grand_tour --nocapture
 
 cargo test --release -p poke-agent --features slow-tests --lib -- hall_of_fame
 cargo test --release -p poke-agent --features slow-tests --lib -- soak --nocapture
@@ -33,14 +33,14 @@ cargo test --release --workspace --features slow-tests -- probe_ --ignored --noc
 - `full_playthrough` (~235 s) is the scripted route walking the whole of Kanto to eight badges. It
   is the only test that proves the `PolicyStep` legs compose, and it is what keeps
   `--policy deterministic` honest.
-- `godmode_run` (~40 s) plays a fresh save to the Hall of Fame through the deployed `LlmPolicy`, the
-  worker and the wire, against an in-process mock endpoint, with a god party and a battle script so
-  no battle costs a request. It never touches `PolicyStep`.
+- `grand_tour` (~20 min) walks a fresh save through the whole game through the deployed
+  `LlmPolicy`, the worker and the wire, against an in-process mock endpoint, with every story gate
+  live, a god party and a battle script so no battle costs a request. It asserts the completion
+  ledger, every door and every map edge included, and never touches `PolicyStep`.
 - Neither replaces the other: they gate different halves, and the leg tier is not a substitute for
   either.
-- Each filter also matches an animated twin, `full_playthrough_animated` (the route to Brock, ~25 s)
-  and `godmode_run_animated`: battle animations on is what is served, and it spends the RNG
-  differently.
+- `full_playthrough` also matches an animated twin, `full_playthrough_animated` (the route to Brock,
+  ~25 s): battle animations on is what is served, and it spends the RNG differently.
 - A battle cell runs in both animation modes through `in_both_animation_modes!`.
 
 ## Fixtures
@@ -67,7 +67,7 @@ cargo test --release --workspace --features slow-tests -- probe_ --ignored --noc
   `battle_refusals` for the refusal each one contains — so a re-cut has to keep *which battle* as
   well as which jam.
 - The `completion-*.bin` are a chain of their own, one per `completion_phase_*` test, each cut where
-  the phase before it ended: re-cutting an early one invalidates every later one. `completion_run`
+  the phase before it ended: re-cutting an early one invalidates every later one. `grand_tour`
   reads none of them; it plays every phase's steps from the fresh save.
 - `soak-*.bin` are not in the chain and are re-cut wholesale by `regen_soak_checkpoints`.
 - A phase that sticks saves where it stuck to `$TMPDIR/<name>-stuck.bin`, and `dump_fixture_states`

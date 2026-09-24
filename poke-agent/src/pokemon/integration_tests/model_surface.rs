@@ -123,7 +123,7 @@ fn walk_in_then(
     calls: Vec<Call>,
     seen: Arc<Mutex<Seen>>,
 ) -> impl FnMut(&TurnRequest) -> Reply + Send {
-    use crate::pokemon::integration_tests::godmode::Intent;
+    use crate::pokemon::integration_tests::scripted_brain::Intent;
     let mut calls: std::collections::VecDeque<Call> = calls.into();
     let mut leg = 0;
     move |request: &TurnRequest| {
@@ -436,7 +436,7 @@ fn a_quiz_machine_answered_wrong_is_a_trainer_battle() {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "a Strength floor; run with --features slow-tests")]
 fn seafoams_boulders_are_pushed_by_their_rows_down_to_articuno() {
-    use crate::pokemon::integration_tests::godmode::{Intent, ScriptedBrain};
+    use crate::pokemon::integration_tests::scripted_brain::{Intent, ScriptedBrain};
     use crate::pokemon::species::PokemonSpecies;
     let brain = ScriptedBrain::new(vec![
         // One row per hole, naming the one boulder that can reach it.
@@ -735,7 +735,7 @@ fn a_one_shove_row_says_it_landed_after_a_long_shove() {
 /// in RAM, and the second must still read its greeting before it picks.
 #[test]
 fn a_second_vending_machine_sells_its_own_drink() {
-    use crate::pokemon::integration_tests::godmode::Intent;
+    use crate::pokemon::integration_tests::scripted_brain::Intent;
     const PATH: &[&str] = &["CeladonMart1F", "CeladonMart2F", "CeladonMart3F", "CeladonMart4F", "CeladonMart5F", "CeladonMartRoof"];
     let told = Arc::new(Mutex::new(false));
     let log = Arc::clone(&told);

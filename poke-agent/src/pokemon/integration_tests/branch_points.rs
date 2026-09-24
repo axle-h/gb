@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::pokemon::integration_tests::godmode::{Intent, ScriptedBrain};
+use crate::pokemon::integration_tests::scripted_brain::{Intent, ScriptedBrain};
 use crate::pokemon::integration_tests::llm_harness::LlmRun;
 use crate::pokemon::move_name::PokemonMoveName;
 use crate::pokemon::party::PokemonParty;

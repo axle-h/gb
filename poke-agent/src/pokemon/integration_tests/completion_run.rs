@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::pokemon::integration_tests::cheats::Cheats;
 use crate::pokemon::integration_tests::completion::{checklist, Entry, Ledger, Legend, Way};
-use crate::pokemon::integration_tests::godmode::{names_map, Intent};
+use crate::pokemon::integration_tests::scripted_brain::{names_map, Intent};
 use crate::pokemon::integration_tests::llm_harness::{Brain, Call, LlmRun, Reply, TurnRequest};
 use crate::pokemon::item::ItemId;
 use crate::pokemon::PokemonApiTrait;
@@ -665,10 +665,13 @@ impl CompletionBrain {
         if let Some((_, what)) = rows.iter().find(|(row, what)| *row == id && destination(row, what).is_some()) {
             self.left_by = Some((self.here.clone(), passage(what)));
         }
-        // A person or a thing: what the event says if the walk is given up on the way.
+        // A person or a thing: what the event says if the walk is given up on the way. A statue
+        // too: the Mansion's are pressed in an order, and a press lost to a run of wild battles
+        // leaves every floor's doors the wrong way round.
         let name = request.menu_rows().iter().find(|(row, _)| *row == id)
             .and_then(|(_, what)| ["talk to ", "pick up the ", "pick up ", "examine the ", "examine ", "read the "].iter()
-                .find_map(|lead| what.strip_prefix(lead)).map(|rest| rest.split(" (").next().unwrap_or(rest).to_string()));
+                .find_map(|lead| what.strip_prefix(lead)).map(|rest| rest.split(" (").next().unwrap_or(rest).to_string())
+                .or_else(|| what.starts_with("press this statue's switch").then(|| "a statue".to_string())));
         self.last_walk = name.map(|name| (map.clone(), id.clone(), name, self.at));
         // Taking a person or a thing is progress; walking through a door on the way is not. So is
         // cutting a tree that was not cut before in this exploring: a cut row carries coordinates
@@ -1972,10 +1975,10 @@ pub fn to_the_marsh_badge() -> Vec<Step> {
         GoTo("CeladonMart3F"), GoTo("CeladonMart2F"), GoTo("CeladonMart1F"), GoTo("CeladonCity"),
         // The guard takes the drink as the player walks past him, without being talked to, and
         // the gate's far door names the map it was entered from until he does.
-        // Both doors lead back onto Route 7: the guard is what blocks the room between them, and
-        // his thanks interrupt the walk, so it is taken again.
-        GoTo("Route7"), GoTo("Route7Gate"), Take("Route7, arriving at (19, "),
-        Take("Route7, arriving at (19, "), GoTo("SaffronCity"),
+        // Both doors lead back onto Route 7: the guard is what blocks the room between them. His
+        // thanks stop the walk and leave the player where they stood, so the walk goes on; the
+        // door is repeated in case something else stops it.
+        GoTo("Route7"), GoTo("Route7Gate"), Repeat("Route7, arriving at (19, "), GoTo("SaffronCity"),
     ];
     steps.extend([
         Explore { maps: &["SaffronCity", "SaffronPokecenter", "SaffronMart", "SaffronPidgeyHouse",
@@ -2990,7 +2993,7 @@ fn completion_phase_cinnabar_errands() {
 /// each phase green from its own fixture proves every entry reachable, and only this proves one run
 /// reaches them all.
 #[test]
-fn completion_run() {
+fn grand_tour() {
     let phases = vec![
         to_the_boulder_badge(), to_bill(), to_the_thunder_badge(), to_celadon(), to_the_rainbow_badge(),
         to_the_poke_flute(), to_the_marsh_badge(), to_the_soul_badge(), to_surf(), to_the_volcano_badge(),

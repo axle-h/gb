@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 
 use gb::joypad::JoypadButton;
+use poke_core::geometry::Point8;
 use crate::llm::battle_report::{BattleReport, MAX_QUEUED as MAX_QUEUED_REPORTS};
 use crate::llm::battle_script::{self, Outcome as ScriptOutcome, ScriptState};
 use crate::llm::prompt::{self, ApiSnapshot, TurnContext};
@@ -92,13 +93,18 @@ pub(crate) const PLAYER_NAME: &str = "AI";
 /// How many battles one action may be resumed through before the decision is handed back anyway.
 pub(crate) const MAX_BATTLE_RESUMES: u8 = 5;
 
+/// How many passing messages one action may be taken up again after. A message that stops the same
+/// walk on the same square every time is a blocker, and two is already more than any notice needs.
+const MAX_NOTICE_RESUMES: u8 = 2;
+
 /// What became of the overworld action the policy last handed to the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActionOutcome {
     /// `OverworldActionCompleted`, or `OverworldInteractionCompleted` for a person or a PC.
     Landed,
-    /// `OverworldActionAborted`.
-    Stopped(OverworldActionAbortedReason),
+    /// `OverworldActionAborted`, and the square it was stopped on while that still means
+    /// something: a battle since the stop clears it.
+    Stopped(OverworldActionAbortedReason, Option<Point8>),
 }
 
 /// One `choose_action` call, while the agent is working through it.
@@ -113,6 +119,8 @@ struct ActionQueue {
     resume_after_battle: bool,
     /// Battles `current` has already been resumed through.
     resumes: u8,
+    /// Passing messages `current` has already been taken up again after.
+    notices: u8,
 }
 
 /// Why what was left of a chain was thrown away.
@@ -394,6 +402,8 @@ impl LlmPolicy {
             Next,
             /// A battle took `current` and the model asked for it back.
             Resume,
+            /// The game said something in passing and left the player where it stopped them.
+            ResumeNotice,
             Drop(Dropped),
         }
 
@@ -401,7 +411,7 @@ impl LlmPolicy {
             let queue = self.queue.as_ref()?;
             match self.outcome {
                 Some(ActionOutcome::Landed) => Step::Next,
-                Some(ActionOutcome::Stopped(OverworldActionAbortedReason::Battle))
+                Some(ActionOutcome::Stopped(OverworldActionAbortedReason::Battle, _))
                     if queue.resume_after_battle =>
                 {
                     match queue.resumes < MAX_BATTLE_RESUMES {
@@ -409,7 +419,16 @@ impl LlmPolicy {
                         false => Step::Drop(Dropped::Resumes),
                     }
                 }
-                Some(ActionOutcome::Stopped(reason)) => Step::Drop(Dropped::Stopped(reason)),
+                // A notice the cartridge prints on a square, as Pokémon Tower 5F's purified zone
+                // does across the only corridor between its stairs, is not a decision: the player
+                // is free and still where it stopped them. A guard walks the player back and a
+                // trainer's words end in a battle, and both of those still come back to the model.
+                Some(ActionOutcome::Stopped(OverworldActionAbortedReason::Textbox, Some(at)))
+                    if queue.notices < MAX_NOTICE_RESUMES
+                        && state.map.player_position == at
+                        && queue.current.split(':').next() == Some(state.map.map.to_string().as_str()) =>
+                    Step::ResumeNotice,
+                Some(ActionOutcome::Stopped(reason, _)) => Step::Drop(Dropped::Stopped(reason)),
                 None => Step::Drop(Dropped::Unreported),
             }
         };
@@ -422,12 +441,14 @@ impl LlmPolicy {
                 return None;
             }
             Step::Resume => self.queue.as_mut()?.resumes += 1,
+            Step::ResumeNotice => self.queue.as_mut()?.notices += 1,
             Step::Next => {
                 let queue = self.queue.as_mut()?;
                 let finished = std::mem::take(&mut queue.current);
                 queue.done.push(finished);
                 // Per action, not per call: a chain of three each get the full budget.
                 queue.resumes = 0;
+                queue.notices = 0;
                 match queue.rest.pop_front() {
                     Some(next) => queue.current = next,
                     // The whole chain landed.
@@ -566,6 +587,7 @@ impl Policy for LlmPolicy {
                     done: Vec::new(),
                     resume_after_battle,
                     resumes: 0,
+                    notices: 0,
                 });
                 self.outcome = None;
                 self.take_current(state)
@@ -800,8 +822,14 @@ impl Policy for LlmPolicy {
             | AgentEvent::OverworldInteractionCompleted { .. } => {
                 self.outcome = Some(ActionOutcome::Landed);
             }
-            AgentEvent::OverworldActionAborted { reason, .. } => {
-                self.outcome = Some(ActionOutcome::Stopped(*reason));
+            AgentEvent::OverworldActionAborted { reason, at, .. } => {
+                self.outcome = Some(ActionOutcome::Stopped(*reason, *at));
+            }
+            // Words that end in a battle were a trainer's, not a notice.
+            AgentEvent::BattleStarted => {
+                if let Some(ActionOutcome::Stopped(_, at)) = self.outcome.as_mut() {
+                    *at = None;
+                }
             }
             // The cartridge's own words are the only account of a battle turn there is.
             AgentEvent::TextBox { message } => {
@@ -2175,6 +2203,56 @@ mod tests {
                 expected_requests,
                 "resume_after_battle={resume} should cost {expected_requests} request(s)",
             );
+        }
+    }
+
+    /// A message that leaves the player where it stopped them is walked on through, twice at most;
+    /// one that moved them, or ended in a battle, hands the decision back.
+    #[test]
+    fn a_walk_stopped_by_a_passing_message_is_taken_up_again() {
+        #[derive(Debug, Clone, Copy)]
+        enum After { StayedPut, WalkedBack, Battled }
+        for (after, stops, expected_requests) in [
+            (After::StayedPut, 1, 1),
+            (After::StayedPut, MAX_NOTICE_RESUMES + 1, 2),
+            (After::WalkedBack, 1, 2),
+            (After::Battled, 1, 2),
+        ] {
+            let (mut rig, mut policy) = Rig::new(vec![]);
+            let id = rig.first_action_id();
+            rig.endpoint.replies.lock().unwrap().push_back(calls(&[(
+                "choose_action",
+                &format!(r#"{{"id":"{id}","summary":"across the floor"}}"#),
+            )]));
+            rig.endpoint.replies.lock().unwrap().push_back(calls(&[("wait", r#"{"ticks":1,"summary":"think"}"#)]));
+
+            let mut action = rig.pump_overworld(&mut policy).expect("the action lands");
+            let here = rig.state().map.player_position;
+            let at = match after {
+                After::WalkedBack => Point8 { x: here.x.wrapping_add(1), y: here.y },
+                After::StayedPut | After::Battled => here,
+            };
+            let mut taken_up = 0;
+            for _ in 0..stops {
+                policy.on_event(&AgentEvent::OverworldActionAborted {
+                    destination: action.tile,
+                    reason: OverworldActionAbortedReason::Textbox,
+                    at: Some(at),
+                });
+                if matches!(after, After::Battled) {
+                    policy.on_event(&AgentEvent::BattleStarted);
+                }
+                match rig.tick_overworld(&mut policy) {
+                    Some(again) => {
+                        assert_eq!(tools::overworld_id(&rig.state(), &again), id);
+                        action = again;
+                        taken_up += 1;
+                    }
+                    None => rig.wait_for_requests(2, Duration::from_secs(2)),
+                }
+            }
+            assert_eq!(rig.requests().len(), expected_requests,
+                "{after:?} {stops} time(s), taken up {taken_up} time(s)");
         }
     }
 

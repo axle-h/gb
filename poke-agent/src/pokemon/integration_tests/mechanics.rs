@@ -2558,6 +2558,42 @@ fn a_warp_reached_by_surfing_is_entered_rather_than_leant_on() {
     }
 }
 
+/// The bow's door is walked into going right, onto $15, although the floor below it is a tile the
+/// carpet list for facing down names.
+#[test]
+fn the_ss_anne_bow_is_left_to_the_right() {
+    use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
+    use crate::pokemon::tile_map::WarpTrigger;
+    use std::sync::Arc;
+
+    let mmu = gb::mmu::MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
+    let metadata = Arc::new(mmu.read_map_metadata(Map::SSAnneBow).unwrap());
+    for y in [6, 7] {
+        let door = Point8 { x: 13, y };
+        let tm = MetaTileMap::new(&CurrentMap {
+            player_position: door,
+            player_direction: PlayerFacingDirection::Down,
+            sprites: Vec::new(),
+            metadata: Arc::clone(&metadata),
+            closed_doors: Vec::new(),
+            grass_encounter_rate: 0,
+            water_encounter_rate: 0,
+            card_key_locked: false,
+            header_loaded: true,
+            surfing: false,
+            sprites_loaded: true,
+            script_cancelled_warps: Vec::new(),
+            strong_current_below: false,
+            standing_on_warp: true,
+        });
+        assert_eq!(tm.warp_trigger(door), WarpTrigger::HoldDirection(JoypadButton::Right), "(13, {y})");
+        let row = tm.actions().into_iter()
+            .find(|a| matches!(a.tile, MetaTile::Warp { to_map: Map::SSAnne3F, .. }))
+            .expect("the door back to 3F is a row");
+        assert_eq!(row.route, vec![JoypadButton::Right], "(13, {y})");
+    }
+}
+
 #[test]
 fn an_impossible_warp_is_one_the_cartridge_really_will_not_open() {
     use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};

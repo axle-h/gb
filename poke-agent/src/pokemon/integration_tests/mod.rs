@@ -36,7 +36,7 @@ pub(crate) mod completion;
 #[cfg(feature = "slow-tests")]
 pub(crate) mod completion_run;
 
-pub(crate) mod godmode;
+pub(crate) mod scripted_brain;
 
 mod mechanics;
 mod early_game;
