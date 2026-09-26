@@ -476,6 +476,10 @@ fn battle(opponent: Opponent, lead: Lead, presses: &[Joypad], loadings: Option<&
             let differing: Vec<usize> = (0..49).filter(|&t| theirs[t * 16..t * 16 + 16] != mine[t * 16..t * 16 + 16]).collect();
             assert!(differing.is_empty(), "the back pic at poll {poll}: tiles {differing:?} differ");
             assert_eq!(cartridge_state(&cartridge.gb), recreation_state(&game), "the battle at poll {poll}");
+            // What a policy is shown of the battle, which is a reading of the same bytes.
+            use crate::pokemon::battle::BattleStateReader;
+            assert_eq!(format!("{:?}", cartridge.gb.core().mmu().read_battle_state()),
+                       format!("{:?}", crate::pokemon::native::battle_state(&game)), "the policy's battle at poll {poll}");
         }
         if let Some(&loading) = loadings.and_then(|loadings| loadings.get(poll)) {
             assert_late(theirs.frames, recreation, loading, &format!("poll {poll}"));

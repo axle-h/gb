@@ -107,6 +107,11 @@ impl Pokemart {
         }
     }
 
+    /// The stock, in the order the BUY list shows it.
+    pub fn stock(&self) -> &[ItemId] {
+        &self.items
+    }
+
     /// `PrintText`, whose `UpdateSprites` follows the box.
     fn text(&mut self, label: &str, after: After, ctx: &mut Ctx) -> Transition {
         self.phase = Phase::Child(after);

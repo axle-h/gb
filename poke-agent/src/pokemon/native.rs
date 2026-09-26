@@ -13,12 +13,14 @@ use poke_core::geometry::Point8;
 use poke_core::sprite::{PictureId, PlayerFacingDirection, Sprite, SpriteFacing};
 use pokered::mode::{Mode, ModeUpdate, Status};
 use pokered::modes::overworld::Overworld;
-use pokered::party::{Named, PartyMon};
+use pokered::party::{BoxMon, Named, PartyMon};
+use pokered::systems::battle::{BattleKind, Combatant, Status1};
 use pokered::systems::overworld::location::{Location, SURFING};
 use pokered::world::World;
 use pokered::Game;
 
 use crate::pokemon::bag::Bag;
+use crate::pokemon::battle::{BattleState, BattleType};
 use crate::pokemon::badge::Badge;
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::item::ItemId;
@@ -30,8 +32,10 @@ use crate::pokemon::map_metadata::{
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::party::PokemonParty;
 use crate::pokemon::pokedex::Pokedex;
-use crate::pokemon::pokemon::{Pokemon, PokemonStats, PokemonType};
+use crate::pokemon::pokemon::{Pokemon, PokemonStats, PokemonSummary, PokemonType};
 use crate::pokemon::postgame;
+use crate::pokemon::postgame::pc_box::BoxedPokemon;
+use crate::pokemon::postgame::safari::SafariState;
 use crate::pokemon::strings::PokemonString;
 use crate::pokemon::tile_map::MetaTileMap;
 use crate::pokemon::{trash_can_position, GameState, TrashCanPuzzle};
@@ -224,10 +228,9 @@ impl NativeGame {
             mode: self.game_mode(),
             map,
             bag,
-            // The battle's own state is the next slice; until then a policy sees the battle in
-            // `mode` and nothing else, so nothing may drive a battle through this backend yet.
-            battle: None,
-            boxed_pokemon: Vec::new(),
+            battle: battle_state(&self.game),
+            boxed_pokemon: world.boxes.get(world.current_box as usize)
+                .map_or_else(Vec::new, |mons| mons.iter().map(boxed).collect()),
             current_box: world.current_box,
             can_use_cut,
             can_use_surf,
@@ -238,7 +241,12 @@ impl NativeGame {
             // EVENT_FOUND_ROCKET_HIDEOUT = 0x1b9, EVENT_MANSION_SWITCH_ON = 0x278.
             found_rocket_hideout: gates.event_byte(55) & 0x02 != 0,
             mansion_switch_on: gates.event_byte(79) & 0x01 != 0,
-            safari: None,
+            safari: gates.holds_event(poke_core::symbols::pokered_events::EVENT_IN_SAFARI_ZONE)
+                .then(|| SafariState {
+                    steps_left: world.safari_steps,
+                    balls_left: world.safari_balls,
+                    game_over: gates.holds_event(poke_core::symbols::pokered_events::EVENT_SAFARI_GAME_OVER),
+                }),
             strength_active: location.strength_active,
             hall_of_fame_teams: world.hall_of_fame_teams,
             repel_steps: location.repel_steps,
@@ -293,6 +301,69 @@ fn party(mons: &[Named<PartyMon>]) -> Result<PokemonParty, String> {
         party.push(party_mon(mon)?)?;
     }
     Ok(party)
+}
+
+/// The battle as `wBattleMon`, `wEnemyMon` and the bytes beside them. A lost battle is none,
+/// as `LOST_BATTLE` in `wIsInBattle` is on the cartridge: its fainted mon is still out.
+pub(crate) fn battle_state(game: &Game) -> Option<BattleState> {
+    let mode = game.modes().iter().rev().find_map(|mode| match mode {
+        Mode::Battle(battle) => Some(battle),
+        _ => None,
+    })?;
+    let battle = mode.battle()?;
+    let battle_type = match (mode.battle_type(), battle.kind) {
+        (_, BattleKind::Lost) => return None,
+        (pokered::modes::battle::BattleType::Safari, _) => BattleType::Safari,
+        (_, BattleKind::Trainer) => BattleType::Trainer,
+        (_, BattleKind::Wild) => BattleType::Wild,
+    };
+    // `wBattleMonSpecies2` and `wEnemyMonSpecies2` are the species sent out, which Transform
+    // leaves alone while it rewrites the mon's own.
+    let player_species = game.world().party.get(battle.player_mon_number as usize)?.mon.mon.species;
+    let enemy_species = battle.enemy_party.get(battle.enemy.mon.party_pos as usize)
+        .map_or(battle.enemy.mon.species, |mon| mon.mon.species);
+    Some(BattleState {
+        battle_type,
+        player: summary(&battle.player, player_species)?,
+        enemy: summary(&battle.enemy, enemy_species)?,
+        active_party_slot: battle.player_mon_number,
+        enemy_trapping: battle.enemy.status1.contains(Status1::USING_TRAPPING_MOVE),
+        enemy_catch_rate: battle.enemy_exp.catch_rate,
+    })
+}
+
+/// One side's mon as the battle holds it, stat modifiers applied.
+fn summary(side: &Combatant, species: poke_core::species::PokemonSpecies) -> Option<PokemonSummary> {
+    let mon = &side.mon;
+    // The slot from 1 in the high nybble, the turns left in the low.
+    let disabled = side.disabled_move >> 4;
+    Some(PokemonSummary {
+        species,
+        current_hp: mon.hp,
+        status: mon.status.into(),
+        types: [PokemonType::from_repr(mon.types[0])?, PokemonType::from_repr(mon.types[1])?],
+        level: mon.level,
+        moves: std::array::from_fn(|i| mon.moves[i].map(|name| PokemonMove { name, pp: mon.pp[i] })),
+        stats: PokemonStats {
+            hp: mon.stats[0], attack: mon.stats[1], defense: mon.stats[2], speed: mon.stats[3],
+            special: mon.stats[4],
+        },
+        disabled_move_slot: (disabled >= 1).then(|| disabled - 1),
+    })
+}
+
+/// `box_struct`, as `wBoxMons` holds the open box.
+fn boxed(named: &Named<BoxMon>) -> BoxedPokemon {
+    let mon = &named.mon;
+    BoxedPokemon {
+        species: mon.species,
+        nickname: PokemonString::from(named.nick.as_slice()),
+        trainer_name: PokemonString::from(named.ot.as_slice()),
+        level: mon.box_level,
+        current_hp: mon.hp,
+        status: mon.status.into(),
+        moves: std::array::from_fn(|i| mon.moves[i].map(|name| PokemonMove { name, pp: mon.pp[i] })),
+    }
 }
 
 /// `party_struct`, field for field. The emulated side decodes these same fields out of the

@@ -3678,7 +3678,7 @@ CascadeBadge; not cutting".to_string(),
 }
 
 /// Returns the direction to step from `from` to an orthogonally adjacent `to`.
-fn dir_to(from: Point8, to: Point8) -> Option<JoypadButton> {
+pub(crate) fn dir_to(from: Point8, to: Point8) -> Option<JoypadButton> {
     match (to.x as i16 - from.x as i16, to.y as i16 - from.y as i16) {
         ( 1,  0) => Some(JoypadButton::Right),
         (-1,  0) => Some(JoypadButton::Left),
@@ -3689,7 +3689,7 @@ fn dir_to(from: Point8, to: Point8) -> Option<JoypadButton> {
 }
 
 /// The tile one step from `from` towards `btn`, or `None` off the top or left edge.
-fn step_pos(from: Point8, btn: JoypadButton) -> Option<Point8> {
+pub(crate) fn step_pos(from: Point8, btn: JoypadButton) -> Option<Point8> {
     match btn {
         JoypadButton::Up    => (from.y > 0).then(|| Point8 { x: from.x, y: from.y - 1 }),
         JoypadButton::Down  => Some(Point8 { x: from.x, y: from.y + 1 }),
@@ -3758,7 +3758,7 @@ pub(crate) fn field_move_menu_button(api: &PokemonApi<'_>, slot: u8, move_index:
 }
 
 /// Two plain floor tiles to pace between: a neighbour of `pos` and one of its neighbours.
-fn adjacent_pacing_pair(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> Option<(Point8, Point8)> {
+pub(crate) fn adjacent_pacing_pair(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> Option<(Point8, Point8)> {
     let plain = |p: Point8| (p.x as usize) < map.width && (p.y as usize) < map.height
         && map.meta_tiles[p.x as usize + p.y as usize * map.width] == MetaTile::Empty;
     let neighbours = |p: Point8| [
@@ -3769,12 +3769,12 @@ fn adjacent_pacing_pair(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8
 }
 
 /// The squares a [`MetaTile::Pace`] row paces on.
-fn pace_kind(water: bool) -> MetaTile {
+pub(crate) fn pace_kind(water: bool) -> MetaTile {
     if water { MetaTile::Water } else { MetaTile::Empty }
 }
 
 /// A grass tile next to `pos` that the player can actually step onto.
-fn adjacent_grass(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> Option<Point8> {
+pub(crate) fn adjacent_grass(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> Option<Point8> {
     let neighbors = [
         Point8 { x: pos.x,                  y: pos.y.saturating_sub(1) },
         Point8 { x: pos.x,                  y: pos.y.saturating_add(1) },
@@ -3791,7 +3791,7 @@ fn adjacent_grass(map: &crate::pokemon::tile_map::MetaTileMap, pos: Point8) -> O
 }
 
 /// True on the outermost row or column, where an edge warp fires by stepping off the map.
-fn is_on_map_border(map: &crate::pokemon::tile_map::MetaTileMap) -> bool {
+pub(crate) fn is_on_map_border(map: &crate::pokemon::tile_map::MetaTileMap) -> bool {
     let pos = map.player_position;
     pos.x == 0
         || pos.y == 0

@@ -57,6 +57,7 @@ use crate::systems::overworld::collision::{self, ExtraWarp};
 use crate::systems::overworld::location::{BIKING, SURFING, WALKING};
 use crate::systems::overworld::map_view::{MapView, TileMap};
 use crate::systems::overworld::sprites::{self, SpriteEnv, SpriteSet, SpriteState, Sprites, NUM_SPRITES};
+use crate::systems::overworld::boulder::{boulder_blocked, BOULDER_MOVEMENT_BYTE_2};
 use poke_core::symbols::pokered_events::EVENT_IN_SAFARI_ZONE;
 use crate::scripts::Code;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_SEAFOAMISLANDSB3F_MOVE_OBJECT, SCRIPT_SEAFOAMISLANDSB4F_MOVE_OBJECT};
@@ -1301,6 +1302,35 @@ impl Overworld {
         blocked.filter(|_| !off_the_edge())
     }
 
+    /// Why a shove `direction` would move no boulder, judged as `TryPushingBoulder` would judge it.
+    pub fn push_refusal(&self, direction: Direction, world: &World) -> Option<String> {
+        if !world.location.strength_active {
+            return Some("Strength is not on".into());
+        }
+        let mut probe = self.clone();
+        probe.sprites[0].facing = direction.facing() as u8;
+        let mut player_direction = direction as u8;
+        let slot = sprites::sprite_in_front_of_player(&mut probe.sprites, probe.num_sprites, 0x10, &mut player_direction);
+        if slot == 0 || probe.sprites[slot as usize].movement2 != BOULDER_MOVEMENT_BYTE_2 {
+            return Some("no boulder in front of the player that way".into());
+        }
+        let tiles = probe.view.tile_map();
+        boulder_blocked(probe.view.tileset, &tiles, direction.facing(), &probe.sprites, probe.num_sprites, slot)
+            .then(|| "the boulder is blocked".into())
+    }
+
+    /// A hidden event, a bookshelf or a card-key door in front, as
+    /// `CheckForHiddenEventOrBookshelfOrCardKeyDoor` would find it before any sprite or sign.
+    pub fn hidden_in_front(&self, world: &World) -> bool {
+        let location = &world.location;
+        let facing = self.player().facing;
+        let tiles = self.view.tile_map();
+        let front = collision::in_front(&tiles, location.x, location.y, SpriteFacing::from_repr(facing).unwrap_or_default());
+        hidden_events::check_for_hidden_event(location.map, location.x, location.y, facing).is_some()
+            || facing == SpriteFacing::Up as u8 && hidden_events::bookshelf_text(self.view.tileset, tiles[7 * 20 + 8]).is_some()
+            || hidden_events::card_key_door(location.map, front.tile)
+    }
+
     /// The slot or sign text A would open, as `IsSpriteOrSignInFrontOfPlayer` finds it.
     pub fn in_front_text(&self, world: &World) -> u8 {
         let mut probe = self.clone();
@@ -1490,6 +1520,7 @@ pub struct OverworldDriver {
 enum Order {
     Step(Direction),
     Face(Direction),
+    Push(Direction),
     Interact,
     OpenStartMenu,
 }
@@ -1518,10 +1549,18 @@ impl OverworldDriver {
         Ok(Self::new(Order::Face(direction), world))
     }
 
+    pub fn push(direction: Direction, overworld: &Overworld, world: &World) -> Result<Self, Refusal> {
+        Self::waiting(overworld)?;
+        if let Some(reason) = overworld.push_refusal(direction, world) {
+            return Err(Refusal::Invalid(reason));
+        }
+        Ok(Self::new(Order::Push(direction), world))
+    }
+
     pub fn interact(overworld: &Overworld, world: &World) -> Result<Self, Refusal> {
         Self::waiting(overworld)?;
-        if overworld.in_front_text(world) == 0 {
-            return Err(Refusal::Invalid("nothing to talk to or read in front of the player".into()));
+        if !overworld.hidden_in_front(world) && overworld.in_front_text(world) == 0 {
+            return Err(Refusal::Invalid("nothing to talk to, read or press in front of the player".into()));
         }
         Ok(Self::new(Order::Interact, world))
     }
@@ -1557,25 +1596,34 @@ impl OverworldDriver {
             self.started = match self.order {
                 Order::Step(_) => overworld.moving() || now != self.from,
                 Order::Face(_) => overworld.is_turning() || now != self.from,
+                Order::Push(_) => overworld.rt.boulder_dust,
                 Order::Interact | Order::OpenStartMenu => !matches!(overworld.phase, Phase::Loop(_)),
             };
         }
         if self.started {
+            // The step ran into something that asks, a Repel wearing off say, printed by the
+            // overworld itself: the command is over and the question is the next decision.
+            if matches!(overworld.status(), Status::Waiting(decision) if decision != Decision::Overworld) {
+                return Drive::Done;
+            }
             let settled = overworld.status() == Status::Waiting(Decision::Overworld) && !overworld.is_turning();
             let arrived = match self.order {
                 Order::Face(direction) => location.facing == direction.facing(),
+                Order::Push(_) => !overworld.rt.boulder_dust,
                 _ => true,
             };
             return if settled && arrived { Drive::Done } else { Drive::Press(Joypad::empty()) };
         }
         if overworld.status() == Status::Waiting(Decision::Overworld) {
             self.bumps += 1;
-            if self.bumps > 4 {
+            // A shove is two passes into the boulder, each of which leaves the player standing.
+            let patience = if matches!(self.order, Order::Push(_)) { 16 } else { 4 };
+            if self.bumps > patience {
                 return Drive::Interrupted("the press was taken by nothing".into());
             }
         }
         Drive::Press(match self.order {
-            Order::Step(direction) | Order::Face(direction) => direction.button(),
+            Order::Step(direction) | Order::Face(direction) | Order::Push(direction) => direction.button(),
             Order::Interact => Joypad::A,
             Order::OpenStartMenu => Joypad::START,
         })
@@ -1735,6 +1783,62 @@ mod tests {
         game.frame(Input::Command(Command::Advance));
         settle(&mut game);
         assert!(game.ui().cover(1, 14).is_none(), "the map is back");
+    }
+
+    /// The PC is a hidden event rather than a sign or a sprite, and A turns it on all the same.
+    #[test]
+    fn a_press_at_the_pokemon_centre_pc_turns_it_on() {
+        let mut game = game_at(Map::ViridianPokecenter, 13, 4);
+        let frame = game.frame(Input::Command(Command::Interact));
+        assert_eq!(frame.reply, Some(Reply::Accepted));
+        let mut seen = Vec::new();
+        for _ in 0..600 {
+            game.frame(Input::None);
+            let status = game.status();
+            if seen.last() != Some(&status) {
+                seen.push(status.clone());
+            }
+            match status {
+                Status::Waiting(Decision::Text) => { game.frame(Input::Command(Command::Advance)); }
+                Status::Waiting(Decision::CursorMenu) => return,
+                _ => {}
+            }
+        }
+        panic!("the PC's menu never came up: {seen:?}");
+    }
+
+    #[test]
+    fn a_push_with_strength_on_shoves_the_boulder_and_leaves_the_player_where_they_stood() {
+        let mut game = game_at(Map::VictoryRoad1F, 6, 15);
+        let frame = game.frame(Input::Command(Command::Push(Direction::Left)));
+        assert!(matches!(frame.reply, Some(Reply::Refused(Refusal::Invalid(_)))), "no Strength: {:?}", frame.reply);
+
+        let mut world = game.world().clone();
+        world.location.strength_active = true;
+        let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
+        let mut overworld = Overworld::new();
+        overworld.rt.no_battles = true;
+        game.push(Mode::Overworld(overworld));
+        settle(&mut game);
+        let boulders = |game: &Game| {
+            let Some(Mode::Overworld(overworld)) = game.modes().last() else { panic!("the overworld") };
+            overworld.sprites().iter().skip(1).filter(|sprite| sprite.movement2 == BOULDER_MOVEMENT_BYTE_2)
+                .map(|sprite| (sprite.map_x - 4, sprite.map_y - 4)).collect::<Vec<_>>()
+        };
+        let boulder = |game: &Game| boulders(game)[0];
+        assert_eq!(boulder(&game), (5, 15));
+        command(&mut game, Command::Push(Direction::Left));
+        assert_eq!(boulder(&game), (4, 15));
+        assert_eq!(at(&game), (Map::VictoryRoad1F, 6, 15));
+        let frame = game.frame(Input::Command(Command::Push(Direction::Left)));
+        assert!(matches!(frame.reply, Some(Reply::Refused(Refusal::Invalid(_)))), "out of reach: {:?}", frame.reply);
+    }
+
+    #[test]
+    fn a_press_at_a_bare_wall_is_refused() {
+        let mut game = game_at(Map::ViridianPokecenter, 11, 4);
+        let frame = game.frame(Input::Command(Command::Interact));
+        assert!(matches!(frame.reply, Some(Reply::Refused(Refusal::Invalid(_)))), "{:?}", frame.reply);
     }
 
     #[test]

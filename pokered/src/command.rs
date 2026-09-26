@@ -32,7 +32,8 @@ pub enum Command {
     CloseDex,
     /// Press B through an evolution's animation, which stops it unless an item forced it.
     CancelEvolution,
-    /// Back out with B from the party menu, the bag's USE/TOSS, or a mon's moves.
+    /// Back out with B from the party menu, the bag's USE/TOSS, a mon's moves, or the list of moves
+    /// to forget, which asks whether to abandon learning.
     CancelOption,
     /// Count up or down to a quantity and take it.
     ChooseQuantity(u8),
@@ -42,7 +43,10 @@ pub enum Command {
     Step(Direction),
     /// Turn to face that way without moving.
     Face(Direction),
-    /// Press A at what is in front: a sign, or a sprite to talk to.
+    /// Shove the boulder that way with Strength on. The player stays put and the boulder moves a
+    /// square; refused if there is no boulder there or it is blocked.
+    Push(Direction),
+    /// Press A at what is in front: a sign, a sprite to talk to, or a hidden event such as a PC.
     Interact,
     /// Press START in the overworld.
     OpenStartMenu,
@@ -54,6 +58,10 @@ pub enum Command {
     SwitchPokemon(u8),
     /// Use a bag item in battle, on a party slot where it asks for one.
     UseItem { item: ItemId, target: Option<u8> },
+    /// The Safari Zone's BALL, BAIT and THROW ROCK, which stand where FIGHT, PKMN and ITEM do.
+    SafariBall,
+    SafariBait,
+    SafariRock,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,15 +154,17 @@ pub(crate) struct Executor {
 enum Driver {
     /// Holds A until the prompt answers. A box that takes the press can be replaced by another in
     /// the same frame, with the count it started from, so a wait that ends after a press is an answer
-    /// too.
-    Advance { answered: u32, pressed: bool },
+    /// too. `held` counts the frames A has been down.
+    Advance { answered: u32, held: u8 },
     /// A press at a time, released on a frame the menu polls so that each is an edge.
     List { target: Option<u8>, released: bool },
     StartMenu { target: Option<u8>, released: bool },
     Options { released: bool },
     /// `chosen` is the stack's depth when A was pressed: a menu that answers by popping to another
     /// of the same kind, as a PC's LOG OFF does, cannot otherwise be told from the one asked.
-    Option { target: u8, from: Decision, released: bool, #[serde(default)] chosen: Option<usize> },
+    /// `stopped` is the menu having stopped waiting since: one that waits again at the same depth
+    /// is another menu, as `LearnMove`'s second yes/no replaces its first inside one frame.
+    Option { target: u8, from: Decision, released: bool, #[serde(default)] chosen: Option<usize>, #[serde(default)] stopped: bool },
     /// The grid is walked a letter at a time, so the target is kept and the next press worked out
     /// against whatever is typed so far.
     Name { target: Vec<u8>, released: bool },
@@ -179,21 +189,21 @@ impl Executor {
         let driver = match &command {
             Command::Advance => match modes.last() {
                 Some(Mode::TextBox(text)) if text.status() == Status::Waiting(Decision::Text) =>
-                    Driver::Advance { answered: text.answered(), pressed: false },
+                    Driver::Advance { answered: text.answered(), held: 0 },
                 Some(Mode::StatusScreen(screen)) if screen.status() == Status::Waiting(Decision::StatusScreen) =>
-                    Driver::Advance { answered: screen.answered(), pressed: false },
+                    Driver::Advance { answered: screen.answered(), held: 0 },
                 Some(Mode::UseItem(flow)) if flow.status() == Status::Waiting(Decision::Text) =>
-                    Driver::Advance { answered: flow.answered(), pressed: false },
+                    Driver::Advance { answered: flow.answered(), held: 0 },
                 Some(Mode::Overworld(overworld)) if overworld.status() == Status::Waiting(Decision::Text) =>
-                    Driver::Advance { answered: overworld.answered(), pressed: false },
+                    Driver::Advance { answered: overworld.answered(), held: 0 },
                 Some(Mode::TrainerCard(card)) if card.status() == Status::Waiting(Decision::TrainerCard) =>
-                    Driver::Advance { answered: card.answered(), pressed: false },
+                    Driver::Advance { answered: card.answered(), held: 0 },
                 Some(Mode::MainMenu(menu)) if menu.status() == Status::Waiting(Decision::ContinueGame) =>
-                    Driver::Advance { answered: menu.answered(), pressed: false },
+                    Driver::Advance { answered: menu.answered(), held: 0 },
                 Some(Mode::Battle(battle)) if battle.status() == Status::Waiting(Decision::Text) =>
-                    Driver::Advance { answered: battle.answered(), pressed: false },
+                    Driver::Advance { answered: battle.answered(), held: 0 },
                 Some(Mode::Movie(movie)) if movie.status() == Status::Waiting(Decision::TitleScreen) =>
-                    Driver::Advance { answered: movie.answered(), pressed: false },
+                    Driver::Advance { answered: movie.answered(), held: 0 },
                 _ => return Err(Refusal::Invalid("no text box is waiting".into())),
             },
             Command::ChooseListEntry(_) | Command::CancelList => match modes.last() {
@@ -258,7 +268,7 @@ impl Executor {
                     },
                     Some(top) => {
                         let Status::Waiting(from) = top.status() else { unreachable!("only a waiting menu has rows") };
-                        Driver::Option { target: *row, from, released: true, chosen: None }
+                        Driver::Option { target: *row, from, released: true, chosen: None, stopped: false }
                     }
                     None => unreachable!("a menu was matched above"),
                 }
@@ -303,7 +313,7 @@ impl Executor {
             Command::CancelOption => match modes.last().map(|mode| mode.status()) {
                 Some(Status::Waiting(from @ (Decision::PartyMenu | Decision::UseToss | Decision::MoveMenu | Decision::ContinueGame
                                               | Decision::BattleMoves | Decision::SwitchStatsCancel | Decision::CursorMenu
-                                              | Decision::TownMap | Decision::FlyDestination))) =>
+                                              | Decision::TownMap | Decision::FlyDestination | Decision::ForgetMove))) =>
                     Driver::Cancel { from, pressed: false },
                 _ => return Err(Refusal::Invalid("no menu that B backs out of is waiting".into())),
             },
@@ -328,16 +338,18 @@ impl Executor {
                     Driver::Options { released: true },
                 _ => return Err(Refusal::Invalid("the option screen is not open".into())),
             },
-            Command::Step(_) | Command::Face(_) | Command::Interact | Command::OpenStartMenu => match modes.last() {
+            Command::Step(_) | Command::Face(_) | Command::Push(_) | Command::Interact | Command::OpenStartMenu => match modes.last() {
                 Some(Mode::Overworld(overworld)) => Driver::Overworld(match &command {
                     Command::Step(direction) => OverworldDriver::step(*direction, overworld, world)?,
+                    Command::Push(direction) => OverworldDriver::push(*direction, overworld, world)?,
                     Command::Face(direction) => OverworldDriver::face(*direction, overworld, world)?,
                     Command::Interact => OverworldDriver::interact(overworld, world)?,
                     _ => OverworldDriver::open_start_menu(overworld, world)?,
                 }),
                 _ => return Err(Refusal::Invalid("the overworld is not on top".into())),
             },
-            Command::Fight(_) | Command::Run | Command::SwitchPokemon(_) | Command::UseItem { .. } =>
+            Command::Fight(_) | Command::Run | Command::SwitchPokemon(_) | Command::UseItem { .. }
+            | Command::SafariBall | Command::SafariBait | Command::SafariRock =>
                 Driver::Battle(BattleDriver::accept(&command, modes, world)?),
         };
         Ok(Self { command, driver })
@@ -345,7 +357,7 @@ impl Executor {
 
     pub fn drive(&mut self, modes: &[Mode], world: &World) -> Drive {
         match &mut self.driver {
-            Driver::Advance { answered, pressed } => {
+            Driver::Advance { answered, held } => {
                 let (count, status, decision) = match modes.last() {
                     Some(Mode::TextBox(text)) => (text.answered(), text.status(), Decision::Text),
                     Some(Mode::StatusScreen(screen)) => (screen.answered(), screen.status(), Decision::StatusScreen),
@@ -357,10 +369,16 @@ impl Executor {
                     Some(Mode::Movie(movie)) => (movie.answered(), movie.status(), Decision::TitleScreen),
                     _ => return Drive::Done,
                 };
-                if count != *answered || (*pressed && status != Status::Waiting(decision)) {
+                if count != *answered || (*held > 0 && status != Status::Waiting(decision)) {
                     return Drive::Done;
                 }
-                *pressed = true;
+                // A release made while nothing polled is never seen, since an edge is against the
+                // last poll: a press still unanswered after two frames goes up and comes down again.
+                if *held >= 2 {
+                    *held = 0;
+                    return Drive::Press(Joypad::empty());
+                }
+                *held += 1;
                 Drive::Press(Joypad::A)
             }
             Driver::List { target, released } => match modes.last() {
@@ -397,7 +415,7 @@ impl Executor {
                 }
                 _ => Drive::Done,
             },
-            Driver::Option { target, from, released, chosen } => {
+            Driver::Option { target, from, released, chosen, stopped } => {
                 if chosen.is_some_and(|depth| depth != modes.len()) {
                     return Drive::Done;
                 }
@@ -433,6 +451,12 @@ impl Executor {
                     return Drive::Done;
                 }
                 let waiting = status == Status::Waiting(kind);
+                if chosen.is_some() && !waiting {
+                    *stopped = true;
+                }
+                if chosen.is_some() && waiting && *stopped {
+                    return Drive::Done;
+                }
                 if !waiting || !*released || chosen.is_some() {
                     *released = true;
                     return Drive::Press(Joypad::empty());

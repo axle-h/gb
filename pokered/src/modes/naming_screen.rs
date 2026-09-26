@@ -101,6 +101,15 @@ impl NamingScreen {
         }
     }
 
+    pub fn kind(&self) -> NamingScreenType {
+        self.kind
+    }
+
+    /// The mon a nickname is for.
+    pub fn species(&self) -> Option<PokemonSpecies> {
+        self.species
+    }
+
     pub fn name(&self) -> &[u8] {
         &self.name
     }

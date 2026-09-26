@@ -117,7 +117,27 @@ enum Next {
     Saved,
 }
 
+/// Which of its three cursor menus is up over it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BillsPcMenu {
+    /// WITHDRAW, DEPOSIT, RELEASE, CHANGE BOX, SEE YA!
+    Main,
+    /// WITHDRAW or DEPOSIT, STATS, CANCEL, under a chosen mon.
+    DepositWithdraw,
+    /// The twelve boxes.
+    Boxes,
+}
+
 impl BillsPc {
+    pub fn menu_up(&self) -> Option<BillsPcMenu> {
+        match self.phase {
+            Phase::Child(After::Menu) => Some(BillsPcMenu::Main),
+            Phase::Child(After::DepositWithdraw) => Some(BillsPcMenu::DepositWithdraw),
+            Phase::Child(After::BoxList) => Some(BillsPcMenu::Boxes),
+            _ => None,
+        }
+    }
+
     fn with(generic: bool, saved: Option<UiSurface>) -> Self {
         Self {
             generic,

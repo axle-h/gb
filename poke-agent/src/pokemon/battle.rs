@@ -51,7 +51,10 @@ impl BattleStateReader for MMU {
         Some(BattleState {
             battle_type,
             player: PokemonSummary {
-                species: PokemonSpecies::from_repr(self.read_pointer(&pokered_symbols::wBattleMonSpecies2))?,
+                // Not `wBattleMonSpecies2`, which `HandlePartyMenuInput` overwrites with any mon
+                // picked from the party menu, even one only looked at.
+                species: PokemonSpecies::from_repr(
+                    self.read(pokered_symbols::wPartySpecies.address + active_party_slot as u16))?,
                 level: self.read_pointer(&pokered_symbols::wBattleMonLevel),
                 current_hp: self.read_pointer_u16_be(&pokered_symbols::wBattleMonHP),
                 status: PokemonStatus::from(self.read_pointer(&pokered_symbols::wBattleMonStatus)),

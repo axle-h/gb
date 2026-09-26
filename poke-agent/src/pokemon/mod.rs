@@ -47,6 +47,7 @@ pub mod policy;
 /// The `Policy` an LLM drives.
 pub mod llm_policy;
 pub mod native;
+pub mod native_agent;
 pub mod tile_map;
 pub mod encoding;
 pub use poke_core::strings;

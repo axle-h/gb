@@ -711,6 +711,11 @@ pub(crate) fn field_move_carrier(
         .map(|(i, p)| (i as u8, field_move_index_of(p, want)))
 }
 
+/// The move on row `index` of `mon`'s field-move box.
+pub(crate) fn field_move_at(mon: &crate::pokemon::pokemon::Pokemon, index: u8) -> Option<PokemonMoveName> {
+    mon.moves.iter().flatten().map(|m| m.name).filter(|&n| is_field_move(n)).nth(index as usize)
+}
+
 /// `want`'s row in `mon`'s field-move box.
 pub(crate) fn field_move_index_of(mon: &crate::pokemon::pokemon::Pokemon, want: PokemonMoveName) -> u8 {
     mon.moves.iter().flatten().map(|m| m.name).filter(|&n| is_field_move(n))

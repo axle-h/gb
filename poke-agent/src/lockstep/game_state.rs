@@ -19,8 +19,7 @@ use crate::pokemon::{GameState, PokemonApi, PokemonApiTrait};
 use super::overworld::Cartridge;
 
 /// The part of a [`GameState`] this comparison covers. Everything in it is filled by both halves;
-/// what is not in it is either presentation or the battle's, which the native side does not read
-/// yet.
+/// what is not in it is presentation, or the battle's, which `lockstep/battle.rs` compares.
 #[derive(Debug, PartialEq)]
 struct Compared {
     map: Map,
@@ -41,6 +40,8 @@ struct Compared {
     strength_active: bool,
     repel_steps: u8,
     hall_of_fame_teams: u8,
+    boxed: String,
+    safari: String,
     /// Every row the pathfinder offers, with the length of the walk to it: the whole map pipeline
     /// in one field, since a row is a block map, a tileset, a warp table and the people on it.
     actions: Vec<(String, usize)>,
@@ -72,6 +73,8 @@ fn compared(state: &GameState) -> Compared {
         strength_active: state.strength_active,
         repel_steps: state.repel_steps,
         hall_of_fame_teams: state.hall_of_fame_teams,
+        boxed: format!("{:?}", state.boxed_pokemon),
+        safari: format!("{:?}", state.safari),
         actions: {
             let mut rows: Vec<(String, usize)> =
                 state.map.actions().iter().map(|a| (a.id(), a.route.len())).collect();
@@ -185,7 +188,7 @@ fn recreation_step(game: &mut Game, button: Joypad, what: &str) {
 #[test]
 fn the_state_a_policy_is_shown_matches_the_cartridge_along_a_walk() {
     let mut cartridge = Cartridge::from_state(include_bytes!("../pokemon/data/pallet-town-state.bin"));
-    // Grass on the way would start wild battles, which the native side does not read yet.
+    // Grass on the way would start wild battles, which a walk of single steps cannot fight.
     let flags4 = sym::wStatusFlags4.address;
     let value = cartridge.read(flags4) | 1 << 4;
     cartridge.gb.core_mut().mmu_mut().write(flags4, value);

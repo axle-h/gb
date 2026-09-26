@@ -18,6 +18,11 @@ use super::BattleMode;
 const CURSOR: u8 = 0xED;
 const UNFILLED_CURSOR: u8 = 0xEC;
 
+/// The Safari menu's items, as `.handleMenuSelection` numbers them: nothing is swapped.
+pub(super) const BALL: u8 = 0;
+pub(super) const ROCK: u8 = 1;
+pub(super) const BAIT: u8 = 2;
+
 /// `InitBattleVariables`: a wild battle on the maps from `SAFARI_ZONE_EAST` up to the centre's rest
 /// house is the Safari Zone's.
 pub fn is_safari_map(map: Map) -> bool {
@@ -74,8 +79,7 @@ impl BattleMode {
         self.push(Present::Menu);
     }
 
-    /// `.handleMenuSelection` in the Safari Zone, where nothing is swapped: 0 BALL, 1 THROW ROCK,
-    /// 2 BAIT, 3 RUN.
+    /// `.handleMenuSelection` in the Safari Zone: `BALL`, `ROCK`, `BAIT`, then RUN.
     pub(super) fn safari_menu_chosen(&mut self, id: u8, ctx: &mut Ctx) {
         self.action_taken = true;
         match id {

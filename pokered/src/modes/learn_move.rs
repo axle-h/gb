@@ -86,6 +86,17 @@ impl LearnMove {
         self.input.max + 1
     }
 
+    /// The party slot being taught, and what.
+    pub fn learning(&self) -> (u8, PokemonMoveName) {
+        (self.slot, self.learning)
+    }
+
+    /// Whether the yes/no over it asks to delete a move to make room, rather than whether to
+    /// abandon learning.
+    pub fn asking_to_delete(&self) -> bool {
+        self.phase == Phase::AskingToDelete
+    }
+
     fn text(&mut self, phase: Phase, commands: Vec<TextCommand>) -> Transition {
         self.phase = phase;
         Transition::Push(Mode::TextBox(TextBox::script(commands)))

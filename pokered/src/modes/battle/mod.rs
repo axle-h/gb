@@ -259,6 +259,11 @@ impl BattleMode {
         self.battle.as_ref()
     }
 
+    /// `wBattleType`.
+    pub fn battle_type(&self) -> BattleType {
+        self.battle_type
+    }
+
     pub(super) fn battle_mut(&mut self) -> &mut Battle {
         self.battle.as_mut().expect("the battle has started")
     }
@@ -338,7 +343,15 @@ impl BattleDriver {
         let top = modes.last().map(Mode::status);
         let at_menu = matches!(top, Some(Status::Waiting(Decision::BattleMenu | Decision::BattleMoves)))
             && matches!(modes.last(), Some(Mode::Battle(_)));
+        let safari = battle.battle_type == BattleType::Safari;
         match command {
+            Command::SafariBall | Command::SafariBait | Command::SafariRock if !safari =>
+                return Err(Refusal::Invalid("only the Safari Zone has that menu".into())),
+            Command::Fight(_) | Command::SwitchPokemon(_) | Command::UseItem { .. } if safari =>
+                return Err(Refusal::Invalid("the Safari Zone's menu is BALL, BAIT, THROW ROCK and RUN".into())),
+            Command::SafariBall if at_menu && world.safari_balls == 0 =>
+                return Err(Refusal::Invalid("no Safari Balls left".into())),
+            Command::SafariBall | Command::SafariBait | Command::SafariRock if at_menu => {}
             Command::Fight(slot) if at_menu => {
                 let battle = battle.battle().expect("a battle waiting has started");
                 if battle.player.mon.moves.get(*slot as usize).copied().flatten().is_none() {
@@ -437,6 +450,9 @@ impl BattleDriver {
                     (Command::Run, Decision::BattleMenu) => (menu.press_toward(menus::RUN), true),
                     (Command::SwitchPokemon(_), Decision::BattleMenu) => (menu.press_toward(menus::PKMN), false),
                     (Command::SwitchPokemon(_), Decision::SwitchStatsCancel) => (menu.press_toward(0), true),
+                    (Command::SafariBall, Decision::BattleMenu) => (menu.press_toward(safari::BALL), true),
+                    (Command::SafariRock, Decision::BattleMenu) => (menu.press_toward(safari::ROCK), true),
+                    (Command::SafariBait, Decision::BattleMenu) => (menu.press_toward(safari::BAIT), true),
                     _ => return Drive::Done,
                 };
                 self.answered = answers && press == Joypad::A;
@@ -532,6 +548,37 @@ mod tests {
         assert!(game.world().party[1].mon.mon.exp > exp_before, "RAT fought and gained experience");
         assert!(game.world().party[0].mon.mon.exp > new_party_mon(PokemonSpecies::Pidgey, 50, 0, &Origin::Trainer,
             &mut GameRng::tape(vec![])).mon.exp, "BIRD fought too, and shares it");
+    }
+
+    #[test]
+    fn a_safari_battle_is_played_by_rock_bait_and_ball() {
+        let mut game = game(BattleMode::wild(PokemonSpecies::Rhyhorn, 25));
+        let mut world = game.world().clone();
+        world.location.map = poke_core::map::Map::SafariZoneCenter;
+        world.safari_balls = 30;
+        let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
+        game.push(Mode::Battle(BattleMode::wild(PokemonSpecies::Rhyhorn, 25)));
+        let mut asked = vec![Command::SafariRock, Command::SafariBait];
+        let mut thrown = 0;
+        while let Some(decision) = settle(&mut game) {
+            let next = match decision {
+                Decision::Text => Command::Advance,
+                Decision::TwoOption => Command::ChooseOption(1),
+                Decision::PokedexData => Command::CloseDex,
+                Decision::BattleMenu => {
+                    assert!(matches!(command(&mut game, Command::Fight(0)), Reply::Refused(_)), "no FIGHT here");
+                    let next = if asked.is_empty() { Command::SafariBall } else { asked.remove(0) };
+                    thrown += (next == Command::SafariBall) as u8;
+                    next
+                }
+                decision => panic!("the battle asked {decision:?}"),
+            };
+            assert_eq!(command(&mut game, next.clone()), Reply::Accepted, "{next:?} at {decision:?}");
+            assert!(thrown < 30, "the battle goes on");
+        }
+        assert!(asked.is_empty(), "the rock and the bait were thrown");
+        assert!(thrown > 0);
+        assert_eq!(game.world().safari_balls, 30 - thrown, "a ball a throw");
     }
 
     #[test]
