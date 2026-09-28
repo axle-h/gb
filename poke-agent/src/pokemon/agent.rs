@@ -53,10 +53,15 @@ fn player_is_spinning(api: &PokemonApi) -> bool {
         & BIT_SPINNING != 0
 }
 
-/// From the last Pokémon fainting until the black-out warp has landed.
+/// From the last Pokémon fainting until the black-out warp has landed, and from any battle's end
+/// until its map is entered again: `BIT_BATTLE_OVER_OR_BLACKOUT` is set by both and cleared only by
+/// `EnterMap` and `HandleBlackOut`, while the map still reads as the one the battle was on.
 fn blackout_in_flight(api: &PokemonApi) -> bool {
-    api.mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wIsInBattle)
-        == crate::pokemon::battle::LOST_BATTLE
+    /// `BIT_BATTLE_OVER_OR_BLACKOUT` of `wStatusFlags4`.
+    const BATTLE_OVER_OR_BLACKOUT: u8 = 1 << 5;
+    let mmu = api.mmu();
+    mmu.read_pointer(&crate::pokemon::symbols::pokered_symbols::wIsInBattle) == crate::pokemon::battle::LOST_BATTLE
+        || mmu.read_pointer(&crate::pokemon::symbols::pokered_symbols::wStatusFlags4) & BATTLE_OVER_OR_BLACKOUT != 0
 }
 
 /// A walk that never arrives is silence, and silence is what the watchdog reads.
@@ -729,6 +734,8 @@ pub struct PokemonAgent {
     cycles_since_driver_answer: MachineCycles,
 
     forget_choice: Option<Option<usize>>,
+    /// Ticks the B that declines the move list has been held, of `FORGET_B_PERIOD`.
+    forget_b_ticks: u8,
 
     /// An item ball just pressed A on, waiting for the overworld to ask whether it is still there.
     pending_pickup: Option<(MetaTile, u16)>,
@@ -800,6 +807,7 @@ impl PokemonAgent {
             vending_pick: None,
             menu_handover_ticks: 0,
             forget_choice: None,
+            forget_b_ticks: 0,
             pending_pickup: None,
             party_menu: None,
             blackout_ticks: 0,
@@ -1167,6 +1175,45 @@ impl PokemonAgent {
         }
     }
 
+    fn start_boulder_goal(&mut self, map: Map, boulder: Point8, target: Point8, hole: bool) {
+        self.boulder_goal = Some((map, boulder, target, hole));
+        self.boulder_goal_pushes = 0;
+        self.boulder_goal_best = usize::MAX;
+        self.boulder_goal_stale = 0;
+        self.boulder_goal_silences = 0;
+        self.set_state(AgentState::SolvingBoulderPuzzle { boulder, target, hole, pushes: 0, settle: 0 });
+    }
+
+    /// A battle out of the landing that ends a boulder goal's walk interrupts the goal, not the walk,
+    /// whether or not a tick saw the landing before the encounter check ran.
+    fn battle_at_the_end_of_a_goal_walk(&mut self, game_mode: GameMode, api: &PokemonApi) {
+        if !matches!(game_mode, GameMode::WildBattle | GameMode::TrainerBattle) {
+            return;
+        }
+        let AgentState::OverworldMovement { destination, map } = self.state else { return };
+        let MetaTile::BoulderGoal { boulder, at, hole } = destination else { return };
+        let arrived = api.game_state().is_ok_and(|state| state.map.map == map && state.map.actions().iter()
+            .any(|row| row.tile.is_same_row_as(&destination) && row.route.is_empty()));
+        if arrived {
+            self.start_boulder_goal(map, boulder, at, hole);
+        }
+    }
+
+    /// Pacing from `pos`, its first step pressed in the same tick: the overworld polls two frames
+    /// after a step lands, so a tick with nothing held may or may not be seen, and a turn it arms
+    /// draws for an encounter.
+    fn start_pacing(&mut self, api: &mut PokemonApi, destination: MetaTile, map: Map, pos: Point8,
+                    (tile_a, tile_b): (Point8, Point8), mut heading_to_b: bool) {
+        if pos == if heading_to_b { tile_b } else { tile_a } {
+            heading_to_b = !heading_to_b;
+        }
+        self.set_state(AgentState::PacingForEncounters { destination, map, tile_a, tile_b, heading_to_b, stalled: 0, paced: 0 });
+        api.release_all_buttons();
+        if let Some(dir) = dir_to(pos, if heading_to_b { tile_b } else { tile_a }) {
+            api.press_button(dir);
+        }
+    }
+
     fn set_battle_state(&mut self, state: BattleState) {
         self.set_state(AgentState::Battle(state));
     }
@@ -1204,10 +1251,17 @@ impl PokemonAgent {
                 }
                 // Held rather than toggled: the prompt stands for a few ticks and a toggle spends
                 // half of them released, so whether the game polls the press at all comes down to
-                // how long the policy took to answer.
+                // how long the policy took to answer. Let go one tick in `FORGET_B_PERIOD`, though:
+                // the list reads new presses only, and one spent before it was reading is never
+                // pressed again.
                 Some(None) => {
+                    /// Ticks per press of the B that declines the move list.
+                    const FORGET_B_PERIOD: u8 = 5;
+                    self.forget_b_ticks = (self.forget_b_ticks + 1) % FORGET_B_PERIOD;
                     api.release_all_buttons();
-                    api.press_button(JoypadButton::B);
+                    if self.forget_b_ticks != 0 {
+                        api.press_button(JoypadButton::B);
+                    }
                 }
             },
             None => api.toggle_button(JoypadButton::A),
@@ -1668,6 +1722,7 @@ impl PokemonAgent {
 
         self.assert_naming_screen(game_mode, api)?;
         self.assert_script_state(game_mode);
+        self.battle_at_the_end_of_a_goal_walk(game_mode, api);
         self.assert_battle_state(game_mode);
         self.assert_pokemart_state(game_mode, api)?;
         if !drives_its_own_menus(&self.state) {
@@ -1738,7 +1793,12 @@ impl PokemonAgent {
                 if player_is_spinning(api) {
                     *rollback_delay = DelayContext::long();
                 }
-                if rollback_delay.is_exhausted() {
+                // A script holding the d-pad runs by itself, and its texts are the reader's: an A
+                // pressed as it lets go lands on the overworld, a talk to whoever the player faces.
+                let holds_the_pad = api.mmu().read_pointer(&pokered_symbols::wJoyIgnore) & 0xF0 != 0;
+                if rollback_delay.is_exhausted() && holds_the_pad {
+                    api.release_all_buttons();
+                } else if rollback_delay.is_exhausted() {
                     api.toggle_button(JoypadButton::A);
                 } else {
                     // Inside the rollback window: maybe a ledge jump.
@@ -1777,6 +1837,8 @@ impl PokemonAgent {
                         // Turned-back squares may stop being true.
                         self.turned_back_tiles.clear();
                         self.turn_back_watch = None;
+                    } else {
+                        self.world_graph.refresh(&game_state.map, api.raw_player_coords());
                     }
                     self.poll_policy(&game_state, api);
                     // A non-walking field action takes priority over walking.
@@ -1958,6 +2020,8 @@ CascadeBadge; not cutting".to_string(),
                 } else if game_state.map.map != expected_map {
                     // Success for warps and connections, which both leave the map.
                     if matches!(destination, MetaTile::Warp { .. } | MetaTile::Connection { .. } | MetaTile::ConnectionWater(_)) {
+                        // Let go, or a crossing's held direction walks on into a square nobody chose.
+                        api.release_all_buttons();
                         new_events.push(AgentEvent::OverworldActionCompleted { destination });
                         self.set_state(AgentState::Idle);
                     } else {
@@ -1998,8 +2062,8 @@ CascadeBadge; not cutting".to_string(),
                     // A cave wander: keep walking so per-step encounters fire.
                     let pos = game_state.map.player_position;
                     match adjacent_pacing_pair(&game_state.map, pos) {
-                        Some((tile_a, tile_b)) => self.set_state(AgentState::PacingForEncounters {
-                            destination, map: game_state.map.map, tile_a, tile_b, heading_to_b: false, stalled: 0, paced: 0 }),
+                        Some((tile_a, tile_b)) =>
+                            self.start_pacing(api, destination, game_state.map.map, pos, (tile_a, tile_b), false),
                         None => {
                             let at = Some(game_state.map.player_position);
                             self.abort_overworld(
@@ -2016,8 +2080,8 @@ CascadeBadge; not cutting".to_string(),
                         // Pace against a steppable grass neighbour, else any plain one.
                         let pair = adjacent_grass(&game_state.map, pos).map(|b| (pos, b))
                             .or_else(|| adjacent_pacing_pair(&game_state.map, pos));
-                        if let Some((tile_a, tile_b)) = pair {
-                            self.set_state(AgentState::PacingForEncounters { destination, map: game_state.map.map, tile_a, tile_b, heading_to_b: true, stalled: 0, paced: 0 });
+                        if let Some(pair) = pair {
+                            self.start_pacing(api, destination, game_state.map.map, pos, pair, true);
                         } else {
                             // TODO: unreachable if `actions()` checks the neighbour.
                             let at = Some(game_state.map.player_position);
@@ -2116,21 +2180,12 @@ CascadeBadge; not cutting".to_string(),
                                     && let pos = game_state.map.player_position
                                     && let Some(next) = game_state.map.pacing_neighbour(pos, pace_kind(water))
                                 {
-                                    api.release_all_buttons();
-                                    self.set_state(AgentState::PacingForEncounters {
-                                        destination, map: game_state.map.map, tile_a: pos, tile_b: next,
-                                        heading_to_b: true, stalled: 0, paced: 0 });
+                                    self.start_pacing(api, destination, game_state.map.map, pos, (pos, next), true);
                                     return Ok(());
                                 }
                                 if let MetaTile::BoulderGoal { boulder, at, hole } = destination {
                                     api.release_all_buttons();
-                                    self.boulder_goal = Some((game_state.map.map, boulder, at, hole));
-                                    self.boulder_goal_pushes = 0;
-                                    self.boulder_goal_best = usize::MAX;
-                                    self.boulder_goal_stale = 0;
-                                    self.boulder_goal_silences = 0;
-                                    self.set_state(AgentState::SolvingBoulderPuzzle {
-                                        boulder, target: at, hole, pushes: 0, settle: 0 });
+                                    self.start_boulder_goal(game_state.map.map, boulder, at, hole);
                                     return Ok(());
                                 }
                                 if let MetaTile::BoulderPush { boulder, dir } = destination {
@@ -2218,9 +2273,10 @@ CascadeBadge; not cutting".to_string(),
                     }
                     return Ok(());
                 }
-                // A quiz row chosen for NO: the cursor to NO, then A, once.
+                // A quiz row chosen for NO: the cursor to NO, then A, once. A only on NO itself: the
+                // box can be drawn a tick before its cursor is, with the last menu's item still read.
                 if self.answer_no && let Some(menu) = api.menu_state().filter(|menu| menu.is_yes_no_menu()) {
-                    let button = if menu.current_item == 0 { JoypadButton::Down } else { JoypadButton::A };
+                    let button = if menu.current_item == 1 { JoypadButton::A } else { JoypadButton::Down };
                     self.answer_no &= button == JoypadButton::Down;
                     reader.update_with(api, button);
                     return Ok(());

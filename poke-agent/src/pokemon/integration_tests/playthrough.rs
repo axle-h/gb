@@ -119,11 +119,13 @@ fn probe_resume_playthrough() {
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "full playthrough; run with --features slow-tests")]
 fn full_playthrough() {
+    // A gym fought by an HM carrier once the starter faints stays on one step through its trainers,
+    // its black-outs and the regrown trees on the way back: longer than the default.
     let mut fixture = TestFixture::new(
         include_bytes!("../data/start-of-game-state.bin"),
         Duration::from_mins(800),
         PolicyStep::eight_badge_steps(),
-    );
+    ).with_stall_tolerance(Duration::from_mins(30));
 
     {
         let state = fixture.game_state();
@@ -284,11 +286,24 @@ const NATIVE_STALL: &str = "target/test-artifacts/native_stall.pkrd";
 /// [`full_playthrough`]'s route on the recreation, from a new game, through the native agent.
 #[test]
 fn native_full_playthrough() {
+    play_native_full_playthrough(1);
+}
+
+/// The route on other seeds, which black out along the way and have to find their way back.
+#[test]
+#[cfg(feature = "slow-tests")]
+fn native_full_playthrough_recovers_from_black_outs_on_other_seeds() {
+    for seed in 2..=9 {
+        play_native_full_playthrough(seed);
+    }
+}
+
+fn play_native_full_playthrough(seed: u64) {
     use crate::pokemon::native_agent::NativeAgent;
 
-    let game = native_new_game(1, false, pokered::Pacing::Instant);
+    let game = native_new_game(seed, false, pokered::Pacing::Instant);
     assert_eq!(game.world().location.map, Map::RedsHouse2F);
-    let policy = DeterministicPolicy::new(1, PolicyStep::eight_badge_steps());
+    let policy = DeterministicPolicy::new(seed, PolicyStep::eight_badge_steps());
     let mut agent = NativeAgent::new(game, Box::new(policy)).expect("a native agent");
 
     // An hour of game time with the queue standing still is a stall.
@@ -306,7 +321,7 @@ fn native_full_playthrough() {
         if ticked.is_err() || stalled {
             std::fs::create_dir_all("target/test-artifacts").ok();
             std::fs::write(NATIVE_STALL, agent.game().save()).ok();
-            panic!("{} with {left:?} steps left, on {:?}, {:?}",
+            panic!("seed {seed}: {} with {left:?} steps left, on {:?}, {:?}",
                    ticked.err().unwrap_or_else(|| "stalled for an hour of game time".into()),
                    agent.game().world().location, agent.game().status());
         }

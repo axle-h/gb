@@ -65,7 +65,7 @@ struct Walk {
     /// The last command was A at the row's end, so a text box is the row succeeding.
     pressed_a: bool,
     route_lost: u32,
-    /// Where the last accepted step set off from.
+    /// The square the player last left: a step pressed on a poll offered early may never be taken.
     came_from: Option<Point8>,
     /// The shortest the row's route has been, and the steps since it last got shorter: a current
     /// or a slope can take back every step a walk makes. Counted where the player stood last.
@@ -320,6 +320,8 @@ pub struct NativeAgent {
     turn_back_watch: Option<(Map, Point8, Point8)>,
     /// Squares this visit was walked back off, which a script refuses and no tile shows.
     turned_back: Vec<Point8>,
+    /// Where the player stood at the last tick, for a walk's `came_from`.
+    square: Option<(Map, Point8)>,
     /// The text on screen outside a battle, reported as one event once it is gone.
     text: PokemonTextReader,
     /// A talk landed on an in-game trader, and this is the species their party menu is answered
@@ -354,6 +356,7 @@ impl NativeAgent {
             card_key_presses: Vec::new(),
             turn_back_watch: None,
             turned_back: Vec::new(),
+            square: None,
             text: PokemonTextReader::untorn(),
             trade_give: None,
             pending_pickup: None,
@@ -390,6 +393,10 @@ impl NativeAgent {
             && self.native.game().status() == Status::Waiting(Decision::Overworld)
     }
 
+    fn poll_offered(&self) -> bool {
+        matches!(self.native.game().modes().last(), Some(Mode::Overworld(overworld)) if overworld.poll_offered())
+    }
+
     /// The game state with the trees cut on this visit cleared, and the squares it was walked back
     /// off walled.
     pub fn game_state(&self) -> Result<GameState, String> {
@@ -416,8 +423,23 @@ impl NativeAgent {
     /// One frame: the command in flight carried on, or the next one chosen and handed in.
     pub fn tick(&mut self) -> Result<(), String> {
         self.frames += 1;
+        let location = &self.native.game().world().location;
+        let square = Some((location.map, Point8 { x: location.x, y: location.y }));
+        if let Some((map, left)) = std::mem::replace(&mut self.square, square).filter(|&left| Some(left) != square)
+            && let Some(walk) = self.walk.as_mut().filter(|walk| walk.map == map)
+        {
+            walk.came_from = Some(left);
+        }
         self.read_text();
         if self.running.is_some() {
+            // A pad's destination is arrived at even when the player only passes over it, on a pad
+            // of its own, as the emulated agent sees it between two of its ticks.
+            if let Some(Walk { destination: MetaTile::Warp { to_map, to_position }, .. }) = self.walk
+                && let location = &self.native.game().world().location
+                && (location.map, location.x, location.y) == (to_map, to_position.x, to_position.y)
+            {
+                self.complete();
+            }
             let input = self.idle_input();
             let frame = self.native.game_mut().frame(input);
             self.finish(&frame.events);
@@ -427,7 +449,12 @@ impl NativeAgent {
         if self.learning().is_none() {
             self.forget = None;
         }
-        let status = self.native.game().status();
+        // A walk takes the poll the overworld offers before it runs, and so carries on as a held
+        // direction does. Nothing else does: the poll runs the map's script first.
+        let status = match self.native.game().status() {
+            Status::Busy if self.walk.is_some() && self.poll_offered() => Status::Waiting(Decision::Overworld),
+            status => status,
+        };
         // Every decision point, as the emulated agent polls: a policy's tools are answered here.
         if matches!(status, Status::Waiting(_)) && let Ok(state) = self.game_state() {
             if status == Status::Waiting(Decision::Overworld) {
@@ -441,11 +468,10 @@ impl NativeAgent {
                 return self.issue_or_wait(command);
             }
             // A battle out of a step behind a boulder, or the step onto the water. A boulder goal
-            // goes too: the battle may move the player off the floor.
+            // outlives it, as the emulated agent's does, and is taken up again on the same floor.
             self.task = None;
-            self.boulder_goal = None;
         }
-        if self.walk.is_some() && status != Status::Waiting(Decision::Overworld) {
+        if self.walk.is_some() && status != Status::Waiting(Decision::Overworld) && self.boulder_goal.is_none() {
             self.end_walk_off_the_map()?;
         }
         let command = match status {
@@ -517,13 +543,9 @@ impl NativeAgent {
         match frame.reply {
             Some(Reply::Accepted) => {
                 self.task_blocked = 0;
-                let at = self.player_at();
                 if let Some(walk) = self.walk.as_mut() {
                     walk.pressed_a = command == Command::Interact;
                     walk.route_lost = 0;
-                    if matches!(command, Command::Step(_)) {
-                        walk.came_from = at;
-                    }
                 }
                 self.running = Some(command);
                 self.finish(&frame.events);
@@ -611,6 +633,9 @@ impl NativeAgent {
             self.turned_back.clear();
             let location = &self.native.game().world().location;
             self.graph.observe(state.map.map, Point8 { x: location.x, y: location.y }, &state.map);
+        } else {
+            let location = &self.native.game().world().location;
+            self.graph.refresh(&state.map, Point8 { x: location.x, y: location.y });
         }
     }
 
@@ -648,6 +673,14 @@ impl NativeAgent {
             return Ok(None);
         }
         if let Some(walk) = self.walk {
+            if self.boulder_goal.is_some() && self.task.is_none() {
+                if state.map.map == walk.map {
+                    return self.goal_step(&state);
+                }
+                self.boulder_goal = None;
+                self.abort(OverworldActionAbortedReason::WrongMap(state.map.map), None);
+                return Ok(None);
+            }
             return self.walk_on(walk, &state);
         }
         // Armed for a talk that asked nothing.
@@ -759,7 +792,9 @@ impl NativeAgent {
             Some(&button) => {
                 let direction = direction(button).ok_or_else(|| format!("a route pressed {button:?}"))?;
                 let onto = step_pos(map.player_position, button).and_then(|at| map.tile_at_checked(at));
-                if !map.surfing && matches!(onto, Some(MetaTile::Water | MetaTile::ConnectionWater(_)))
+                // A fishing row casts from the shore.
+                if !map.surfing && !matches!(destination, MetaTile::Fish { .. })
+                    && matches!(onto, Some(MetaTile::Water | MetaTile::ConnectionWater(_)))
                     && let Some((slot, _)) = field_move_carrier(state, PokemonMoveName::Surf)
                 {
                     let at = step_pos(map.player_position, button);
@@ -865,6 +900,15 @@ impl NativeAgent {
     fn end_walk_off_the_map(&mut self) -> Result<(), String> {
         let Some(walk) = self.walk else { return Ok(()) };
         let state = self.native.game_state()?;
+        // The landing that ends a boulder goal's walk starts the goal, even when it draws a battle
+        // before the next poll, as the emulated agent's does.
+        if let MetaTile::BoulderGoal { boulder, at, hole } = walk.destination && self.battle_is_up()
+            && state.map.map == walk.map && state.map.actions().iter()
+                .any(|row| row.tile.is_same_row_as(&walk.destination) && row.route.is_empty())
+        {
+            self.boulder_goal = Some(BoulderGoal { which: boulder, target: at, hole, pushes: 0, best: usize::MAX, stale: 0 });
+            return Ok(());
+        }
         let mode = state.mode;
         if walk.pressed_a && mode == GameMode::TextBox {
             self.walk = None;

@@ -1535,6 +1535,9 @@ impl MetaTileMap {
     /// The row crossing into `to_map` at raw `to_position`, if reachable. Kept out of `actions()`
     /// so `EnterMap { to_position }` can pick a landing without a row per edge.
     pub fn connection_action(&self, to_map: Map, to_position: Point8) -> Option<OverworldAction> {
+        if !self.position_settled {
+            return None;
+        }
         let (full_dist, full_from) = self.bfs_from_player();
         let (dest, tile) = self.meta_tiles.iter().enumerate()
             .filter_map(|(i, t)| match t {
@@ -1594,6 +1597,9 @@ impl MetaTileMap {
 
     /// Route to the nearest reachable `ConnectionWater` edge into `to_map`.
     pub fn water_connection_action(&self, to_map: Map) -> Option<OverworldAction> {
+        if !self.position_settled {
+            return None;
+        }
         let (full_dist, full_from) = self.bfs_from_player();
         let (dest, tile) = self.meta_tiles.iter().enumerate()
             .filter_map(|(i, t)| match t {

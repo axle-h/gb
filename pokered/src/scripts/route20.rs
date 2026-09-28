@@ -48,18 +48,18 @@ pub fn script(rt: &mut Script) -> Flow {
     rt.trainer_script(index).then(Label::StoreCurScript)
 }
 
-/// `Route20BoulderScript`, run on the first pass after leaving the islands: a completed pair of
-/// holes puts its boulders back at the top of the puzzle and takes away the copies below. The
-/// events stay set, so the currents stay slowed and the walk back through is only scenery.
+/// `Route20BoulderScript`, run on the first pass after leaving the islands: a pair of holes left
+/// unfinished puts its boulders back at the top of the puzzle and takes away the copies below, so
+/// the puzzle starts again. A finished pair stays where it is, and so do the slowed currents.
 fn boulder_script(rt: &mut Script) {
-    if rt.check_event(EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE) && rt.check_event(EVENT_SEAFOAM3_BOULDER2_DOWN_HOLE) {
+    if !(rt.check_event(EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE) && rt.check_event(EVENT_SEAFOAM3_BOULDER2_DOWN_HOLE)) {
         rt.show_object(TOGGLE_SEAFOAM_ISLANDS_1F_BOULDER_1);
         rt.show_object(TOGGLE_SEAFOAM_ISLANDS_1F_BOULDER_2);
         for boulder in MOVED_BOULDERS {
             rt.hide_object(boulder);
         }
     }
-    if rt.check_event(EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE) && rt.check_event(EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE) {
+    if !(rt.check_event(EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE) && rt.check_event(EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE)) {
         rt.show_object(TOGGLE_SEAFOAM_ISLANDS_B3F_BOULDER_1);
         rt.show_object(TOGGLE_SEAFOAM_ISLANDS_B3F_BOULDER_2);
         rt.hide_object(TOGGLE_SEAFOAM_ISLANDS_B4F_BOULDER_1);

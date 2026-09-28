@@ -60,13 +60,31 @@ impl Compared {
     }
 }
 
-/// The fields that differ, one line each, as `ours` and then `theirs`.
+/// The lines that differ, as `ours` and `theirs`: a line diff, so a row only one side has is one
+/// line rather than every line after it.
 pub(super) fn differences(ours: &Compared, theirs: &Compared) -> Vec<String> {
     let (ours, theirs) = (format!("{ours:#?}"), format!("{theirs:#?}"));
-    ours.lines().zip(theirs.lines())
-        .filter(|(ours, theirs)| ours != theirs)
-        .map(|(ours, theirs)| format!("  ours   {}\n  theirs {}", ours.trim(), theirs.trim()))
-        .collect()
+    let (a, b): (Vec<&str>, Vec<&str>) = (ours.lines().collect(), theirs.lines().collect());
+    // `common[i][j]`: the longest common subsequence of `a[i..]` and `b[j..]`.
+    let mut common = vec![vec![0u16; b.len() + 1]; a.len() + 1];
+    for i in (0..a.len()).rev() {
+        for j in (0..b.len()).rev() {
+            common[i][j] = if a[i] == b[j] { common[i + 1][j + 1] + 1 } else { common[i + 1][j].max(common[i][j + 1]) };
+        }
+    }
+    let (mut i, mut j, mut lines) = (0, 0, Vec::new());
+    while i < a.len() || j < b.len() {
+        if i < a.len() && j < b.len() && a[i] == b[j] {
+            (i, j) = (i + 1, j + 1);
+        } else if j == b.len() || i < a.len() && common[i + 1][j] >= common[i][j + 1] {
+            lines.push(format!("  ours   {}", a[i].trim()));
+            i += 1;
+        } else {
+            lines.push(format!("  theirs {}", b[j].trim()));
+            j += 1;
+        }
+    }
+    lines
 }
 
 pub(super) fn compared(state: &GameState) -> Compared {

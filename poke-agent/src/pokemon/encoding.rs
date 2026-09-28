@@ -226,12 +226,13 @@ impl PokemonEncoding for MMU {
                             Some(self.read_pointer(&pokered_symbols::wSeafoamIslandsB4FCurScript)),
                         _ => None,
                     };
-                    if script.is_some_and(|script| script != 0 || joy_ignore == 0xFF) {
+                    if script.is_some_and(|script| script != 0) {
                         return GameMode::Script;
                     }
-                    // BIT_SCRIPTED_NPC_MOVEMENT (bit 0) is set by MoveSprite for scripted NPC
-                    // walks (e.g. Oak running toward the player in Pallet Town).
-                    if flags5 & 0x01 != 0 && joy_ignore & 0xF0 != 0 {
+                    // Every script that holds the player ignores the whole d-pad, between its texts
+                    // and its walks as well as during them (Oak running toward the player, the rival
+                    // leaving Oak's lab after the fight).
+                    if joy_ignore & 0xF0 != 0 {
                         return GameMode::Script;
                     }
                     // WCurOpponent is set by trainer encounter scripts (e.g. rival in Oak's lab)

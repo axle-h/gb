@@ -386,11 +386,17 @@ mod tests {
                 Box::new(crate::pokemon::policy::RandomPolicy::seeded(0)),
             );
             let mut cheats = Cheats::default().with_key_items(999_999);
-            let state = fixture.game_state();
             // `Cheats::apply` waits for a party, since a fresh save has no bag until Oak's script
-            // has run.
-            assert!(state.pokemon.len() > 0, "{}: a start has to have a party", start.name);
-            cheats.apply(&mut fixture.api(), &state);
+            // has run, and for the overworld, which a start may open on a script holding.
+            assert!(fixture.game_state().pokemon.len() > 0, "{}: a start has to have a party", start.name);
+            for _ in 0..600 {
+                let state = fixture.game_state();
+                cheats.apply(&mut fixture.api(), &state);
+                if cheats.stocked {
+                    break;
+                }
+                fixture.gb.run(crate::pokemon::agent::AGENT_RESOLUTION);
+            }
             assert!(cheats.stocked, "{}: the bag was never stocked", start.name);
 
             assert!(

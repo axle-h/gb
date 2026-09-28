@@ -56,10 +56,10 @@ fn run_current_map_script(rt: &mut Script) -> Flow {
     }
 }
 
-/// `SeafoamIslandsB3FDefaultScript`: once both of this floor's boulders are down its own holes, a
-/// player who surfs up to the steps is swept back down to them.
+/// `SeafoamIslandsB3FDefaultScript`: until both boulders from the floor above lie in this floor's
+/// water to slow the current, a player who surfs up to the steps is swept back away from them.
 fn default_script(rt: &mut Script) -> Flow {
-    if !boulders_down(rt) || (rt.x(), rt.y()) != NEAR_STEPS {
+    if boulders_down(rt) || (rt.x(), rt.y()) != NEAR_STEPS {
         return Flow::Return;
     }
     rt.simulate_joypad_rle(RLEList_ForcedSurfingStrongCurrentNearSteps);
@@ -69,9 +69,10 @@ fn default_script(rt: &mut Script) -> Flow {
 }
 
 /// `SeafoamIslandsB3FMoveObjectScript`, which `CheckForceBikeOrSurf` arms as the player lands in the
-/// water beside one of the boulders: the column they fell down says which way the current runs.
+/// water beside one of the boulders: until both are down, the column they fell down says which way
+/// the current runs.
 fn move_object_script(rt: &mut Script) -> Flow {
-    if !boulders_down(rt) {
+    if boulders_down(rt) {
         return Flow::Return;
     }
     let list = match rt.x() {

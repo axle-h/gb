@@ -128,6 +128,9 @@ impl NativeGame {
 
         let metadata = if live_blocks(map) {
             Arc::new(self.runtime_metadata(map, overworld)?)
+        } else if crate::pokemon::tile_map::elevator_for(map).is_some() {
+            let exits = overworld.warps().iter().map(|warp| (warp.destination_warp, warp.destination_map));
+            Arc::new(crate::pokemon::map_metadata::with_live_exits(&self.rom, &*self.maps.read_map(&self.rom, map)?, exits))
         } else {
             self.maps.read_map(&self.rom, map)?
         };

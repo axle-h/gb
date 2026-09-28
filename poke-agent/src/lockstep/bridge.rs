@@ -8,6 +8,7 @@ use poke_core::map::Map;
 use poke_core::move_name::PokemonMoveName;
 use poke_core::species::PokemonSpecies;
 use poke_core::sprite::SpriteFacing;
+use poke_core::map_objects::Warp;
 use pokered::mode::Mode;
 use pokered::modes::overworld::{Overworld, Standing};
 use pokered::party::{BoxMon, Named, Pokedex};
@@ -412,6 +413,9 @@ pub(super) fn overworld(gb: &GameBoy) -> Overworld {
         )
         .with_step_counter(mmu.read_pointer(&sym::wStepCounter))
         .with_blocks(mmu.read_slice(sym::wOverworldMap.address, blocks))
+        .with_warps(mmu.read_slice(sym::wWarpEntries.address, 4 * mmu.read_pointer(&sym::wNumberOfWarps) as usize)
+            .chunks(4).map(|entry| Warp { y: entry[0], x: entry[1], destination_warp: entry[2], destination_map: entry[3] })
+            .collect())
 }
 
 /// The recreation re-made from a cartridge that has just polled in the overworld.

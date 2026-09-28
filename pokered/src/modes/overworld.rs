@@ -183,8 +183,18 @@ pub struct Overworld {
     /// keeps it rather than the map's own blocks.
     #[serde(skip)]
     kept_blocks: Option<Vec<u8>>,
+    /// The fixture's `wWarpEntries`, which a lift's script may already have pointed elsewhere.
+    #[serde(skip)]
+    kept_warps: Option<Vec<Warp>>,
     /// The last body found no button pressed with nothing under way, so a press now is a new decision.
     polled: bool,
+    /// A step has landed or a map been entered since the last body, so the poll the body comes to
+    /// is offered before it runs.
+    #[serde(default)]
+    offer_poll: bool,
+    /// The poll is offered: the loop will poll next with nothing scripted, though it has not yet.
+    #[serde(default)]
+    offered: bool,
     /// Presses answered after a text, so a driver can see its own land.
     answered: u32,
     /// `wWalkBikeSurfStateCopy`, as `DisplayStartMenu` leaves it.
@@ -240,7 +250,10 @@ impl Overworld {
             warped_from: (0, 0),
             keep_sprites: false,
             kept_blocks: None,
+            kept_warps: None,
             polled: false,
+            offer_poll: false,
+            offered: false,
             answered: 0,
             walk_bike_surf_copy: WALKING,
             cut_tile: 0,
@@ -257,6 +270,12 @@ impl Overworld {
     /// The blocks as a running game has them, border included, for a map `standing` resumes.
     pub fn with_blocks(mut self, blocks: Vec<u8>) -> Self {
         self.kept_blocks = Some(blocks);
+        self
+    }
+
+    /// The doors as a running game has them, for a map `standing` resumes.
+    pub fn with_warps(mut self, warps: Vec<Warp>) -> Self {
+        self.kept_warps = Some(warps);
         self
     }
 
@@ -285,6 +304,11 @@ impl Overworld {
         &self.sprites
     }
 
+    /// `wWarpEntries`, as a lift's script has rewritten them.
+    pub fn warps(&self) -> &[Warp] {
+        &self.warps
+    }
+
     pub fn num_sprites(&self) -> u8 {
         self.num_sprites
     }
@@ -308,6 +332,14 @@ impl Overworld {
 
     pub fn is_turning(&self) -> bool {
         self.turning
+    }
+
+    /// A command is taken before the poll after a step lands or a map is entered, so a press there
+    /// carries a held direction straight on as a player's does, with no empty poll to arm a turn.
+    /// The overworld is not waiting yet: the poll runs the map's script first, and on entering a
+    /// map that is what redraws its gates.
+    pub fn poll_offered(&self) -> bool {
+        self.offered
     }
 
     /// `BIT_STANDING_ON_WARP`: a completed step landed on a warp entry.
@@ -493,6 +525,7 @@ impl Overworld {
         self.no_face_player = false;
         self.update_sprites(ctx);
         ctx.pad.ignore = Joypad::empty();
+        self.offer_poll = true;
         self.phase = Phase::Loop(1);
         Transition::Stay
     }
@@ -622,6 +655,7 @@ impl Overworld {
 
     fn after_mid_jump(&mut self, ctx: &mut Ctx) -> Transition {
         self.polled = false;
+        self.offer_poll = false;
         if self.walk_counter != 0 {
             // `.moveAhead`.
             if self.spinning {
@@ -873,6 +907,7 @@ impl Overworld {
         if self.walk_counter != 0 {
             return self.check_map_connections(ctx);
         }
+        self.offer_poll = true;
         if !self.scripted {
             self.rt.step_counter = self.rt.step_counter.wrapping_sub(1);
             if self.rt.wild_encounter_cooldown {
@@ -1426,6 +1461,9 @@ impl ModeUpdate for Overworld {
         if let Some(blocks) = self.kept_blocks.take() {
             self.view.blocks = blocks;
         }
+        if let Some(warps) = self.kept_warps.take() {
+            self.warps = warps;
+        }
         self.standing.destination_warp = destination;
         if resuming {
             // Stopped where the cartridge's loop had just polled, so its sprites are already updated.
@@ -1477,9 +1515,14 @@ impl ModeUpdate for Overworld {
             }
             Phase::Script => self.script_frame(ctx),
         };
+        if !matches!(transition, Transition::Stay) {
+            self.offer_poll = false;
+        }
+        let next_polls = matches!(self.phase, Phase::Loop(_)) && !self.moving() && self.free_to_poll(ctx);
+        self.offered = next_polls && self.offer_poll;
         // The slope answers a poll that finds nothing held, so the turn is offered before it, and a
         // host that sends nothing rolls on at the cartridge's pace.
-        if matches!(self.phase, Phase::Loop(_)) && !self.moving() && self.on_cycling_road_slope(ctx.world) && self.free_to_poll(ctx) {
+        if next_polls && self.on_cycling_road_slope(ctx.world) {
             self.polled = true;
         }
         if matches!(transition, Transition::Stay) {
@@ -1604,7 +1647,9 @@ impl OverworldDriver {
         if overworld.on_cycling_road_slope(world) {
             return Err(Refusal::Invalid("on the Cycling Road's slope a press rides rather than turns".into()));
         }
-        if overworld.standing.last_stop_direction == direction as u8 {
+        // A press that does not turn faces the way it bumps, and walks where nothing is in the way.
+        let turns = overworld.standing.check_for_180_degree_turn != 0 && overworld.standing.last_stop_direction != direction as u8;
+        if !turns && overworld.step_refusal(direction, world).is_none() {
             return Err(Refusal::Invalid(format!("a press {:?} would walk rather than turn", direction)));
         }
         Ok(Self::new(Order::Face(direction), world))
@@ -1632,7 +1677,7 @@ impl OverworldDriver {
     }
 
     fn waiting(overworld: &Overworld) -> Result<(), Refusal> {
-        if overworld.status() != Status::Waiting(Decision::Overworld) {
+        if overworld.status() != Status::Waiting(Decision::Overworld) && !overworld.poll_offered() {
             return Err(Refusal::Invalid("the player is not free to move".into()));
         }
         Ok(())
@@ -1667,13 +1712,15 @@ impl OverworldDriver {
             if matches!(overworld.status(), Status::Waiting(decision) if decision != Decision::Overworld) {
                 return Drive::Done;
             }
-            let settled = overworld.status() == Status::Waiting(Decision::Overworld) && !overworld.is_turning();
+            let settled = (overworld.status() == Status::Waiting(Decision::Overworld) || overworld.poll_offered())
+                && !overworld.is_turning();
+            let landed = (now.0, now.1, now.2) != (self.from.0, self.from.1, self.from.2);
             let arrived = match self.order {
-                Order::Face(direction) => location.facing == direction.facing(),
+                // An arrow tile under the poll carries the player off before the press turns them.
+                Order::Face(direction) => location.facing == direction.facing() || landed,
                 Order::Push(_) => !overworld.rt.boulder_dust,
                 _ => true,
             };
-            let landed = (now.0, now.1, now.2) != (self.from.0, self.from.1, self.from.2);
             let held = match self.order {
                 Order::Step(direction) if self.hold && !landed => direction.button(),
                 _ => Joypad::empty(),
@@ -1806,6 +1853,32 @@ mod tests {
         command(&mut game, Command::Face(Direction::Left));
         assert_eq!(at(&game), (Map::PalletTown, 6, 7));
         assert_eq!(game.world().location.facing, SpriteFacing::Left);
+    }
+
+    /// Runs to the frame the command in flight is done and gives `next` on the frame after, as an
+    /// agent with it ready does. The frames it ran.
+    fn chain(game: &mut Game, next: Command) -> u32 {
+        for frames in 1..2000 {
+            if game.frame(Input::None).events.iter().any(|event| matches!(event, crate::Event::CommandDone(_))) {
+                assert_eq!(game.frame(Input::Command(next.clone())).reply, Some(Reply::Accepted), "{next:?}");
+                return frames;
+            }
+        }
+        panic!("the command was never done");
+    }
+
+    /// A step given as the last one lands is pressed on the poll it lands before, so a corner is
+    /// walked as a held pad walks it: with no empty poll between, nothing arms a turn.
+    #[test]
+    fn a_step_given_as_the_last_lands_rounds_a_corner_without_a_turn() {
+        let mut game = game_at(Map::PalletTown, 5, 9);
+        assert_eq!(game.frame(Input::Command(Command::Step(Direction::Up))).reply, Some(Reply::Accepted));
+        chain(&mut game, Command::Step(Direction::Up));
+        let straight = chain(&mut game, Command::Step(Direction::Right));
+        let corner = chain(&mut game, Command::Step(Direction::Right));
+        assert_eq!(corner, straight, "no pass spent turning");
+        settle(&mut game);
+        assert_eq!(at(&game), (Map::PalletTown, 7, 7));
     }
 
     #[test]

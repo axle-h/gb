@@ -10,7 +10,9 @@ can break in silence.
 - `poll_policy` is the single seam every decision goes through and it resets the clock the watchdog
   reads; calling `service_tools` from a new site makes the watchdog believe the run is wedged.
 - A new map is recorded in the world graph before that poll, which is where a policy takes the
-  arrival it tells the model about; polling first left every map's first turn without one.
+  arrival it tells the model about; polling first left every map's first turn without one. Every
+  poll after it adds what the section now reaches (`WorldGraph::refresh`), and a landing joins only
+  a section that reaches it: a black-out's way back is routed from the graph alone.
 - `service_tools` is handed a `Readout`, not the emulator, so the recreation can answer it too;
   `Readout::emulated` is for a test that reads what only the emulator has.
 - The emulator never pauses while the model thinks, so a pause spanning a tool call deadlocks.
@@ -209,6 +211,15 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   every step), and a task's walk waits `MAX_TASK_BLOCKED_POLLS` for someone to move before giving up.
 - A harness that drives the game itself (the credits) calls `host_took_the_screen`, or the agent waits
   for ever on a command that will never report back.
+- A walk carries a held direction from step to step through `Overworld::poll_offered`, as the
+  emulated agent's pad does; nothing else may take that poll, which runs the map's script first.
+- The emulated agent asks only when the player is free: a d-pad bit in `wJoyIgnore` reads as
+  `GameMode::Script`, and `blackout_in_flight` holds the ask from any battle's end until its map is
+  entered again, which `wIsInBattle` alone does not cover. `RunningScript` presses nothing while a
+  script holds the d-pad: an A as it lets go talks to whoever the player faces.
+- The two agents end a route alike: the emulated one presses a pace's first step in the tick it
+  arrives (`start_pacing`), and a battle out of the landing that ends a boulder goal's walk starts
+  the goal in both (`battle_at_the_end_of_a_goal_walk`), since which tick sees a landing is chance.
 
 ## The page's copy
 

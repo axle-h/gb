@@ -65,10 +65,10 @@ fn object_moving3(rt: &mut Script) -> Flow {
     rt.end_trainer_battle().then(Label::BattleEnded)
 }
 
-/// `SeafoamIslandsB4FDefaultScript`: the current pushes a player who surfs up to the exit out of the
-/// water rather than letting them float there.
+/// `SeafoamIslandsB4FDefaultScript`: until both of B3F's boulders are down to slow it, the current
+/// pushes a player who surfs up to the exit out of the water rather than letting them float there.
 fn default_script(rt: &mut Script) -> Flow {
-    if !rt.check_event(EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE) || !rt.check_event(EVENT_SEAFOAM3_BOULDER2_DOWN_HOLE) {
+    if rt.check_event(EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE) && rt.check_event(EVENT_SEAFOAM3_BOULDER2_DOWN_HOLE) {
         return Flow::Return;
     }
     let Some(index) = rt.are_player_coords_in_array(&SURF_EXIT) else {
@@ -82,10 +82,10 @@ fn default_script(rt: &mut Script) -> Flow {
 }
 
 /// `SeafoamIslandsB4FMoveObjectScript`, armed by `CheckForceBikeOrSurf` as the player drops into the
-/// water: the boulders have plugged the whirlpool, so the current carries them round it.
+/// water: until both boulders are down here to slow it, the current carries them round to the stairs.
 fn move_object_script(rt: &mut Script) -> Flow {
-    let plugged = rt.check_event(EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE) && rt.check_event(EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE);
-    let list = match rt.are_player_coords_in_array(&STRONG_CURRENT).filter(|_| plugged) {
+    let slowed = rt.check_event(EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE) && rt.check_event(EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE);
+    let list = match rt.are_player_coords_in_array(&STRONG_CURRENT).filter(|_| !slowed) {
         Some(1) => SeafoamIslandsB4FMoveObjectScript::RLEList_StrongCurrentNearLeftBoulder,
         Some(_) => SeafoamIslandsB4FMoveObjectScript::RLEList_StrongCurrentNearRightBoulder,
         None => {

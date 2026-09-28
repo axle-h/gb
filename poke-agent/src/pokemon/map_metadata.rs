@@ -452,16 +452,22 @@ fn map_warp_gate_specs(map: Map) -> &'static [WarpGateSpec] {
     }
 }
 
+/// Each `wWarpEntries` entry's destination warp and map.
+fn warp_entry_exits(mmu: &MMU) -> Vec<(u8, u8)> {
+    let count = mmu.read_pointer(&pokered_symbols::wNumberOfWarps) as u16;
+    (0..count).map(|index| pokered_symbols::wWarpEntries.address + index * 4)
+        .map(|entry| (mmu.read(entry + 2), mmu.read(entry + 3)))
+        .collect()
+}
+
 /// A lift's doors lead wherever `wWarpEntries` says: the floor it was entered from until the panel
-/// picks another, which the ROM's table, written for one floor, cannot know.
-fn with_live_exits(mmu: &MMU, metadata: &MapMetadata) -> MapMetadata {
+/// picks another, which the ROM's table, written for one floor, cannot know. `exits` is each door's
+/// destination warp and map, as the entries hold them.
+pub(crate) fn with_live_exits(rom: &MMU, metadata: &MapMetadata, exits: impl IntoIterator<Item = (u8, u8)>) -> MapMetadata {
     let mut live = metadata.clone();
-    let count = mmu.read_pointer(&pokered_symbols::wNumberOfWarps) as usize;
-    for (index, warp) in live.warp_events.iter_mut().enumerate().take(count) {
-        let entry = pokered_symbols::wWarpEntries.address + index as u16 * 4;
-        let (warp_id, raw_map) = (mmu.read(entry + 2) as u16, mmu.read(entry + 3));
+    for (warp, (warp_id, raw_map)) in live.warp_events.iter_mut().zip(exits) {
         let Some(map) = Map::from_repr(raw_map).filter(|map| map.header_pointer().is_some()) else { continue };
-        if let Ok(position) = mmu.read_destination_warp_position(map, warp_id) {
+        if let Ok(position) = rom.read_destination_warp_position(map, warp_id as u16) {
             warp.destination_map = map;
             warp.destination_position = position;
         }
@@ -665,7 +671,7 @@ impl MapMetadataCache {
             metadata: if map_uses_runtime_blocks(map) {
                 Arc::new(mmu.read_map_metadata_runtime(map)?)
             } else if crate::pokemon::tile_map::elevator_for(map).is_some() {
-                Arc::new(with_live_exits(mmu, &*self.read_map(mmu, map)?))
+                Arc::new(with_live_exits(mmu, &*self.read_map(mmu, map)?, warp_entry_exits(mmu)))
             } else {
                 self.read_map(mmu, map)?
             },
@@ -717,7 +723,7 @@ impl MapMetadataReader for MMU {
                 metadata: if map_uses_runtime_blocks(map) {
                     Arc::new(self.read_map_metadata_runtime(map)?)
                 } else if crate::pokemon::tile_map::elevator_for(map).is_some() {
-                    Arc::new(with_live_exits(self, &self.read_map_metadata(map)?))
+                    Arc::new(with_live_exits(self, &self.read_map_metadata(map)?, warp_entry_exits(self)))
                 } else {
                     Arc::new(self.read_map_metadata(map)?)
                 },
@@ -749,7 +755,7 @@ pub fn map_uses_runtime_blocks(map: Map) -> bool {
         | Map::PokemonMansionB1F | Map::CinnabarGym
         | Map::VictoryRoad1F | Map::VictoryRoad2F | Map::VictoryRoad3F
         | Map::LoreleisRoom | Map::BrunosRoom | Map::AgathasRoom | Map::LancesRoom | Map::ChampionsRoom
-        | Map::VermilionGym)
+        | Map::VermilionGym | Map::GameCorner)
 }
 
 /// [`MapMetadata`] for one of the maps a script rewrites the blocks of, given the live block map

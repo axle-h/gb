@@ -60,6 +60,12 @@ pub struct MapStep {
 #[derive(Debug, Clone, Default)]
 pub struct WorldGraph {
     adjacency: HashMap<(Map, Point8), Vec<Edge>>,
+    /// The squares each observed section reaches, in the raw coordinates its entry is keyed in.
+    reach: HashMap<(Map, Point8), HashSet<Point8>>,
+    /// The section the player is in: the last arrival's key.
+    section: Option<(Map, Point8)>,
+    /// The tiles its last refresh saw, which a refresh from inside the reach can skip on.
+    refreshed: Vec<MetaTile>,
     arrival: Option<Arrival>,
 }
 
@@ -74,7 +80,7 @@ pub struct Arrival {
 
 impl WorldGraph {
     pub fn new() -> Self {
-        Self { adjacency: HashMap::new(), arrival: None }
+        Self { adjacency: HashMap::new(), reach: HashMap::new(), section: None, refreshed: Vec::new(), arrival: None }
     }
 
     fn edges_from_reachable(tile_map: &MetaTileMap, map: Map) -> Vec<Edge> {
@@ -96,12 +102,36 @@ impl WorldGraph {
             .collect()
     }
 
-    /// Refine the node `(map, entry)` from the live map view, once per arrival.
+    /// The node `(map, entry)` from the live map view, on an arrival.
     pub fn observe(&mut self, map: Map, entry: Point8, tile_map: &MetaTileMap) {
-        let edges = Self::edges_from_reachable(tile_map, map);
-        self.adjacency.insert((map, entry), edges);
+        self.adjacency.insert((map, entry), Vec::new());
+        self.reach.insert((map, entry), HashSet::new());
+        self.section = Some((map, entry));
+        self.refreshed.clear();
+        self.refresh(tile_map, entry);
         let from = self.arrival.map(|a| a.map).filter(|&previous| previous != map);
         self.arrival = Some(Arrival { map, at: tile_map.player_position, from });
+    }
+
+    /// What the player's section reaches from where they stand now, added to what it reached
+    /// before: a boulder shoved onto a switch or a tree cut opens more of it, and the way back up a
+    /// ledge is still there. `at` is the player's raw position.
+    pub fn refresh(&mut self, tile_map: &MetaTileMap, at: Point8) {
+        let Some(key) = self.section.filter(|&(map, _)| map == tile_map.map) else { return };
+        if self.refreshed == tile_map.meta_tiles && self.reach.get(&key).is_some_and(|reach| reach.contains(&at)) {
+            return;
+        }
+        self.refreshed.clone_from(&tile_map.meta_tiles);
+        let edges = self.adjacency.entry(key).or_default();
+        for edge in Self::edges_from_reachable(tile_map, key.0) {
+            if !edges.contains(&edge) {
+                edges.push(edge);
+            }
+        }
+        // The tile map's coordinates are the raw ones shifted by the border it draws.
+        let (dx, dy) = (tile_map.player_position.x.wrapping_sub(at.x), tile_map.player_position.y.wrapping_sub(at.y));
+        self.reach.entry(key).or_default().extend(tile_map.reachable_tiles().into_iter()
+            .map(|p| Point8 { x: p.x.wrapping_sub(dx), y: p.y.wrapping_sub(dy) }));
     }
 
     /// `None` before the first arrival this process sees, so a resumed run does not know until it
@@ -135,14 +165,24 @@ impl WorldGraph {
         let mut came_from: HashMap<Node, (Node, (EdgeKind, Point8))> = HashMap::new();
         let mut queue: VecDeque<Node> = VecDeque::new();
 
-        // Snap to the nearest observed node, or keep the raw position when none is near.
+        // Snap to the observed section that reaches the square, or keep the raw position when none
+        // does. Near is not enough: Mt. Moon's pockets lie a few squares apart and never meet. A
+        // section observed without its reach snaps to the nearest within a few squares.
         let resolve = |map: Map, pos: Point8| -> Point8 {
             if self.adjacency.contains_key(&(map, pos)) {
                 return pos;
             }
+            let distance = |p: Point8| (p.x as i32 - pos.x as i32).abs() + (p.y as i32 - pos.y as i32).abs();
+            if let Some(&(_, entry)) = self.reach.iter()
+                .filter(|((m, _), reach)| *m == map && reach.contains(&pos))
+                .map(|(key, _)| key)
+                .min_by_key(|(_, entry)| distance(*entry))
+            {
+                return entry;
+            }
             const SNAP_THRESHOLD: i32 = 8;
             self.adjacency.keys()
-                .filter(|(m, _)| *m == map)
+                .filter(|&&key| key.0 == map && !self.reach.contains_key(&key))
                 .map(|(_, p)| *p)
                 .map(|p| (p, (p.x as i32 - pos.x as i32).abs() + (p.y as i32 - pos.y as i32).abs()))
                 .filter(|(_, d)| *d <= SNAP_THRESHOLD)
@@ -246,6 +286,11 @@ impl WorldGraph {
             })
             .collect();
         self.adjacency.insert((map, entry), edges);
+    }
+
+    /// Record the squares a section reaches, as `observe` would.
+    pub(crate) fn observe_reach(&mut self, map: Map, entry: Point8, reach: &[Point8]) {
+        self.reach.insert((map, entry), reach.iter().copied().collect());
     }
 }
 
@@ -402,5 +447,17 @@ mod tests {
         ];
         let chosen = g.pick_shortest_path_action(&actions, Map::ViridianCity).unwrap();
         assert_eq!(chosen.tile, MetaTile::Connection { to_map: Map::Route1, to_position: p(9, 8) });
+    }
+
+    /// Mt. Moon B1F's pockets lie a few squares apart and never meet: a ladder landing in one that
+    /// has not been seen is not the pocket next to it, which leads out.
+    #[test]
+    fn a_landing_joins_only_a_section_that_reaches_it() {
+        use EdgeKind::*;
+        let mut g = WorldGraph::new();
+        g.observe_edges(Map::MtMoonB1F, p(23, 3), &[(p(27, 3), Map::Route4, p(24, 5), Warp)]);
+        g.observe_reach(Map::MtMoonB1F, p(23, 3), &[p(23, 3), p(24, 3), p(25, 3), p(26, 3), p(27, 3)]);
+        assert_eq!(g.shortest_path_from_entry(Map::MtMoonB1F, p(25, 9), Map::Route4), None);
+        assert!(g.shortest_path_from_entry(Map::MtMoonB1F, p(25, 3), Map::Route4).is_some());
     }
 }

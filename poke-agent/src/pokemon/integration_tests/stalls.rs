@@ -317,9 +317,10 @@ fn a_surf_mount_hands_the_walk_back_to_itself_rather_than_to_the_policy() {
     assert!(arrived, "the crossing has to finish, or the sequence below is about nothing: {seen:?}");
     assert!(seen.iter().any(|s| s == "surf"),
             "the walk had to mount Surf to leave Pallet Town, or this proves nothing: {seen:?}");
-    assert_eq!(seen.first().map(String::as_str), Some("wait"),
-               "the crossing opens on the one decision that starts it: {seen:?}");
-    assert!(!seen[1..].iter().any(|s| s.starts_with("wait")),
+    // The fixture opens on a script holding the pad, which the agent waits out before it asks.
+    let walk = seen.iter().position(|s| s.starts_with("move→")).expect("the crossing is a walk");
+    assert_eq!(seen[walk - 1], "wait", "the crossing opens on the one decision that starts it: {seen:?}");
+    assert!(!seen[walk..].iter().any(|s| s.starts_with("wait")),
             "the whole crossing is one decision: a second `wait` is the walk being thrown away and \
              the identical question put back to the policy, which is a paid request. {seen:?}");
 }

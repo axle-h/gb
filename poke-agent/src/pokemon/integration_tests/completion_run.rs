@@ -3244,6 +3244,13 @@ fn action_for_action_tour() {
                      Duration::from_secs(4 * 3600), Some(Arc::clone(&log)));
     let segments = std::mem::take(&mut log.lock().expect("not poisoned").segments);
     let failed = crate::lockstep::action_for_action::replay_all(&segments);
+    // Each differing segment's save, for the fixture sweep's `GB_A4A_DIR` to replay alone.
+    if let Ok(dir) = std::env::var("GB_A4A_DUMP") {
+        for &(at, _) in &failed {
+            std::fs::write(std::path::Path::new(&dir).join(format!("segment-{at}.bin")), &segments[at].state)
+                .expect("the dump directory is writable");
+        }
+    }
     assert!(failed.is_empty(), "{} of {} actions differ", failed.len(), segments.len());
 }
 

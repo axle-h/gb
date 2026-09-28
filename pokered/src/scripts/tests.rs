@@ -346,13 +346,29 @@ fn seafoam_s_current_carries_a_surfing_player_round_to_the_stairs_and_puts_them_
     let mut game = game(Map::SeafoamIslandsB4F, 4, 14, SpriteFacing::Down, 13, |world| {
         world.location.walk_bike_surf = SURFING;
         world.events.set(EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE);
-        world.events.set(EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE);
         world.scripts.maps.seafoam_islands_b4f.cur_script = SCRIPT_SEAFOAMISLANDSB4F_MOVE_OBJECT;
     });
     play_until(&mut game, 8000, |game| {
         (game.world().location.x, game.world().location.y) == (7, 10) && free(game)
     });
     assert_eq!(game.world().location.walk_bike_surf, WALKING, "the press before the last one is the step ashore");
+    assert_eq!(game.world().scripts.maps.seafoam_islands_b4f.cur_script, 0);
+}
+
+/// `CheckBothEventsSet` sets `z` when both are set: with both boulders down here the current is
+/// slowed, and a player who lands at (4, 14) stays there.
+#[test]
+fn seafoam_s_current_leaves_a_player_where_they_land_once_both_boulders_are_down() {
+    use poke_core::symbols::pokered_map_scripts::SCRIPT_SEAFOAMISLANDSB4F_MOVE_OBJECT;
+    let mut game = game(Map::SeafoamIslandsB4F, 4, 14, SpriteFacing::Down, 13, |world| {
+        world.location.walk_bike_surf = crate::systems::overworld::location::SURFING;
+        world.events.set(EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE);
+        world.events.set(EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE);
+        world.scripts.maps.seafoam_islands_b4f.cur_script = SCRIPT_SEAFOAMISLANDSB4F_MOVE_OBJECT;
+    });
+    play_until(&mut game, 600, free);
+    assert!(free(&game));
+    assert_eq!((game.world().location.x, game.world().location.y), (4, 14));
     assert_eq!(game.world().scripts.maps.seafoam_islands_b4f.cur_script, 0);
 }
 
@@ -3272,19 +3288,16 @@ fn a_boulder_pushed_down_a_seafoam_hole_turns_up_in_the_water_below() {
 
     lean(&mut game, crate::input::Joypad::RIGHT, 4000, |game| game.world().location.map == Map::SeafoamIslandsB3F);
     play_until(&mut game, 4000, free);
-    assert_eq!(game.world().location.map, Map::SeafoamIslandsB3F, "the player fell down after it");
+    // One boulder does not slow B3F's current, which sweeps the player on down.
+    assert_eq!(game.world().location.map, Map::SeafoamIslandsB4F, "the player fell down after it, and further");
 }
 
-/// `Route20BoulderScript`: the first pass on Route 20 after the islands puts every boulder back
-/// where it started. The events stay set, so the currents stay slowed and the puzzle cannot be
-/// undone by pushing them down again.
-#[test]
-fn route_20_puts_the_seafoam_boulders_back_where_they_started() {
-    use poke_core::map_objects::initial_toggleable_object_flags;
+/// The islands with every boulder where a finished puzzle leaves it, and `events` set.
+fn seafoam_left(events: &[u16]) -> Game {
     use poke_core::symbols::pokered_toggles::*;
-    let mut game = game(Map::Route20, 5, 5, SpriteFacing::Down, 5, |world| {
-        for event in [EVENT_IN_SEAFOAM_ISLANDS, EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE, EVENT_SEAFOAM3_BOULDER2_DOWN_HOLE,
-            EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE, EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE] {
+    game(Map::Route20, 5, 5, SpriteFacing::Down, 5, |world| {
+        world.events.set(EVENT_IN_SEAFOAM_ISLANDS);
+        for &event in events {
             world.events.set(event);
         }
         for toggle in [TOGGLE_SEAFOAM_ISLANDS_1F_BOULDER_1, TOGGLE_SEAFOAM_ISLANDS_1F_BOULDER_2,
@@ -3295,12 +3308,32 @@ fn route_20_puts_the_seafoam_boulders_back_where_they_started() {
             TOGGLE_SEAFOAM_ISLANDS_B4F_BOULDER_1, TOGGLE_SEAFOAM_ISLANDS_B4F_BOULDER_2] {
             show(world, toggle);
         }
-    });
+    })
+}
+
+/// `Route20BoulderScript`: the first pass on Route 20 after the islands puts the boulders of a pair
+/// of holes left unfinished back where they started, so the puzzle can be done again.
+#[test]
+fn route_20_puts_an_unfinished_seafoam_puzzle_back_where_it_started() {
+    use poke_core::map_objects::initial_toggleable_object_flags;
+    let mut game = seafoam_left(&[EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE, EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE]);
     play_until(&mut game, 4000, free);
     let world = game.world();
     assert!(!world.events.is_set(EVENT_IN_SEAFOAM_ISLANDS), "the pass reads the event and clears it");
     assert_eq!(world.location.hidden_objects, initial_toggleable_object_flags(), "every boulder is back");
-    assert!(world.events.is_set(EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE), "and the currents stay slowed");
+}
+
+/// `CheckBothEventsSet` sets `z` when both are set, and `Route20BoulderScript` jumps past a pair
+/// on it: a finished puzzle stays finished.
+#[test]
+fn route_20_leaves_a_finished_seafoam_puzzle_alone() {
+    let mut game = seafoam_left(&[EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE, EVENT_SEAFOAM3_BOULDER2_DOWN_HOLE,
+        EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE, EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE]);
+    let before = game.world().location.hidden_objects.clone();
+    play_until(&mut game, 4000, free);
+    let world = game.world();
+    assert!(!world.events.is_set(EVENT_IN_SEAFOAM_ISLANDS), "the pass reads the event and clears it");
+    assert_eq!(world.location.hidden_objects, before, "every boulder stays down");
 }
 
 // ---- Saffron's dojo and its houses ----

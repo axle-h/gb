@@ -49,6 +49,14 @@ impl GameRng {
             Self::Split { main, .. } => main.drawn(),
         }
     }
+
+    /// How far into the people's tape the game has drawn, for a split tape.
+    pub fn wandered(&self) -> Option<usize> {
+        match self {
+            Self::Split { wander, .. } => wander.drawn(),
+            _ => None,
+        }
+    }
 }
 
 impl Rng for GameRng {
