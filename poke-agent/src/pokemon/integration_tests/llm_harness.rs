@@ -558,6 +558,7 @@ pub struct LlmRun {
     pub processes: u64,
     pub cheats: Option<crate::pokemon::integration_tests::cheats::Cheats>,
     options: crate::pokemon::options::GameOptions,
+    recording: Option<Arc<Mutex<crate::lockstep::action_for_action::Log>>>,
 }
 
 /// How to build one. Everything has a default that suits the default tier.
@@ -574,6 +575,7 @@ pub struct LlmRunBuilder {
     name: &'static str,
     coverage: bool,
     options: crate::pokemon::options::GameOptions,
+    recording: Option<Arc<Mutex<crate::lockstep::action_for_action::Log>>>,
 }
 
 impl LlmRunBuilder {
@@ -591,7 +593,15 @@ impl LlmRunBuilder {
             name: "llm-run",
             coverage: false,
             options: crate::pokemon::options::HEADLESS_OPTIONS,
+            recording: None,
         }
+    }
+
+    /// Write down, into `log`, where the cartridge stood before every overworld action and every
+    /// answer after it, for `lockstep::action_for_action` to replay.
+    pub fn recording(mut self, log: Arc<Mutex<crate::lockstep::action_for_action::Log>>) -> Self {
+        self.recording = Some(log);
+        self
     }
 
     pub fn game_time(mut self, budget: Duration) -> Self {
@@ -642,14 +652,14 @@ impl LlmRunBuilder {
         self
     }
 
-    pub fn start(self, brain: Box<dyn Brain>) -> LlmRun {
+    fn endpoint(&self, brain: Box<dyn Brain>) -> MockEndpoint {
         // A `Timeout` fault outlasts the client's patience and nothing more, to keep wall clock
         // down.
-        let endpoint = MockEndpoint::start_with_timeout_hold(
-            brain,
-            self.request_timeout * 3 + Duration::from_millis(200),
-        );
-        let config = LlmConfig {
+        MockEndpoint::start_with_timeout_hold(brain, self.request_timeout * 3 + Duration::from_millis(200))
+    }
+
+    fn config(&self, endpoint: &MockEndpoint) -> LlmConfig {
+        LlmConfig {
             base_url: endpoint.base_url(),
             api_key: "mock".to_string(),
             model: "mock".to_string(),
@@ -661,7 +671,12 @@ impl LlmRunBuilder {
             max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
             reasoning_effort: None,
             stuck_timeout: self.stuck_timeout,
-        };
+        }
+    }
+
+    pub fn start(self, brain: Box<dyn Brain>) -> LlmRun {
+        let endpoint = self.endpoint(brain);
+        let config = self.config(&endpoint);
 
         let scratch = crate::run::Scratch::new(self.name);
         let root = scratch.0.clone();
@@ -690,9 +705,126 @@ impl LlmRunBuilder {
             processes: 0,
             cheats: None,
             options: self.options,
+            recording: self.recording,
         };
         run.bring_up(None);
         run
+    }
+}
+
+#[cfg(feature = "slow-tests")]
+impl LlmRunBuilder {
+    /// The same stack over the recreation: `game` played by `LlmPolicy` through the native agent,
+    /// from a fresh run directory. The fixture and the options are the emulator's and go unused.
+    pub fn start_native(self, game: pokered::Game, brain: Box<dyn Brain>) -> NativeLlmRun {
+        let endpoint = self.endpoint(brain);
+        let config = self.config(&endpoint);
+        let scratch = crate::run::Scratch::new(self.name);
+        let (run, _origin, _saved) = crate::run::RunDir::open(&scratch.0, true, "mock", &|bytes| !bytes.is_empty())
+            .expect("a run directory");
+        let run_dir = run.path().to_path_buf();
+        let dir = Some(run_dir.as_path());
+        let published = Published::new();
+        let (worker, handles) = worker::channels(
+            Box::new(OpenAiClient::new(&config)),
+            config.clone(),
+            Arc::clone(&published),
+            TodoList::open(dir),
+            BattleScript::open(dir),
+            History::open(dir),
+        );
+        let current = Arc::new(crate::run::CurrentRun::new(scratch.0.clone(), "mock".into(), run));
+        let worker = worker
+            .with_retry(self.retry)
+            .with_refusal_park(self.refusal_park)
+            .with_run(current)
+            .spawn()
+            .expect("the worker thread starts");
+        let policy = Box::new(LlmPolicy::new(handles, self.stuck_timeout));
+        let agent = crate::pokemon::native_agent::NativeAgent::new(game, policy).expect("a native agent");
+        NativeLlmRun {
+            _endpoint: endpoint,
+            published,
+            agent: Some(agent),
+            _scratch: scratch,
+            worker: Some(worker),
+            max_frames: self.max_game_time.as_secs() * 60,
+        }
+    }
+}
+
+/// [`LlmRun`] over the recreation: the same endpoint, worker and policy, a [`NativeAgent`] where
+/// the emulator was, and a frame where the host ticked 20 ms.
+///
+/// [`NativeAgent`]: crate::pokemon::native_agent::NativeAgent
+#[cfg(feature = "slow-tests")]
+pub struct NativeLlmRun {
+    /// Held so the server outlives the run; the brain behind it is what a test reads.
+    _endpoint: MockEndpoint,
+    published: Arc<Published>,
+    /// `None` only once dropped, so the policy's channel closes before the worker is joined.
+    agent: Option<crate::pokemon::native_agent::NativeAgent>,
+    _scratch: crate::run::Scratch,
+    worker: Option<std::thread::JoinHandle<()>>,
+    /// The game time the run may play, in frames.
+    max_frames: u64,
+}
+
+#[cfg(feature = "slow-tests")]
+impl NativeLlmRun {
+    pub fn agent(&mut self) -> &mut crate::pokemon::native_agent::NativeAgent {
+        self.agent.as_mut().expect("a live agent")
+    }
+
+    /// One frame, honouring the park as `host.rs` does. An error is the agent finding no answer.
+    pub fn tick(&mut self) -> Result<(), String> {
+        if self.published.throttled_until().is_some_and(|until| crate::published::now_ms() < until) {
+            std::thread::sleep(Duration::from_millis(1));
+            return Ok(());
+        }
+        let max_frames = self.max_frames;
+        let agent = self.agent();
+        if agent.game().frames() >= max_frames {
+            return Err(format!("out of game time after {} frames", agent.game().frames()));
+        }
+        // The ceremony, the credits and the title screen they end on are the game playing to
+        // itself: the agent stops at the Hall of Fame and a deployed run ends there, so the buttons
+        // that see a run on into the postgame are the harness's own, as the emulated run presses them.
+        use pokered::command::{Command, Decision};
+        use pokered::mode::{Mode, Status};
+        if let Some(Mode::Movie(_) | Mode::MainMenu(_)) = agent.game().modes().last() {
+            agent.host_took_the_screen();
+            let command = match agent.game().status() {
+                Status::Waiting(Decision::MainMenu) => Some(Command::ChooseOption(0)),
+                Status::Waiting(_) => Some(Command::Advance),
+                _ => None,
+            };
+            agent.game_mut().frame(command.map_or(pokered::Input::None, pokered::Input::Command));
+            return Ok(());
+        }
+        agent.tick()
+    }
+
+    /// Tick until `done`, or until the wall clock runs out. `false` means it never happened.
+    pub fn tick_until(&mut self, within: Duration, mut done: impl FnMut(&mut Self) -> bool) -> Result<bool, String> {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            if done(self) {
+                return Ok(true);
+            }
+            self.tick()?;
+        }
+        Ok(done(self))
+    }
+}
+
+#[cfg(feature = "slow-tests")]
+impl Drop for NativeLlmRun {
+    fn drop(&mut self) {
+        self.agent = None;
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -732,7 +864,10 @@ impl LlmRun {
                 .expect("the worker thread starts"),
         );
 
-        let policy = Box::new(LlmPolicy::new(handles, self.stuck_timeout));
+        let mut policy: Box<dyn crate::pokemon::policy::Policy> = Box::new(LlmPolicy::new(handles, self.stuck_timeout));
+        if let Some(log) = &self.recording {
+            policy = Box::new(crate::lockstep::action_for_action::Recording::new(policy, Arc::clone(log)));
+        }
         // Resumed from `state.gbst`, not from the emulator just held.
         let state = saved.unwrap_or_else(|| self.fixture_state.to_vec());
         let mut fixture = TestFixture::with_policy(&state, self.max_game_time, policy).with_options(self.options);
@@ -808,6 +943,9 @@ impl LlmRun {
             let mut cheats = self.cheats.take().expect("checked above");
             cheats.apply(&mut self.fixture().api(), &state);
             self.cheats = Some(cheats);
+        }
+        if let Some(log) = self.recording.clone() {
+            log.lock().expect("not poisoned").after_tick(&self.fixture().gb);
         }
     }
 

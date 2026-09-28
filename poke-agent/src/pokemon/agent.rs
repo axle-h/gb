@@ -187,7 +187,7 @@ impl AgentEvent {
         Self::TextBox { message: reader.to_string() }
     }
 
-    fn is_worth_reporting(&self) -> bool {
+    pub(crate) fn is_worth_reporting(&self) -> bool {
         match self {
             Self::TextBox { message } => !message.trim().is_empty(),
             _ => true,
@@ -898,7 +898,7 @@ impl PokemonAgent {
         self.stuck_reported_at = MachineCycles::ZERO;
         // A decision point ends the deferral this counts.
         self.blackout_ticks = 0;
-        self.policy.service_tools(game_state, api, &self.world_graph);
+        self.policy.service_tools(game_state, &*api, &self.world_graph);
     }
 
     /// [`Policy::name`], reported on every heartbeat and in a finished run's record.
@@ -946,7 +946,7 @@ impl PokemonAgent {
         }
 
         let jam = Jam { agent_state: &agent_state, stuck_for };
-        self.policy.service_tools(&game_state, api, &self.world_graph);
+        self.policy.service_tools(&game_state, &*api, &self.world_graph);
         self.policy.pick_unstick(&game_state, jam);
         true
     }
@@ -1767,8 +1767,8 @@ impl PokemonAgent {
                 }
                 if !warping && delay.tick(delta_cycles) {
                     let game_state = self.observe_state(api)?;
-                    self.poll_policy(&game_state, api);
-                    // Keyed by the raw landing coords.
+                    // Keyed by the raw landing coords. Before the poll, which is where a policy takes
+                    // the arrival it tells the model about.
                     if self.last_map != Some(game_state.map.map) {
                         self.last_map = Some(game_state.map.map);
                         self.world_graph.observe(game_state.map.map, api.raw_player_coords(), &game_state.map);
@@ -1778,6 +1778,7 @@ impl PokemonAgent {
                         self.turned_back_tiles.clear();
                         self.turn_back_watch = None;
                     }
+                    self.poll_policy(&game_state, api);
                     // A non-walking field action takes priority over walking.
                     match self.policy.pick_field_move(&game_state) {
                         Some(crate::pokemon::policy::FieldMove::ReorderParty { slot }) => {
@@ -3806,8 +3807,6 @@ mod tests {
     use crate::pokemon::item::ItemId;
     use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 
-    /// A battle turn formats as a sentence.
-    #[test]
     /// A door given up on for want of the Card Key is not scenery, and the key says so.
     #[test]
     fn the_card_key_forgives_the_doors_that_refused_without_it() {
@@ -3837,6 +3836,7 @@ mod tests {
                 "only the maps with card-key doors are forgiven");
     }
 
+    /// A battle turn formats as a sentence.
     #[test]
     fn a_battle_turn_reads_as_a_sentence() {
         let say = |action| format!("{}", AgentEvent::BattleActionStarted {

@@ -18,7 +18,8 @@ use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::policy::{FieldMove, Policy};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::world_graph::WorldGraph;
-use crate::pokemon::{GameState, PokemonApi};
+use crate::pokemon::GameState;
+use crate::pokemon::observe::Readout;
 
 pub struct LlmPolicy {
     handles: TurnHandles,
@@ -526,12 +527,12 @@ impl Policy for LlmPolicy {
     }
 
     /// Runs fifty times a second, so the common path is a snapshot and an empty `try_recv`.
-    fn service_tools(&mut self, state: &GameState, api: &mut PokemonApi<'_>, graph: &WorldGraph) {
+    fn service_tools(&mut self, state: &GameState, readout: &dyn Readout, graph: &WorldGraph) {
         let live = self.handles.current_generation();
         let asking = self.observed_kind(state);
 
-        // The one moment the policy has a `PokemonApi`, and the source of every turn's snapshot.
-        self.snapshot = ApiSnapshot::read(api);
+        // The one moment the policy has a `Readout`, and the source of every turn's snapshot.
+        self.snapshot = ApiSnapshot::read(readout);
         self.snapshot.arrival = graph.arrival();
         // Moved, not cloned, so keeping the last battle state costs a pointer swap.
         if let Some(previous) = self.state.replace(Box::new(state.clone())) {
@@ -555,7 +556,7 @@ impl Policy for LlmPolicy {
                         self.guide_chapter_read = Some(crate::llm::guide::chapter_index(state.badges));
                     }
                     ToolBatchResult::Answered(
-                        batch.calls.iter().map(|call| tools::service_read(call, state, api, graph)).collect(),
+                        batch.calls.iter().map(|call| tools::service_read(call, state, readout, graph)).collect(),
                     )
                 }
                 // The tool is never executed.
@@ -876,6 +877,7 @@ impl Drop for LlmPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pokemon::PokemonApi;
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
@@ -1095,16 +1097,16 @@ mod tests {
         /// One agent tick: the tool poll, then the decision poll, in `agent.rs`'s order.
         fn tick_overworld(&mut self, policy: &mut LlmPolicy) -> Option<OverworldAction> {
             let state = self.state();
-            let mut api = PokemonApi::new(&mut self.gb);
-            policy.service_tools(&state, &mut api, &self.graph);
+            let api = PokemonApi::new(&mut self.gb);
+            policy.service_tools(&state, &api, &self.graph);
             drop(api);
             policy.pick_overworld_action(&state, &self.graph)
         }
 
         fn tick_battle(&mut self, policy: &mut LlmPolicy) -> Option<crate::pokemon::battle::BattleAction> {
             let state = self.state();
-            let mut api = PokemonApi::new(&mut self.gb);
-            policy.service_tools(&state, &mut api, &self.graph);
+            let api = PokemonApi::new(&mut self.gb);
+            policy.service_tools(&state, &api, &self.graph);
             drop(api);
             policy.pick_battle_action(&state)
         }
@@ -1116,8 +1118,8 @@ mod tests {
             ask: impl FnOnce(&mut LlmPolicy, &GameState) -> Option<T>,
         ) -> Option<T> {
             let state = self.state();
-            let mut api = PokemonApi::new(&mut self.gb);
-            policy.service_tools(&state, &mut api, &self.graph);
+            let api = PokemonApi::new(&mut self.gb);
+            policy.service_tools(&state, &api, &self.graph);
             drop(api);
             ask(policy, &state)
         }
@@ -1125,8 +1127,8 @@ mod tests {
         /// A jammed tick in `run_watchdog`'s order: `service_tools`, then `pick_unstick`.
         fn tick_stuck(&mut self, policy: &mut LlmPolicy, agent_state: &str) {
             let state = self.state();
-            let mut api = PokemonApi::new(&mut self.gb);
-            policy.service_tools(&state, &mut api, &self.graph);
+            let api = PokemonApi::new(&mut self.gb);
+            policy.service_tools(&state, &api, &self.graph);
             drop(api);
             let jam = crate::pokemon::policy::Jam {
                 agent_state,

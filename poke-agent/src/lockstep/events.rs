@@ -3,46 +3,14 @@
 //! the fixture nearest it with WRAM written to clear the event it tests.
 
 use gb::game_boy::GameBoy;
-use gb::ram::ROM;
 use poke_core::map::Map;
-use poke_core::move_name::PokemonMoveName;
 use poke_core::species::PokemonSpecies;
 use poke_core::sprite::SpriteFacing;
 use pokered::input::Joypad;
-use pokered::party::{BoxMon, Named};
-use pokered::systems::stats::Dvs;
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointerRead};
 use super::scripts::{lockstep, Action, Cartridge, Kind, Seen, PROMPT};
 
-const NAME_LENGTH: u16 = 11;
-const TERMINATOR: u8 = 0x50;
 const PARTY_STRUCT: u16 = 0x2C;
-
-/// A `box_struct` and its two names as WRAM lays them out.
-pub(super) fn box_mon_at(gb: &GameBoy, at: u16, ot: u16, nick: u16) -> Named<BoxMon> {
-    let mmu = gb.core().mmu();
-    let b: Vec<u8> = (0..33).map(|i| mmu.read(at + i)).collect();
-    let word = |i: usize| u16::from_be_bytes([b[i], b[i + 1]]);
-    let name = |at: u16| (0..NAME_LENGTH).map(|i| mmu.read(at + i)).take_while(|&byte| byte != TERMINATOR).collect();
-    Named {
-        mon: BoxMon {
-            species: PokemonSpecies::from_repr(b[0]).expect("a species"),
-            hp: word(1),
-            box_level: b[3],
-            status: b[4],
-            types: [b[5], b[6]],
-            catch_rate: b[7],
-            moves: [0, 1, 2, 3].map(|i| PokemonMoveName::from_repr(b[8 + i])),
-            ot_id: word(12),
-            exp: u32::from_be_bytes([0, b[14], b[15], b[16]]),
-            stat_exp: [0, 1, 2, 3, 4].map(|i| word(17 + 2 * i)),
-            dvs: Dvs([b[27], b[28]]),
-            pp: [b[29], b[30], b[31], b[32]],
-        },
-        ot: name(ot),
-        nick: name(nick),
-    }
-}
 
 /// Walks `route`, answering every prompt with A, and stops at the first overworld poll `done` accepts
 /// once the route is walked.
@@ -111,6 +79,21 @@ fn the_nurse_heals_the_party_as_the_cartridge_does() {
         cartridge.write(sym::wStatusFlags4.address, flags & !(1 << 2));
     };
     lockstep(include_bytes!("../pokemon/data/post-cascade.bin"), prepare, route(ROUTE, |seen| seen.settled().party_hp[0] > 1));
+}
+
+/// The Cerulean Cable Club's receptionist with no cable in: up from the door, along the room to
+/// her counter, and turned away.
+#[test]
+fn the_link_receptionist_turns_the_player_away_as_the_cartridge_does() {
+    const ROUTE: &[(Action, &str)] = &[
+        walk(Joypad::UP, "up"), walk(Joypad::UP, "up"), walk(Joypad::UP, "up to (3, 4)"),
+        walk(Joypad::RIGHT, "right"), walk(Joypad::RIGHT, "right"), walk(Joypad::RIGHT, "right"),
+        walk(Joypad::RIGHT, "right"), walk(Joypad::RIGHT, "right"), walk(Joypad::RIGHT, "right"),
+        walk(Joypad::RIGHT, "right"), walk(Joypad::RIGHT, "right to (11, 4)"),
+        walk(Joypad::UP, "up to the counter"),
+        (Action::Talk, "talk to the receptionist"),
+    ];
+    lockstep(include_bytes!("../pokemon/data/post-cascade.bin"), |_| {}, seeing_text(route(ROUTE, |_| true), "friends who are"));
 }
 
 /// Viridian Forest's hidden Antidote in the bush at (16, 42), forgotten first: round the Youngster

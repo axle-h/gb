@@ -12,9 +12,12 @@ pub struct PokemonTextReader {
     buffer: String,
     /// The page currently on screen, as last read.
     page: String,
-    /// Consecutive reads that did not continue `page`.
+    /// Consecutive reads that did not continue `page`, and the latest of them.
     mismatches: u8,
+    pending: Option<String>,
     message_box_only: bool,
+    /// Every read is a whole frame, so one that does not continue the page is a new page.
+    untorn: bool,
 }
 
 impl Display for PokemonTextReader {
@@ -31,16 +34,33 @@ impl PokemonTextReader {
         }
     }
 
+    /// A reader of a screen that is never read mid-draw: the recreation's.
+    pub fn untorn() -> Self {
+        Self {
+            untorn: true,
+            ..Self::default()
+        }
+    }
+
     pub fn take(&mut self) -> String {
         let out = self.committed();
         self.buffer.clear();
         self.page.clear();
         self.mismatches = 0;
+        self.pending = None;
         out
     }
 
-    /// Everything read so far: the committed pages plus the one still on screen.
+    /// Everything read so far: the committed pages plus the one still on screen. A read that has
+    /// not yet been confirmed as a new page counts as one, because a message can end on it: a box
+    /// that closes a few frames after its last page is drawn leaves nothing to confirm it with.
     fn committed(&self) -> String {
+        if let Some(screen) = &self.pending {
+            let mut ended = self.clone();
+            ended.pending = None;
+            ended.break_page(screen.clone());
+            return ended.committed();
+        }
         match (self.buffer.is_empty(), self.page.is_empty()) {
             (_, true) => self.buffer.clone(),
             (true, false) => self.page.clone(),
@@ -60,7 +80,12 @@ impl PokemonTextReader {
 
     /// [`Self::update_with`] without the button: read this tick's screen and press nothing.
     pub fn accumulate<A: PokemonApiTrait>(&mut self, api: &A) {
-        let Some(screen) = api.on_screen_text(self.message_box_only) else { return };
+        self.read(api.on_screen_text(self.message_box_only));
+    }
+
+    /// Fold in one read of the screen, `None` where there was nothing to read.
+    pub fn read(&mut self, screen: Option<String>) {
+        let Some(screen) = screen else { return };
 
         // A blank frame is not a page break and must not commit anything.
         if screen.is_empty() {
@@ -76,15 +101,22 @@ impl PokemonTextReader {
                 self.page = screen;
             }
             self.mismatches = 0;
+            self.pending = None;
             return;
         }
         // One read of something else is not a page break, because a torn frame reads like one.
         self.mismatches += 1;
-        if self.mismatches < MISMATCHES_BEFORE_PAGE_BREAK {
+        if !self.untorn && self.mismatches < MISMATCHES_BEFORE_PAGE_BREAK {
+            self.pending = Some(screen);
             return;
         }
         self.mismatches = 0;
-        // A different page.
+        self.pending = None;
+        self.break_page(screen);
+    }
+
+    /// `screen` is a different page from `page`.
+    fn break_page(&mut self, screen: String) {
         let overlap = longest_overlap(&self.page, &screen);
         match overlap {
             0 => {
@@ -289,6 +321,17 @@ mod tests {
         }
         assert_eq!(reader.take(), "You don't have the BOULDERBADGE yet!");
         assert_eq!(reader.take(), "", "and it is emptied by the drain");
+    }
+
+    /// A vending machine draws the MONEY box over its last line and closes a few frames later, as
+    /// soon as A is let go, so the whole of the last page can be read only once.
+    #[test]
+    fn a_last_page_read_once_before_the_box_closes_is_kept() {
+        let mut reader: PokemonTextReader = Default::default();
+        for frame in ["SODA POP popped o", "SODA POP popped ou", "MONEY ¥42709 SODA POP popped out!"] {
+            reader.read(Some(frame.to_string()));
+        }
+        assert!(reader.take().ends_with("SODA POP popped out!"), "the drink is said to have come out");
     }
 
     #[test]

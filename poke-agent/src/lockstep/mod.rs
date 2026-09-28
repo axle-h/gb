@@ -1,9 +1,11 @@
 //! The recreation and the emulator fed the same buttons and compared.
 
+pub(crate) mod action_for_action;
 mod audio;
 mod battle;
 mod battle_animations;
 mod events;
+pub(crate) mod bridge;
 mod game_state;
 mod evolution;
 mod field_move_menu;

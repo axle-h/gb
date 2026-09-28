@@ -76,6 +76,16 @@ impl NativeGame {
         self.game.world()
     }
 
+    /// The cartridge, for a reader of its tables.
+    pub fn rom(&self) -> &MMU {
+        &self.rom
+    }
+
+    /// `wWarpedFromWhichWarp` and `wWarpedFromWhichMap`, which the overworld keeps.
+    pub fn warped_from(&self) -> Option<(u8, u8)> {
+        self.overworld().map(Overworld::warped_from)
+    }
+
     /// The overworld under whatever is on top: a battle, a menu and a text box all leave it in
     /// place, and it is where the map and the sprites live.
     fn overworld(&self) -> Option<&Overworld> {
@@ -87,7 +97,7 @@ impl NativeGame {
 
     /// What kind of decision is on the table. The emulated side has to infer this from
     /// `wIsInBattle`, `wFontLoaded` and the shape of the drawn menu; here the mode stack says so.
-    fn game_mode(&self) -> GameMode {
+    pub(crate) fn game_mode(&self) -> GameMode {
         let Some(top) = self.game.modes().last() else { return GameMode::Overworld };
         match top {
             // `wTrainerClass`, which is 0 in a wild battle: the same byte `wIsInBattle` follows.
@@ -96,9 +106,11 @@ impl NativeGame {
                 false => GameMode::WildBattle,
             },
             Mode::NamingScreen(_) => GameMode::NamingScreen,
-            // An overworld that is not waiting on the player is running a script or a scripted walk.
+            // An overworld that is not waiting on the player is running a script or a scripted walk,
+            // or showing a text's last page itself.
             Mode::Overworld(_) => match top.status() {
-                Status::Waiting(_) => GameMode::Overworld,
+                Status::Waiting(pokered::command::Decision::Overworld) => GameMode::Overworld,
+                Status::Waiting(_) => GameMode::TextBox,
                 _ => GameMode::Script,
             },
             _ => GameMode::TextBox,
@@ -114,7 +126,7 @@ impl NativeGame {
         let gates = NativeGates(self.world());
         let wild = poke_core::wild::encounters(map);
 
-        let metadata = if crate::pokemon::map_metadata::map_uses_runtime_blocks(map) {
+        let metadata = if live_blocks(map) {
             Arc::new(self.runtime_metadata(map, overworld)?)
         } else {
             self.maps.read_map(&self.rom, map)?
@@ -122,7 +134,8 @@ impl NativeGame {
 
         Ok(CurrentMap {
             player_position: Point8 { x: location.x, y: location.y },
-            player_direction: facing_as_player_direction(location.facing),
+            player_direction: PlayerFacingDirection::from_repr(overworld.player_direction())
+                .unwrap_or_else(|| facing_as_player_direction(location.facing)),
             sprites: self.sprites(map, location, overworld),
             metadata,
             closed_doors: closed_door_blocks(&gates, map),
@@ -208,6 +221,9 @@ impl NativeGame {
         map.best_rod = postgame::fishing::Rod::best_in_bag(&bag);
 
         let gates = NativeGates(world);
+        // Bill's cell separator, while pressing it would do something: the emulated reader's bits.
+        map.bill_cell_separator = location.map == Map::BillsHouse
+            && gates.event_byte(171) & 0x40 != 0 && gates.event_byte(171) & 0x08 == 0;
         let trash_cans = (location.map == Map::VermilionGym).then(|| TrashCanPuzzle {
             // EVENT_1ST_LOCK_OPENED (0x161), EVENT_2ND_LOCK_OPENED (0x160).
             first_opened: gates.event_byte(44) & 0x02 != 0,
@@ -284,6 +300,75 @@ fn facing_as_player_direction(facing: SpriteFacing) -> PlayerFacingDirection {
         SpriteFacing::Left => PlayerFacingDirection::Left,
         SpriteFacing::Right => PlayerFacingDirection::Right,
     }
+}
+
+impl NativeGame {
+    /// The text in the message box at the foot of the screen, without the menus above it.
+    pub fn message_box_text(&self) -> Option<String> {
+        /// `on_screen_text`'s `MESSAGE_BOX_MIN_Y`.
+        const MESSAGE_BOX_MIN_Y: usize = 13;
+        self.text_on_rows(MESSAGE_BOX_MIN_Y)
+    }
+
+    /// The emulated reader decodes the font's tiles wherever VRAM's map shows them; here the UI
+    /// surface holds charmap bytes, and the font is every byte from `$80` up.
+    fn text_on_rows(&self, from: usize) -> Option<String> {
+        use pokered::gfx::ui::{SCREEN_TILES_X, SCREEN_TILES_Y};
+        if self.game_mode() == GameMode::Overworld {
+            return None;
+        }
+        let ui = self.game.ui();
+        let lines: Vec<String> = (from..SCREEN_TILES_Y).filter_map(|y| {
+            let mut line = Vec::new();
+            let mut last_x = None;
+            for x in 0..SCREEN_TILES_X {
+                let Some(byte) = ui.cover(x, y).filter(|&byte| byte >= 0x80) else { continue };
+                // 64 is the space glyph; never two in a row.
+                if last_x.is_some_and(|last| x - last > 1) && line.last() != Some(&64) {
+                    line.push(64);
+                }
+                line.push(byte as usize - 0x80);
+                last_x = Some(x);
+            }
+            (!line.is_empty()).then(|| poke_core::font::render_font_string(&line, false).trim().to_string())
+        }).collect();
+        Some(lines.join(" "))
+    }
+}
+
+impl crate::pokemon::observe::Readout for NativeGame {
+    fn screen_text(&self) -> Option<String> {
+        self.text_on_rows(0)
+    }
+
+    fn play_time(&self) -> (u8, u8, u8) {
+        let clock = &self.world().play_time;
+        (clock.hours, clock.minutes, clock.seconds)
+    }
+
+    fn price(&self, item: ItemId) -> Option<u32> {
+        poke_core::item::price(item).map(|price| bcd(&price)).filter(|&price| price != 0)
+    }
+
+    fn pc_items(&self) -> Bag {
+        bag(&self.world().pc_items)
+    }
+
+    fn mart_stock(&self) -> Vec<ItemId> {
+        self.game.modes().iter().rev().find_map(|mode| match mode {
+            Mode::Pokemart(mart) => Some(mart.stock().to_vec()),
+            _ => None,
+        }).unwrap_or_default()
+    }
+}
+
+/// A map whose blocks a script rewrites. The emulated reader reads a few of them live and learns
+/// the rest a refused walk at a time; the recreation holds its live blocks anyway, so every one is
+/// read from them: a Silph door the load code shuts is floor in the cartridge's own blocks.
+fn live_blocks(map: Map) -> bool {
+    crate::pokemon::map_metadata::map_uses_runtime_blocks(map)
+        || crate::pokemon::map_metadata::map_has_card_key_doors(map)
+        || matches!(map, Map::GameCorner | Map::VermilionDock | Map::RocketHideoutB1F | Map::RocketHideoutB4F)
 }
 
 /// BCD as the cartridge keeps money and coins, two digits to a byte.

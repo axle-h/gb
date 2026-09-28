@@ -248,3 +248,144 @@ fn hall_of_fame_playthrough() {
             "{species:?} is lv{} — the gauntlet grind did not run", mon.level);
     }
 }
+
+/// A new game on the recreation, in Red's room with the preset names, with battle animations on
+/// or off and the rest of the options as a served run plays them, at `pacing`.
+pub(crate) fn native_new_game(seed: u64, battle_animation: bool, pacing: pokered::Pacing) -> pokered::Game {
+    use pokered::command::{Command, Decision};
+    use pokered::mode::{Mode, Status};
+    use pokered::rng::GameRng;
+    use pokered::world::{BattleStyle, Options, TextSpeed};
+    use pokered::{Game, Input, Pacing};
+
+    let mut game = Game::power_on(None, GameRng::seeded(seed), Pacing::Instant);
+    for _ in 0..60_000 {
+        if matches!(game.modes(), [Mode::Overworld(_)]) {
+            let mut world = game.world().clone();
+            world.options = Options { text_speed: TextSpeed::Fast, battle_animation, battle_style: BattleStyle::Set };
+            let mut game = Game::new(world, GameRng::seeded(seed), pacing);
+            game.push(Mode::Overworld(pokered::modes::overworld::Overworld::new()));
+            return game;
+        }
+        let command = match game.status() {
+            Status::Waiting(Decision::TitleScreen | Decision::Text) => Some(Command::Advance),
+            Status::Waiting(Decision::MainMenu) => Some(Command::ChooseOption(0)),
+            Status::Waiting(Decision::IntroNameMenu) => Some(Command::ChooseOption(1)),
+            _ => None,
+        };
+        game.frame(command.map_or(Input::None, Input::Command));
+    }
+    panic!("the intro never reached Red's room: {:?}", game.status());
+}
+
+/// Where [`native_full_playthrough`] leaves the game it stalled in, for [`probe_native_stall`].
+const NATIVE_STALL: &str = "target/test-artifacts/native_stall.pkrd";
+
+/// [`full_playthrough`]'s route on the recreation, from a new game, through the native agent.
+#[test]
+fn native_full_playthrough() {
+    use crate::pokemon::native_agent::NativeAgent;
+
+    let game = native_new_game(1, false, pokered::Pacing::Instant);
+    assert_eq!(game.world().location.map, Map::RedsHouse2F);
+    let policy = DeterministicPolicy::new(1, PolicyStep::eight_badge_steps());
+    let mut agent = NativeAgent::new(game, Box::new(policy)).expect("a native agent");
+
+    // An hour of game time with the queue standing still is a stall.
+    const STALL_FRAMES: u64 = 60 * 60 * 60;
+    let mut left = agent.policy().steps_remaining();
+    let (mut frame, mut moved_at) = (0u64, 0u64);
+    while !agent.policy().is_exhausted() {
+        frame += 1;
+        let ticked = agent.tick();
+        if agent.policy().steps_remaining() != left {
+            left = agent.policy().steps_remaining();
+            moved_at = frame;
+        }
+        let stalled = frame - moved_at > STALL_FRAMES;
+        if ticked.is_err() || stalled {
+            std::fs::create_dir_all("target/test-artifacts").ok();
+            std::fs::write(NATIVE_STALL, agent.game().save()).ok();
+            panic!("{} with {left:?} steps left, on {:?}, {:?}",
+                   ticked.err().unwrap_or_else(|| "stalled for an hour of game time".into()),
+                   agent.game().world().location, agent.game().status());
+        }
+    }
+
+    let state = agent.game_state().expect("a game state");
+    println!("\nplayed {frame} frames");
+    for pokemon in state.pokemon.iter() {
+        println!("{}: {} lv.{}", pokemon.species, pokemon.nickname, pokemon.level);
+    }
+    for badge in [Badge::BoulderBadge, Badge::CascadeBadge, Badge::ThunderBadge, Badge::RainbowBadge,
+                  Badge::SoulBadge, Badge::MarshBadge, Badge::VolcanoBadge, Badge::EarthBadge] {
+        assert!(state.badges.contains(badge), "should have the {badge:?}");
+    }
+    assert!(state.bag.contains(&ItemId::SilphScope), "should have the Silph Scope");
+    assert!(state.bag.contains(&ItemId::PokeFlute), "should have the Poké Flute");
+    assert_eq!(state.pokemon.len(), 3, "party should be the starter + the two HM slaves");
+    assert!(state.pokemon.iter().any(|p| p.species == PokemonSpecies::Blastoise),
+        "the starter should have reached Blastoise");
+    for want in [PokemonMoveName::Cut, PokemonMoveName::Surf, PokemonMoveName::Strength] {
+        assert!(state.pokemon.iter().any(|p| p.moves.iter().flatten().any(|m| m.name == want)),
+            "a party member should know {want}");
+    }
+    assert_eq!(state.map.map, Map::VictoryRoad2F, "should have solved VR1F and climbed to Victory Road 2F");
+}
+
+/// What [`native_full_playthrough`]'s saved stall is doing: its mode stack over `PROBE_FRAMES`
+/// frames, then the rows the agent would be offered.
+#[test]
+#[cfg(feature = "slow-tests")]
+#[ignore = "probe — run with --ignored --nocapture after a native stall"]
+fn probe_native_stall() {
+    let path = std::env::var("NATIVE_STALL").unwrap_or_else(|_| NATIVE_STALL.to_string());
+    let Ok(bytes) = std::fs::read(&path) else {
+        println!("no native stall artifact — run native_full_playthrough first");
+        return;
+    };
+    let mut game = pokered::Game::load(&bytes, pokered::Pacing::Instant).expect("a native save");
+    let frames: u32 = std::env::var("PROBE_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    for _ in 0..frames {
+        let location = &game.world().location;
+        println!("{:?} on {:?} at ({}, {}) facing {:?}", game.status(), location.map, location.x, location.y, location.facing);
+        for mode in game.modes() {
+            println!("    {mode:#?}");
+        }
+        game.frame(pokered::Input::None);
+    }
+    if let Ok(steps) = std::env::var("PROBE_STEPS") {
+        for step in steps.split(',') {
+            let direction = match step {
+                "Up" => pokered::systems::overworld::location::Direction::Up,
+                "Down" => pokered::systems::overworld::location::Direction::Down,
+                "Left" => pokered::systems::overworld::location::Direction::Left,
+                _ => pokered::systems::overworld::location::Direction::Right,
+            };
+            let reply = game.frame(pokered::Input::Command(pokered::command::Command::Step(direction))).reply;
+            for _ in 0..60 {
+                game.frame(pokered::Input::None);
+            }
+            let location = &game.world().location;
+            println!("step {step}: {reply:?}, now at ({}, {}) on {:?}", location.x, location.y, location.map);
+        }
+    }
+    let state = crate::pokemon::native::NativeGame::new(game).and_then(|native| native.game_state()).expect("a game state");
+    println!("party {:?}", state.pokemon.iter().map(|p| (p.species, p.level)).collect::<Vec<_>>());
+    println!("bag {:?}", state.bag.iter().map(|item| (item.id, item.quantity)).collect::<Vec<_>>());
+    for sprite in &state.map.sprites {
+        println!("sprite {sprite:?}");
+    }
+    if std::env::var("PROBE_MAP").is_ok() {
+        println!("{}", state.map);
+        println!("can_surf {} surfing {}", state.map.can_surf, state.map.surfing);
+        if let Ok(target) = std::env::var("PROBE_FACE") {
+            let (x, y) = target.split_once(',').expect("x,y");
+            let at = poke_core::geometry::Point8 { x: x.parse().unwrap(), y: y.parse().unwrap() };
+            println!("route to face {at}: {:?}", state.map.route_to_face(at));
+        }
+    }
+    for action in state.map.actions() {
+        println!("row {} {:?}", action.tile, action.route);
+    }
+}

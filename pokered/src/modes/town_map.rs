@@ -665,6 +665,27 @@ mod tests {
         until(&mut game, Decision::PartyMenu);
     }
 
+    /// Up steps on through the fly screen's list: a driver that pressed Down for a later row would
+    /// wrap to the last town, overshoot, and swing between the ends for ever.
+    #[test]
+    fn the_second_of_four_towns_is_flown_to() {
+        let four = THREE_TOWNS | 1 << Map::CeruleanCity as u16;
+        let mut game = started(world(Map::PalletTown, THUNDER, four));
+        game.push(Mode::Overworld(Overworld::new()));
+        until(&mut game, Decision::Overworld);
+        command(&mut game, Command::OpenStartMenu);
+        until(&mut game, Decision::StartMenu);
+        command(&mut game, Command::ChooseStartMenuEntry(crate::modes::start_menu::StartMenuEntry::Pokemon));
+        until(&mut game, Decision::PartyMenu);
+        command(&mut game, Command::ChooseOption(0));
+        until(&mut game, Decision::FieldMoveMenu);
+        command(&mut game, Command::ChooseOption(0));
+        until(&mut game, Decision::FlyDestination);
+        command(&mut game, Command::ChooseOption(1));
+        until(&mut game, Decision::Overworld);
+        assert_eq!(game.world().location.map, Map::ViridianCity);
+    }
+
     #[test]
     fn the_town_chosen_is_flown_to() {
         let mut game = started(world(Map::PalletTown, THUNDER, THREE_TOWNS));

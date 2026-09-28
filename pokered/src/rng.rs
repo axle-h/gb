@@ -5,6 +5,12 @@ use serde::{Deserialize, Serialize};
 /// `Random`. A caller that also reads `hRandomSub` takes a second byte.
 pub trait Rng {
     fn random(&mut self) -> u8;
+
+    /// `Random` as the people who wander draw it. The same generator in play; a tape of its own in
+    /// a comparison, because how often they draw depends on how many frames a run takes.
+    fn wander(&mut self) -> u8 {
+        self.random()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,6 +18,8 @@ pub enum GameRng {
     Seeded(Pcg64),
     /// What the emulator's `Random` returned, for a harvested fixture.
     Tape { bytes: Vec<u8>, cursor: usize },
+    /// Two tapes: `wander` for the people's draws, `main` for every other.
+    Split { main: Box<GameRng>, wander: Box<GameRng> },
 }
 
 impl GameRng {
@@ -26,6 +34,21 @@ impl GameRng {
     pub fn tape(bytes: Vec<u8>) -> Self {
         Self::Tape { bytes, cursor: 0 }
     }
+
+    pub fn split(main: Vec<u8>, wander: Vec<u8>) -> Self {
+        Self::Split { main: Box::new(Self::tape(main)), wander: Box::new(Self::tape(wander)) }
+    }
+}
+
+impl GameRng {
+    /// How far into a tape the game has drawn; `None` for a seeded generator.
+    pub fn drawn(&self) -> Option<usize> {
+        match self {
+            Self::Seeded(_) => None,
+            Self::Tape { cursor, .. } => Some(*cursor),
+            Self::Split { main, .. } => main.drawn(),
+        }
+    }
 }
 
 impl Rng for GameRng {
@@ -38,6 +61,14 @@ impl Rng for GameRng {
                 *cursor += 1;
                 byte
             }
+            Self::Split { main, .. } => main.random(),
+        }
+    }
+
+    fn wander(&mut self) -> u8 {
+        match self {
+            Self::Split { wander, .. } => wander.random(),
+            _ => self.random(),
         }
     }
 }

@@ -181,6 +181,98 @@ impl Cheats {
     }
 }
 
+#[cfg(feature = "slow-tests")]
+impl Cheats {
+    /// [`Self::apply`] on the recreation, whose world is fields rather than memory. `free` is the
+    /// agent's [`is_free`](crate::pokemon::native_agent::NativeAgent::is_free), the one moment the
+    /// party is safe to write.
+    pub fn apply_native(&mut self, world: &mut pokered::world::World, state: &GameState, free: bool) {
+        assert!(self.key_items.is_none(), "the recreation's cheats do not stock the bag");
+        if let Some(badges) = self.badges {
+            world.badges = badges.bits();
+        }
+        if !free {
+            self.refused_in_battle += 1;
+            return;
+        }
+        if self.god_party && !self.installed && has_god_party(state, self.hm_slaves) {
+            self.installed = true;
+        }
+        if self.god_party && !self.installed && !world.party.is_empty() {
+            let ot = world.player_name.clone();
+            let mut party = vec![native_maxed(PokemonSpecies::Mewtwo, "MEWTWO", FIGHTER_MOVES, &ot, world.player_id)];
+            if self.hm_slaves {
+                party.push(native_maxed(PokemonSpecies::Lapras, "TERRAIN", TERRAIN_MOVES, &ot, world.player_id));
+                party.push(native_maxed(PokemonSpecies::Pidgeot, "FLIGHT", FLIGHT_MOVES, &ot, world.player_id));
+            }
+            party.extend(world.party.iter().cloned());
+            party.truncate(pokered::party::PARTY_LENGTH);
+            world.party = party;
+            self.installed = true;
+        }
+        if let Some(money) = self.money
+            && state.money < money
+        {
+            world.money = to_bcd(money);
+        }
+        if self.keep_healthy && self.needs_a_top_up(state) {
+            for member in world.party.iter_mut() {
+                let mon = &mut member.mon;
+                mon.mon.hp = mon.stats[0];
+                mon.mon.status = 0;
+                for (slot, learnt) in mon.mon.moves.iter().enumerate() {
+                    let Some(learnt) = learnt else { continue };
+                    let ups = mon.mon.pp[slot] >> 6;
+                    let base = poke_core::moves::MoveData::of_move(*learnt).pp;
+                    mon.mon.pp[slot] = ups << 6 | (base + base / 5 * ups);
+                }
+            }
+            self.top_ups += 1;
+        }
+    }
+}
+
+/// Six BCD digits, as `wPlayerMoney` holds them.
+#[cfg(feature = "slow-tests")]
+fn to_bcd(value: u32) -> [u8; 3] {
+    let digit = |place: u32| (value / place % 10) as u8;
+    [digit(100_000) << 4 | digit(10_000), digit(1_000) << 4 | digit(100), digit(10) << 4 | digit(1)]
+}
+
+/// [`Pokemon::maxed`] as the recreation holds a party member.
+#[cfg(feature = "slow-tests")]
+fn native_maxed(species: PokemonSpecies, nickname: &str, moves: [PokemonMoveName; 4], ot: &[u8], ot_id: u16)
+    -> pokered::party::Named<pokered::party::PartyMon> {
+    use pokered::systems::stats::{calc_stats, Dvs};
+    let base = poke_core::base_stats::BaseStats::of(species);
+    let dvs = Dvs([0xFF, 0xFF]);
+    let stat_exp = [u16::MAX; pokered::party::NUM_STATS];
+    let stats = calc_stats(base.stats, dvs, Some(stat_exp), 100);
+    let moves = moves.map(Some);
+    pokered::party::Named {
+        mon: pokered::party::PartyMon {
+            mon: pokered::party::BoxMon {
+                species,
+                hp: stats[0],
+                box_level: 100,
+                status: 0,
+                types: base.types,
+                catch_rate: base.catch_rate,
+                moves,
+                ot_id,
+                exp: pokered::systems::experience::calc_experience(base.growth_rate, 100),
+                stat_exp,
+                dvs,
+                pp: moves.map(|learnt| learnt.map_or(0, |learnt| poke_core::moves::MoveData::of_move(learnt).pp)),
+            },
+            level: 100,
+            stats,
+        },
+        ot: ot.to_vec(),
+        nick: crate::pokemon::strings::PokemonString::from_string(nickname).0,
+    }
+}
+
 /// Whether the named members [`god_party`] would install are already in the party.
 fn has_god_party(state: &GameState, hm_slaves: bool) -> bool {
     let has = |species, nickname: &str| state.pokemon.iter()

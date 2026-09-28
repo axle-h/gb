@@ -7,12 +7,11 @@
 use poke_core::map::Map;
 use pokered::input::Joypad;
 use pokered::mode::Mode;
-use pokered::modes::overworld::Overworld;
 use pokered::rng::GameRng;
 use pokered::{Game, Input, Pacing};
 
 use crate::pokemon::native::NativeGame;
-use gb::ram::{RAM, ROM};
+use gb::ram::RAM;
 use crate::pokemon::symbols::pokered_symbols as sym;
 use crate::pokemon::{GameState, PokemonApi, PokemonApiTrait};
 
@@ -21,7 +20,7 @@ use super::overworld::Cartridge;
 /// The part of a [`GameState`] this comparison covers. Everything in it is filled by both halves;
 /// what is not in it is presentation, or the battle's, which `lockstep/battle.rs` compares.
 #[derive(Debug, PartialEq)]
-struct Compared {
+pub(super) struct Compared {
     map: Map,
     position: poke_core::geometry::Point8,
     facing: poke_core::sprite::PlayerFacingDirection,
@@ -47,7 +46,30 @@ struct Compared {
     actions: Vec<(String, usize)>,
 }
 
-fn compared(state: &GameState) -> Compared {
+impl Compared {
+    /// For two runs that took different numbers of frames, so the people who wander have wandered
+    /// differently: the rows by id alone, since a walk's length depends on who is standing in it,
+    /// and without the player's square and facing after a talk, which is wherever the person was.
+    pub(super) fn paced_apart(mut self, talked: bool) -> Self {
+        self.actions.iter_mut().for_each(|row| row.1 = 0);
+        if talked {
+            self.position = Default::default();
+            self.facing = Default::default();
+        }
+        self
+    }
+}
+
+/// The fields that differ, one line each, as `ours` and then `theirs`.
+pub(super) fn differences(ours: &Compared, theirs: &Compared) -> Vec<String> {
+    let (ours, theirs) = (format!("{ours:#?}"), format!("{theirs:#?}"));
+    ours.lines().zip(theirs.lines())
+        .filter(|(ours, theirs)| ours != theirs)
+        .map(|(ours, theirs)| format!("  ours   {}\n  theirs {}", ours.trim(), theirs.trim()))
+        .collect()
+}
+
+pub(super) fn compared(state: &GameState) -> Compared {
     Compared {
         map: state.map.map,
         position: state.map.player_position,
@@ -116,24 +138,6 @@ const ROUTE: &[(Joypad, &str)] = &[
     (Joypad::UP, "into Route 1"),
 ];
 
-/// The cartridge→`World` bridges in the menu tests fill only what those menus read. This tops up
-/// the fields this comparison covers, so a difference is the adapter's rather than the harness's.
-fn top_up(world: &mut pokered::world::World, cartridge: &Cartridge) {
-    let mmu = cartridge.gb.core().mmu();
-    let name_at = |at: u16| (0..11u16).map(|i| mmu.read(at + i))
-        .take_while(|&byte| byte != crate::pokemon::strings::PokemonString::TERMINATOR).collect();
-    world.rival_name = name_at(sym::wRivalName.address);
-    world.badges = cartridge.read(sym::wObtainedBadges.address);
-    world.player_id = u16::from_be_bytes([cartridge.read(sym::wPlayerID.address),
-                                          cartridge.read(sym::wPlayerID.address + 1)]);
-    world.hall_of_fame_teams = cartridge.read(sym::wNumHoFTeams.address);
-    world.current_box = cartridge.read(sym::wCurrentBoxNum.address) & 0x7F;
-    world.pokedex.owned = mmu.read_slice(sym::wPokedexOwned.address, 19).try_into().unwrap();
-    world.pokedex.seen = mmu.read_slice(sym::wPokedexSeen.address, 19).try_into().unwrap();
-    // `item_menu`'s party carries no OT, which `status_screen`'s does.
-    world.party = super::status_screen::the_party(&cartridge.gb);
-}
-
 const BUDGET: u32 = 600;
 
 /// Holds the direction until a step begins, then lets go until the loop is asking again.
@@ -194,10 +198,7 @@ fn the_state_a_policy_is_shown_matches_the_cartridge_along_a_walk() {
     cartridge.gb.core_mut().mmu_mut().write(flags4, value);
     while !cartridge.frame() {}
 
-    let mut world = cartridge.world();
-    top_up(&mut world, &cartridge);
-    let (sprites, count, standing) =
-        (cartridge.sprites(), cartridge.read(sym::wNumSprites.address), cartridge.standing());
+    let (world, overworld) = (super::bridge::world(&cartridge.gb), super::bridge::overworld(&cartridge.gb));
     assert_eq!(world.location.map, Map::PalletTown);
 
     // The cartridge walks first, so its `Random` tape is what the recreation's NPCs wander on.
@@ -208,9 +209,7 @@ fn the_state_a_policy_is_shown_matches_the_cartridge_along_a_walk() {
     }
 
     let mut game = Game::new(world, GameRng::tape(cartridge.tape.clone()), Pacing::Faithful);
-    game.push(Mode::Overworld(
-        Overworld::standing(sprites, count, standing).with_battle_flags(true, false, 0),
-    ));
+    game.push(Mode::Overworld(overworld));
     let mut native = NativeGame::new(game).unwrap();
 
     let mut ours = vec![compared(&native.game_state().unwrap())];

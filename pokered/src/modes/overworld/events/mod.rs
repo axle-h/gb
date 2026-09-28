@@ -14,7 +14,7 @@ mod poison;
 mod trades;
 mod vending;
 
-use poke_core::symbols::DmgPointer;
+use poke_core::symbols::{pokered_symbols, DmgPointer};
 use serde::{Deserialize, Serialize};
 use crate::gfx::mon_icons::clear_sprites;
 use crate::mode::{Mode, Outcome};
@@ -123,6 +123,12 @@ pub enum Label {
     VendingMachineDeliver(u8),
     VendingMachineRattle(u8),
     VendingMachinePaid,
+
+    // `CableClubNPC` with no one on the other end of the cable, which is every time.
+    CableClubNpc,
+    CableClubNpcWelcomed,
+    /// Whether the player has the Pokédex, which is what the receptionist waits for a link on.
+    CableClubNpcGaveUp(bool),
 
     // `ApplyOutOfBattlePoisonDamage`.
     ApplyOutOfBattlePoisonDamage,
@@ -268,6 +274,16 @@ pub fn resume(s: &mut Script, label: Label) -> Flow {
             s.update_sprites();
             Flow::Return
         }
+
+        CableClubNpc => print(pokered_symbols::CableClubNPCWelcomeText).then(CableClubNpcWelcomed),
+        CableClubNpcWelcomed => {
+            let dex = s.ctx.world.events.is_set(poke_core::symbols::pokered_events::EVENT_GOT_POKEDEX);
+            // `.establishConnectionLoop`: `wLinkTimeoutCounter` from 90, a frame each until it
+            // reaches zero.
+            s.delay_frames(if dex { 89 } else { 60 }).then(CableClubNpcGaveUp(dex))
+        }
+        CableClubNpcGaveUp(true) => print(pokered_symbols::CableClubNPCAreaReservedFor2FriendsLinkedByCableText).ret(),
+        CableClubNpcGaveUp(false) => print(pokered_symbols::CableClubNPCMakingPreparationsText).ret(),
 
         VendingMachine => vending::vending_machine(s),
         VendingMachineMenu => vending::menu(s),

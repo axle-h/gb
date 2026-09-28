@@ -179,6 +179,10 @@ pub struct Overworld {
     warped_from: (u8, u8),
     /// The fixture's sprites, which `enter` keeps rather than loading the map's own.
     keep_sprites: bool,
+    /// The fixture's `wOverworldMap`, which its map's load code may already have redrawn; `enter`
+    /// keeps it rather than the map's own blocks.
+    #[serde(skip)]
+    kept_blocks: Option<Vec<u8>>,
     /// The last body found no button pressed with nothing under way, so a press now is a new decision.
     polled: bool,
     /// Presses answered after a text, so a driver can see its own land.
@@ -235,6 +239,7 @@ impl Overworld {
             warp_destination_map: 0,
             warped_from: (0, 0),
             keep_sprites: false,
+            kept_blocks: None,
             polled: false,
             answered: 0,
             walk_bike_surf_copy: WALKING,
@@ -247,6 +252,18 @@ impl Overworld {
     /// the sixteen slots as the cartridge has them.
     pub fn standing(sprites: Sprites, num_sprites: u8, standing: Standing) -> Self {
         Self { sprites, num_sprites, standing, keep_sprites: true, ..Self::new() }
+    }
+
+    /// The blocks as a running game has them, border included, for a map `standing` resumes.
+    pub fn with_blocks(mut self, blocks: Vec<u8>) -> Self {
+        self.kept_blocks = Some(blocks);
+        self
+    }
+
+    /// `wPlayerDirection`, which is not always the way the player's sprite faces: a landing turns
+    /// the sprite and leaves this where the last step put it.
+    pub fn player_direction(&self) -> u8 {
+        self.standing.player_direction
     }
 
     /// `BIT_NO_BATTLES`, `BIT_WILD_ENCOUNTER_COOLDOWN` and `wNumberOfNoRandomBattleStepsLeft`, as a
@@ -828,7 +845,7 @@ impl Overworld {
 
     /// `JoypadOverworld`'s Cycling Road: with no trainer engaging, a poll that finds nothing held
     /// finds Down.
-    fn on_cycling_road_slope(&self, world: &World) -> bool {
+    pub fn on_cycling_road_slope(&self, world: &World) -> bool {
         world.location.map == Map::Route17 && !self.rt.trainer_battle
     }
 
@@ -1080,6 +1097,11 @@ impl Overworld {
         }
     }
 
+    /// `wWarpedFromWhichWarp` and `wWarpedFromWhichMap`, in that order.
+    pub fn warped_from(&self) -> (u8, u8) {
+        self.warped_from
+    }
+
     /// `WarpFound2`'s `wWarpedFromWhichWarp`, which only a warp the player walked through has: the
     /// warps a script or the Safari Zone takes leave whatever the last one left.
     fn warp_found_at(&mut self, ctx: &mut Ctx, warp: Warp, index: usize) -> Transition {
@@ -1302,6 +1324,38 @@ impl Overworld {
         blocked.filter(|_| !off_the_edge())
     }
 
+    /// Whether a step `direction` lands on a warp that `CheckWarpsNoCollision` takes only while a
+    /// direction is held: not a door or warp tile, which take the player at once, but one the
+    /// `ExtraWarpCheck` passes, the edge of a cave or a carpet.
+    fn lands_on_a_held_warp(&self, direction: Direction, world: &World) -> bool {
+        let location = &world.location;
+        let (dx, dy) = direction.delta();
+        let (x, y) = (location.x.wrapping_add_signed(dx), location.y.wrapping_add_signed(dy));
+        if !self.warps.iter().any(|warp| (warp.x, warp.y) == (x, y)) {
+            return false;
+        }
+        let tiles = self.view.tile_map();
+        let facing = direction.facing();
+        // The landing square's lower left tile, and the one a square beyond it.
+        let (landing, beyond) = match facing {
+            SpriteFacing::Down => (tiles[11 * 20 + 8], tiles[13 * 20 + 8]),
+            SpriteFacing::Up => (tiles[7 * 20 + 8], tiles[5 * 20 + 8]),
+            SpriteFacing::Left => (tiles[9 * 20 + 6], tiles[9 * 20 + 4]),
+            SpriteFacing::Right => (tiles[9 * 20 + 10], tiles[9 * 20 + 12]),
+        };
+        !collision::on_door_or_warp_tile(self.view.tileset, landing).0
+            && collision::extra_warp_check(ExtraWarp {
+                map: location.map as u8,
+                tileset: self.view.tileset,
+                facing,
+                x,
+                y,
+                width: self.view.width,
+                height: self.view.height,
+                front: beyond,
+            })
+    }
+
     /// Why a shove `direction` would move no boulder, judged as `TryPushingBoulder` would judge it.
     pub fn push_refusal(&self, direction: Direction, world: &World) -> Option<String> {
         if !world.location.strength_active {
@@ -1369,6 +1423,9 @@ impl ModeUpdate for Overworld {
             play_default_music_common(ctx, 0);
         }
         self.load_map_data(ctx);
+        if let Some(blocks) = self.kept_blocks.take() {
+            self.view.blocks = blocks;
+        }
         self.standing.destination_warp = destination;
         if resuming {
             // Stopped where the cartridge's loop had just polled, so its sprites are already updated.
@@ -1514,6 +1571,10 @@ pub struct OverworldDriver {
     started: bool,
     /// Bodies polled with the press held and nothing started, for a bump nothing foresaw.
     bumps: u8,
+    /// The step lands on a warp that `CheckWarpsNoCollision` takes only with a direction held, so
+    /// the direction is held until it lands, as a player walking onto it holds it.
+    #[serde(default)]
+    hold: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1531,7 +1592,7 @@ impl OverworldDriver {
         if let Some(reason) = overworld.step_refusal(direction, world) {
             return Err(Refusal::Invalid(reason));
         }
-        Ok(Self::new(Order::Step(direction), world))
+        Ok(Self { hold: overworld.lands_on_a_held_warp(direction, world), ..Self::new(Order::Step(direction), world) })
     }
 
     pub fn face(direction: Direction, overworld: &Overworld, world: &World) -> Result<Self, Refusal> {
@@ -1579,7 +1640,7 @@ impl OverworldDriver {
 
     fn new(order: Order, world: &World) -> Self {
         let location = &world.location;
-        Self { order, from: (location.map, location.x, location.y, location.facing), started: false, bumps: 0 }
+        Self { order, from: (location.map, location.x, location.y, location.facing), started: false, bumps: 0, hold: false }
     }
 
     /// Holds the press until the overworld takes it, then lets go until it is waiting again.
@@ -1612,7 +1673,16 @@ impl OverworldDriver {
                 Order::Push(_) => !overworld.rt.boulder_dust,
                 _ => true,
             };
-            return if settled && arrived { Drive::Done } else { Drive::Press(Joypad::empty()) };
+            let landed = (now.0, now.1, now.2) != (self.from.0, self.from.1, self.from.2);
+            let held = match self.order {
+                Order::Step(direction) if self.hold && !landed => direction.button(),
+                _ => Joypad::empty(),
+            };
+            return if settled && arrived { Drive::Done } else { Drive::Press(held) };
+        }
+        // Something the overworld runs of its own, a trainer's eye say, asked first.
+        if matches!(overworld.status(), Status::Waiting(decision) if decision != Decision::Overworld) {
+            return Drive::Interrupted("the overworld asked something first".into());
         }
         if overworld.status() == Status::Waiting(Decision::Overworld) {
             self.bumps += 1;
@@ -1690,6 +1760,38 @@ mod tests {
         let (_, _, y) = at(&game);
         command(&mut game, Command::Step(Direction::Up));
         assert_eq!(at(&game), (Map::Route17, 8, y - 1), "a press answers the turn before the slope does");
+    }
+
+    /// B3F's stairs down are on the map's bottom edge, over water: a surfer who arrives holding
+    /// Down goes through, as `CheckWarpsNoCollision` polls the pad on landing.
+    #[test]
+    fn a_surfer_steps_down_seafoams_edge_stairs() {
+        let mut world = World::default();
+        world.location = Location { map: Map::SeafoamIslandsB3F, x: 20, y: 16, facing: SpriteFacing::Down,
+            last_map: Map::SeafoamIslandsB2F, walk_bike_surf: SURFING, ..Location::default() };
+        let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
+        let mut overworld = Overworld::new();
+        overworld.rt.no_battles = true;
+        game.push(Mode::Overworld(overworld));
+        settle(&mut game);
+        assert_eq!(at(&game), (Map::SeafoamIslandsB3F, 20, 16));
+        assert_eq!(game.frame(Input::Command(Command::Step(Direction::Down))).reply, Some(Reply::Accepted));
+        for _ in 0..200 {
+            game.frame(Input::None);
+        }
+        assert_eq!(game.world().location.map, Map::SeafoamIslandsB4F);
+    }
+
+    /// Held from the frame the step up onto the road ends, B keeps the rider there: that frame's
+    /// poll is the host's, not the finished command's.
+    #[test]
+    fn a_rider_holding_b_stays_where_a_step_up_the_cycling_road_left_them() {
+        let mut game = game_at(Map::Route18, 10, 0);
+        assert_eq!(game.frame(Input::Command(Command::Step(Direction::Up))).reply, Some(Reply::Accepted));
+        for _ in 0..60 {
+            game.frame(Input::Buttons(Joypad::B));
+        }
+        assert_eq!(at(&game), (Map::Route17, 10, 143));
     }
 
     #[test]

@@ -104,6 +104,10 @@ impl Game {
         }
     }
 
+    pub fn rng(&self) -> &GameRng {
+        &self.rng
+    }
+
     /// Power on: the splash, the intro and the title screen, then the main menu into a new game, or
     /// into `save` when there is one to continue.
     pub fn power_on(save: Option<World>, rng: GameRng, pacing: Pacing) -> Self {
@@ -122,6 +126,12 @@ impl Game {
 
     pub fn world(&self) -> &World {
         &self.world
+    }
+
+    /// For a host's own edits between frames, as a debugger pokes WRAM: no mode sees the change
+    /// until it next reads the field.
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.world
     }
 
     pub fn ui(&self) -> &UiSurface {
@@ -170,10 +180,12 @@ impl Game {
     pub fn frame(&mut self, input: Input) -> Frame {
         let mut events = Vec::new();
         let mut reply = None;
+        // The host's buttons count on any frame a command is not pressing, the one it ends on
+        // included: that frame's poll is the host's, and the Cycling Road coasts an empty pad.
         let mut buttons = Joypad::empty();
         match input {
-            Input::Buttons(held) if self.executor.is_none() => buttons = held,
-            Input::Buttons(_) | Input::None => {}
+            Input::Buttons(held) => buttons = held,
+            Input::None => {}
             Input::Command(command) => reply = Some(self.accept(command)),
         }
         if let Some(executor) = &mut self.executor {

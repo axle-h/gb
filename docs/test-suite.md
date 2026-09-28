@@ -41,6 +41,12 @@ cargo test --release --workspace --features slow-tests -- probe_ --ignored --noc
   either.
 - `full_playthrough` also matches an animated twin, `full_playthrough_animated` (the route to Brock,
   ~25 s): battle animations on is what is served, and it spends the RNG differently.
+- `native_full_playthrough` (~3 s, default tier) is `full_playthrough`'s route on the recreation,
+  from a new game through the native agent; a stall saves the game for `probe_native_stall`.
+- `native_grand_tour` (~200 s, slow tier, matched by the `grand_tour` filter) is `grand_tour` on the
+  recreation at a served game's pace: the same brain and ledger through `NativeLlmRun`. The mock
+  endpoint's latency moves the RNG, so it is not deterministic; a stall saves
+  `target/test-artifacts/native-completion-run-stuck.pkrd` for `probe_native_stall` (`NATIVE_STALL`).
 - A battle cell runs in both animation modes through `in_both_animation_modes!`.
 
 ## Fixtures

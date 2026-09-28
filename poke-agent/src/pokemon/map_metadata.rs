@@ -270,7 +270,8 @@ impl MapMetadata {
     /// approach, though the static tileset marks them impassable.
     pub fn apply_card_key_doors(&self, result: &mut [MetaTile], locked: bool) {
         for (idx, &tile) in self.raw_tile_ids.iter().enumerate() {
-            if tile == 0x18 || tile == 0x24 {
+            // `_CheckForCardKeyDoor`: 11F's door is a tile of its own.
+            if tile == 0x18 || tile == 0x24 || (self.map == Map::SilphCo11F && tile == 0x5e) {
                 result[idx] = if locked { MetaTile::Obstacle } else { MetaTile::Empty };
             }
         }
@@ -488,12 +489,13 @@ pub(crate) fn script_cancelled_warps(gates: &impl EventGates, map: Map) -> Vec<P
 }
 
 /// Whether the Seafoam floor below `map` still runs its strong current: until both boulders from
-/// `map` are down its holes (`EVENT_SEAFOAM3_*` for B2F, `EVENT_SEAFOAM4_*` for B3F).
+/// `map` are down its holes (`EVENT_SEAFOAM3_*` for B2F, `EVENT_SEAFOAM4_*` for B3F). On B4F, the
+/// floor they land on, it is its own: `IsSurfingAllowed` refuses Surf at the stairs until then.
 pub(crate) fn strong_current_below(gates: &impl EventGates, map: Map) -> bool {
     let calmed = |byte: u16| gates.event_byte(byte) & 0x03 == 0x03;
     match map {
         Map::SeafoamIslandsB2F => !calmed(313),
-        Map::SeafoamIslandsB3F => !calmed(314),
+        Map::SeafoamIslandsB3F | Map::SeafoamIslandsB4F => !calmed(314),
         _ => false,
     }
 }

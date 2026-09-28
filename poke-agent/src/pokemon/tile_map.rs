@@ -99,7 +99,7 @@ fn hole_table(map: Map) -> &'static [(u8, u8)] {
     }
 }
 
-/// Shore tiles the game refuses to mount Surf from, in raw coordinates.
+/// Shore tiles the game refuses to mount Surf from while the current runs, in raw coordinates.
 fn no_surf_mount_table(map: Map) -> &'static [(u8, u8)] {
     match map {
         Map::SeafoamIslandsB4F => &[(7, 11)],
@@ -280,6 +280,7 @@ impl MetaTileMap {
                 .map(|&(x, y)| Point8 { x: x + dimensions.west_extra as u8, y: y + dimensions.north_extra as u8 })
                 .collect(),
             no_surf_mount: no_surf_mount_table(map.metadata.map).iter()
+                .filter(|_| map.strong_current_below)
                 .map(|&(x, y)| Point8 { x: x + dimensions.west_extra as u8, y: y + dimensions.north_extra as u8 })
                 .collect(),
             // Already `Arc`'d and cached in `MapMetadataCache`, so this is a refcount bump.
@@ -1376,7 +1377,10 @@ impl MetaTileMap {
             };
         }
         // `IsWarpTileInFrontOfPlayer`: the tile in front, against the list for the way you face.
+        // Holding a way whose square is open walks off the warp, so a blocked front is preferred:
+        // only a press that collides reaches `CheckWarpsCollision` from on top.
         let mut looks_off_the_map = false;
+        let mut open_front = None;
         for (facing, dx, dy) in [
             (PlayerFacingDirection::Up,    0i32, -1i32),
             (PlayerFacingDirection::Down,  0,  1),
@@ -1396,8 +1400,17 @@ impl MetaTileMap {
                 _ => crate::pokemon::map_header::TileSetId::warp_carpet_tile_ids(facing).contains(&front),
             };
             if warps {
-                return WarpTrigger::HoldDirection(facing_button(facing));
+                let ahead = Point8 { x: x as u8, y: y as u8 };
+                let open = matches!(self.meta_tiles[x as usize + y as usize * self.width], MetaTile::Empty | MetaTile::Grass)
+                    && !self.pair_blocked(at, ahead);
+                if !open {
+                    return WarpTrigger::HoldDirection(facing_button(facing));
+                }
+                open_front.get_or_insert(WarpTrigger::HoldDirection(facing_button(facing)));
             }
+        }
+        if let Some(trigger) = open_front {
+            return trigger;
         }
         match looks_off_the_map {
             true => WarpTrigger::Unknown,

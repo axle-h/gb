@@ -11,7 +11,6 @@ use crate::llm::todo::{MAX_ITEMS as MAX_TODO_ITEMS, MAX_TEXT as MAX_TODO_TEXT, T
 use crate::llm::protocol::{ToolCall, ToolSpec};
 use crate::llm::worker::ToolAnswer;
 use crate::pokemon::GameState;
-use crate::pokemon::PokemonApi;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::agent::MANUAL_INPUT_CAPACITY;
 use crate::pokemon::bag::BagItem;
@@ -1671,7 +1670,7 @@ fn button_by_name(name: &str) -> Option<JoypadButton> {
 pub fn service_read(
     call: &ToolCall,
     state: &GameState,
-    api: &PokemonApi<'_>,
+    readout: &dyn crate::pokemon::observe::Readout,
     graph: &WorldGraph,
 ) -> ToolAnswer {
     // A `MetaTileMap`, never pixels: the picture is drawn on the worker thread.
@@ -1686,8 +1685,8 @@ pub fn service_read(
     let value = match call.function.name.as_str() {
         "read_map" => serde_json::to_value(observe::map_view(state)),
         "read_party" => serde_json::to_value(observe::party(state)),
-        "read_bag" => serde_json::to_value(observe::bag(state, api)),
-        "read_pc" => serde_json::to_value(observe::pc(state, api)),
+        "read_bag" => serde_json::to_value(observe::bag(state, readout)),
+        "read_pc" => serde_json::to_value(observe::pc(state, readout)),
         "read_battle" => serde_json::to_value(observe::battle(state)),
         READ_ROUTE => serde_json::to_value(route_answer(call, state, graph)),
         other => Ok(json!({ "error": format!("`{other}` is not a read tool") })),

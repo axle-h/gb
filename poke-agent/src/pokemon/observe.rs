@@ -11,6 +11,55 @@ use crate::pokemon::tile::MetaTile;
 use crate::pokemon::world_graph::WorldGraph;
 use poke_core::geometry::Point8;
 
+/// What a read needs beyond the [`GameState`]: the screen, the clock and the cartridge's tables.
+/// The emulator reads them out of memory; the recreation holds them as fields.
+pub trait Readout {
+    /// Whatever text is on screen; `None` in the overworld, where there is none to read.
+    fn screen_text(&self) -> Option<String>;
+    /// Hours, minutes and seconds of play.
+    fn play_time(&self) -> (u8, u8, u8);
+    /// A mart's price for `item`; `None` for what cannot be sold.
+    fn price(&self, item: crate::pokemon::item::ItemId) -> Option<u32>;
+    fn pc_items(&self) -> crate::pokemon::bag::Bag;
+    /// The open mart's stock, in its own order; empty when none is open.
+    fn mart_stock(&self) -> Vec<crate::pokemon::item::ItemId>;
+    /// The emulator behind it, for a test that reads what only the emulator has.
+    fn emulated(&self) -> Option<&PokemonApi<'_>> {
+        None
+    }
+}
+
+impl Readout for PokemonApi<'_> {
+    fn screen_text(&self) -> Option<String> {
+        self.on_screen_text(false)
+    }
+
+    fn play_time(&self) -> (u8, u8, u8) {
+        let mmu = self.mmu();
+        (
+            mmu.read_pointer(&pokered_symbols::wPlayTimeHours),
+            mmu.read_pointer(&pokered_symbols::wPlayTimeMinutes),
+            mmu.read_pointer(&pokered_symbols::wPlayTimeSeconds),
+        )
+    }
+
+    fn price(&self, item: crate::pokemon::item::ItemId) -> Option<u32> {
+        self.item_price(item)
+    }
+
+    fn pc_items(&self) -> crate::pokemon::bag::Bag {
+        self.pc_stored_items()
+    }
+
+    fn mart_stock(&self) -> Vec<crate::pokemon::item::ItemId> {
+        self.mart_item_list()
+    }
+
+    fn emulated(&self) -> Option<&PokemonApi<'_>> {
+        Some(self)
+    }
+}
+
 /// `#[derive(Serialize)]` only when something is going to serialise it.
 macro_rules! view {
     ($(#[$meta:meta])* pub struct $name:ident { $($body:tt)* }) => {
@@ -24,25 +73,17 @@ macro_rules! view {
 // ── Play time
 
 /// `HH:MM:SS` of in-game play time. Saturates at 255:59:59, as the game itself does.
-pub fn playtime(api: &PokemonApi<'_>) -> String {
-    let (hours, minutes, seconds) = playtime_parts(api);
+pub fn playtime(readout: &(impl Readout + ?Sized)) -> String {
+    let (hours, minutes, seconds) = readout.play_time();
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
 /// The same clock as a plain count of seconds.
-pub fn playtime_seconds(api: &PokemonApi<'_>) -> u32 {
-    let (hours, minutes, seconds) = playtime_parts(api);
+pub fn playtime_seconds(readout: &(impl Readout + ?Sized)) -> u32 {
+    let (hours, minutes, seconds) = readout.play_time();
     u32::from(hours) * 3600 + u32::from(minutes) * 60 + u32::from(seconds)
 }
 
-fn playtime_parts(api: &PokemonApi<'_>) -> (u8, u8, u8) {
-    let mmu = api.mmu();
-    (
-        mmu.read_pointer(&pokered_symbols::wPlayTimeHours),
-        mmu.read_pointer(&pokered_symbols::wPlayTimeMinutes),
-        mmu.read_pointer(&pokered_symbols::wPlayTimeSeconds),
-    )
-}
 
 // ── Party
 
@@ -143,13 +184,13 @@ view! {
     }
 }
 
-pub fn bag(state: &GameState, api: &PokemonApi<'_>) -> BagView {
+pub fn bag(state: &GameState, readout: &(impl Readout + ?Sized)) -> BagView {
     BagView {
         money: state.money,
         items: state.bag.iter().map(|item| BagItemView {
             item: format!("{:?}", item.id),
             quantity: item.quantity,
-            price: api.item_price(item.id),
+            price: readout.price(item.id),
         }).collect(),
         slots_used: state.bag.len(),
         slots_total: crate::pokemon::bag::Bag::MAX_ITEMS,
@@ -186,7 +227,7 @@ view! {
     }
 }
 
-pub fn pc(state: &GameState, api: &PokemonApi<'_>) -> PcView {
+pub fn pc(state: &GameState, readout: &(impl Readout + ?Sized)) -> PcView {
     use crate::pokemon::postgame::pc_box::{BOX_CAPACITY, BOX_COUNT};
     PcView {
         open_box: state.current_box + 1,
@@ -201,7 +242,7 @@ pub fn pc(state: &GameState, api: &PokemonApi<'_>) -> PcView {
             hp: mon.current_hp,
             moves: mon.moves.iter().flatten().map(|mv| mv.name.to_string()).collect(),
         }).collect(),
-        stored_items: api.pc_stored_items().iter().map(|item| item.to_string()).collect(),
+        stored_items: readout.pc_items().iter().map(|item| item.to_string()).collect(),
         party_size: state.pokemon.len(),
         note: format!(
             "Only box {} can be read. Switching to another with `change_box` saves the game.",
@@ -329,9 +370,9 @@ fn warps(state: &GameState) -> Vec<WarpView> {
 
 // ── Screen text
 
-/// Whatever text is on screen, decoded from VRAM.
-pub fn screen_text(api: &PokemonApi<'_>) -> Option<String> {
-    api.on_screen_text(false)
+/// Whatever text is on screen.
+pub fn screen_text(readout: &(impl Readout + ?Sized)) -> Option<String> {
+    readout.screen_text()
 }
 
 // ── World graph

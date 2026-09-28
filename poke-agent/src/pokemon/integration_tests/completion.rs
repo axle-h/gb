@@ -399,6 +399,47 @@ pub fn ways() -> Vec<Way> {
         .collect()
 }
 
+/// Where a ledger reads the flags its checklist names, by the address the cartridge keeps them at.
+pub trait Flags {
+    fn read(&self, address: u16) -> u8;
+}
+
+impl Flags for MMU {
+    fn read(&self, address: u16) -> u8 {
+        <MMU as ROM>::read(self, address)
+    }
+}
+
+/// The recreation's world laid out at the cartridge's addresses, for exactly the flags a ledger
+/// reads: any other address is a checklist entry nobody taught the recreation to answer.
+#[cfg(feature = "slow-tests")]
+pub struct WorldFlags<'a> {
+    pub world: &'a pokered::world::World,
+    /// `wWarpedFromWhichWarp` and `wWarpedFromWhichMap`, which the overworld keeps.
+    pub warped_from: (u8, u8),
+}
+
+#[cfg(feature = "slow-tests")]
+impl Flags for WorldFlags<'_> {
+    fn read(&self, address: u16) -> u8 {
+        use pokered_symbols as sym;
+        let within = |start: u16, bytes: &[u8]| address.checked_sub(start)
+            .and_then(|offset| bytes.get(offset as usize).copied());
+        let trades = self.world.in_game_trades.to_le_bytes();
+        within(sym::wEventFlags.address, self.world.events.as_bytes())
+            .or_else(|| within(sym::wToggleableObjectFlags.address, &self.world.location.hidden_objects))
+            .or_else(|| within(sym::wCompletedInGameTradeFlags.address, &trades))
+            .unwrap_or_else(|| match address {
+                // `BIT_GOT_LAPRAS`.
+                _ if address == sym::wStatusFlags4.address => self.world.scripts.got_lapras as u8,
+                _ if address == sym::wCurMap.address => self.world.location.map as u8,
+                _ if address == sym::wWarpedFromWhichWarp.address => self.warped_from.0,
+                _ if address == sym::wWarpedFromWhichMap.address => self.warped_from.1,
+                _ => panic!("the ledger reads {address:#06x}, which the recreation does not lay out"),
+            })
+    }
+}
+
 /// What a run has done, folded in tick by tick.
 #[derive(Debug, Default, Clone)]
 pub struct Ledger {
@@ -440,9 +481,14 @@ impl Ledger {
     }
 
     /// Fold one tick's game state in.
-    pub fn observe(&mut self, state: &GameState, mmu: &MMU) {
-        self.visited.insert(state.map.map);
-        self.held.extend(state.bag.iter().map(|item| item.id as u8));
+    pub fn observe(&mut self, state: &GameState, mmu: &dyn Flags) {
+        self.observe_on(state.map.map, state.bag.iter().map(|item| item.id as u8), mmu);
+    }
+
+    /// [`Self::observe`] from the three things it reads, for a caller with no [`GameState`] to hand.
+    pub fn observe_on(&mut self, map: Map, bag: impl Iterator<Item = u8>, mmu: &dyn Flags) {
+        self.visited.insert(map);
+        self.held.extend(bag);
         for (address, mask, seen_clear) in self.toggled.iter_mut() {
             *seen_clear |= mmu.read(*address) & *mask == 0;
         }
@@ -458,7 +504,7 @@ impl Ledger {
     /// so a changed warp record is a door taken and a changed map without one is a map edge walked
     /// over. An edge is only ticked where the header declares that neighbour, which is what keeps
     /// the two apart if a tick ever lands between those two writes.
-    fn cross(&mut self, mmu: &MMU) {
+    fn cross(&mut self, mmu: &dyn Flags) {
         let now = (mmu.read(pokered_symbols::wCurMap.address),
                    (mmu.read(pokered_symbols::wWarpedFromWhichMap.address),
                     mmu.read(pokered_symbols::wWarpedFromWhichWarp.address)));
@@ -484,7 +530,7 @@ impl Ledger {
         self.observed.insert(entry);
     }
 
-    pub fn done(&self, item: &Item, mmu: &MMU, state: &GameState) -> bool {
+    pub fn done(&self, item: &Item, mmu: &dyn Flags, state: &GameState) -> bool {
         match &item.check {
             Check::Visited(map) => self.visited.contains(map),
             Check::Flag { address, mask } => mmu.read(*address) & mask != 0
@@ -500,7 +546,7 @@ impl Ledger {
     }
 
     /// Every entry of `list` not done, for the assertion that ends a run.
-    pub fn missing(&self, list: &[Item], mmu: &MMU, state: &GameState) -> Vec<Entry> {
+    pub fn missing(&self, list: &[Item], mmu: &dyn Flags, state: &GameState) -> Vec<Entry> {
         list.iter().filter(|item| !self.done(item, mmu, state)).map(|item| item.entry.clone()).collect()
     }
 }

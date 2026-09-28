@@ -450,6 +450,8 @@ impl Executor {
                 if kind != *from {
                     return Drive::Done;
                 }
+                // The fly screen's Up steps on through its list, and every other menu's Down does.
+                let (back, on) = if kind == Decision::FlyDestination { (Joypad::DOWN, Joypad::UP) } else { (Joypad::UP, Joypad::DOWN) };
                 let waiting = status == Status::Waiting(kind);
                 if chosen.is_some() && !waiting {
                     *stopped = true;
@@ -463,8 +465,8 @@ impl Executor {
                 }
                 *released = false;
                 let button = match (*target).cmp(&selected) {
-                    std::cmp::Ordering::Less => Joypad::UP,
-                    std::cmp::Ordering::Greater => Joypad::DOWN,
+                    std::cmp::Ordering::Less => back,
+                    std::cmp::Ordering::Greater => on,
                     std::cmp::Ordering::Equal => Joypad::A,
                 };
                 if button == Joypad::A {

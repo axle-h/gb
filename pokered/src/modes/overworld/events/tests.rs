@@ -44,7 +44,7 @@ fn free(game: &Game) -> bool {
 }
 
 /// Answers texts with A, and every menu of options with what `choose` says, until `done`.
-fn play_until(game: &mut Game, limit: u32, choose: &mut dyn FnMut(&Game) -> u8, done: impl Fn(&Game) -> bool) {
+fn play_until(game: &mut Game, limit: u32, choose: &mut dyn FnMut(&Game) -> u8, mut done: impl FnMut(&Game) -> bool) {
     for _ in 0..limit {
         if done(game) {
             return;
@@ -79,6 +79,33 @@ fn the_nurse_heals_the_party_and_remembers_the_town() {
     let mon = &game.world().party[0].mon;
     assert_eq!((mon.mon.hp, mon.mon.status), (mon.stats[0], 0));
     assert_eq!(game.world().location.last_blackout_map, Map::ViridianCity);
+}
+
+/// The Cable Club's receptionist with nobody on the other end of the cable: a welcome, a wait, and
+/// the reason, which is the Pokédex's absence or the missing friend.
+#[test]
+fn the_link_receptionist_turns_the_player_away() {
+    for dex in [false, true] {
+        let mut game = game(Map::ViridianPokecenter, 11, 3, SpriteFacing::Up, |world| {
+            if dex {
+                world.events.set(poke_core::symbols::pokered_events::EVENT_GOT_POKEDEX);
+            }
+        });
+        let reply = game.frame(Input::Command(Command::Interact)).reply;
+        assert_eq!(reply, Some(Reply::Accepted));
+        // The message box's second line at each prompt, inside the border and without the arrow.
+        let mut prompts = Vec::new();
+        play_until(&mut game, 1000, &mut |_| 0, |game| {
+            if game.status() == Status::Waiting(Decision::Text) {
+                let line = &game.ui().row(16)[1..19];
+                let end = line.iter().rposition(|&tile| tile != 0x7F && tile != 0xEE).map_or(0, |i| i + 1);
+                prompts.push(line[..end].to_vec());
+            }
+            free(game)
+        });
+        let want: &[&str] = if dex { &["reserved for 2", "friends who are", "linked by cable."] } else { &["preparations.", "Please wait."] };
+        assert_eq!(prompts, want.iter().map(|line| encode(line).unwrap()).collect::<Vec<_>>(), "with the dex {dex}");
+    }
 }
 
 #[test]

@@ -9,6 +9,10 @@ can break in silence.
 
 - `poll_policy` is the single seam every decision goes through and it resets the clock the watchdog
   reads; calling `service_tools` from a new site makes the watchdog believe the run is wedged.
+- A new map is recorded in the world graph before that poll, which is where a policy takes the
+  arrival it tells the model about; polling first left every map's first turn without one.
+- `service_tools` is handed a `Readout`, not the emulator, so the recreation can answer it too;
+  `Readout::emulated` is for a test that reads what only the emulator has.
 - The emulator never pauses while the model thinks, so a pause spanning a tool call deadlocks.
 - Letting go of the pad is not standing still on Route 17: `JoypadOverworld` forces a Down press
   there whenever no direction and neither A nor B is held, so every idle tick costs a square
@@ -59,7 +63,11 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   route, `OverworldMovement` tests for a border warp before consulting one. Fixing one half does
   nothing.
 - `map_uses_runtime_blocks` lists every map `ReplaceTileBlock` rewrites. A map missing from it is
-  offered rows through closed doors, and no finished-game fixture can show that.
+  offered rows through closed doors, and no finished-game fixture can show that. The recreation reads
+  Silph's floors and the other rewritten maps live as well (`native::live_blocks`); Silph 11F's
+  card-key door is tile `$5E`, not `$18` or `$24` (`apply_card_key_doors`).
+- Seafoam B4F refuses Surf at its stairs only until both boulders are down (`IsSurfingAllowed`), so
+  `no_surf_mount` follows `strong_current_below`.
 - The floor menu is up when the screen says so, never when `wListMenuID` does: it still reads the
   floor list long after the menu closed, so a second ride navigates a menu that is not there.
 - A lift's doors lead where the live `wWarpEntries` says, the floor it was entered from until the
@@ -186,6 +194,21 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   toggle, called before the driver's press and gated on `MessageBox`, because an in-battle bag list
   is drawn in the rows a message-box reader reads. A battle sub-state's reader is carried out of it,
   never rebuilt.
+
+## The native agent
+
+- It decides at the recreation's decision points, a frame at a time, and emulates the emulated
+  agent's habits where a route depends on them: a trader's party menu gets the species asked for
+  (`trade_give`), the roof girl's and the fossil scientist's menus their first row
+  (`FIRST_ROW_TALKS`), a faint's party menu the first mon standing (`forced_switch`), and Route 17 a
+  held B (`idle_input`).
+- Its reader reads the message box only while the game prints or waits on a page, never while a
+  battle animates, and flushes at the overworld or a battle menu. The recreation is never read
+  mid-draw, so it breaks a page on one mismatch (`PokemonTextReader::untorn`).
+- A walk is bounded on progress as well as on a lost route (`MAX_STALE_STEPS`: a current takes back
+  every step), and a task's walk waits `MAX_TASK_BLOCKED_POLLS` for someone to move before giving up.
+- A harness that drives the game itself (the credits) calls `host_took_the_screen`, or the agent waits
+  for ever on a command that will never report back.
 
 ## The page's copy
 

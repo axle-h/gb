@@ -4,7 +4,8 @@ use std::sync::mpsc::{self, Receiver};
 use rand::prelude::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
-use crate::pokemon::{GameState, PokemonApi};
+use crate::pokemon::GameState;
+use crate::pokemon::observe::Readout;
 use crate::pokemon::actions::OverworldAction;
 use poke_core::geometry::Point8;
 use crate::pokemon::badge::Badge;
@@ -14,6 +15,7 @@ use crate::pokemon::damage::{expected_damage, is_damaging_move, pick_best_move};
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::data::PokemonNamePicker;
 use crate::pokemon::tile::MetaTile;
+use crate::pokemon::agent::OverworldActionAbortedReason;
 pub use crate::pokemon::item::ItemId;
 use crate::pokemon::map::{Map, MapSprite};
 use crate::pokemon::species::PokemonSpecies;
@@ -68,7 +70,7 @@ pub trait Policy {
     fn on_event(&mut self, _event: &crate::pokemon::agent::AgentEvent) {}
 
     /// Called at the top of every policy poll, before any `pick_*` for that decision point.
-    fn service_tools(&mut self, _state: &GameState, _api: &mut PokemonApi<'_>, _graph: &WorldGraph) {}
+    fn service_tools(&mut self, _state: &GameState, _readout: &dyn Readout, _graph: &WorldGraph) {}
 
     /// How much emulated time may pass without a policy poll before the watchdog wakes this one.
     fn stuck_timeout(&self) -> Option<std::time::Duration> {
@@ -1749,6 +1751,10 @@ pub struct DeterministicPolicy {
     heal_came_from: Option<Map>,
     /// Consecutive polls spent waiting for a nurse to finish.
     heal_waits: u32,
+    /// The `Interact` step just issued, and the one to put back because a text box cut its walk
+    /// short: at the next free moment, unless the text was a trainer's and led to a fight.
+    interacting: Option<PolicyStep>,
+    interact_again: Option<PolicyStep>,
     /// Consecutive polls a `DefeatGymLeader` step has found no route to its gym.
     gym_route_stuck: u32,
     /// The map a `Dig` was issued from, so the step pops once Dig has actually warped away.
@@ -1922,6 +1928,8 @@ impl DeterministicPolicy {
             heal_unreachable: false,
             heal_came_from: None,
             heal_waits: 0,
+            interacting: None,
+            interact_again: None,
             mart_attempts: 0,
             mart_baseline: None,
             gym_route_stuck: 0,
@@ -2000,9 +2008,35 @@ impl Policy for DeterministicPolicy {
             self.blackouts += 1;
             self.blackout_pending = true;
         }
+        match event {
+            // A script's own text can start between a free frame and the walk's first step.
+            crate::pokemon::agent::AgentEvent::OverworldActionAborted { destination, reason, .. } => {
+                if let Some(step @ PolicyStep::Interact(sprite)) = self.interacting.take()
+                    && *reason == OverworldActionAbortedReason::Textbox
+                    && *destination == MetaTile::Sprite(sprite.name)
+                {
+                    self.interact_again = Some(step);
+                }
+            }
+            crate::pokemon::agent::AgentEvent::OverworldInteractionCompleted { .. } => self.interacting = None,
+            crate::pokemon::agent::AgentEvent::BattleStarted => self.interact_again = None,
+            _ => {}
+        }
+        // A map a script walks the player straight back out of is never stood on at a decision.
+        if let crate::pokemon::agent::AgentEvent::OverworldActionCompleted {
+            destination: MetaTile::Warp { to_map, .. } | MetaTile::Connection { to_map, .. },
+        } = event
+            && self.heal_return.is_none() && self.heal_came_from.is_none()
+            && self.queue.front() == Some(&PolicyStep::EnterMap { to_map: *to_map, to_position: None })
+        {
+            self.queue.pop_front();
+        }
     }
 
     fn pick_overworld_action(&mut self, state: &GameState, world_graph: &WorldGraph) -> Option<OverworldAction> {
+        if let Some(step) = self.interact_again.take() {
+            self.queue.push_front(step);
+        }
         // The cursor is written here rather than at every `pop_front`.
         self.record_progress();
         // Back in the overworld, so the last battle is over.
@@ -2489,7 +2523,7 @@ impl Policy for DeterministicPolicy {
                                 state.map.map);
                         }
                         self.heal_waits = 0;
-                        self.queue.pop_front();
+                        self.interacting = self.queue.pop_front();
                         return Some(action.clone());
                     }
                     let map = sprite.map();

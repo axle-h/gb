@@ -707,13 +707,13 @@ impl crate::pokemon::policy::Policy for RecordingPolicy {
         self.log.borrow_mut().events.push(format!("{event:?}"));
     }
 
-    fn service_tools(&mut self, state: &GameState, api: &mut PokemonApi<'_>,
+    fn service_tools(&mut self, state: &GameState, readout: &dyn crate::pokemon::observe::Readout,
                      graph: &crate::pokemon::world_graph::WorldGraph) {
         // Answer the poll as `LlmPolicy` does: from the observation facade, on the state in hand.
         use crate::pokemon::observe;
         assert_eq!(observe::map_view(state).map, format!("{}", state.map.map),
                    "the facade must describe the state it was given");
-        assert_eq!(observe::bag(state, api).slots_used, state.bag.len());
+        assert_eq!(observe::bag(state, readout).slots_used, state.bag.len());
         assert_eq!(observe::party(state).len(), state.pokemon.len());
         self.log.borrow_mut().tool_polls.push((state.map.map, graph.map_count()));
     }
@@ -864,7 +864,7 @@ impl crate::pokemon::policy::Policy for WatchdogSpy {
         }
     }
 
-    fn service_tools(&mut self, _: &GameState, _: &mut PokemonApi<'_>,
+    fn service_tools(&mut self, _: &GameState, _: &dyn crate::pokemon::observe::Readout,
                      _: &crate::pokemon::world_graph::WorldGraph) {
         self.log.borrow_mut().polls += 1;
     }
@@ -1351,7 +1351,8 @@ fn a_battle_turn_is_decided_once_rather_than_twice() {
     impl Policy for Probe {
         fn name(&self) -> &'static str { "scripted" }
 
-        fn service_tools(&mut self, _: &GameState, api: &mut PokemonApi<'_>, _: &WorldGraph) {
+        fn service_tools(&mut self, _: &GameState, readout: &dyn crate::pokemon::observe::Readout, _: &WorldGraph) {
+            let api = readout.emulated().expect("an emulated run");
             self.log.lock().expect("the log is never poisoned").menu =
                 format!("{:?}", api.menu_state().and_then(|m| m.battle_menu_state()));
         }
@@ -2592,6 +2593,39 @@ fn the_ss_anne_bow_is_left_to_the_right() {
             .expect("the door back to 3F is a row");
         assert_eq!(row.route, vec![JoypadButton::Right], "(13, {y})");
     }
+}
+
+/// The Rocket Hideout's lift is pressed into from above, against the wall under its door: the
+/// floor behind the door names a carpet for facing up as well, and holding up walks off it.
+#[test]
+fn the_rocket_hideout_lift_is_entered_going_down() {
+    use crate::pokemon::map_metadata::{CurrentMap, MapMetadataReader, PlayerFacingDirection};
+    use crate::pokemon::tile_map::WarpTrigger;
+    use std::sync::Arc;
+
+    let mmu = gb::mmu::MMU::from_rom(crate::pokemon::roms::POKERED).unwrap();
+    let door = Point8 { x: 24, y: 19 };
+    let tm = MetaTileMap::new(&CurrentMap {
+        player_position: door,
+        player_direction: PlayerFacingDirection::Down,
+        sprites: Vec::new(),
+        metadata: Arc::new(mmu.read_map_metadata(Map::RocketHideoutB2F).unwrap()),
+        closed_doors: Vec::new(),
+        grass_encounter_rate: 0,
+        water_encounter_rate: 0,
+        card_key_locked: false,
+        header_loaded: true,
+        surfing: false,
+        sprites_loaded: true,
+        script_cancelled_warps: Vec::new(),
+        strong_current_below: false,
+        standing_on_warp: true,
+    });
+    assert_eq!(tm.warp_trigger(door), WarpTrigger::HoldDirection(JoypadButton::Down));
+    let row = tm.actions().into_iter()
+        .find(|a| a.tile == MetaTile::Warp { to_map: Map::RocketHideoutElevator, to_position: Point8 { x: 2, y: 1 } })
+        .expect("the lift is a row");
+    assert_eq!(row.route, vec![JoypadButton::Down]);
 }
 
 #[test]

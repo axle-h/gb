@@ -23,7 +23,7 @@ use crate::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
 use crate::scripts::{self, Code, MapStates};
 use crate::systems::overworld::map_text::{map_text, map_text_in, text_predef, MapText, TX_SCRIPT_BILLS_PC, TX_SCRIPT_MART,
     TX_SCRIPT_PLAYERS_PC, TX_SCRIPT_POKECENTER_NURSE, TX_SCRIPT_POKECENTER_PC, TX_SCRIPT_PRIZE_VENDOR,
-    TX_SCRIPT_VENDING_MACHINE};
+    TX_SCRIPT_VENDING_MACHINE, TX_SCRIPT_CABLE_CLUB_RECEPTIONIST};
 use crate::systems::math::{add_bcd, sub_bcd};
 use crate::systems::print_num::{print_bcd, BcdFormat};
 use crate::systems::overworld::sprites::{NpcPaths, SpriteState, NUM_SPRITES};
@@ -1886,6 +1886,8 @@ impl Overworld {
                 Then::call(super::events::Label::PokemonCenter).then(Routine::AfterDisplayingTextId),
             Ok(MapText::Dispatch(TX_SCRIPT_VENDING_MACHINE, _)) =>
                 Then::call(super::events::Label::VendingMachine).then(Routine::AfterDisplayingTextId),
+            Ok(MapText::Dispatch(TX_SCRIPT_CABLE_CLUB_RECEPTIONIST, _)) =>
+                Then::call(super::events::Label::CableClubNpc).then(Routine::AfterDisplayingTextId),
             Ok(MapText::Dispatch(TX_SCRIPT_PRIZE_VENDOR, _)) =>
                 Then::call(super::events::Label::PrizeMenu).then(Routine::HoldTextDisplayOpen),
             Ok(MapText::Dispatch(TX_SCRIPT_PLAYERS_PC, _)) => {
@@ -1897,7 +1899,6 @@ impl Overworld {
                 Then::call(Routine::BillsPc).then(Routine::HoldTextDisplayOpen)
             }
             Ok(MapText::Dispatch(TX_SCRIPT_POKECENTER_PC, _)) => Then::call(Routine::ActivatePc).then(Routine::HoldTextDisplayOpen),
-            // The Cable Club is a non-goal.
             _ => Flow::Jump(Routine::CloseTextDisplay.into()),
         }
     }

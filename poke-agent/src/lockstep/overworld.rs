@@ -16,17 +16,10 @@ use pokered::mode::Mode;
 use pokered::modes::overworld::{Overworld, Standing};
 use pokered::rng::GameRng;
 use pokered::systems::overworld::sprites::{SpriteState, Sprites};
-use pokered::systems::overworld::Location;
-use pokered::systems::overworld::location::Ahead;
 use pokered::{Game, Input, Pacing};
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointerRead};
 use super::{assert_late, breakpoint, joypad};
 
-const STATE_BYTES: u16 = 16;
-/// `wStatusFlags6`'s.
-const BIT_ALWAYS_ON_BIKE: u8 = 5;
-/// `wStatusFlags1`'s.
-const BIT_STRENGTH_ACTIVE: u8 = 0;
 
 fn local_label(label: &str) -> crate::pokemon::symbols::DmgPointer {
     use crate::pokemon::symbols::{DmgBank, DmgPointer};
@@ -117,17 +110,7 @@ impl Cartridge {
     }
 
     pub(super) fn sprites(&self) -> Sprites {
-        let mmu = self.gb.core().mmu();
-        std::array::from_fn(|slot| {
-            let at = slot as u16 * STATE_BYTES;
-            let data1 = mmu.read_slice(sym::wSpriteStateData1.address + at, 16);
-            let data2 = mmu.read_slice(sym::wSpriteStateData2.address + at, 16);
-            let map_data = if slot == 0 { [0, 0] } else {
-                let entry = sym::wMapSpriteData.address + (slot as u16 - 1) * 2;
-                [mmu.read(entry), mmu.read(entry + 1)]
-            };
-            SpriteState::from_bytes(&data1, &data2, map_data)
-        })
+        super::bridge::sprites(&self.gb)
     }
 
     fn lcd(&self) -> Vec<u8> {
@@ -209,41 +192,11 @@ impl Cartridge {
     }
 
     pub(super) fn world(&self) -> pokered::world::World {
-        let mmu = self.gb.core().mmu();
-        let mut world = super::item_menu::the_world(&self.gb);
-        let (map, x, y, facing) = self.location();
-        world.location = Location {
-            map, x, y, facing,
-            last_map: Map::from_repr(mmu.read_pointer(&sym::wLastMap)).unwrap(),
-            walk_bike_surf: mmu.read_pointer(&sym::wWalkBikeSurfState),
-            hidden_objects: mmu.read_slice(sym::wToggleableObjectFlags.address, 32),
-            towns_visited: u16::from_le_bytes([mmu.read(sym::wTownVisitedFlag.address), mmu.read(sym::wTownVisitedFlag.address + 1)]),
-            last_blackout_map: Map::from_repr(mmu.read_pointer(&sym::wLastBlackoutMap)).unwrap(),
-            repel_steps: mmu.read_pointer(&sym::wRepelRemainingSteps),
-            always_on_bike: mmu.read_pointer(&sym::wStatusFlags6) & 1 << BIT_ALWAYS_ON_BIKE != 0,
-            ahead: Ahead {
-                tile: mmu.read_pointer(&sym::wTileInFrontOfPlayer),
-                standing_on: mmu.read_pointer(&sym::wTilePlayerStandingOn),
-                sprite: false,
-            },
-            strength_active: mmu.read_pointer(&sym::wStatusFlags1) & 1 << BIT_STRENGTH_ACTIVE != 0,
-            used_field_move: None,
-            fly_warp: None,
-            escape_warp: false,
-        };
-        world
+        super::bridge::world(&self.gb)
     }
 
     pub(super) fn standing(&self) -> Standing {
-        let mmu = self.gb.core().mmu();
-        Standing {
-            player_direction: mmu.read_pointer(&sym::wPlayerDirection),
-            moving_direction: mmu.read_pointer(&sym::wPlayerMovingDirection),
-            last_stop_direction: mmu.read_pointer(&sym::wPlayerLastStopDirection),
-            check_for_180_degree_turn: mmu.read_pointer(&sym::wCheckFor180DegreeTurn),
-            standing_on_warp: mmu.read_pointer(&sym::wMovementFlags) & 1 << 2 != 0,
-            destination_warp: mmu.read_pointer(&sym::wDestinationWarpID),
-        }
+        super::bridge::standing(&self.gb)
     }
 }
 

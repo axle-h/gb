@@ -26,24 +26,13 @@ use pokered::gfx::tiles::V_CHARS2;
 use pokered::input::Joypad;
 use pokered::mode::{Mode, ModeUpdate, Status};
 use pokered::modes::overworld::{Overworld, Standing};
-use pokered::party::Pokedex;
 use pokered::rng::GameRng;
 use pokered::systems::overworld::sprites::{SpriteState, Sprites, MAP_TILESET_SIZE};
-use pokered::systems::overworld::Location;
-use pokered::systems::overworld::location::Ahead;
-use pokered::world::{BattleStyle, TextSpeed};
 use pokered::{Game, Input, Pacing};
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointer, DmgPointerRead};
 use super::{breakpoint, joypad};
 
-const STATE_BYTES: u16 = 16;
 const PARTY_STRUCT: u16 = 44;
-/// `wStatusFlags6`'s.
-const BIT_ALWAYS_ON_BIKE: u8 = 5;
-/// `wStatusFlags1`'s.
-const BIT_STRENGTH_ACTIVE: u8 = 0;
-/// `wStatusFlags4`'s.
-const BIT_GOT_STARTER: u8 = 3;
 /// `wStatusFlags4`'s.
 const BIT_NO_BATTLES: u8 = 4;
 /// The routines both sides skip: the trade's animation is the movie's to recreate.
@@ -499,29 +488,11 @@ impl Cartridge {
     }
 
     fn sprites(&self) -> Sprites {
-        let mmu = self.gb.core().mmu();
-        std::array::from_fn(|slot| {
-            let at = slot as u16 * STATE_BYTES;
-            let data1 = mmu.read_slice(sym::wSpriteStateData1.address + at, 16);
-            let data2 = mmu.read_slice(sym::wSpriteStateData2.address + at, 16);
-            let map_data = if slot == 0 { [0, 0] } else {
-                let entry = sym::wMapSpriteData.address + (slot as u16 - 1) * 2;
-                [mmu.read(entry), mmu.read(entry + 1)]
-            };
-            SpriteState::from_bytes(&data1, &data2, map_data)
-        })
+        super::bridge::sprites(&self.gb)
     }
 
     fn standing(&self) -> Standing {
-        let mmu = self.gb.core().mmu();
-        Standing {
-            player_direction: mmu.read_pointer(&sym::wPlayerDirection),
-            moving_direction: mmu.read_pointer(&sym::wPlayerMovingDirection),
-            last_stop_direction: mmu.read_pointer(&sym::wPlayerLastStopDirection),
-            check_for_180_degree_turn: mmu.read_pointer(&sym::wCheckFor180DegreeTurn),
-            standing_on_warp: mmu.read_pointer(&sym::wMovementFlags) & 1 << 2 != 0,
-            destination_warp: mmu.read_pointer(&sym::wDestinationWarpID),
-        }
+        super::bridge::standing(&self.gb)
     }
 
     /// The party and what the events move, unless `party_unsettled`.
@@ -583,78 +554,7 @@ impl Cartridge {
 
     /// The recreation's world, from where the cartridge stands.
     pub fn world(&self) -> pokered::world::World {
-        let mmu = self.gb.core().mmu();
-        let mut world = super::item_menu::the_world(&self.gb);
-        world.party = super::status_screen::the_party(&self.gb);
-        let options = mmu.read_pointer(&sym::wOptions);
-        world.options.text_speed = match options & 0xF {
-            1 => TextSpeed::Fast,
-            5 => TextSpeed::Slow,
-            _ => TextSpeed::Medium,
-        };
-        world.options.battle_animation = options & 1 << 7 == 0;
-        world.options.battle_style = if options & 1 << 6 != 0 { BattleStyle::Set } else { BattleStyle::Shift };
-        let (map, x, y, facing) = self.location();
-        world.location = Location {
-            map, x, y, facing,
-            last_map: Map::from_repr(mmu.read_pointer(&sym::wLastMap)).unwrap(),
-            walk_bike_surf: mmu.read_pointer(&sym::wWalkBikeSurfState),
-            hidden_objects: mmu.read_slice(sym::wToggleableObjectFlags.address, 32),
-            towns_visited: u16::from_le_bytes([mmu.read(sym::wTownVisitedFlag.address), mmu.read(sym::wTownVisitedFlag.address + 1)]),
-            last_blackout_map: Map::from_repr(mmu.read_pointer(&sym::wLastBlackoutMap)).unwrap(),
-            repel_steps: mmu.read_pointer(&sym::wRepelRemainingSteps),
-            always_on_bike: mmu.read_pointer(&sym::wStatusFlags6) & 1 << BIT_ALWAYS_ON_BIKE != 0,
-            ahead: Ahead {
-                tile: mmu.read_pointer(&sym::wTileInFrontOfPlayer),
-                standing_on: mmu.read_pointer(&sym::wTilePlayerStandingOn),
-                sprite: false,
-            },
-            strength_active: mmu.read_pointer(&sym::wStatusFlags1) & 1 << BIT_STRENGTH_ACTIVE != 0,
-            used_field_move: None,
-            fly_warp: None,
-            escape_warp: false,
-        };
-        world.player_id = mmu.read_u16_be(sym::wPlayerID.address);
-        world.badges = mmu.read_pointer(&sym::wObtainedBadges);
-        world.rival_name = (0..7).map(|i| mmu.read(sym::wRivalName.address + i)).take_while(|&byte| byte != 0x50).collect();
-        world.coins = [mmu.read(sym::wPlayerCoins.address), mmu.read(sym::wPlayerCoins.address + 1)];
-        world.hidden_items = mmu.read_slice(sym::wObtainedHiddenItemsFlags.address, 14).try_into().unwrap();
-        world.hidden_coins = mmu.read_slice(sym::wObtainedHiddenCoinsFlags.address, 2).try_into().unwrap();
-        world.in_game_trades = u16::from_le_bytes([mmu.read(sym::wCompletedInGameTradeFlags.address), mmu.read(sym::wCompletedInGameTradeFlags.address + 1)]);
-        world.used_pokecenter = mmu.read_pointer(&sym::wStatusFlags4) & 1 << 2 != 0;
-        world.safari_steps = mmu.read_u16_be(sym::wSafariSteps.address);
-        world.safari_balls = mmu.read_pointer(&sym::wNumSafariBalls);
-        if mmu.read_pointer(&sym::wDayCareInUse) != 0 {
-            world.day_care = Some(super::events::box_mon_at(&self.gb, sym::wDayCareMon.address, sym::wDayCareMonOT.address,
-                sym::wDayCareMonName.address));
-        }
-        world.scripts.trash_cans = [mmu.read_pointer(&sym::wFirstLockTrashCanIndex), mmu.read_pointer(&sym::wSecondLockTrashCanIndex)];
-        world.pokedex = Pokedex {
-            owned: mmu.read_slice(sym::wPokedexOwned.address, 19).try_into().unwrap(),
-            seen: mmu.read_slice(sym::wPokedexSeen.address, 19).try_into().unwrap(),
-        };
-        let scripts = &mut world.scripts;
-        scripts.cur_map_script = mmu.read_pointer(&sym::wCurMapScript);
-        scripts.rival_starter = mmu.read_pointer(&sym::wRivalStarter);
-        scripts.maps.pallet_town.cur_script = mmu.read_pointer(&sym::wPalletTownCurScript);
-        scripts.maps.pallet_town.oak_walked_to_player = mmu.read_pointer(&sym::wOakWalkedToPlayer) != 0;
-        scripts.got_starter = mmu.read_pointer(&sym::wStatusFlags4) & 1 << BIT_GOT_STARTER != 0;
-        let oaks_lab = &mut scripts.maps.oaks_lab;
-        oaks_lab.cur_script = mmu.read_pointer(&sym::wOaksLabCurScript);
-        oaks_lab.player_starter = mmu.read_pointer(&sym::wPlayerStarter);
-        oaks_lab.rival_starter_temp = mmu.read_pointer(&sym::wRivalStarterTemp);
-        oaks_lab.rival_starter_ball = mmu.read_pointer(&sym::wRivalStarterBallSpriteIndex);
-        oaks_lab.saved_steps = mmu.read_pointer(&sym::wSavedNPCMovementDirections2Index);
-        let scripts = &mut world.scripts;
-        scripts.maps.reds_house_2f.cur_script = mmu.read_pointer(&sym::wRedsHouse2FCurScript);
-        scripts.maps.viridian_forest.cur_script = mmu.read_pointer(&sym::wViridianForestCurScript);
-        scripts.maps.viridian_mart.cur_script = mmu.read_pointer(&sym::wViridianMartCurScript);
-        scripts.maps.vermilion_gym.cur_script = mmu.read_pointer(&sym::wVermilionGymCurScript);
-        scripts.maps.viridian_gym.cur_script = mmu.read_pointer(&sym::wViridianGymCurScript);
-        scripts.maps.celadon_gym.cur_script = mmu.read_pointer(&sym::wCeladonGymCurScript);
-        scripts.maps.fuchsia_gym.cur_script = mmu.read_pointer(&sym::wFuchsiaGymCurScript);
-        scripts.maps.saffron_gym.cur_script = mmu.read_pointer(&sym::wSaffronGymCurScript);
-        world
+        super::bridge::world(&self.gb)
     }
 
     /// What the recreation starts from, taken where the cartridge has just polled in the overworld.

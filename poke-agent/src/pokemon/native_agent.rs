@@ -12,6 +12,7 @@ use pokered::mode::{Mode, Status};
 use pokered::modes::field_move_menu::FieldMoveChoice;
 use pokered::modes::pc::bills_pc::BillsPcMenu;
 use pokered::modes::start_menu::StartMenuEntry;
+use pokered::systems::overworld::collision;
 use pokered::systems::overworld::location::Direction;
 use pokered::{Event, Game, Input};
 
@@ -20,6 +21,7 @@ use crate::pokemon::battle::BattleAction;
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::map::Map;
 use crate::pokemon::native::NativeGame;
+use crate::pokemon::text::PokemonTextReader;
 use crate::pokemon::move_name::PokemonMoveName;
 use crate::pokemon::bag::BagItem;
 use crate::pokemon::item::ItemId;
@@ -40,6 +42,20 @@ use crate::pokemon::GameState;
 /// the only doorway moves on in a few of their own steps.
 const MAX_ROUTE_LOST_POLLS: u32 = 120;
 
+/// Talks whose menu the emulated agent's A answers with its first row: the drinks the roof's girl
+/// is shown, and the fossils the lab's scientist is.
+const FIRST_ROW_TALKS: [(Map, &str); 2] = [(Map::CeladonMartRoof, "Little Girl"), (Map::CinnabarLabFossilRoom, "Scientist 1")];
+
+/// Steps a walk may take without its route getting shorter before it is given up.
+const MAX_STALE_STEPS: u32 = 64;
+
+/// Decision points a task's walk waits for someone to move off its way: longer than a row's, since
+/// a person at a counter can stand there for seconds. Twenty seconds of game time.
+const MAX_TASK_BLOCKED_POLLS: u32 = 1200;
+
+/// Presses of A at one Silph door before it is taken for a wall that looks like one.
+const CARD_KEY_PRESSES: usize = 3;
+
 /// A row being walked: re-derived at every decision point, as the emulated agent re-derives it
 /// every tick, so nothing depends on a route's tail.
 #[derive(Debug, Clone, Copy)]
@@ -49,6 +65,13 @@ struct Walk {
     /// The last command was A at the row's end, so a text box is the row succeeding.
     pressed_a: bool,
     route_lost: u32,
+    /// Where the last accepted step set off from.
+    came_from: Option<Point8>,
+    /// The shortest the row's route has been, and the steps since it last got shorter: a current
+    /// or a slope can take back every step a walk makes. Counted where the player stood last.
+    closest: usize,
+    stale: u32,
+    last_at: Option<Point8>,
 }
 
 /// Menus the agent walks itself. A walk it was started from stays in [`NativeAgent::walk`], which is
@@ -94,12 +117,16 @@ struct TalkBefore {
     nick: Option<[u8; 11]>,
 }
 
-/// SWITCH on the party menu, to bring a mon to the front.
+/// SWITCH on the party menu, a neighbour at a time, to bring a mon to the front with the rest
+/// behind it in their order: what the emulated agent's write of the party leaves.
 #[derive(Debug, Clone, Copy)]
 struct SwitchUse {
     slot: u8,
+    /// Where the mon being moved stands now.
+    at: u8,
     opened: bool,
-    /// The mon was chosen, then SWITCH, then the front slot: every party menu after is the way out.
+    /// The mon was chosen, then SWITCH, then the slot in front of it, until it leads: every party
+    /// menu after is the way out.
     stage: u8,
 }
 
@@ -271,8 +298,9 @@ pub struct NativeAgent {
     task: Option<Task>,
     /// The row being walked is a quiz answer of NO, so the next yes/no is answered NO.
     answer_no: bool,
-    /// The row being walked is a vending machine's drink, by its row in the machine's menu.
-    vending_pick: Option<u8>,
+    /// The row the next cursor menu is answered with: a vending machine's drink, or a
+    /// [`FIRST_ROW_TALKS`] menu's first row.
+    menu_pick: Option<u8>,
     /// The boulder goal being worked, between its shoves.
     boulder_goal: Option<BoulderGoal>,
     /// Frames ticked, which is game time under any pacing.
@@ -285,6 +313,25 @@ pub struct NativeAgent {
     /// Accepted and not yet done or interrupted.
     running: Option<Command>,
     in_battle: bool,
+    /// Every A pressed at a card-key door, so one that never opens is given up on.
+    card_key_presses: Vec<(Map, Point8)>,
+    /// A walk stopped on a square (in the tile map's coordinates), and the square its
+    /// step left (in the map's): the next free moment says whether the game walked the player back.
+    turn_back_watch: Option<(Map, Point8, Point8)>,
+    /// Squares this visit was walked back off, which a script refuses and no tile shows.
+    turned_back: Vec<Point8>,
+    /// The text on screen outside a battle, reported as one event once it is gone.
+    text: PokemonTextReader,
+    /// A talk landed on an in-game trader, and this is the species their party menu is answered
+    /// with, as the emulated agent arms it: nothing else says a trade is happening.
+    trade_give: Option<PokemonSpecies>,
+    /// An item ball was talked to, to be looked for again once the overworld is back.
+    pending_pickup: Option<&'static str>,
+    /// Decision points in a row a task's walk has been refused or found no way: somebody stands
+    /// in it, and moves on in a few of their own steps.
+    task_blocked: u32,
+    /// The next wait on Route 17 lets go of the pad, for the slope to turn the rider down.
+    coast: bool,
 }
 
 impl NativeAgent {
@@ -299,11 +346,19 @@ impl NativeAgent {
             cut_trees: Vec::new(),
             forget: None,
             answer_no: false,
-            vending_pick: None,
+            menu_pick: None,
             boulder_goal: None,
             frames: 0,
             running: None,
             in_battle: false,
+            card_key_presses: Vec::new(),
+            turn_back_watch: None,
+            turned_back: Vec::new(),
+            text: PokemonTextReader::untorn(),
+            trade_give: None,
+            pending_pickup: None,
+            task_blocked: 0,
+            coast: false,
         })
     }
 
@@ -311,13 +366,44 @@ impl NativeAgent {
         self.native.game()
     }
 
-    /// The game state with the trees cut on this visit cleared.
+    pub fn game_mut(&mut self) -> &mut Game {
+        self.native.game_mut()
+    }
+
+    pub fn native(&self) -> &NativeGame {
+        &self.native
+    }
+
+    /// The host has taken the screen, as a harness takes it through the credits: whatever was in
+    /// flight will never report back, so it is forgotten.
+    pub fn host_took_the_screen(&mut self) {
+        self.running = None;
+        self.walk = None;
+        self.task = None;
+        self.boulder_goal = None;
+    }
+
+    /// Nothing is in flight and the overworld is waiting on the player: the moment a host may
+    /// edit the world without a mode or a command reading it half-changed.
+    pub fn is_free(&self) -> bool {
+        self.running.is_none() && self.task.is_none()
+            && self.native.game().status() == Status::Waiting(Decision::Overworld)
+    }
+
+    /// The game state with the trees cut on this visit cleared, and the squares it was walked back
+    /// off walled.
     pub fn game_state(&self) -> Result<GameState, String> {
         let mut state = self.native.game_state()?;
         for &at in &self.cut_trees {
             let index = at.x as usize + at.y as usize * state.map.width;
             if state.map.meta_tiles.get(index) == Some(&MetaTile::CutTree) {
                 state.map.meta_tiles[index] = MetaTile::Empty;
+            }
+        }
+        for &at in &self.turned_back {
+            let index = at.x as usize + at.y as usize * state.map.width;
+            if index < state.map.meta_tiles.len() {
+                state.map.meta_tiles[index] = MetaTile::Obstacle;
             }
         }
         Ok(state)
@@ -330,8 +416,10 @@ impl NativeAgent {
     /// One frame: the command in flight carried on, or the next one chosen and handed in.
     pub fn tick(&mut self) -> Result<(), String> {
         self.frames += 1;
+        self.read_text();
         if self.running.is_some() {
-            let frame = self.native.game_mut().frame(Input::None);
+            let input = self.idle_input();
+            let frame = self.native.game_mut().frame(input);
             self.finish(&frame.events);
             return Ok(());
         }
@@ -340,6 +428,13 @@ impl NativeAgent {
             self.forget = None;
         }
         let status = self.native.game().status();
+        // Every decision point, as the emulated agent polls: a policy's tools are answered here.
+        if matches!(status, Status::Waiting(_)) && let Ok(state) = self.game_state() {
+            if status == Status::Waiting(Decision::Overworld) {
+                self.note_map(&state);
+            }
+            self.policy.service_tools(&state, &self.native, &self.graph);
+        }
         if self.task.is_some() {
             if !self.battle_is_up() {
                 let command = self.task_step(status)?;
@@ -359,10 +454,12 @@ impl NativeAgent {
             Status::Waiting(Decision::TwoOption | Decision::ForgetMove) if self.learning().is_some() => self.learn_answer(&status)?,
             Status::Waiting(Decision::TwoOption) => Some(Command::ChooseOption(std::mem::take(&mut self.answer_no) as u8)),
             Status::Waiting(Decision::NamingScreen) => self.name_answer()?,
-            Status::Waiting(Decision::CursorMenu) => Some(match self.vending_pick.take() {
+            Status::Waiting(Decision::CursorMenu) => Some(match self.menu_pick.take() {
                 Some(row) => Command::ChooseOption(row),
                 None => Command::CancelOption,
             }),
+            Status::Waiting(Decision::PartyMenu) if !self.battle_is_up() && let Some(give) = self.trade_give.take() =>
+                Some(self.hand_over(give)),
             // A menu the agent did not open is closed, not confirmed.
             Status::Waiting(Decision::List) => Some(Command::CancelList),
             Status::Waiting(Decision::StartMenu) => Some(Command::CloseStartMenu),
@@ -380,16 +477,35 @@ impl NativeAgent {
             }
             Status::Waiting(Decision::Overworld) => self.overworld()?,
             Status::Waiting(Decision::BattleMenu | Decision::BattleMoves) => self.battle()?,
-            Status::Waiting(Decision::PartyMenu) if self.battle_is_up() => self.battle()?,
+            Status::Waiting(Decision::PartyMenu) if self.battle_is_up() => match self.forced_switch()? {
+                Some(slot) => Some(Command::ChooseOption(slot)),
+                None => self.battle()?,
+            },
             Status::Waiting(decision) => return Err(format!("no native answer yet for {decision:?}")),
         };
         self.issue_or_wait(command)
     }
 
+    /// What a frame with nothing to press holds. `JoypadOverworld` coasts a rider on Route 17 south
+    /// whenever no direction and neither A nor B is held, so B is held there, as the emulated agent
+    /// holds it, unless the slope is wanted to turn the rider down.
+    fn idle_input(&mut self) -> Input {
+        let game = self.native.game();
+        let slope = match game.modes().last() {
+            Some(Mode::Overworld(overworld)) => overworld.on_cycling_road_slope(game.world()),
+            _ => false,
+        };
+        match slope && !std::mem::take(&mut self.coast) {
+            true => Input::Buttons(pokered::input::Joypad::B),
+            false => Input::None,
+        }
+    }
+
     fn issue_or_wait(&mut self, command: Option<Command>) -> Result<(), String> {
         match command {
             None => {
-                self.native.game_mut().frame(Input::None);
+                let input = self.idle_input();
+                self.native.game_mut().frame(input);
                 Ok(())
             }
             Some(command) => self.issue(command),
@@ -400,18 +516,37 @@ impl NativeAgent {
         let frame = self.native.game_mut().frame(Input::Command(command.clone()));
         match frame.reply {
             Some(Reply::Accepted) => {
+                self.task_blocked = 0;
+                let at = self.player_at();
                 if let Some(walk) = self.walk.as_mut() {
                     walk.pressed_a = command == Command::Interact;
                     walk.route_lost = 0;
+                    if matches!(command, Command::Step(_)) {
+                        walk.came_from = at;
+                    }
                 }
                 self.running = Some(command);
                 self.finish(&frame.events);
                 Ok(())
             }
+            // Whoever the walk was for stepped away between the route and the press: ask again.
+            Some(Reply::Refused(Refusal::Invalid(reason))) if command == Command::Interact && self.walk.is_some() =>
+                self.lose_route(&reason),
             // Someone stepped into the way between the route and the step: ask again next frame.
             Some(Reply::Refused(Refusal::Invalid(reason))) if matches!(command, Command::Step(_)) && self.walk.is_some() => {
+                if let Command::Step(direction) = command && let Some(door) = self.card_key_door(direction)? {
+                    self.card_key_presses.push(door);
+                    self.issue(Command::Interact)?;
+                    // The door's text is not what the row was for.
+                    if let Some(walk) = self.walk.as_mut() {
+                        walk.pressed_a = false;
+                    }
+                    return Ok(());
+                }
                 self.lose_route(&reason)
             }
+            Some(Reply::Refused(Refusal::Invalid(reason))) if matches!(command, Command::Step(_)) && let Some(task) = self.task =>
+                self.task_blocked(task, format!("gave up walking: {reason}")),
             Some(Reply::Refused(Refusal::Busy)) => Ok(()),
             other => Err(format!("{command:?} was not taken: {other:?}")),
         }
@@ -420,7 +555,18 @@ impl NativeAgent {
     fn finish(&mut self, events: &[Event]) {
         for event in events {
             match event {
-                Event::CommandDone(done) if Some(done) == self.running.as_ref() => self.running = None,
+                Event::CommandDone(done) if Some(done) == self.running.as_ref() => {
+                    self.running = None;
+                    // The executor calls a press done only once something answered it, so an answer
+                    // over by the time the overworld is free again was a talk with no page to wait
+                    // on: Pewter's Jigglypuff sings and goes quiet.
+                    if *done == Command::Interact && self.native.game().status() == Status::Waiting(Decision::Overworld)
+                        && let Some(walk) = self.walk.filter(|walk| walk.pressed_a)
+                    {
+                        self.walk = None;
+                        self.interacted(walk);
+                    }
+                }
                 Event::CommandInterrupted { command, .. } if Some(command) == self.running.as_ref() => self.running = None,
                 _ => {}
             }
@@ -428,7 +574,44 @@ impl NativeAgent {
     }
 
     fn event(&mut self, event: AgentEvent) {
+        if !event.is_worth_reporting() {
+            return;
+        }
+        println!("{event:?}");
         self.policy.on_event(&event);
+    }
+
+    /// Read the message box while the game is printing or waiting on a page, and report it all as
+    /// one message once the overworld or a battle's menu is back, as the emulated agent reports a
+    /// turn's text.
+    fn read_text(&mut self) {
+        // The transition's fills and an animation's tiles are no text, whatever they spell.
+        if let Some(Mode::Battle(battle)) = self.native.game().modes().last() && battle.animating() {
+            return;
+        }
+        match self.native.game().status() {
+            Status::Busy | Status::Waiting(Decision::Text) => {
+                self.text.read(self.native.message_box_text());
+                return;
+            }
+            // A question inside a text, the nurse's HEAL/CANCEL say, is part of it.
+            Status::Waiting(Decision::Overworld | Decision::BattleMenu | Decision::BattleMoves) | Status::Idle => {}
+            Status::Waiting(_) => return,
+        }
+        let message = self.text.take();
+        self.event(AgentEvent::TextBox { message });
+    }
+
+    /// A map stood on for the first time since the last: before the policy's poll, which is where
+    /// it takes the arrival it tells the model about.
+    fn note_map(&mut self, state: &GameState) {
+        if self.last_map != Some(state.map.map) {
+            self.last_map = Some(state.map.map);
+            self.cut_trees.clear();
+            self.turned_back.clear();
+            let location = &self.native.game().world().location;
+            self.graph.observe(state.map.map, Point8 { x: location.x, y: location.y }, &state.map);
+        }
     }
 
     fn battle_is_up(&self) -> bool {
@@ -446,27 +629,43 @@ impl NativeAgent {
     // ---- The overworld ----
 
     fn overworld(&mut self) -> Result<Option<Command>, String> {
+        self.trade_give = None;
         let state = self.game_state()?;
-        if self.last_map != Some(state.map.map) {
-            self.last_map = Some(state.map.map);
-            self.cut_trees.clear();
-            let location = &self.native.game().world().location;
-            self.graph.observe(state.map.map, Point8 { x: location.x, y: location.y }, &state.map);
+        // A ball picked up is hidden; one still showing was refused, a full bag say.
+        if let Some(name) = self.pending_pickup.take()
+            && state.map.sprites.iter().any(|sprite| sprite.name == name && !sprite.hidden)
+        {
+            self.event(AgentEvent::OverworldPickupFailed { target: MetaTile::Sprite(name) });
+        }
+        self.note_map(&state);
+        if let Some((map, tile, came_from)) = self.turn_back_watch.take()
+            && map == state.map.map && self.player_at() == Some(came_from)
+        {
+            self.turned_back.push(tile);
+            self.event(AgentEvent::TextBox { message: format!(
+                "the game walked you back off {tile}, so it is being treated as a wall until you \
+                 leave {map} and come back") });
+            return Ok(None);
         }
         if let Some(walk) = self.walk {
             return self.walk_on(walk, &state);
         }
+        // Armed for a talk that asked nothing.
+        self.menu_pick = None;
         if let Some(field_move) = self.policy.pick_field_move(&state) {
             return self.field_move(field_move, &state);
         }
         let Some(action) = self.policy.pick_overworld_action(&state, &self.graph) else { return Ok(None) };
         self.answer_no = matches!(action.tile, MetaTile::Switch { object: HiddenObject::Quiz { yes: false }, .. });
-        self.vending_pick = match action.tile {
+        self.menu_pick = match action.tile {
             MetaTile::Switch { object: HiddenObject::VendingMachine, ordinal } => Some(ordinal - 1),
             _ => None,
         };
         self.event(AgentEvent::StartedOverworldAction { destination: action.tile, id: action.id() });
-        let walk = Walk { destination: action.tile, map: action.map, pressed_a: false, route_lost: 0 };
+        let walk = Walk {
+            destination: action.tile, map: action.map, pressed_a: false, route_lost: 0, came_from: None,
+            closest: usize::MAX, stale: 0, last_at: None,
+        };
         self.walk = Some(walk);
         self.walk_on(walk, &state)
     }
@@ -541,6 +740,20 @@ impl NativeAgent {
             self.lose_route("no route")?;
             return Ok(None);
         };
+        if let Some(walk) = self.walk.as_mut()
+            && walk.last_at.replace(map.player_position) != Some(map.player_position)
+        {
+            if row.route.len() < walk.closest {
+                walk.closest = row.route.len();
+                walk.stale = 0;
+            } else {
+                walk.stale += 1;
+            }
+            if walk.stale > MAX_STALE_STEPS {
+                self.abort(OverworldActionAbortedReason::Unknown, Some(map.player_position));
+                return Ok(None);
+            }
+        }
         match row.route.first() {
             Some(JoypadButton::A) => Ok(Some(Command::Interact)),
             Some(&button) => {
@@ -555,7 +768,7 @@ impl NativeAgent {
                 }
                 // A press against what the row is for, a tree or a person, is a turn, which a step
                 // would be refused as.
-                Ok(Some(self.step_or_face(button)?))
+                self.step_or_face(button)
             }
             None => match destination {
                 // The route ends facing the tree.
@@ -601,6 +814,39 @@ impl NativeAgent {
         }
     }
 
+    /// `PrintCardKeyText`'s door, faced and closed, with the Card Key to open it and not yet given
+    /// up on. The doors are drawn by load code, so only the live screen has them.
+    fn card_key_door(&self, direction: Direction) -> Result<Option<(Map, Point8)>, String> {
+        let game = self.native.game();
+        let location = &game.world().location;
+        let Some(Mode::Overworld(overworld)) = game.modes().last() else { return Ok(None) };
+        if !crate::pokemon::map_metadata::map_has_card_key_doors(location.map)
+            || !game.world().bag.items.iter().any(|slot| slot.id == ItemId::CardKey)
+            || location.facing != direction.facing()
+        {
+            return Ok(None);
+        }
+        let front = collision::in_front(&overworld.view().tile_map(), location.x, location.y, direction.facing());
+        let door = front.tile == 0x18 || front.tile == 0x24 || (front.tile == 0x5e && location.map == Map::SilphCo11F);
+        let ahead = (location.map, Point8 { x: front.x, y: front.y });
+        let presses = self.card_key_presses.iter().filter(|&&pressed| pressed == ahead).count();
+        Ok((door && presses < CARD_KEY_PRESSES).then_some(ahead))
+    }
+
+    /// Wait out a task's walk that somebody stands in, up to [`MAX_TASK_BLOCKED_POLLS`], then give
+    /// the task up saying `why`.
+    fn task_blocked(&mut self, task: Task, why: String) -> Result<(), String> {
+        self.task_blocked += 1;
+        if self.task_blocked > MAX_TASK_BLOCKED_POLLS {
+            self.task_blocked = 0;
+            self.task = None;
+            self.say(&why);
+        } else {
+            self.task = Some(task);
+        }
+        Ok(())
+    }
+
     /// Wait out a route that has gone, up to a bound, then give the walk up.
     fn lose_route(&mut self, _why: &str) -> Result<(), String> {
         let Some(walk) = self.walk.as_mut() else { return Ok(()) };
@@ -618,12 +864,16 @@ impl NativeAgent {
     /// text box that stopped it.
     fn end_walk_off_the_map(&mut self) -> Result<(), String> {
         let Some(walk) = self.walk else { return Ok(()) };
-        let mode = self.native.game_state()?.mode;
+        let state = self.native.game_state()?;
+        let mode = state.mode;
         if walk.pressed_a && mode == GameMode::TextBox {
             self.walk = None;
-            self.event(AgentEvent::OverworldInteractionCompleted { target: walk.destination });
+            self.interacted(walk);
         } else {
             let at = self.player_at();
+            if let (Some(at), Some(came_from)) = (at, walk.came_from) && at != came_from {
+                self.turn_back_watch = Some((walk.map, state.map.player_position, came_from));
+            }
             self.abort(OverworldActionAbortedReason::from_game_mode(mode), at);
         }
         Ok(())
@@ -632,6 +882,40 @@ impl NativeAgent {
     fn player_at(&self) -> Option<Point8> {
         let location = &self.native.game().world().location;
         Some(Point8 { x: location.x, y: location.y })
+    }
+
+    /// A talk the walk was for has landed.
+    fn interacted(&mut self, walk: Walk) {
+        if FIRST_ROW_TALKS.iter().any(|&(map, who)| walk.map == map && walk.destination == MetaTile::Sprite(who)) {
+            self.menu_pick = Some(0);
+        }
+        if let MetaTile::Sprite(name) = walk.destination
+            && self.native.game_state().is_ok_and(|state| state.map.sprites.iter()
+                .any(|sprite| sprite.name == name && sprite.picture_id == crate::pokemon::sprite::PictureId::PokeBall))
+        {
+            self.pending_pickup = Some(name);
+        }
+        if let MetaTile::Sprite(who) = walk.destination
+            && let Some(trade) = crate::pokemon::postgame::trades::trade_at(walk.map, who)
+        {
+            self.trade_give = Some(trade.give);
+        }
+        self.event(AgentEvent::OverworldInteractionCompleted { target: walk.destination });
+    }
+
+    /// The trader's party menu: the mon they asked for, or backed out of rather than offer another.
+    fn hand_over(&mut self, give: PokemonSpecies) -> Command {
+        match self.native.game().world().party.iter().position(|named| named.mon.mon.species == give) {
+            Some(slot) => {
+                self.event(AgentEvent::TextBox { message: format!("handed over the {give:?} in party slot {}", slot + 1) });
+                Command::ChooseOption(slot as u8)
+            }
+            None => {
+                self.event(AgentEvent::TextBox { message: format!(
+                    "the trade wants a {give:?} and there is none in the party, so nothing was handed over") });
+                Command::CancelOption
+            }
+        }
     }
 
     fn complete(&mut self) {
@@ -715,7 +999,7 @@ impl NativeAgent {
             FieldMove::Fish { rod, at } => self.start_bag(rod.item(), BagHow::Cast { rod, row: false }, Some(at), state),
             FieldMove::ReorderParty { slot: 0 } => Ok(None),
             FieldMove::ReorderParty { slot } => {
-                self.task = Some(Task::Switch(SwitchUse { slot, opened: false, stage: 0 }));
+                self.task = Some(Task::Switch(SwitchUse { slot, at: slot, opened: false, stage: 0 }));
                 self.task_step(self.native.game().status())
             }
             FieldMove::SellToMart { item, clerk } => {
@@ -754,7 +1038,7 @@ impl NativeAgent {
                 let state = self.game_state()?;
                 let warp = state.map.actions().into_iter().find(|row| matches!(row.tile, MetaTile::Warp { .. }));
                 match warp.and_then(|row| row.route.first().copied()) {
-                    Some(button) if talk.answered => Some(self.step_or_face(button)?),
+                    Some(button) if talk.answered => self.step_or_face(button)?,
                     _ => return self.talk_done(talk),
                 }
             }
@@ -770,12 +1054,11 @@ impl NativeAgent {
                         talk.opened = true;
                         Some(Command::Interact)
                     }
-                    Some(&[button, ..]) => Some(self.step_or_face(button)?),
+                    Some(&[button, ..]) => self.step_or_face(button)?,
                     None => {
-                        self.task = None;
                         let what = state.map.tile_at_checked(talk.at)
                             .map_or_else(|| "a square that is not on this map".to_string(), |tile| format!("{tile}"));
-                        self.say(&format!("Could not get next to {what} at {} to face it", talk.at));
+                        self.task_blocked(Task::Talk(talk), format!("Could not get next to {what} at {} to face it", talk.at))?;
                         return Ok(None);
                     }
                 }
@@ -866,11 +1149,12 @@ impl NativeAgent {
             Status::Waiting(Decision::PartyMenu) => match switch.stage {
                 0 => {
                     switch.stage = 1;
-                    Some(Command::ChooseOption(switch.slot))
+                    Some(Command::ChooseOption(switch.at))
                 }
                 2 => {
-                    switch.stage = 3;
-                    Some(Command::ChooseOption(0))
+                    switch.at -= 1;
+                    switch.stage = if switch.at == 0 { 3 } else { 0 };
+                    Some(Command::ChooseOption(switch.at))
                 }
                 _ => {
                     switch.stage = switch.stage.max(4);
@@ -927,10 +1211,9 @@ impl NativeAgent {
                         mart.opened = true;
                         Some(Command::Interact)
                     }
-                    Some(&[button, ..]) => Some(self.step_or_face(button)?),
+                    Some(&[button, ..]) => self.step_or_face(button)?,
                     None => {
-                        self.task = None;
-                        self.say(&format!("Can't reach the clerk at {at}"));
+                        self.task_blocked(Task::Mart(mart), format!("Can't reach the clerk at {at}"))?;
                         return Ok(None);
                     }
                 }
@@ -1056,10 +1339,9 @@ impl NativeAgent {
                         pc.opened = true;
                         Some(Command::Interact)
                     }
-                    Some(&[button, ..]) => Some(self.step_or_face(button)?),
+                    Some(&[button, ..]) => self.step_or_face(button)?,
                     None => {
-                        self.task = None;
-                        self.say(&format!("Can't reach the PC at {}", pc.at));
+                        self.task_blocked(Task::Pc(pc), format!("Can't reach the PC at {}", pc.at))?;
                         return Ok(None);
                     }
                 }
@@ -1200,10 +1482,9 @@ impl NativeAgent {
                             bag.opened = true;
                             Some(Command::OpenStartMenu)
                         }
-                        Some(&[button, ..]) => Some(self.step_or_face(button)?),
+                        Some(&[button, ..]) => self.step_or_face(button)?,
                         None => {
-                            self.task = None;
-                            self.say(&format!("Can't reach the field-item target at {target}"));
+                            self.task_blocked(Task::Bag(bag), format!("Can't reach the field-item target at {target}"))?;
                             return Ok(None);
                         }
                     }
@@ -1334,15 +1615,24 @@ impl NativeAgent {
         }))
     }
 
-    /// A press toward a row's target: a step, or a turn where a step would be refused.
-    fn step_or_face(&self, button: JoypadButton) -> Result<Command, String> {
+    /// A press toward a row's target: a step, or a turn where a step would be refused. On the
+    /// Cycling Road nothing turns in place, and the slope turns a rider down by itself.
+    fn step_or_face(&mut self, button: JoypadButton) -> Result<Option<Command>, String> {
         let direction = direction(button).ok_or_else(|| format!("a route pressed {button:?}"))?;
         let world = self.native.game().world();
         let blocked = match self.native.game().modes().last() {
             Some(Mode::Overworld(overworld)) => overworld.step_refusal(direction, world).is_some(),
             _ => false,
         };
-        Ok(if blocked && world.location.facing != direction.facing() { Command::Face(direction) } else { Command::Step(direction) })
+        let turn = blocked && world.location.facing != direction.facing();
+        Ok(match (turn, world.location.map == Map::Route17) {
+            (true, true) if direction == Direction::Down => {
+                self.coast = true;
+                None
+            }
+            (true, false) => Some(Command::Face(direction)),
+            _ => Some(Command::Step(direction)),
+        })
     }
 
     fn start_field_move(&mut self, field_move: FieldMoveUse) -> Result<Option<Command>, String> {
@@ -1634,9 +1924,21 @@ impl NativeAgent {
 
     // ---- The battle ----
 
+    /// The party menu a faint opens is the agent's to answer, as it is on the emulated side: the
+    /// first member still standing, and no question to the policy.
+    fn forced_switch(&self) -> Result<Option<u8>, String> {
+        let state = self.native.game_state()?;
+        if state.battle.as_ref().is_none_or(|battle| battle.player.current_hp != 0) {
+            return Ok(None);
+        }
+        Ok(state.pokemon.iter().position(|mon| mon.current_hp > 0).map(|slot| slot as u8))
+    }
+
     fn battle(&mut self) -> Result<Option<Command>, String> {
         if !self.in_battle {
             self.in_battle = true;
+            // A trainer's text before the fight is not a script walking the player back.
+            self.turn_back_watch = None;
             self.event(AgentEvent::BattleStarted);
         }
         let state = self.native.game_state()?;
@@ -2320,12 +2622,15 @@ mod tests {
     }
 
     #[test]
-    fn switch_brings_a_mon_to_the_front() {
-        let game = game_at(Map::PalletTown, 5, 6, |world| world.party.push(level(PokemonSpecies::Pidgey, 5)));
-        let (agent, events) = ask(game, FieldMove::ReorderParty { slot: 1 }, None);
-        let party = &agent.game().world().party;
-        assert_eq!((party[0].mon.mon.species, party[1].mon.mon.species), (PokemonSpecies::Pidgey, PokemonSpecies::Mewtwo), "{events:#?}");
-        assert!(says(&events, "Moved party slot 1 to the front"), "{events:#?}");
+    fn switch_brings_a_mon_to_the_front_and_keeps_the_rest_in_order() {
+        let game = game_at(Map::PalletTown, 5, 6, |world| {
+            world.party.push(level(PokemonSpecies::Pidgey, 5));
+            world.party.push(level(PokemonSpecies::Rattata, 5));
+        });
+        let (agent, events) = ask(game, FieldMove::ReorderParty { slot: 2 }, None);
+        let party: Vec<_> = agent.game().world().party.iter().map(|named| named.mon.mon.species).collect();
+        assert_eq!(party, [PokemonSpecies::Rattata, PokemonSpecies::Mewtwo, PokemonSpecies::Pidgey], "{events:#?}");
+        assert!(says(&events, "Moved party slot 2 to the front"), "{events:#?}");
     }
 
     #[test]

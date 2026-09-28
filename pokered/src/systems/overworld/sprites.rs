@@ -422,7 +422,7 @@ pub fn update_npc_sprite(sprites: &mut Sprites, slot: usize, env: &SpriteEnv, pa
             direction => direction,
         }
     } else {
-        rng.random()
+        rng.wander()
     };
     let movement2 = sprite.movement2;
     let down = |at: &mut isize| { *at += 40; (1u8, 0u8, 4u8, SPRITE_FACING_DOWN) };
@@ -503,7 +503,7 @@ fn can_walk_onto_tile(sprites: &mut Sprites, slot: usize, env: &SpriteEnv, rng: 
     sprite.movement_status = 2;
     sprite.y_step = 0;
     sprite.x_step = 0;
-    sprite.movement_delay = rng.random() & 0x7F;
+    sprite.movement_delay = rng.wander() & 0x7F;
     false
 }
 
@@ -571,7 +571,7 @@ fn update_sprite_in_walking_animation(sprite: &mut SpriteState, rng: &mut GameRn
         return;
     }
     // A delay of 0 is 256 frames, since the count is decremented before it is tested.
-    sprite.movement_delay = rng.random() & 0x7F;
+    sprite.movement_delay = rng.wander() & 0x7F;
     sprite.movement_status = 2;
     sprite.y_step = 0;
     sprite.x_step = 0;

@@ -325,12 +325,11 @@ pub struct ApiSnapshot {
 }
 
 impl ApiSnapshot {
-    pub fn read(api: &crate::pokemon::PokemonApi<'_>) -> Self {
-        use crate::pokemon::PokemonApiTrait;
+    pub fn read(readout: &(impl crate::pokemon::observe::Readout + ?Sized)) -> Self {
         Self {
-            screen_text: crate::pokemon::observe::screen_text(api),
-            playtime: crate::pokemon::observe::playtime(api),
-            mart_stock: api.mart_item_list().into_iter().map(|item| (item, api.item_price(item))).collect(),
+            screen_text: crate::pokemon::observe::screen_text(readout),
+            playtime: crate::pokemon::observe::playtime(readout),
+            mart_stock: readout.mart_stock().into_iter().map(|item| (item, readout.price(item))).collect(),
             arrival: None,
         }
     }

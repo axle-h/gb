@@ -9,10 +9,12 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use strum::IntoEnumIterator;
+
 use crate::pokemon::integration_tests::cheats::Cheats;
-use crate::pokemon::integration_tests::completion::{checklist, Entry, Ledger, Legend, Way};
+use crate::pokemon::integration_tests::completion::{checklist, Entry, Ledger, Legend, Way, WorldFlags};
 use crate::pokemon::integration_tests::scripted_brain::{names_map, Intent};
-use crate::pokemon::integration_tests::llm_harness::{Brain, Call, LlmRun, Reply, TurnRequest};
+use crate::pokemon::integration_tests::llm_harness::{Brain, Call, LlmRun, NativeLlmRun, Reply, TurnRequest};
 use crate::pokemon::item::ItemId;
 use crate::pokemon::PokemonApiTrait;
 use crate::pokemon::symbols::DmgPointerRead;
@@ -73,6 +75,9 @@ pub enum Step {
     Train { row: &'static str, until: &'static str, way: Way, flee: &'static [&'static str] },
     /// Walk to `map` over the transitions the brain has been offered so far.
     GoTo(&'static str),
+    /// Stand on `map` having come in at `landing`, walking the pockets learned so far to the door
+    /// that lands there: for a map of several pockets, where being on it says nothing of which.
+    Enter { map: &'static str, landing: (u8, u8) },
     /// Leave by the opening into `map` that lands nearest `landing`. Each opening is a row of its
     /// own and they read alike but for where they land, and the square a row names moves with the
     /// player, so the landing is what picks one out from wherever the run stands.
@@ -338,6 +343,13 @@ pub struct CompletionBrain {
     pickups_failed: std::collections::HashMap<String, u8>,
     /// Walks given up on the way, per map and row.
     walks_given_up: std::collections::HashMap<String, u8>,
+    /// A [`Step::Take`] of a row with a square in it or a [`Step::Talk`], done when the row is
+    /// chosen: the map it was taken from, the step, and, once a turn has said, whether the walk to
+    /// it was given up, for the next overworld turn to take it again.
+    taking: Option<(String, usize, Option<bool>)>,
+    /// A [`Step::Field`] sent: the map and the step, to send again if the next turn says the agent
+    /// could not reach what the field move was for, a counter someone stood in front of say.
+    field_sent: Option<(String, usize)>,
     pub ledger: Arc<Mutex<Ledger>>,
     pub stuck: Arc<Mutex<Option<String>>>,
     pub turns: Arc<Mutex<usize>>,
@@ -367,7 +379,7 @@ impl CompletionBrain {
             ran: Default::default(), running_at: 0, came: Came::Given, named: 0, party_was_full: false,
             graph: Default::default(), travelled: Default::default(), offered: HashSet::new(), barren: 0,
             last_walk: None, here: String::new(), pockets: Default::default(), pocket_edges: Default::default(), left_by: None,
-            exploring: 0, explore_idle: 0, explored_maps: HashSet::new(), explore_cut: HashSet::new(), tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), walks_given_up: Default::default(), day_care_sent: None, used_on: false, prize_pending: false, quiz_pending: false, safari_seen: HashSet::new(), evolving: None, kept_from_evolving: None, repeated: (String::new(), 0), ledger,
+            exploring: 0, explore_idle: 0, explored_maps: HashSet::new(), explore_cut: HashSet::new(), tidying: None, bins: (None, HashSet::new(), None), pc_sent: None, teaching: false, taught: None, pickups_failed: Default::default(), walks_given_up: Default::default(), taking: None, field_sent: None, day_care_sent: None, used_on: false, prize_pending: false, quiz_pending: false, safari_seen: HashSet::new(), evolving: None, kept_from_evolving: None, repeated: (String::new(), 0), ledger,
             stuck: Arc::new(Mutex::new(None)), turns: Arc::new(Mutex::new(0)),
         }
     }
@@ -553,12 +565,16 @@ impl CompletionBrain {
             .collect();
         exits.sort();
         let key = format!("{map}|{}", exits.iter().map(|(way, ..)| way.as_str()).collect::<Vec<_>>().join(" ~ "));
+        // Never a legendary: each is its phase's `Hunt`, and one met before the collecting is on is
+        // run from, which hides it for the rest of the game.
         let things = rows.iter().map(|(id, _)| id.clone())
             .filter(|id| id.matches(':').count() == 1 && !id.contains("Boulder"))
+            .filter(|id| !Legend::iter().any(|legend| id.ends_with(&format!(":{legend:?}"))))
             .collect();
-        // A walk a battle interrupted comes back to the same pocket, which is no passage.
+        // A walk a battle interrupted comes back to the same pocket, which is no passage; one the
+        // agent gave up for making no headway is a passage to nowhere, or it is taken for ever.
         if let Some(from) = self.left_by.take()
-            && from.0 != key
+            && (from.0 != key || request.situation().contains("it stopped making progress"))
         {
             self.pocket_edges.insert(from, key.clone());
         }
@@ -867,6 +883,25 @@ impl CompletionBrain {
                 self.at = self.at.min(step);
             }
         }
+        // A passage, a push or a talk taken and never reached: a battle on the way, say, left the
+        // run where it was.
+        if let Some((map, step)) = self.field_sent.take()
+            && request.location().as_deref() == Some(map.as_str())
+            && let Some(since) = text.split("### Since your last decision").nth(1)
+            && (since.to_lowercase().contains("can't reach") || since.to_lowercase().contains("could not get next to"))
+        {
+            let tries = self.walks_given_up.entry(format!("{map}|field|{step}")).or_default();
+            *tries += 1;
+            if *tries <= Self::RETRIES_PER_PLACE {
+                self.at = self.at.min(step);
+            }
+        }
+        if let Some((map, step, Some(gave_up))) = self.taking.clone() {
+            self.taking = None;
+            if gave_up && request.location().as_deref() == Some(map.as_str()) {
+                self.at = self.at.min(step);
+            }
+        }
         // Six rows under the party heading: the next catch goes to the box.
         self.party_was_full = text.split("### Party").nth(1)
             .map(|party| party.lines().skip(1).take_while(|line| !line.trim().is_empty()).count() >= 6)
@@ -917,29 +952,61 @@ impl CompletionBrain {
                 Step::Hunt { row, .. } | Step::Train { row, .. } =>
                     rows.iter().map(|(id, _)| id).find(|id| id.ends_with(&format!(":{row}"))).cloned(),
                 Step::Field(arguments) => {
+                    self.field_sent = Some((map.clone(), self.at));
                     self.at += 1;
                     let mut arguments: serde_json::Value = serde_json::from_str(arguments).expect("a step's JSON");
                     arguments["summary"] = serde_json::json!("as planned");
                     return Reply::call("use_field_move", arguments);
                 }
                 Step::Buy(_) => {
-                    // The mart turn answers it; an overworld turn in between means the mart never opened.
+                    // The mart turn answers it; an overworld turn in between means the mart never
+                    // opened, as when the talk to the clerk was an answer the policy never used, so
+                    // the talk is made again.
                     self.unresolved += 1;
                     if self.unresolved > Self::PATIENCE {
                         self.stuck(format!("step {} ({step:?}): no mart opened on {map}", self.at + 1));
                     }
+                    if self.unresolved % 3 == 0 && matches!(self.at.checked_sub(1).and_then(|at| self.steps.get(at)), Some(Step::Talk(_))) {
+                        let tries = self.walks_given_up.entry(format!("{map}|mart|{}", self.at)).or_default();
+                        *tries += 1;
+                        let tries = *tries;
+                        if tries > Self::RETRIES_PER_PLACE {
+                            self.stuck(format!("step {} ({step:?}): no mart opened on {map} after {tries} talks", self.at + 1));
+                        }
+                        self.at -= 1;
+                        continue;
+                    }
                     return Reply::Calls(vec![Call::wait(10)]);
                 }
                 Step::GoTo(target) => {
-                    if request.location().as_deref() == Some(*target) { self.at += 1; continue }
+                    // Or passed through since the last turn: once the S.S. Anne has sailed, the dock
+                    // walks the player back to Vermilion before anything is asked there.
+                    let reached = format!("✓ reached the warp to {target}");
+                    let passed = request.situation().split("### Since your last decision").nth(1)
+                        .is_some_and(|since| since.match_indices(&reached).any(|(at, _)|
+                            !since[at + reached.len()..].starts_with(|c: char| c.is_ascii_alphanumeric())));
+                    if request.location().as_deref() == Some(*target) || passed { self.at += 1; continue }
                     enter_toward(request, target)
                         .or_else(|| self.toward(&here, |_, to| to == *target))
                         .or_else(|| self.route(request, target))
                         // Walled in with nothing known beyond: a way on within this map, such as a
-                        // tree, not taken from here before.
-                        .or_else(|| self.pockets.get(&here).and_then(|pocket| pocket.exits.iter()
-                            .find(|(way, _, to)| *to == pocket.map && !self.pocket_edges.contains_key(&(here.clone(), way.clone())))
-                            .map(|(_, id, _)| id.clone())))
+                        // tree, not taken from here before, and failing that any way out, as a phase
+                        // that opens where the last one's exploring left off knows no map yet.
+                        .or_else(|| self.pockets.get(&here).and_then(|pocket| {
+                            let untaken = |(way, _, _): &&(String, String, String)|
+                                !self.pocket_edges.contains_key(&(here.clone(), way.clone()));
+                            pocket.exits.iter().filter(untaken).find(|(_, _, to)| *to == pocket.map)
+                                .or_else(|| pocket.exits.iter().find(untaken))
+                                .map(|(_, id, _)| id.clone())
+                        }))
+                }
+                Step::Enter { map: target, landing } => {
+                    if request.location().as_deref() == Some(*target) && entered_at(request.situation()) == Some(*landing) {
+                        self.at += 1;
+                        continue
+                    }
+                    let door = format!("warp to {target}, arriving at ({}, {})", landing.0, landing.1);
+                    self.toward(&here, |way, _| way.ends_with(&door))
                 }
                 Step::Cross { map: target, landing } => {
                     if request.location().as_deref() == Some(*target) { self.at += 1; continue }
@@ -956,6 +1023,12 @@ impl CompletionBrain {
                     self.explore_idle += 1;
                     match self.explore(&here, maps) {
                         Some(id) if self.exploring < *patience && self.explore_idle < IDLE => Some(id),
+                        // Nothing reachable from here while something known is unfinished is
+                        // people standing in the way: a pocket is known by the passages it offers,
+                        // so one they block reads as a pocket never seen, joined to nothing.
+                        None if self.explore_idle < IDLE && self.pockets.iter().any(|(key, pocket)|
+                            maps.contains(&pocket.map.as_str()) && (self.has_things(pocket) || self.has_untaken_exit(pocket, key, maps))) =>
+                            return Reply::Calls(vec![Call::wait(UNRESOLVED_TICKS)]),
                         _ => {
                             self.exploring = 0;
                             self.explore_idle = 0;
@@ -1165,15 +1238,25 @@ impl CompletionBrain {
                             }
                         }
                         Step::Hunt { .. } | Step::Train { .. } | Step::Clear(_) | Step::GoTo(_) | Step::Explore { .. }
-                        | Step::TrashCans | Step::Coins(_) | Step::Safari | Step::Cross { .. } => {}
+                        | Step::TrashCans | Step::Coins(_) | Step::Safari | Step::Cross { .. } | Step::Enter { .. } => {}
                         Step::Trade(_) => self.at += 1,
                         // A hop toward the row is not the row.
                         Step::Take(fragment) => {
                             if rows.iter().any(|(row, what)| *row == id && what.contains(fragment)) {
+                                // A row with a square in its id: a passage, a push, a tree.
+                                if id.matches(':').count() == 2 {
+                                    self.taking = Some((map.clone(), self.at, None));
+                                }
                                 self.at += 1;
                             }
                         }
                         Step::Gift(_) => { self.came = Came::Given; self.at += 1 }
+                        // A statue's press is the Mansion's doors: one lost to a battle on the way
+                        // leaves every floor the wrong way round.
+                        Step::Talk(_) => {
+                            self.taking = Some((map.clone(), self.at, None));
+                            self.at += 1;
+                        }
                         _ => self.at += 1,
                     }
                     if matches!(step, Step::Hunt { .. }) { self.came = Came::Caught }
@@ -1232,6 +1315,20 @@ impl Brain for CompletionBrain {
             self.saw(way);
             self.at += 1;
         }
+        // Before a battle's turn returns: a walk a wild battle cut short is said on that turn. The
+        // latest outcome is the verdict, since a walk cut short can be taken up again after the
+        // battle and finish; a first turn with neither an outcome nor a walk begun is a choice the
+        // policy never carried out.
+        if let Some((_, _, verdict)) = self.taking.as_mut()
+            && let Some(since) = request.situation().split("### Since your last decision").nth(1)
+        {
+            match since.lines().rev().find(|line| line.starts_with("- ✓") || line.starts_with("- ✗ gave up on")) {
+                Some(last) => *verdict = Some(last.starts_with("- ✗")),
+                None if verdict.is_none() && !since.lines().any(|line| line.starts_with("- → heading for")) =>
+                    *verdict = Some(true),
+                None => {}
+            }
+        }
         if request.is_battle() {
             return self.battle(request);
         }
@@ -1281,6 +1378,12 @@ pub fn play(fixture: &'static [u8], name: &'static str, steps: Vec<Step>, game_m
 /// [`play`] for several phases back to back in one run, each with a brain of its own as it has
 /// when played from its fixture, and one ledger across them all.
 pub fn play_phases(fixture: &'static [u8], name: &'static str, phases: Vec<Vec<Step>>, game_minutes: u64, wall: Duration) -> Played {
+    play_phases_with(fixture, name, phases, game_minutes, wall, None)
+}
+
+/// [`play_phases`], writing every overworld action into `recording` if there is one.
+pub fn play_phases_with(fixture: &'static [u8], name: &'static str, phases: Vec<Vec<Step>>, game_minutes: u64,
+                        wall: Duration, recording: Option<Arc<Mutex<crate::lockstep::action_for_action::Log>>>) -> Played {
     let ledger = Arc::new(Mutex::new(Ledger::default()));
     let total: usize = phases.iter().map(Vec::len).sum();
     let mut phases: VecDeque<Vec<Step>> = phases.into();
@@ -1289,12 +1392,15 @@ pub fn play_phases(fixture: &'static [u8], name: &'static str, phases: Vec<Vec<S
     let done = Arc::new(Mutex::new(false));
     let finished = Arc::clone(&done);
     let brain = FinishFlag { brain, phases, phase: 1, finished };
-    let mut run = LlmRun::builder(fixture)
+    let mut builder = LlmRun::builder(fixture)
         .named(name)
         .game_time(Duration::from_mins(game_minutes))
         .options(crate::pokemon::options::SERVED_OPTIONS)
-        .with_coverage()
-        .start(Box::new(brain));
+        .with_coverage();
+    if let Some(log) = recording {
+        builder = builder.recording(log);
+    }
+    let mut run = builder.start(Box::new(brain));
     run.with_cheats(Cheats::story(999_999));
     {
         let list = checklist(run.fixture().gb.core().mmu());
@@ -1360,6 +1466,94 @@ pub fn play_phases(fixture: &'static [u8], name: &'static str, phases: Vec<Vec<S
         .collect();
     assert!(defects.is_empty(), "[completion:{name}] the agent could not carry out: {defects:?}");
     Played { run, ledger }
+}
+
+/// What one phase on the recreation leaves behind.
+pub struct NativePlayed {
+    pub run: NativeLlmRun,
+    pub ledger: Arc<Mutex<Ledger>>,
+}
+
+impl NativePlayed {
+    /// Every entry of the checklist the run has not done.
+    pub fn missing(&mut self) -> (Vec<crate::pokemon::integration_tests::completion::Item>, Vec<Entry>) {
+        let agent = self.run.agent();
+        let state = agent.game_state().expect("a game state");
+        let list = checklist(agent.native().rom());
+        let flags = WorldFlags { world: agent.game().world(), warped_from: (0, 0) };
+        let missing = self.ledger.lock().expect("not poisoned").missing(&list, &flags, &state);
+        (list, missing)
+    }
+}
+
+/// Where a native phase that stuck is saved, to load and look at.
+fn native_stuck_path(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("target/test-artifacts/{name}-stuck.pkrd"))
+}
+
+/// [`play_phases`] on the recreation: a new game from Red's room played by the same brain through
+/// `LlmPolicy` and the native agent, with the cheats written into the world and the ledger read
+/// from it.
+pub fn play_phases_native(seed: u64, name: &'static str, phases: Vec<Vec<Step>>, game_minutes: u64, wall: Duration) -> NativePlayed {
+    let ledger = Arc::new(Mutex::new(Ledger::default()));
+    let total: usize = phases.iter().map(Vec::len).sum();
+    let mut phases: VecDeque<Vec<Step>> = phases.into();
+    let brain = CompletionBrain::new(phases.pop_front().expect("at least one phase"), Arc::clone(&ledger));
+    let (stuck, turns) = (Arc::clone(&brain.stuck), Arc::clone(&brain.turns));
+    let done = Arc::new(Mutex::new(false));
+    let finished = Arc::clone(&done);
+    let brain = FinishFlag { brain, phases, phase: 1, finished };
+    // At a served game's pace: a text with no wait on it is on screen only for the frames it is
+    // printed in, which instant pacing makes none.
+    let game = crate::pokemon::integration_tests::playthrough::native_new_game(seed, true, pokered::Pacing::Faithful);
+    let mut run = LlmRun::builder(&[])
+        .named(name)
+        .game_time(Duration::from_mins(game_minutes))
+        .start_native(game, Box::new(brain));
+    *ledger.lock().expect("not poisoned") = Ledger::new(&checklist(run.agent().native().rom()));
+
+    let mut cheats = Cheats::story(999_999);
+    let mut warped_from = (0, 0);
+    let started = std::time::Instant::now();
+    let ticked = run.tick_until(wall, |run| {
+        let agent = run.agent();
+        warped_from = agent.native().warped_from().unwrap_or(warped_from);
+        {
+            let world = agent.game().world();
+            let flags = WorldFlags { world, warped_from };
+            ledger.lock().expect("not poisoned")
+                .observe_on(world.location.map, world.bag.items.iter().map(|item| item.id as u8), &flags);
+        }
+        // Between decisions, as the emulated sidecar writes between ticks.
+        if agent.is_free() && agent.game().frames() % 8 == 0 && let Ok(state) = agent.game_state() {
+            let world = agent.game_mut().world_mut();
+            cheats.apply_native(world, &state, true);
+            // Master Balls for every catch outside the Safari Zone, as the emulated run has.
+            let balls = world.bag.quantity_of(ItemId::MasterBall);
+            if balls < 5 && world.bag.items.len() < crate::pokemon::bag::Bag::MAX_ITEMS {
+                world.bag.add(ItemId::MasterBall, 10 - balls);
+            }
+        }
+        *done.lock().expect("not poisoned") || stuck.lock().expect("not poisoned").is_some()
+    });
+    let turns = *turns.lock().expect("not poisoned");
+    let frames = run.agent().game().frames();
+    println!("[completion:{name}] {total} steps, {turns} turns, {} of game time in {:?}",
+             Duration::from_secs(frames / 60).as_secs(), started.elapsed());
+    let why = match ticked {
+        Err(why) => Some(why),
+        Ok(_) => stuck.lock().expect("not poisoned").clone(),
+    };
+    if let Some(why) = why {
+        let at = native_stuck_path(name);
+        std::fs::create_dir_all(at.parent().expect("a directory")).ok();
+        std::fs::write(&at, run.agent().game().save()).ok();
+        let location = &run.agent().game().world().location;
+        panic!("[completion:{name}] stuck on {:?} at ({}, {}) (saved to {}): {why}",
+               location.map, location.x, location.y, at.display());
+    }
+    assert!(*done.lock().expect("not poisoned"), "[completion:{name}] ran out of wall clock");
+    NativePlayed { run, ledger }
 }
 
 /// The brain, handed the next phase's steps as each finishes, with a flag the driver reads to know
@@ -1496,6 +1690,30 @@ fn completion_phase_boulder_badge() {
     ], &[Entry::Badge(0), Entry::Way(Way::GiftStarter), Entry::Way(Way::WildInGrass),
          Entry::Way(Way::EvolvedInBattle), Entry::Way(Way::NicknameAfterAGift)]);
     cut(&mut played, "completion-boulder");
+    assert!(missing.is_empty(), "the phase left {missing:?}");
+}
+
+/// [`completion_phase_boulder_badge`] on the recreation, from a new game.
+#[test]
+fn native_completion_phase_boulder_badge() {
+    use crate::pokemon::map::Map;
+    let mut played = play_phases_native(1, "native-completion-boulder", vec![to_the_boulder_badge()], 240,
+                                        Duration::from_secs(1800));
+    let (_, missing) = played.missing();
+    let maps = [
+        Map::RedsHouse1F, Map::PalletTown, Map::BluesHouse, Map::OaksLab, Map::Route1,
+        Map::ViridianCity, Map::ViridianMart, Map::ViridianPokecenter, Map::ViridianSchoolHouse,
+        Map::ViridianNicknameHouse, Map::Route22, Map::ViridianForestSouthGate, Map::ViridianForest,
+        Map::ViridianForestNorthGate, Map::PewterCity, Map::PewterGym, Map::PewterMart,
+        Map::PewterPokecenter, Map::Museum1F, Map::Museum2F, Map::PewterNidoranHouse,
+        Map::PewterSpeechHouse,
+    ];
+    let also = [Entry::Badge(0), Entry::Way(Way::GiftStarter), Entry::Way(Way::WildInGrass),
+                Entry::Way(Way::EvolvedInBattle), Entry::Way(Way::NicknameAfterAGift)];
+    let missing: Vec<Entry> = missing.into_iter().filter(|entry| also.contains(entry) || match entry {
+        Entry::Map(map) | Entry::Trainer { map, .. } | Entry::ItemBall { map, .. } => maps.contains(map),
+        _ => false,
+    }).collect();
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
 
@@ -1747,7 +1965,8 @@ pub fn to_celadon() -> Vec<Step> {
         GoTo("PokemonTower1F"), Clear(&[]), GoTo("PokemonTower2F"), Clear(&[]),
         GoTo("PokemonTower1F"), GoTo("LavenderTown"),
         GoTo("Route12"), Clear(&["Snorlax"]), GoTo("Route12Gate1F"), Clear(&[]), GoTo("Route12Gate2F"), Clear(&[]),
-        GoTo("Route12Gate1F"), GoTo("Route12"), GoTo("LavenderTown"),
+        // The north door: the one nearest where the gate was entered is the stairs' side.
+        GoTo("Route12Gate1F"), Take("Route12, arriving at (11, 16)"), GoTo("LavenderTown"),
         GoTo("Route8"), Explore { maps: &["Route8"], patience: 200 },
         GoTo("Route8Gate"), Clear(&[]), GoTo("Route8"),
         GoTo("UndergroundPathRoute8"), Clear(&[]), GoTo("UndergroundPathWestEast"), Clear(&[]),
@@ -1818,7 +2037,8 @@ pub fn to_the_rainbow_badge() -> Vec<Step> {
         GoTo("CeladonMart1F"),
         // The mart's other street door, at the far end of its ground floor.
         Take("CeladonCity, arriving at (11, 13)"),
-        GoTo("CeladonMansion1F"),
+        // By the back door: its stairwell is the one that reaches the roof house.
+        Take("CeladonMansion1F, arriving at (4, 0)"),
         Explore { maps: &["CeladonMansion1F", "CeladonMansion2F", "CeladonMansion3F", "CeladonMansionRoof",
                           "CeladonMansionRoofHouse"], patience: 200 },
         // The exploring took the Eevee in the roof house.
@@ -1972,7 +2192,8 @@ pub fn to_the_marsh_badge() -> Vec<Step> {
         // run is still in Celadon: the shop comes before the walk east rather than a trip back.
         GoTo("CeladonMart1F"), GoTo("CeladonMart2F"), GoTo("CeladonMart3F"), GoTo("CeladonMart4F"),
         Talk("Clerk"), Buy(&[("PokeDoll", 1)]),
-        GoTo("CeladonMart3F"), GoTo("CeladonMart2F"), GoTo("CeladonMart1F"), GoTo("CeladonCity"),
+        // Out by the front door, which no other walk through the shop leaves by.
+        GoTo("CeladonMart3F"), GoTo("CeladonMart2F"), GoTo("CeladonMart1F"), Take("CeladonCity, arriving at (9, 13)"),
         // The guard takes the drink as the player walks past him, without being talked to, and
         // the gate's far door names the map it was entered from until he does.
         // Both doors lead back onto Route 7: the guard is what blocks the room between them. His
@@ -2285,7 +2506,8 @@ pub fn to_the_volcano_badge() -> Vec<Step> {
         // and item balls, never a statue, whose row carries its coordinates and so two colons.
         GoTo("PokemonMansion1F"),
         Explore { maps: &["PokemonMansion1F", "PokemonMansion2F", "PokemonMansion3F"], patience: 1000 },
-        GoTo("PokemonMansion3F"), Talk("Statue1"),
+        // By the north stairs: the statue's side of 3F is not the side the middle stairs land on.
+        GoTo("PokemonMansion2F"), Take("PokemonMansion3F, arriving at (6, 1)"), Talk("Statue1"),
         // 3F's holes are warps down to 1F's right side, which is the only way to the B1F stairs.
         GoTo("PokemonMansion1F"), GoTo("PokemonMansionB1F"),
         Talk("Statue2"),
@@ -2359,8 +2581,8 @@ pub fn to_seafoam() -> Vec<Step> {
         Take("Route20, arriving at (59, 9)"), GoTo("SeafoamIslands1F"),
         Explore { maps: SEAFOAM, patience: 1200 },
         // B3F's two holes, each filled by the one boulder that can reach it. The row names both,
-        // and arming Strength is the row's own business.
-        GoTo("SeafoamIslandsB3F"),
+        // and arming Strength is the row's own business. The boulders' side is the west stairs'.
+        Enter { map: "SeafoamIslandsB3F", landing: (5, 12) },
         Repeat("hole at (3, 16)"),
         Repeat("hole at (6, 16)"),
         // Down the hole just filled, into the west lake: the staircases land on the other side,
@@ -2795,7 +3017,8 @@ pub fn to_the_north_errands() -> Vec<Step> {
         // The swimmer off Route 10's bank, whom the phases before could only look at.
         Explore { maps: &["Route10"], patience: 400 },
         GoTo("Route9"), GoTo("CeruleanCity"),
-        GoTo("CeruleanTrashedHouse"), Take("CeruleanCity, arriving at (28, 12)"),
+        // In by the terrace door and out by the front: the one walk that takes the terrace door in.
+        Take("CeruleanTrashedHouse, arriving at (3, 0)"), Take("CeruleanCity, arriving at (28, 12)"),
         GoTo("CeruleanTradeHouse"), Trade("Gambler"), GoTo("CeruleanCity"),
         GoTo("CeruleanPokecenter"), AtPc(Pc::Deposit("Jynx")), GoTo("CeruleanCity"),
         // The tree on the main terrace is the way down to Route 5, into the pocket the Day Care
@@ -2969,6 +3192,10 @@ pub fn to_the_cinnabar_errands() -> Vec<Step> {
         // North over the water to Pallet Town, where the tour started: the island is reached down
         // Route 21 and nowhere else, so both of that route's edges are crossings of their own.
         GoTo("Route21"), GoTo("PalletTown"),
+        // Route 15's aide again, for a run that met fewer than fifty species by the first visit:
+        // this phase's catch and trades are the last new ones the tour makes.
+        Tidy, Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"),
+        GoTo("Route15"), GoTo("Route15Gate1F"), GoTo("Route15Gate2F"), Talk("OaksAide"),
     ]
 }
 
@@ -2994,31 +3221,63 @@ fn completion_phase_cinnabar_errands() {
 /// reaches them all.
 #[test]
 fn grand_tour() {
-    let phases = vec![
+    let mut played = play_phases(include_bytes!("../data/start-of-game-state.bin"), "completion-run",
+                                 all_phases(), 10_800, Duration::from_secs(4 * 3600));
+    let state = played.run.fixture().game_state();
+    let list = checklist(played.run.fixture().gb.core().mmu());
+    let mmu = played.run.fixture().gb.core().mmu();
+    let missing = played.ledger.lock().expect("not poisoned").missing(&list, mmu, &state);
+    assert_the_tour_complete("completion-run", &list, missing);
+}
+
+/// [`grand_tour`] played on the cartridge, and every overworld action in it replayed on both halves
+/// from where the cartridge stood: `lockstep::action_for_action`. `GB_A4A_PHASES` plays only the
+/// first so many phases.
+#[test]
+fn action_for_action_tour() {
+    let log = Arc::new(Mutex::new(crate::lockstep::action_for_action::Log::default()));
+    let mut phases = all_phases();
+    if let Some(first) = std::env::var("GB_A4A_PHASES").ok().and_then(|n| n.parse().ok()) {
+        phases.truncate(first);
+    }
+    play_phases_with(include_bytes!("../data/start-of-game-state.bin"), "completion-a4a", phases, 10_800,
+                     Duration::from_secs(4 * 3600), Some(Arc::clone(&log)));
+    let segments = std::mem::take(&mut log.lock().expect("not poisoned").segments);
+    let failed = crate::lockstep::action_for_action::replay_all(&segments);
+    assert!(failed.is_empty(), "{} of {} actions differ", failed.len(), segments.len());
+}
+
+/// [`grand_tour`] on the recreation: a new game, its own RNG, the native agent, the same brain.
+#[test]
+fn native_grand_tour() {
+    let mut played = play_phases_native(1, "native-completion-run", all_phases(), 10_800, Duration::from_secs(3600));
+    let (list, missing) = played.missing();
+    assert_the_tour_complete("native-completion-run", &list, missing);
+}
+
+/// Every phase, in the order one run plays them.
+fn all_phases() -> Vec<Vec<Step>> {
+    vec![
         to_the_boulder_badge(), to_bill(), to_the_thunder_badge(), to_celadon(), to_the_rainbow_badge(),
         to_the_poke_flute(), to_the_marsh_badge(), to_the_soul_badge(), to_surf(), to_the_volcano_badge(),
         to_seafoam(), to_the_earth_badge(), to_victory_road(), to_the_hall_of_fame(),
         to_the_north_errands(), to_mewtwo(), to_the_power_plant(), to_the_eastern_routes(),
         to_the_safari_game(), to_the_middle_errands(), to_the_cinnabar_errands(),
-    ];
-    let mut played = play_phases(include_bytes!("../data/start-of-game-state.bin"), "completion-run",
-                                 phases, 10_800, Duration::from_secs(4 * 3600));
-    let state = played.run.fixture().game_state();
-    let list = checklist(played.run.fixture().gb.core().mmu());
-    let mmu = played.run.fixture().gb.core().mmu();
-    let excused = out_of_reach();
-    let missing: Vec<Entry> = played.ledger.lock().expect("not poisoned").missing(&list, mmu, &state)
-        .into_iter().filter(|entry| !excused.contains(entry)).collect();
+    ]
+}
 
-    // Counted as well as asserted, because the count is what says how much of the world a run
-    // that goes green actually walks.
+/// The whole ledger asserted, bar what is out of reach, and counted as well: the count is what says
+/// how much of the world a run that goes green actually walks.
+fn assert_the_tour_complete(name: &str, list: &[crate::pokemon::integration_tests::completion::Item], missing: Vec<Entry>) {
+    let excused = out_of_reach();
+    let missing: Vec<Entry> = missing.into_iter().filter(|entry| !excused.contains(entry)).collect();
     let walked = |kind: fn(&Entry) -> bool| {
         let all = list.iter().filter(|item| kind(&item.entry)).count();
         (all - missing.iter().filter(|entry| kind(entry)).count(), all)
     };
     let (doors, all_doors) = walked(|entry| matches!(entry, Entry::Warp { .. }));
     let (edges, all_edges) = walked(|entry| matches!(entry, Entry::Connection { .. }));
-    println!("[completion-run] {doors} of {all_doors} doors and {edges} of {all_edges} map edges crossed");
+    println!("[{name}] {doors} of {all_doors} doors and {edges} of {all_edges} map edges crossed");
 
     // Named, not just counted: the route that closes the gap is written from this list.
     let mut uncrossed: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -3031,13 +3290,13 @@ fn grand_tour() {
     }
     for (map, mut left) in uncrossed {
         left.sort();
-        println!("[completion-run] {map} left {}", left.join(", "));
+        println!("[{name}] {map} left {}", left.join(", "));
     }
 
     let elsewhere = |entry: &Entry| !matches!(entry, Entry::Warp { .. } | Entry::Connection { .. });
     let rest = list.len() - all_doors - all_edges;
     let others = missing.iter().filter(|entry| elsewhere(entry)).count();
-    println!("[completion-run] {} of {rest} entries met",
+    println!("[{name}] {} of {rest} entries met",
              rest - others - excused.iter().filter(|entry| elsewhere(entry)).count());
     assert!(missing.is_empty(), "the run left {} entries: {missing:?}", missing.len());
 }
