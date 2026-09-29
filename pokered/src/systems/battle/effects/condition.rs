@@ -15,15 +15,19 @@ const FIRE: u8 = 20;
 const GRASS: u8 = 22;
 const ELECTRIC: u8 = 23;
 
-/// `SleepEffect`. A target that must recharge wakes from that into sleep with no checks at all,
-/// losing any status it had; otherwise one already asleep or with any status is unaffected, and a
-/// miss is "didn't affect". Sleep lasts 1 to 7 turns, a random byte's low three bits drawn again
-/// until they are not 0.
+/// `SleepEffect`. A target already asleep or with any status is unaffected, and a miss is "didn't
+/// affect". Sleep ends the target's recharge and lasts 1 to 7 turns, a random byte's low three bits
+/// drawn again until they are not 0.
 pub fn sleep_effect(battle: &mut Battle, user: Side, rng: &mut impl Rng) -> Vec<BattleText> {
+    let cartridge_bugs = battle.cartridge_bugs;
     let target = battle.side_mut(user.other());
-    let recharging = target.status2.contains(Status2::NEEDS_TO_RECHARGE);
-    target.status2.remove(Status2::NEEDS_TO_RECHARGE);
-    if !recharging {
+    // The cartridge ends the recharge before any check, and puts a recharging target to sleep with
+    // no check at all, over any status it had.
+    let unchecked = cartridge_bugs && target.status2.contains(Status2::NEEDS_TO_RECHARGE);
+    if cartridge_bugs {
+        target.status2.remove(Status2::NEEDS_TO_RECHARGE);
+    }
+    if !unchecked {
         if target.mon.status & status::SLP_MASK != 0 {
             return vec![BattleText::AlreadyAsleepText];
         }
@@ -41,7 +45,9 @@ pub fn sleep_effect(battle: &mut Battle, user: Side, rng: &mut impl Rng) -> Vec<
             break turns;
         }
     };
-    battle.side_mut(user.other()).mon.status = turns;
+    let target = battle.side_mut(user.other());
+    target.mon.status = turns;
+    target.status2.remove(Status2::NEEDS_TO_RECHARGE);
     vec![BattleText::FellAsleepText]
 }
 
@@ -94,8 +100,7 @@ const SIDE_EFFECT2_CHANCE: u8 = 77;
 /// `FreezeBurnParalyzeEffect`: nothing through a substitute; a target with a status already can
 /// only be thawed, by `CheckDefrost`; nothing if the move shares a type with the target. Otherwise
 /// a tenth, or for the `_2` effects nearly a third, of random bytes inflict it: paralysis quarters
-/// the speed, a burn halves the attack, and freezing ends the target's recharge, but only when the
-/// player froze the enemy.
+/// the speed, a burn halves the attack, and freezing ends the target's recharge.
 pub fn freeze_burn_paralyze_effect(battle: &mut Battle, party: &mut [PartyMon], user: Side, rng: &mut impl Rng)
                                    -> Vec<BattleText> {
     if target_has_substitute(battle, user) {
@@ -123,7 +128,8 @@ pub fn freeze_burn_paralyze_effect(battle: &mut Battle, party: &mut [PartyMon], 
             vec![BattleText::BurnedText]
         }
         effect::FREEZE_SIDE_EFFECT1 => {
-            if user == Side::Player {
+            // The cartridge forgets the player's recharge when the enemy freezes it.
+            if user == Side::Player || !battle.cartridge_bugs {
                 clear_hyper_beam(battle, user);
             }
             battle.side_mut(user.other()).mon.status = status::FRZ;
@@ -242,4 +248,44 @@ pub fn leech_seed_effect(battle: &mut Battle, user: Side, rng: &mut impl Rng) ->
     }
     target.status2 |= Status2::SEEDED;
     vec![BattleText::WasSeededText]
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::rng::GameRng;
+    use super::super::tests::using;
+    use super::*;
+
+    #[test]
+    fn sleep_on_a_recharging_target_takes_the_usual_checks() {
+        let mut arena = using(Side::Player, PokemonMoveName::Hypnosis);
+        let enemy = &mut arena.battle.enemy;
+        enemy.status2 |= Status2::NEEDS_TO_RECHARGE;
+        enemy.mon.status = status::PAR;
+        let texts = sleep_effect(&mut arena.battle, Side::Player, &mut GameRng::tape(vec![]));
+        assert_eq!(texts, vec![BattleText::DidntAffectText]);
+        assert_eq!(arena.battle.enemy.mon.status, status::PAR);
+        assert!(arena.battle.enemy.status2.contains(Status2::NEEDS_TO_RECHARGE));
+
+        arena.battle.enemy.mon.status = 0;
+        let texts = sleep_effect(&mut arena.battle, Side::Player, &mut GameRng::tape(vec![0xFF]));
+        assert_eq!(texts, vec![BattleText::DidntAffectText]);
+        assert!(arena.battle.enemy.status2.contains(Status2::NEEDS_TO_RECHARGE));
+
+        arena.battle.move_missed = false;
+        let texts = sleep_effect(&mut arena.battle, Side::Player, &mut GameRng::tape(vec![0, 3]));
+        assert_eq!(texts, vec![BattleText::FellAsleepText]);
+        assert_eq!(arena.battle.enemy.mon.status, 3);
+        assert!(!arena.battle.enemy.status2.contains(Status2::NEEDS_TO_RECHARGE));
+    }
+
+    #[test]
+    fn the_enemy_freezing_the_player_ends_its_recharge() {
+        let mut arena = using(Side::Enemy, PokemonMoveName::IceBeam);
+        arena.battle.player.status2 |= Status2::NEEDS_TO_RECHARGE;
+        let mut rng = GameRng::tape(vec![0]);
+        let texts = freeze_burn_paralyze_effect(&mut arena.battle, &mut arena.party, Side::Enemy, &mut rng);
+        assert_eq!(texts, vec![BattleText::FrozenText]);
+        assert!(!arena.battle.player.status2.contains(Status2::NEEDS_TO_RECHARGE));
+    }
 }

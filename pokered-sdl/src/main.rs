@@ -6,9 +6,9 @@
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use pokered::audio::synth::{Synth, SAMPLE_RATE};
+use pokered::audio::synth::{Synth, HEADROOM, SAMPLE_RATE};
 use pokered::audio::{Voices, Write};
-use pokered::gfx::colour::ColourMode;
+use pokered::gfx::colour::{ColourMode, BYTES_PER_PIXEL};
 use pokered::input::Joypad;
 use pokered::rng::GameRng;
 use pokered::world::World;
@@ -24,11 +24,6 @@ const FRAME: Duration = Duration::from_nanos(16_742_706);
 /// Cycled by `C`. The border is the only one that paints more than the screen.
 const COLOUR_MODES: [ColourMode; 4] =
     [ColourMode::Dmg, ColourMode::Gbc, ColourMode::Sgb, ColourMode::SgbBorder];
-
-/// The synth reaches ±1 with four channels at full amplitude, and its output filters ring past it:
-/// the title theme peaks at 1.19. The sink is fed through this so those samples are heard rather
-/// than squared off.
-const HEADROOM: f32 = 1.0 / 1.2;
 
 /// The game's own save file, which the SAVE menu, a box change and the Hall of Fame write. It is
 /// what CONTINUE resumes from, so the window reads it back at every power-on.
@@ -83,7 +78,7 @@ fn main() -> Result<(), String> {
     let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
     let creator = canvas.texture_creator();
     let mut texture = creator
-        .create_texture_streaming(PixelFormatEnum::RGB24, width as u32, height as u32)
+        .create_texture_streaming(PixelFormatEnum::RGBA32, width as u32, height as u32)
         .map_err(|e| e.to_string())?;
 
     let queue: AudioQueue<f32> = sdl.audio()?.open_queue(
@@ -121,7 +116,7 @@ fn main() -> Result<(), String> {
                         let (width, height) = next.size();
                         canvas.window_mut().set_size(width as u32 * SCALE, height as u32 * SCALE).map_err(|e| e.to_string())?;
                         texture = creator
-                            .create_texture_streaming(PixelFormatEnum::RGB24, width as u32, height as u32)
+                            .create_texture_streaming(PixelFormatEnum::RGBA32, width as u32, height as u32)
                             .map_err(|e| e.to_string())?;
                     }
                     mode = next;
@@ -163,7 +158,7 @@ fn main() -> Result<(), String> {
         }
 
         let (width, _) = mode.size();
-        texture.update(None, &mode.rgb(game.screen()), width * 3).map_err(|e| e.to_string())?;
+        texture.update(None, &mode.rgba(game.screen()), width * BYTES_PER_PIXEL).map_err(|e| e.to_string())?;
         canvas.copy(&texture, None, None)?;
         canvas.present();
 
@@ -183,7 +178,7 @@ mod tests {
     use pokered::mode::{Mode, Status};
 
     /// What the window would show and play at the title screen, for the two judgements only an eye
-    /// and an ear can make: raw RGB in each colour mode, since three of the four have no oracle,
+    /// and an ear can make: raw RGBA in each colour mode, since three of the four have no oracle,
     /// and the theme as a WAV at the level the sink is fed. `POKERED_DUMP` names the directory.
     #[test]
     #[ignore = "a tool: dumps the title screen's picture and music"]
@@ -197,7 +192,7 @@ mod tests {
             game.frame(Input::None);
         }
         for mode in COLOUR_MODES {
-            std::fs::write(format!("{dir}/title-{mode:?}.rgb"), mode.rgb(game.screen())).unwrap();
+            std::fs::write(format!("{dir}/title-{mode:?}.rgba"), mode.rgba(game.screen())).unwrap();
         }
         for _ in 0..600 {
             let frame = game.frame(Input::None);

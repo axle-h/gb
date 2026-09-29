@@ -188,8 +188,8 @@ pub struct Overworld {
     kept_warps: Option<Vec<Warp>>,
     /// The last body found no button pressed with nothing under way, so a press now is a new decision.
     polled: bool,
-    /// A step has landed or a map been entered since the last body, so the poll the body comes to
-    /// is offered before it runs.
+    /// A step has landed, a map been entered or a text closed since the last body, so the poll the
+    /// body comes to is offered before it runs.
     #[serde(default)]
     offer_poll: bool,
     /// The poll is offered: the loop will poll next with nothing scripted, though it has not yet.
@@ -294,6 +294,13 @@ impl Overworld {
         self
     }
 
+    /// `wGrassRate`, `wGrassMons`, `wWaterRate` and `wWaterMons`, as a running game left them: a
+    /// left shore reads the grass list the last map with one loaded.
+    pub fn with_wild_mons(mut self, wild: crate::systems::overworld::encounters::WildMons) -> Self {
+        self.rt.wild_mons = wild;
+        self
+    }
+
     /// `wStepCounter`, which poison and the Safari Zone count on.
     pub fn with_step_counter(mut self, steps: u8) -> Self {
         self.rt.step_counter = steps;
@@ -330,16 +337,39 @@ impl Overworld {
         self.walk_counter != 0 || self.jumping || self.scripted || matches!(self.phase, Phase::FadeOut { .. } | Phase::Landing(_))
     }
 
+    /// `wCheckFor180DegreeTurn` zeroed, as a key taken by any menu leaves it.
+    pub fn disarm_turn(&mut self) {
+        self.standing.check_for_180_degree_turn = 0;
+    }
+
+    /// `BIT_SPINNING`: an arrow tile's presses are carrying the player.
+    pub fn is_spinning(&self) -> bool {
+        self.spinning
+    }
+
     pub fn is_turning(&self) -> bool {
         self.turning
     }
 
-    /// A command is taken before the poll after a step lands or a map is entered, so a press there
-    /// carries a held direction straight on as a player's does, with no empty poll to arm a turn.
+    /// A command is taken before the poll after a step lands, a map is entered or a text closes, so
+    /// a press there carries a held direction straight on as a player's does, with no empty poll to
+    /// arm a turn.
     /// The overworld is not waiting yet: the poll runs the map's script first, and on entering a
     /// map that is what redraws its gates.
     pub fn poll_offered(&self) -> bool {
         self.offered
+    }
+
+    /// A script has the player rather than the pad: one running, a scripted walk, or a d-pad bit in
+    /// `ignore` (`wJoyIgnore`). A step the player took, a jump or a door's fade is not one.
+    pub fn held_by_a_script(&self, ignore: Joypad) -> bool {
+        matches!(self.phase, Phase::Script) || self.scripted
+            || ignore.intersects(Joypad::UP | Joypad::DOWN | Joypad::LEFT | Joypad::RIGHT)
+    }
+
+    /// `BIT_FONT_LOADED`: a text box is open.
+    pub fn font_loaded(&self) -> bool {
+        self.font_loaded
     }
 
     /// `BIT_STANDING_ON_WARP`: a completed step landed on a warp entry.
@@ -758,6 +788,8 @@ impl Overworld {
             if self.standing.standing_on_warp && self.extra_warp_check(ctx) {
                 return self.check_warps_collision(ctx);
             }
+            // A bump arms nothing, so a press held on into the next poll is taken straight after it.
+            self.offer_poll = true;
             return self.overworld_loop();
         }
         self.start_step(ctx)
@@ -1879,6 +1911,53 @@ mod tests {
         assert_eq!(corner, straight, "no pass spent turning");
         settle(&mut game);
         assert_eq!(at(&game), (Map::PalletTown, 7, 7));
+    }
+
+    /// A key taken by a menu disarms the turn, and the poll after the menu closes is offered, so a
+    /// press held out of the START menu walks off the other way with no pass spent turning.
+    #[test]
+    fn a_press_held_out_of_a_menu_walks_the_other_way_without_a_turn() {
+        let mut game = game_at(Map::PalletTown, 5, 9);
+        command(&mut game, Command::Step(Direction::Up));
+        command(&mut game, Command::Step(Direction::Up));
+        assert_eq!(game.frame(Input::Command(Command::OpenStartMenu)).reply, Some(Reply::Accepted));
+        let offered = |game: &Game| matches!(game.modes().last(), Some(Mode::Overworld(overworld)) if overworld.poll_offered());
+        let mut closed = false;
+        for _ in 0..600 {
+            if !closed && game.status() == Status::Waiting(Decision::StartMenu) {
+                assert_eq!(game.frame(Input::Command(Command::CloseStartMenu)).reply, Some(Reply::Accepted));
+                closed = true;
+            } else if closed && offered(&game) {
+                break;
+            } else {
+                game.frame(Input::None);
+            }
+        }
+        assert!(offered(&game), "the poll after the menu is offered");
+        assert_eq!(game.frame(Input::Command(Command::Step(Direction::Down))).reply, Some(Reply::Accepted));
+        for _ in 0..40 {
+            game.frame(Input::None);
+            let Some(Mode::Overworld(overworld)) = game.modes().last() else { panic!("the overworld") };
+            assert!(!overworld.is_turning(), "a turn was armed");
+        }
+        assert_eq!(at(&game), (Map::PalletTown, 5, 8));
+    }
+
+    /// A press into a wall arms nothing, so the poll after the bump is offered: a talk pressed on
+    /// the heels of a turn to face a counter spends no empty poll, in which the people would move.
+    #[test]
+    fn the_poll_after_a_bump_is_offered() {
+        let mut game = game_at(Map::PalletTown, 3, 6);
+        assert_eq!(game.frame(Input::Command(Command::Step(Direction::Right))).reply, Some(Reply::Accepted));
+        chain(&mut game, Command::Face(Direction::Up));
+        for _ in 0..40 {
+            if game.frame(Input::None).events.iter().any(|event| matches!(event, crate::Event::CommandDone(_))) {
+                break;
+            }
+        }
+        assert_eq!((at(&game), game.world().location.facing), ((Map::PalletTown, 4, 6), SpriteFacing::Up));
+        let Some(Mode::Overworld(overworld)) = game.modes().last() else { panic!("the overworld") };
+        assert!(overworld.poll_offered() && game.status() != Status::Waiting(Decision::Overworld));
     }
 
     #[test]

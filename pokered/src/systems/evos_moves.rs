@@ -60,15 +60,15 @@ pub fn level_up_move(species: PokemonSpecies, level: u8, moves: &[Option<Pokemon
 /// that fires, and what it evolves into. Trade entries never fire; `wForceEvolution` (an item
 /// being used) stops the walk at the first level entry.
 ///
-/// `cur_item` is `wCurItem`, which is `wCurPartySpecies`: whatever the battle left there, and after
-/// an evolution the new species, since `LearnMoveFromLevelUp` sets it. An item entry compares
-/// against that, which is how a battle evolves a mon by stone without one.
-pub fn next_evolution(species: PokemonSpecies, level: u8, cur_item: u8, force: bool, from: usize) -> Option<(usize, PokemonSpecies)> {
+/// `cur_item` is `wCurItem`, what an item entry compares against, and `None` where no item is in
+/// play. The cartridge has no `None`: after a battle it compares `wCurPartySpecies`, the same byte,
+/// holding whatever the battle left there, which is how it evolves a mon by stone without one.
+pub fn next_evolution(species: PokemonSpecies, level: u8, cur_item: Option<u8>, force: bool, from: usize) -> Option<(usize, PokemonSpecies)> {
     for (at, evolution) in EvosMoves::of(species).evolutions.into_iter().enumerate().skip(from) {
         match evolution {
             Evolution::Trade { .. } => {}
             Evolution::Item { item, min_level, into } => {
-                if cur_item == item as u8 && level >= min_level {
+                if cur_item == Some(item as u8) && level >= min_level {
                     return Some((at, into));
                 }
             }
@@ -140,20 +140,41 @@ mod tests {
 
     #[test]
     fn evolution_walks_its_entries_in_order() {
-        assert_eq!(next_evolution(Bulbasaur, 16, 0, false, 0), Some((0, Ivysaur)));
-        assert_eq!(next_evolution(Bulbasaur, 15, 0, false, 0), None);
-        assert_eq!(next_evolution(Bulbasaur, 16, 0, true, 0), None, "an item stops at a level entry");
-        assert_eq!(next_evolution(Kadabra, 100, 0, false, 0), None, "no trade outside the Cable Club");
-        let water = ItemId::WaterStone as u8;
+        assert_eq!(next_evolution(Bulbasaur, 16, None, false, 0), Some((0, Ivysaur)));
+        assert_eq!(next_evolution(Bulbasaur, 15, None, false, 0), None);
+        assert_eq!(next_evolution(Bulbasaur, 16, None, true, 0), None, "an item stops at a level entry");
+        assert_eq!(next_evolution(Kadabra, 100, None, false, 0), None, "no trade outside the Cable Club");
+        let water = Some(ItemId::WaterStone as u8);
         assert_eq!(next_evolution(Eevee, 1, water, true, 0), Some((2, Vaporeon)));
         assert_eq!(next_evolution(Eevee, 1, water, true, 3), None);
-        assert_eq!(next_evolution(Eevee, 1, ItemId::MoonStone as u8, true, 0), None);
+        assert_eq!(next_evolution(Eevee, 1, Some(ItemId::MoonStone as u8), true, 0), None);
     }
 
     #[test]
-    fn a_wild_mon_whose_id_is_a_stones_evolves_by_stone() {
+    fn the_cartridge_evolves_by_stone_a_mon_after_a_wild_mon_whose_id_is_the_stones() {
         assert_eq!(Growlithe as u8, ItemId::ThunderStone as u8);
-        assert_eq!(next_evolution(Pikachu, 5, Growlithe as u8, false, 0), Some((0, Raichu)));
+        assert_eq!(next_evolution(Pikachu, 5, Some(Growlithe as u8), false, 0), Some((0, Raichu)));
+    }
+
+    #[test]
+    fn a_mon_levelled_in_a_battle_with_a_wild_mon_whose_id_is_a_stones_does_not_evolve_by_stone() {
+        use crate::mode::Mode;
+        use crate::modes::evolution::Evolution;
+        use crate::rng::GameRng;
+        use crate::world::World;
+        use crate::{Game, Input, Pacing};
+        let evolving = |cartridge_bugs| {
+            let world = World { party: vec![charmander(vec![])], cartridge_bugs, ..World::default() };
+            let mut game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+            game.world_mut().party[0].mon.mon.species = Pikachu;
+            game.push(Mode::Evolution(Evolution::after_battle(1, Growlithe as u8)));
+            for _ in 0..10 {
+                game.frame(Input::None);
+            }
+            game.modes().iter().any(|mode| matches!(mode, Mode::Evolution(evolution) if evolution.occurred()))
+        };
+        assert!(!evolving(false));
+        assert!(evolving(true), "the cartridge reads the Growlithe as a Thunder Stone");
     }
 
     fn charmander(nick: Vec<u8>) -> Named<PartyMon> {

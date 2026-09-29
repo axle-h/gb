@@ -1,7 +1,7 @@
 use crate::pokemon::PokemonType;
 use PokemonType::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PokemonMove {
     pub name: PokemonMoveName,
     pub pp: u8

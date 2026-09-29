@@ -5,6 +5,9 @@
 //! waiting for and takes a typed command, so this loop only has to choose the command: the same
 //! [`Policy`], the same [`GameState`] and the same rows, with the pressing left to `pokered`.
 
+use std::collections::VecDeque;
+
+use gb::cycles::MachineCycles;
 use gb::joypad::JoypadButton;
 use poke_core::geometry::Point8;
 use pokered::command::{Command, Decision, Refusal, Reply};
@@ -14,6 +17,8 @@ use pokered::modes::pc::bills_pc::BillsPcMenu;
 use pokered::modes::start_menu::StartMenuEntry;
 use pokered::systems::overworld::collision;
 use pokered::systems::overworld::location::Direction;
+use pokered::audio::Write;
+use pokered::input::Joypad;
 use pokered::{Event, Game, Input};
 
 use crate::pokemon::agent::{is_on_map_border, step_pos, AgentEvent, OverworldActionAbortedReason};
@@ -25,7 +30,8 @@ use crate::pokemon::text::PokemonTextReader;
 use crate::pokemon::move_name::PokemonMoveName;
 use crate::pokemon::bag::BagItem;
 use crate::pokemon::item::ItemId;
-use crate::pokemon::policy::{field_move_at, field_move_carrier, FieldMove, Policy};
+use crate::pokemon::agent::MANUAL_INPUT_CAPACITY;
+use crate::pokemon::policy::{field_move_at, field_move_carrier, FieldMove, Jam, Policy};
 use crate::pokemon::map_metadata::PlayerFacingDirection;
 use crate::pokemon::postgame::item_storage::PcItemOp;
 use crate::pokemon::postgame::items::{Effect, UseTarget};
@@ -37,6 +43,29 @@ use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::tile::{HiddenObject, MetaTile};
 use crate::pokemon::world_graph::WorldGraph;
 use crate::pokemon::GameState;
+
+/// A new game played from power-on through the intro, on the preset names, to Red's room, with
+/// `options` in force. The intro is played at [`pokered::Pacing::Instant`]: no policy answers it.
+pub fn new_game(rng: impl Fn() -> pokered::rng::GameRng, options: pokered::world::Options, pacing: pokered::Pacing) -> Result<Game, String> {
+    let mut game = Game::power_on(None, rng(), pokered::Pacing::Instant);
+    for _ in 0..60_000 {
+        if matches!(game.modes(), [Mode::Overworld(_)]) {
+            let mut world = game.world().clone();
+            world.options = options;
+            let mut game = Game::new(world, rng(), pacing);
+            game.push(Mode::Overworld(pokered::modes::overworld::Overworld::new()));
+            return Ok(game);
+        }
+        let command = match game.status() {
+            Status::Waiting(Decision::TitleScreen | Decision::Text) => Some(Command::Advance),
+            Status::Waiting(Decision::MainMenu) => Some(Command::ChooseOption(0)),
+            Status::Waiting(Decision::IntroNameMenu) => Some(Command::ChooseOption(1)),
+            _ => None,
+        };
+        game.frame(command.map_or(Input::None, Input::Command));
+    }
+    Err(format!("the intro never reached Red's room: {:?}", game.status()))
+}
 
 /// Decision points a row may go without a route before the walk is given up: a person standing in
 /// the only doorway moves on in a few of their own steps.
@@ -307,12 +336,12 @@ pub struct NativeAgent {
     frames: u64,
     /// `pick_move_to_forget`'s answer, held while its `LearnMove` is up.
     forget: Option<Option<usize>>,
-    /// Trees cut on this visit, which the cartridge's own tables still draw. A battle reloads the
-    /// map and they grow back, as they do on leaving it.
-    cut_trees: Vec<Point8>,
     /// Accepted and not yet done or interrupted.
     running: Option<Command>,
+    /// `BattleStarted` has been said and `BattleEnded` not yet.
     in_battle: bool,
+    /// A battle was on the stack after the last frame, so the text before it is cut off once.
+    battle_was_up: bool,
     /// Every A pressed at a card-key door, so one that never opens is given up on.
     card_key_presses: Vec<(Map, Point8)>,
     /// A walk stopped on a square (in the tile map's coordinates), and the square its
@@ -334,18 +363,41 @@ pub struct NativeAgent {
     task_blocked: u32,
     /// The next wait on Route 17 lets go of the pad, for the slope to turn the rider down.
     coast: bool,
+    /// `World::hall_of_fame_teams` as last seen; `None` until the first tick seeds it, so a game
+    /// loaded after its ceremony does not announce it again.
+    hall_of_fame_teams: Option<u8>,
+    /// Kept only for a host that asked with [`NativeAgent::hosted`], since nothing else drains it.
+    outputs: Option<Outputs>,
+    /// Game time since the policy was last asked to decide anything, which the watchdog reads.
+    since_asked: MachineCycles,
+    /// [`Policy::stuck_timeout`], read once when the agent was built.
+    stuck_after: Option<MachineCycles>,
+    /// `since_asked` at the last [`AgentEvent::WatchdogFired`], so each timeout reports once.
+    stuck_reported_at: MachineCycles,
+    /// The policy's raw presses, a frame's pad each, played ahead of anything the agent decides.
+    manual: VecDeque<Joypad>,
+}
+
+/// Frames a raw press is held before a frame let go, as the emulated agent holds one for two ticks.
+const MANUAL_HOLD_FRAMES: usize = 2;
+
+/// What a host plays and publishes from the frames the agent ran.
+#[derive(Default)]
+struct Outputs {
+    audio: Vec<Write>,
+    events: Vec<AgentEvent>,
+    /// The game's own save, as it last wrote itself: what CONTINUE resumes from.
+    save: Option<Vec<u8>>,
 }
 
 impl NativeAgent {
     pub fn new(game: Game, policy: Box<dyn Policy>) -> Result<Self, String> {
         Ok(Self {
             native: NativeGame::new(game)?,
-            policy,
             graph: WorldGraph::new(),
             last_map: None,
             walk: None,
             task: None,
-            cut_trees: Vec::new(),
             forget: None,
             answer_no: false,
             menu_pick: None,
@@ -353,6 +405,7 @@ impl NativeAgent {
             frames: 0,
             running: None,
             in_battle: false,
+            battle_was_up: false,
             card_key_presses: Vec::new(),
             turn_back_watch: None,
             turned_back: Vec::new(),
@@ -362,7 +415,109 @@ impl NativeAgent {
             pending_pickup: None,
             task_blocked: 0,
             coast: false,
+            hall_of_fame_teams: None,
+            outputs: None,
+            since_asked: MachineCycles::ZERO,
+            stuck_after: policy.stuck_timeout().filter(|timeout| !timeout.is_zero()).map(MachineCycles::from_duration),
+            stuck_reported_at: MachineCycles::ZERO,
+            manual: VecDeque::new(),
+            policy,
         })
+    }
+
+    /// Keep every frame's audio writes and every event for [`Self::drain_audio`] and
+    /// [`Self::drain_events`].
+    pub fn hosted(mut self) -> Self {
+        self.outputs = Some(Outputs::default());
+        self
+    }
+
+    /// The register writes of every frame run since the last drain, in order.
+    pub fn drain_audio(&mut self) -> Vec<Write> {
+        self.outputs.as_mut().map(|outputs| std::mem::take(&mut outputs.audio)).unwrap_or_default()
+    }
+
+    pub fn drain_events(&mut self) -> Vec<AgentEvent> {
+        self.outputs.as_mut().map(|outputs| std::mem::take(&mut outputs.events)).unwrap_or_default()
+    }
+
+    /// The save the game wrote since the last take, the latest if it wrote more than one.
+    pub fn take_save(&mut self) -> Option<Vec<u8>> {
+        self.outputs.as_mut().and_then(|outputs| outputs.save.take())
+    }
+
+    /// Start `game` afresh under the same policy, which is told the run it now writes to.
+    pub fn restart(&mut self, game: Game, run_dir: Option<&std::path::Path>) -> Result<(), String> {
+        let placeholder: Box<dyn Policy> = Box::new(crate::pokemon::policy::RandomPolicy::seeded(0));
+        let policy = std::mem::replace(&mut self.policy, placeholder);
+        let hosted = self.outputs.is_some();
+        *self = Self::new(game, policy)?;
+        if hosted {
+            self.outputs = Some(Outputs::default());
+        }
+        self.policy.restart(run_dir);
+        Ok(())
+    }
+
+    /// `POST /api/clear`, straight through to the policy.
+    pub fn clear_conversation(&mut self, run_dir: Option<&std::path::Path>) -> Result<(), String> {
+        self.policy.clear_conversation(run_dir)
+    }
+
+    /// A frame the host drives itself, through the credits say, kept as the agent's own are.
+    pub fn frame(&mut self, input: Input) -> pokered::Frame {
+        let frame = self.play(input);
+        self.check_hall_of_fame();
+        frame
+    }
+
+    fn play(&mut self, input: Input) -> pokered::Frame {
+        let mut frame = self.native.game_mut().frame(input);
+        for printed in &frame.printed {
+            self.text.read(Some(crate::pokemon::native::message_box_text(printed)));
+        }
+        if self.printing() {
+            self.text.read(self.native.message_box_text());
+        }
+        let battle_up = self.battle_is_up();
+        if battle_up && !self.battle_was_up {
+            self.say_text();
+        }
+        self.battle_was_up = battle_up;
+        if let Some(outputs) = self.outputs.as_mut() {
+            outputs.audio.append(&mut frame.audio);
+            if let Some(save) = &frame.save {
+                outputs.save = Some(save.clone());
+            }
+        }
+        frame
+    }
+
+    /// A menu, the naming grid, a battle's own boxes and an animation's tiles are each drawn by a
+    /// mode of their own, so only a printing mode's rows are a message.
+    fn printing(&self) -> bool {
+        matches!(self.native.game().modes().last(), Some(Mode::TextBox(_) | Mode::Evolution(_)))
+    }
+
+    /// Notice the game being beaten, and say so once: the ceremony's first frame counts the team,
+    /// with the winning party still in the world.
+    fn check_hall_of_fame(&mut self) {
+        let teams = self.native.game().world().hall_of_fame_teams;
+        match self.hall_of_fame_teams.replace(teams) {
+            Some(seen) if teams > seen => {}
+            _ => return,
+        }
+        use crate::pokemon::observe::{playtime, playtime_seconds};
+        let party = self.native.game_state()
+            .map(|state| state.pokemon.iter().map(|mon| mon.nickname.to_default_string()).collect())
+            .unwrap_or_default();
+        self.event(AgentEvent::HallOfFame {
+            teams,
+            playtime: playtime(&self.native),
+            playtime_seconds: playtime_seconds(&self.native),
+            badges: self.native.game().world().badges,
+            party,
+        });
     }
 
     pub fn game(&self) -> &Game {
@@ -393,20 +548,29 @@ impl NativeAgent {
             && self.native.game().status() == Status::Waiting(Decision::Overworld)
     }
 
+    /// A task still on its way to the square it faces, or out of a lift, as the emulated agent's
+    /// drivers walk it with the pad held from step to step and from the floor menu into the first.
+    fn task_walking(&self) -> bool {
+        match self.task {
+            Some(Task::Talk(TalkUse { opened, answered, what, .. })) =>
+                !opened || answered && matches!(what, Talk::Elevator { .. }),
+            Some(Task::Pc(PcUse { opened, .. }) | Task::Mart(MartVisit { opened, .. })) => !opened,
+            Some(Task::Bag(BagUse { face, opened, .. })) => face.is_some() && !opened,
+            _ => false,
+        }
+    }
+
+    fn spinning(&self) -> bool {
+        matches!(self.native.game().modes().last(), Some(Mode::Overworld(overworld)) if overworld.is_spinning())
+    }
+
     fn poll_offered(&self) -> bool {
         matches!(self.native.game().modes().last(), Some(Mode::Overworld(overworld)) if overworld.poll_offered())
     }
 
-    /// The game state with the trees cut on this visit cleared, and the squares it was walked back
-    /// off walled.
+    /// The game state with the squares this visit was walked back off walled.
     pub fn game_state(&self) -> Result<GameState, String> {
         let mut state = self.native.game_state()?;
-        for &at in &self.cut_trees {
-            let index = at.x as usize + at.y as usize * state.map.width;
-            if state.map.meta_tiles.get(index) == Some(&MetaTile::CutTree) {
-                state.map.meta_tiles[index] = MetaTile::Empty;
-            }
-        }
         for &at in &self.turned_back {
             let index = at.x as usize + at.y as usize * state.map.width;
             if index < state.map.meta_tiles.len() {
@@ -420,9 +584,81 @@ impl NativeAgent {
         self.policy.as_ref()
     }
 
-    /// One frame: the command in flight carried on, or the next one chosen and handed in.
+    /// What the agent is doing, for a heartbeat: the command in flight, else what the game waits on.
+    pub fn state_debug(&self) -> String {
+        match &self.running {
+            Some(command) => format!("{command:?}"),
+            None => format!("{:?}", self.native.game().status()),
+        }
+    }
+
+    /// One frame: the command in flight carried on, or the next one chosen and handed in. The frame
+    /// is played whatever the agent makes of it, as the cartridge runs on under a failed tick.
     pub fn tick(&mut self) -> Result<(), String> {
+        let before = self.native.game().frames();
+        let decided = self.decide();
+        if decided.is_err() && self.native.game().frames() == before {
+            let input = self.idle_input();
+            self.play(input);
+        }
+        decided
+    }
+
+    /// Raw presses to deliver ahead of the state machine, which forget whatever was in flight.
+    pub fn queue_manual_input(&mut self, buttons: impl IntoIterator<Item = JoypadButton>) {
+        for button in buttons {
+            if self.manual.len() >= MANUAL_INPUT_CAPACITY * (MANUAL_HOLD_FRAMES + 1) { break; }
+            self.manual.extend(std::iter::repeat_n(pad(button), MANUAL_HOLD_FRAMES));
+            self.manual.push_back(Joypad::empty());
+        }
+        self.host_took_the_screen();
+    }
+
+    /// Frames of raw presses not yet played; zero means the state machine runs.
+    pub fn manual_input_pending(&self) -> usize {
+        self.manual.len()
+    }
+
+    /// Emulated time without the policy being asked anything, whatever it answered.
+    pub fn since_last_policy_poll(&self) -> std::time::Duration {
+        self.since_asked.to_duration()
+    }
+
+    /// The policy is being asked to decide, which is what the watchdog waits for.
+    fn asked(&mut self) {
+        self.since_asked = MachineCycles::ZERO;
+        self.stuck_reported_at = MachineCycles::ZERO;
+    }
+
+    /// The watchdog: ask the policy for a nudge when nothing has asked it anything, a decision this
+    /// agent has no answer for included.
+    fn run_watchdog(&mut self) {
+        let Some(after) = self.stuck_after.filter(|after| self.since_asked >= *after) else { return };
+        let Ok(state) = self.game_state() else { return };
+        let agent_state = self.state_debug();
+        let stuck_for = self.since_asked.to_duration();
+        if self.since_asked >= self.stuck_reported_at + after {
+            self.stuck_reported_at = self.since_asked;
+            self.event(AgentEvent::WatchdogFired { agent_state: agent_state.clone(), stuck_for });
+        }
+        self.policy.service_tools(&state, &self.native, &self.graph);
+        self.policy.pick_unstick(&state, Jam { agent_state: &agent_state, stuck_for });
+    }
+
+    fn decide(&mut self) -> Result<(), String> {
         self.frames += 1;
+        self.since_asked += MachineCycles::PER_FRAME;
+        self.check_hall_of_fame();
+        // The policy's escape hatch.
+        let queued = self.policy.take_manual_input();
+        if !queued.is_empty() {
+            self.queue_manual_input(queued);
+        }
+        if let Some(held) = self.manual.pop_front() {
+            self.play(Input::Buttons(held));
+            return Ok(());
+        }
+        self.run_watchdog();
         let location = &self.native.game().world().location;
         let square = Some((location.map, Point8 { x: location.x, y: location.y }));
         if let Some((map, left)) = std::mem::replace(&mut self.square, square).filter(|&left| Some(left) != square)
@@ -430,7 +666,7 @@ impl NativeAgent {
         {
             walk.came_from = Some(left);
         }
-        self.read_text();
+        self.flush_text();
         if self.running.is_some() {
             // A pad's destination is arrived at even when the player only passes over it, on a pad
             // of its own, as the emulated agent sees it between two of its ticks.
@@ -441,7 +677,7 @@ impl NativeAgent {
                 self.complete();
             }
             let input = self.idle_input();
-            let frame = self.native.game_mut().frame(input);
+            let frame = self.play(input);
             self.finish(&frame.events);
             return Ok(());
         }
@@ -449,10 +685,12 @@ impl NativeAgent {
         if self.learning().is_none() {
             self.forget = None;
         }
-        // A walk takes the poll the overworld offers before it runs, and so carries on as a held
-        // direction does. Nothing else does: the poll runs the map's script first.
+        // A walk, or a task's walk up to what it faces, takes the poll the overworld offers before
+        // it runs, and so carries on as a held direction does. Nothing else does: the poll runs the
+        // map's script first.
         let status = match self.native.game().status() {
-            Status::Busy if self.walk.is_some() && self.poll_offered() => Status::Waiting(Decision::Overworld),
+            Status::Busy if (self.walk.is_some() || self.task_walking()) && self.poll_offered() =>
+                Status::Waiting(Decision::Overworld),
             status => status,
         };
         // Every decision point, as the emulated agent polls: a policy's tools are answered here.
@@ -471,8 +709,17 @@ impl NativeAgent {
             // outlives it, as the emulated agent's does, and is taken up again on the same floor.
             self.task = None;
         }
-        if self.walk.is_some() && status != Status::Waiting(Decision::Overworld) && self.boulder_goal.is_none() {
+        // An arrow tile carries the walk on rather than taking the screen from it, as the emulated
+        // agent's walk outlasts the short script.
+        if self.walk.is_some() && status != Status::Waiting(Decision::Overworld) && self.boulder_goal.is_none() && !self.spinning() {
             self.end_walk_off_the_map()?;
+        }
+        // Said after the walk it stopped, as the emulated agent says it.
+        if !self.in_battle && self.battle_is_up() {
+            self.in_battle = true;
+            // A trainer's text before the fight is not a script walking the player back.
+            self.turn_back_watch = None;
+            self.event(AgentEvent::BattleStarted);
         }
         let command = match status {
             Status::Busy | Status::Idle => None,
@@ -531,7 +778,7 @@ impl NativeAgent {
         match command {
             None => {
                 let input = self.idle_input();
-                self.native.game_mut().frame(input);
+                self.play(input);
                 Ok(())
             }
             Some(command) => self.issue(command),
@@ -539,7 +786,7 @@ impl NativeAgent {
     }
 
     fn issue(&mut self, command: Command) -> Result<(), String> {
-        let frame = self.native.game_mut().frame(Input::Command(command.clone()));
+        let frame = self.play(Input::Command(command.clone()));
         match frame.reply {
             Some(Reply::Accepted) => {
                 self.task_blocked = 0;
@@ -601,25 +848,26 @@ impl NativeAgent {
         }
         println!("{event:?}");
         self.policy.on_event(&event);
+        if let Some(outputs) = self.outputs.as_mut() {
+            outputs.events.push(event);
+        }
     }
 
-    /// Read the message box while the game is printing or waiting on a page, and report it all as
-    /// one message once the overworld or a battle's menu is back, as the emulated agent reports a
-    /// turn's text.
-    fn read_text(&mut self) {
-        // The transition's fills and an animation's tiles are no text, whatever they spell.
-        if let Some(Mode::Battle(battle)) = self.native.game().modes().last() && battle.animating() {
-            return;
+    /// Report what `play` read as one message once the overworld has the screen back, a script's
+    /// included, or a battle's menu is up, as the emulated agent reports a text box or a battle's
+    /// turn. A question inside a text, the nurse's HEAL/CANCEL say, is part of it, and a walk the
+    /// text stopped is said to have ended first.
+    fn flush_text(&mut self) {
+        let game = self.native.game();
+        let overworld = matches!(game.modes().last(), Some(Mode::Overworld(_))) && game.status() == Status::Busy
+            && self.walk.is_none();
+        if overworld || matches!(game.status(),
+                     Status::Waiting(Decision::Overworld | Decision::BattleMenu | Decision::BattleMoves) | Status::Idle) {
+            self.say_text();
         }
-        match self.native.game().status() {
-            Status::Busy | Status::Waiting(Decision::Text) => {
-                self.text.read(self.native.message_box_text());
-                return;
-            }
-            // A question inside a text, the nurse's HEAL/CANCEL say, is part of it.
-            Status::Waiting(Decision::Overworld | Decision::BattleMenu | Decision::BattleMoves) | Status::Idle => {}
-            Status::Waiting(_) => return,
-        }
+    }
+
+    fn say_text(&mut self) {
         let message = self.text.take();
         self.event(AgentEvent::TextBox { message });
     }
@@ -629,7 +877,6 @@ impl NativeAgent {
     fn note_map(&mut self, state: &GameState) {
         if self.last_map != Some(state.map.map) {
             self.last_map = Some(state.map.map);
-            self.cut_trees.clear();
             self.turned_back.clear();
             let location = &self.native.game().world().location;
             self.graph.observe(state.map.map, Point8 { x: location.x, y: location.y }, &state.map);
@@ -646,7 +893,8 @@ impl NativeAgent {
     fn notice_battle_end(&mut self) {
         if self.in_battle && !self.battle_is_up() {
             self.in_battle = false;
-            self.cut_trees.clear();
+            // The battle's last box is its own, as the emulated agent says it.
+            self.say_text();
             self.event(AgentEvent::BattleEnded);
         }
     }
@@ -685,6 +933,7 @@ impl NativeAgent {
         }
         // Armed for a talk that asked nothing.
         self.menu_pick = None;
+        self.asked();
         if let Some(field_move) = self.policy.pick_field_move(&state) {
             return self.field_move(field_move, &state);
         }
@@ -869,10 +1118,16 @@ impl NativeAgent {
     }
 
     /// Wait out a task's walk that somebody stands in, up to [`MAX_TASK_BLOCKED_POLLS`], then give
-    /// the task up saying `why`.
+    /// the task up saying `why`. A prize counter is waited on as long as the emulated agent waits.
     fn task_blocked(&mut self, task: Task, why: String) -> Result<(), String> {
+        const PRIZE_BLOCKED_POLLS: u32 = (crate::pokemon::postgame::game_corner::BLOCKED_TICKS as u64
+            * crate::pokemon::agent::AGENT_RESOLUTION.m_cycles() / gb::cycles::MachineCycles::PER_FRAME.m_cycles()) as u32;
+        let bound = match task {
+            Task::Talk(TalkUse { what: Talk::Prize(_), .. }) => PRIZE_BLOCKED_POLLS,
+            _ => MAX_TASK_BLOCKED_POLLS,
+        };
         self.task_blocked += 1;
-        if self.task_blocked > MAX_TASK_BLOCKED_POLLS {
+        if self.task_blocked > bound {
             self.task_blocked = 0;
             self.task = None;
             self.say(&why);
@@ -891,7 +1146,7 @@ impl NativeAgent {
             let at = self.player_at();
             self.abort(OverworldActionAbortedReason::NoRoute(destination), at);
         }
-        self.native.game_mut().frame(Input::None);
+        self.play(Input::None);
         Ok(())
     }
 
@@ -1229,6 +1484,7 @@ impl NativeAgent {
         let (kind, species, limit) = (screen.kind(), screen.species(), screen.limit());
         let name = match (kind, species) {
             (pokered::modes::naming_screen::NamingScreenType::Mon, Some(species)) => {
+                self.asked();
                 let Some(name) = self.policy.pick_nickname(species) else { return Ok(None) };
                 name
             }
@@ -1275,6 +1531,7 @@ impl NativeAgent {
                 }
                 if !mart.asked {
                     let state = self.native.game_state()?;
+                    self.asked();
                     let Some(want) = self.policy.pick_mart_purchase(&state) else { return Ok(None) };
                     mart.asked = true;
                     mart.want = want.and_then(|item| self.affordable(item)).map(MartWant::Buy);
@@ -1642,6 +1899,7 @@ impl NativeAgent {
                 let state = self.native.game_state()?;
                 let current: Vec<_> = state.pokemon.get(slot as usize)
                     .map(|mon| mon.moves.iter().flatten().copied().collect()).unwrap_or_default();
+                self.asked();
                 let Some(answer) = self.policy.pick_move_to_forget(slot as usize, &current, new_move) else { return Ok(None) };
                 let answer = answer.filter(|&i| current.get(i).is_some_and(|mv| !pokered::systems::learn_move::is_move_hm(mv.name)));
                 self.forget = Some(answer);
@@ -1765,9 +2023,6 @@ impl NativeAgent {
 
     fn field_move_done(&mut self, use_: FieldMoveUse) -> Result<Option<Command>, String> {
         self.task = None;
-        if use_.name == PokemonMoveName::Cut && !use_.refused && let Some(at) = use_.at {
-            self.cut_trees.push(at);
-        }
         let state = self.game_state()?;
         let succeeded = !use_.refused && match use_.name {
             PokemonMoveName::Surf => state.map.surfing,
@@ -1979,14 +2234,10 @@ impl NativeAgent {
     }
 
     fn battle(&mut self) -> Result<Option<Command>, String> {
-        if !self.in_battle {
-            self.in_battle = true;
-            // A trainer's text before the fight is not a script walking the player back.
-            self.turn_back_watch = None;
-            self.event(AgentEvent::BattleStarted);
-        }
         let state = self.native.game_state()?;
+        self.asked();
         let Some(action) = self.policy.pick_battle_action(&state) else { return Ok(None) };
+        self.event(AgentEvent::battle_action_started(&state, action));
         Ok(Some(match action {
             BattleAction::Fight { slot, .. } => Command::Fight(slot),
             BattleAction::UseItem { item, target, .. } => Command::UseItem { item: item.id, target },
@@ -2031,6 +2282,20 @@ impl FieldMoveUse {
 
     fn at(self, at: Option<Point8>) -> Self {
         Self { at, ..self }
+    }
+}
+
+/// The recreation's pad bit for a button.
+fn pad(button: JoypadButton) -> Joypad {
+    match button {
+        JoypadButton::Up => Joypad::UP,
+        JoypadButton::Down => Joypad::DOWN,
+        JoypadButton::Left => Joypad::LEFT,
+        JoypadButton::Right => Joypad::RIGHT,
+        JoypadButton::A => Joypad::A,
+        JoypadButton::B => Joypad::B,
+        JoypadButton::Select => Joypad::SELECT,
+        JoypadButton::Start => Joypad::START,
     }
 }
 
@@ -2211,6 +2476,138 @@ mod tests {
 
     fn pallet_town() -> Game {
         game_at(Map::PalletTown, 5, 6, |_| {})
+    }
+
+    /// The ceremony's count going up is the win, said once, whoever is driving the frame; a game
+    /// that was already a champion when it was loaded says nothing.
+    #[test]
+    fn the_hall_of_fame_is_announced_once_when_the_count_moves() {
+        let game = game_at(Map::PalletTown, 5, 6, |world| world.hall_of_fame_teams = 1);
+        let mut agent = NativeAgent::new(game, Box::new(crate::pokemon::policy::RandomPolicy::seeded(1)))
+            .unwrap()
+            .hosted();
+        let wins = |agent: &mut NativeAgent| agent.drain_events().into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::HallOfFame { teams, party, .. } => Some((teams, party)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        agent.frame(Input::None);
+        assert_eq!(wins(&mut agent), vec![], "a loaded champion was announced");
+
+        agent.game_mut().world_mut().hall_of_fame_teams = 2;
+        agent.frame(Input::None);
+        assert_eq!(wins(&mut agent), vec![(2, vec!["MEWTWO".to_string()])]);
+        agent.tick().unwrap();
+        assert_eq!(wins(&mut agent), vec![], "the same win twice");
+    }
+
+    /// Wakes up after a second, and answers the first wake-up with B.
+    #[derive(Default)]
+    struct Nudges {
+        jams: Rc<RefCell<Vec<std::time::Duration>>>,
+        nudge: Vec<JoypadButton>,
+        overworld_asks: Rc<RefCell<u32>>,
+    }
+
+    impl Policy for Nudges {
+        fn name(&self) -> &'static str { "nudges" }
+
+        fn stuck_timeout(&self) -> Option<std::time::Duration> {
+            Some(std::time::Duration::from_secs(1))
+        }
+
+        fn pick_unstick(&mut self, _: &GameState, jam: Jam<'_>) {
+            let mut jams = self.jams.borrow_mut();
+            if jams.is_empty() {
+                self.nudge = vec![JoypadButton::B];
+            }
+            jams.push(jam.stuck_for);
+        }
+
+        fn take_manual_input(&mut self) -> Vec<JoypadButton> {
+            std::mem::take(&mut self.nudge)
+        }
+
+        fn pick_overworld_action(&mut self, _: &GameState, _: &WorldGraph) -> Option<OverworldAction> {
+            *self.overworld_asks.borrow_mut() += 1;
+            None
+        }
+
+        fn pick_battle_action(&mut self, _: &GameState) -> Option<BattleAction> {
+            None
+        }
+    }
+
+    /// A decision the agent has no answer for is the watchdog's: the game plays on, the policy is
+    /// woken once the timeout has passed, and its press gets back to something the agent answers.
+    #[test]
+    fn the_watchdog_wakes_the_policy_at_a_decision_the_agent_cannot_answer() {
+        let until = |game: &mut Game, decision: Decision| {
+            for _ in 0..600 {
+                if game.status() == Status::Waiting(decision.clone()) {
+                    return;
+                }
+                game.frame(Input::None);
+            }
+            panic!("never reached {decision:?}: {:?}", game.status());
+        };
+        let mut game = pallet_town();
+        game.push(Mode::PokemonMenu(pokered::modes::pokemon_menu::PokemonMenu::new()));
+        until(&mut game, Decision::PartyMenu);
+        game.frame(Input::Command(Command::ChooseOption(0)));
+        until(&mut game, Decision::FieldMoveMenu);
+
+        let policy = Nudges::default();
+        let (jams, overworld_asks) = (policy.jams.clone(), policy.overworld_asks.clone());
+        let mut agent = NativeAgent::new(game, Box::new(policy)).unwrap().hosted();
+        let started = agent.game().frames();
+        let (mut ticks, mut failed) = (0, 0);
+        for _ in 0..3 * 60 {
+            ticks += 1;
+            failed += usize::from(agent.tick().is_err());
+            if *overworld_asks.borrow() > 0 {
+                break;
+            }
+        }
+        assert!(failed > 0, "the agent answered the field-move menu itself");
+        assert_eq!(agent.game().frames() - started, ticks, "a failed tick still plays its frame");
+        let jams = jams.borrow();
+        assert!(jams.first().is_some_and(|stuck| *stuck >= std::time::Duration::from_secs(1)), "never woken: {jams:?}");
+        let fired = agent.drain_events().into_iter().filter(|event| matches!(event, AgentEvent::WatchdogFired { .. })).count();
+        assert_eq!(fired, 1, "reported once per timeout");
+        assert!(*overworld_asks.borrow() > 0, "the nudge never got back to the overworld: {:?}", agent.game().status());
+    }
+
+    /// The modes a step reads as, frame by frame, until the game waits on something again.
+    fn modes_of_a_step_up(mut game: Game) -> Vec<GameMode> {
+        while game.status() != Status::Waiting(Decision::Overworld) {
+            game.frame(Input::None);
+        }
+        assert_eq!(game.frame(Input::Command(Command::Step(Direction::Up))).reply, Some(Reply::Accepted));
+        let mut native = NativeGame::new(game).unwrap();
+        let mut modes = Vec::new();
+        for _ in 0..600 {
+            modes.push(native.game_mode());
+            if native.game().status() != Status::Busy && modes.len() > 1 {
+                break;
+            }
+            native.game_mut().frame(Input::None);
+        }
+        modes
+    }
+
+    /// The player walking reads as the overworld, as the emulated reading has it with nothing in
+    /// `wJoyIgnore`, and a script that takes the pad reads as one.
+    #[test]
+    fn a_step_reads_as_the_overworld_and_a_script_as_a_script() {
+        let walked = modes_of_a_step_up(pallet_town());
+        assert!(walked.iter().all(|&mode| mode == GameMode::Overworld), "{walked:?}");
+
+        let stopped = game_at(Map::PalletTown, 10, 2, |world|
+            world.events.clear(poke_core::symbols::pokered_events::EVENT_FOLLOWED_OAK_INTO_LAB));
+        let stopped = modes_of_a_step_up(stopped);
+        assert!(stopped.contains(&GameMode::Script), "Oak's stopping the player: {stopped:?}");
     }
 
     fn agent(game: Game, goals: Vec<Goal>) -> (NativeAgent, Rc<RefCell<Log>>) {
@@ -2628,6 +3025,52 @@ mod tests {
         assert_eq!(agent.game().world().location.map, Map::SilphCo5F, "{:#?}", log.borrow().events);
     }
 
+    fn turning(agent: &NativeAgent) -> bool {
+        matches!(agent.game().modes().last(), Some(Mode::Overworld(overworld)) if overworld.is_turning())
+    }
+
+    /// A task walks up to what it faces with the pad held from step to step, and out of a lift from
+    /// the floor menu into its first step, as the emulated agent's drivers do: nothing between arms
+    /// a turn, which is an encounter check the cartridge never makes.
+    #[test]
+    fn a_lift_is_walked_up_to_and_out_of_without_a_turn() {
+        let game = game_at(Map::SilphCoElevator, 1, 2, |world| world.location.last_map = Map::SilphCo1F);
+        let (mut agent, log) = agent(game, vec![Goal::Field(FieldMove::UseElevator { panel: Point8 { x: 3, y: 0 }, floor: 4 })]);
+        let turns = std::cell::Cell::new(0);
+        run(&mut agent, &log, |agent, log| {
+            let moved = agent.game().world().location.x != 1 || agent.game().world().location.y != 2;
+            turns.set(turns.get() + (moved && turning(agent)) as u32);
+            settled(agent, log)
+        });
+        assert_eq!(agent.game().world().location.map, Map::SilphCo5F, "{:#?}", log.borrow().events);
+        assert_eq!(turns.get(), 0, "{:#?}", log.borrow().events);
+    }
+
+    /// A step pressed on landing on an arrow tile is refused, as the arrow is about to carry the
+    /// player: the walk rides it out and goes on from where it stops.
+    #[test]
+    fn a_walk_rides_an_arrow_tile_it_lands_on_and_carries_on() {
+        let game = game_at(Map::RocketHideoutB3F, 17, 16, |_| {});
+        let (mut agent, log) = agent(game, vec![Goal::Talk("Rare Candy")]);
+        run(&mut agent, &log, |agent, _| quantity(agent, ItemId::RareCandy) == 1);
+        let events = &log.borrow().events;
+        assert!(!events.iter().any(|event| event.starts_with("OverworldActionAborted")), "{events:#?}");
+    }
+
+    /// A prize counter somebody stands in front of is given up on after the five seconds the
+    /// emulated agent waits, or the two part ways on whoever stands there.
+    #[test]
+    fn a_blocked_prize_counter_is_given_up_when_the_emulated_agent_gives_it_up() {
+        let (mut agent, _) = agent(game_at(Map::GameCornerPrizeRoom, 4, 6, |_| {}), vec![]);
+        let talk = TalkUse { at: Prize::Abra.vendor_tile(), facing: None, what: Talk::Prize(Prize::Abra), opened: false,
+                             answered: false, before: TalkBefore { coins: 0, party: 1, nick: None } };
+        let polls = (1..).find(|_| {
+            agent.task_blocked(Task::Talk(talk), String::new()).unwrap();
+            agent.task.is_none()
+        });
+        assert_eq!(polls, Some(299));
+    }
+
     #[test]
     fn a_prize_is_bought_with_coins_and_its_nickname_kept() {
         let game = game_at(Map::GameCornerPrizeRoom, 4, 6, |world| {
@@ -2698,6 +3141,45 @@ mod tests {
         let log = log.borrow();
         assert!(log.events.iter().any(|event| event.starts_with("OverworldActionAborted { destination: Grass, reason: Battle")),
                 "a battle is what ends a pace: {:#?}", log.events);
+    }
+
+    fn messages(events: &[String]) -> Vec<&str> {
+        events.iter().filter_map(|event| event.strip_prefix("TextBox { message: \"")?.strip_suffix("\" }")).collect()
+    }
+
+    /// Only what a text box printed is a message: the battle's own menus, the move list, the naming
+    /// grid and the party menu's boxes each have a mode of their own, and a line a text box printed
+    /// and took back within one frame is still said.
+    #[test]
+    fn a_message_is_what_a_text_box_printed_and_never_a_menu() {
+        let game = game_at(Map::Route1, 10, 30, |world| {
+            world.location.repel_steps = 1;
+            world.badges = 0xFF;
+        });
+        let (mut agent, log) = agent(game, vec![Goal::Row(|tile| *tile == MetaTile::Grass)]);
+        run(&mut agent, &log, |_, log| log.events.iter().any(|event| event == "BattleEnded"));
+        let events = log.borrow().events.clone();
+        let said = messages(&events).join(" | ");
+        assert!(said.contains("REPEL's effect wore off."), "{said}");
+        assert!(said.contains("Wild RATTATA appeared! Go! MEWTWO!"), "{said}");
+        assert!(said.contains("MEWTWO used SWIFT!"), "{said}");
+        assert!(!said.contains("FIGHT") && !said.contains("PSYCHIC BARRIER"), "{said}");
+
+        let game = game_at(Map::GameCornerPrizeRoom, 4, 6, |world| {
+            world.coins = [0x05, 0x00];
+            world.bag.add(ItemId::CoinCase, 1);
+        });
+        let (_, events) = ask(game, FieldMove::RedeemPrize { prize: Prize::Abra }, None);
+        let said = messages(&events).join(" | ");
+        assert!(said.contains("So, you want ABRA? RED got ABRA! Do you want to give a nickname to ABRA?"), "{said}");
+        assert!(!said.contains("lower case"), "{said}");
+
+        let game = game_at(Map::PalletTown, 5, 6, |world| {
+            world.party.push(level(PokemonSpecies::Pidgey, 5));
+            world.party.push(level(PokemonSpecies::Rattata, 5));
+        });
+        let (_, events) = ask(game, FieldMove::ReorderParty { slot: 2 }, None);
+        assert_eq!(messages(&events), ["Moved party slot 2 to the front"]);
     }
 
     #[test]

@@ -250,7 +250,7 @@ impl Cartridge {
 
 fn compare_cues(cartridge: &mut Cartridge, input: &CueInput) {
     let expected = cartridge.cues(input);
-    let actual = input.play();
+    let actual = input.play(true);
     assert_eq!(expected.writes.len(), actual.writes.len());
     assert!(expected.writes.iter().any(|frame| !frame.is_empty()), "{input:?} is silent on the cartridge");
     for (frame, (expected, actual)) in expected.writes.iter().zip(&actual.writes).enumerate() {
@@ -261,7 +261,7 @@ fn compare_cues(cartridge: &mut Cartridge, input: &CueInput) {
 
 /// The recreation playing the same sound the same way, for the same frames.
 fn recreation(bank: AudioBank, id: SoundId) -> Vec<String> {
-    let mut engine = AudioEngine::new(bank);
+    let mut engine = AudioEngine::cartridge(bank);
     engine.engine_play_sound(SoundId::STOP_ALL_MUSIC);
     engine.engine_play_sound(id);
     engine.take_writes();
@@ -374,7 +374,7 @@ fn a_fade_to_silence_and_stop_music_match_the_cartridge() {
     for input in fades() {
         cartridge.fading.clear();
         compare_cues(&mut cartridge, &input);
-        let mut engine = AudioEngine::new(input.bank);
+        let mut engine = AudioEngine::cartridge(input.bank);
         engine.engine_play_sound(SoundId::STOP_ALL_MUSIC);
         let mut fading = Vec::new();
         for &cue in &input.cues {
@@ -411,7 +411,7 @@ fn every_caller_of_the_frequency_and_tempo_modifiers_matches_the_cartridge() {
         compare_cues(&mut cartridge, input);
     }
     // Both open with 60 frames of cry.
-    let length = |input: &CueInput| input.play().finished[60..].find('1').expect("the sound finishes");
+    let length = |input: &CueInput| input.play(true).finished[60..].find('1').expect("the sound finishes");
     assert_eq!(length(&callers[0]), 17);
     assert_eq!(length(&callers[1]), 271);
 }

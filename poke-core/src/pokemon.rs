@@ -101,7 +101,7 @@ impl Pokemon {
 
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PokemonSummary {
     pub species: PokemonSpecies,
     pub current_hp: u16,
@@ -145,7 +145,7 @@ impl Display for PokemonSummary {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PokemonStats {
     pub attack: u16,
     pub defense: u16,
@@ -231,7 +231,7 @@ pub enum PokemonTypeCategory {
     Special,
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug, strum_macros::Display, strum_macros::FromRepr)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, strum_macros::Display, strum_macros::FromRepr, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum PokemonType {
     Normal = 0,

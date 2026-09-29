@@ -15,7 +15,7 @@ use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::{GameState, PokemonApi, PokemonApiTrait};
 
 /// What a bag item is used on, which is how many menus follow `USE`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UseTarget {
     Nothing,
     /// `evolve` false stops an evolution the use starts, as B does: a Rare Candy's level-up.

@@ -9,9 +9,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use gb::cycles::MachineCycles;
 use gb::game_boy::{GameBoy, Stop};
+use gb::joypad::JoypadButton;
+use strum::IntoEnumIterator;
 use gb::ram::{RAM, ROM};
 use poke_core::bag::BagItem;
 use poke_core::battle::BattleAction;
+use poke_core::map::Map;
 use poke_core::move_name::{PokemonMove, PokemonMoveName};
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_local_labels as local;
@@ -32,7 +35,7 @@ use super::game_state::{compared, differences};
 use super::overworld::Cartridge;
 
 /// One answer a policy gave. An overworld row is kept by id, so each side takes it off its own menu.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Answer {
     Overworld(String),
     FieldMove(FieldMove),
@@ -211,22 +214,27 @@ impl Policy for Recording {
 /// more than there were.
 struct ReplayPolicy {
     overworld: VecDeque<Answer>,
-    rest: VecDeque<Answer>,
+    /// The rest, by their place in the segment.
+    rest: VecDeque<(usize, Answer)>,
     done: Arc<AtomicBool>,
     missing: Arc<Mutex<Option<String>>>,
     /// While set, the overworld's first ask is answered with nothing and `asked` raised.
     hold: Arc<AtomicBool>,
     asked: Arc<AtomicBool>,
+    /// The places of the answers given while `hold` was set.
+    spent: Arc<Mutex<Vec<usize>>>,
 }
 
 impl ReplayPolicy {
     fn new(answers: &[Answer]) -> (Self, Arc<AtomicBool>, Arc<Mutex<Option<String>>>) {
-        let (overworld, rest) = answers.iter().cloned()
-            .partition(|answer| matches!(answer, Answer::Overworld(_) | Answer::FieldMove(_)));
+        let (overworld, rest): (Vec<_>, Vec<_>) = answers.iter().cloned().enumerate()
+            .partition(|(_, answer)| matches!(answer, Answer::Overworld(_) | Answer::FieldMove(_)));
         let (done, missing) = (Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(None)));
         let policy = Self {
-            overworld, rest, done: Arc::clone(&done), missing: Arc::clone(&missing),
+            overworld: overworld.into_iter().map(|(_, answer)| answer).collect(), rest: rest.into(),
+            done: Arc::clone(&done), missing: Arc::clone(&missing),
             hold: Arc::new(AtomicBool::new(false)), asked: Arc::new(AtomicBool::new(false)),
+            spent: Arc::new(Mutex::new(Vec::new())),
         };
         (policy, done, missing)
     }
@@ -241,8 +249,12 @@ impl ReplayPolicy {
     }
 
     fn take<T>(&mut self, pick: impl Fn(&Answer) -> Option<T>) -> Option<T> {
-        let at = self.rest.iter().position(|answer| pick(answer).is_some())?;
-        pick(&self.rest.remove(at)?)
+        let at = self.rest.iter().position(|(_, answer)| pick(answer).is_some())?;
+        let (place, answer) = self.rest.remove(at)?;
+        if self.hold.load(Ordering::Relaxed) {
+            self.spent.lock().unwrap().push(place);
+        }
+        pick(&answer)
     }
 }
 
@@ -265,6 +277,10 @@ impl Policy for ReplayPolicy {
                 self.overworld.pop_front();
                 let row = state.map.actions().into_iter().find(|action| action.id() == id);
                 if row.is_none() {
+                    if std::env::var_os("GB_A4A_DEBUG").is_some() {
+                        println!("[a4a] at {:?} ({}, {}) the menu is {:?}", state.map.map, state.map.player_position.x, state.map.player_position.y,
+                                 state.map.actions().iter().map(|a| a.id()).collect::<Vec<_>>());
+                    }
                     *self.missing.lock().unwrap() = Some(format!("no row {id} on this side's menu"));
                     self.done.store(true, Ordering::Relaxed);
                 }
@@ -341,16 +357,29 @@ struct Read {
     bytes: &'static [u16],
 }
 
-/// The `ldh a, [byte]` first after `label`.
-fn ldh_after(label: crate::pokemon::symbols::DmgPointer, byte: u16) -> gb::game_boy::Breakpoint {
+/// The first instruction after `label` that starts with `code`.
+fn code_after(label: crate::pokemon::symbols::DmgPointer, code: &[u8]) -> gb::game_boy::Breakpoint {
     let mut at = breakpoint(label);
     let rom = crate::pokemon::roms::POKERED;
     let offset = |address: u16| if address < 0x4000 { address as usize }
         else { at.bank as usize * 0x4000 + (address - 0x4000) as usize };
-    while rom[offset(at.address)..][..2] != [0xF0, byte as u8] {
+    while !rom[offset(at.address)..].starts_with(code) {
         at.address += 1;
-        assert!(at.address < label.address + 0x80, "no ldh a, [${byte:04X}] after {label}");
+        assert!(at.address < label.address + 0x80, "no {code:02X?} after {label}");
     }
+    at
+}
+
+/// The `ldh a, [byte]` first after `label`.
+fn ldh_after(label: crate::pokemon::symbols::DmgPointer, byte: u16) -> gb::game_boy::Breakpoint {
+    code_after(label, &[0xF0, byte as u8])
+}
+
+/// Where the first `call Random` after `label` returns to.
+fn random_returns_after(label: crate::pokemon::symbols::DmgPointer) -> gb::game_boy::Breakpoint {
+    let [low, high] = sym::Random.address.to_le_bytes();
+    let mut at = code_after(label, &[0xCD, low, high]);
+    at.address += 3;
     at
 }
 
@@ -364,6 +393,8 @@ fn reads() -> Vec<Read> {
         Read { at: ldh_after(sym::CeruleanCitySlowbroText, add), bytes: &[0xFFD3] },
         // After a `call Random`, whose own byte is `hRandomAdd`.
         Read { at: ldh_after(sym::VermilionCity_Script, sub), bytes: &[0xFFD4] },
+        // A traded mon's OT ID is both bytes, copied straight out of HRAM.
+        Read { at: random_returns_after(sym::InGameTrade_PrepareTradeData), bytes: &[0xFFD4] },
     ]
 }
 
@@ -416,6 +447,10 @@ impl Tape {
                         && gb.core().mmu().rom_bank() as u8 == sym::UpdateNPCSprite.bank.id();
                     if vblank.contains(&from) {
                         self.frames += 1;
+                        if std::env::var_os("GB_A4A_PEOPLE").is_some() {
+                            println!("[a4a] cartridge frame {} walk {}{}", self.frames, gb.core().mmu().read(sym::wWalkCounter.address),
+                                     people_line(&super::bridge::sprites(gb)));
+                        }
                     } else {
                         let (stop, cycles) = gb.run_to_return(MachineCycles::PER_FRAME);
                         assert!(matches!(stop, Stop::Returned { .. }), "Random did not return: {stop:?}");
@@ -448,11 +483,21 @@ impl Tape {
     }
 }
 
+/// Each person's movement status, delay, square and screen position: `GB_A4A_PEOPLE` prints it on
+/// the cartridge every VBlank and on the recreation every frame.
+fn people_line(sprites: &pokered::systems::overworld::sprites::Sprites) -> String {
+    sprites.iter().enumerate().skip(1).filter(|(_, sprite)| sprite.movement_status != 0)
+        .map(|(slot, s)| format!(" {slot}:s{} d{} ({},{}) px({},{})", s.movement_status, s.movement_delay, s.map_x, s.map_y, s.x_pixels, s.y_pixels))
+        .collect()
+}
+
 /// How long one side may take to come back to the overworld.
 const BUDGET_SECS: u64 = 600;
 /// How long the cartridge stands on, drawing for the people who wander, once its agent has asked:
 /// the recreation's agent may take longer to ask, and its people draw meanwhile.
 const STAND_ON_SECS: u64 = 10;
+/// How many ticks the cartridge's agent may take at the bridge to press for its first poll.
+const BRIDGE_TICKS: usize = 4;
 
 /// Every person who wanders made to stand, on the cartridge before it is bridged. Where a wanderer
 /// stands depends on how many frames a run has taken, and the two agents pace a walk differently, so
@@ -470,8 +515,14 @@ fn stand_still(gb: &mut GameBoy) {
     }
 }
 
+/// `wNumHoFTeams`, which the ceremony counts up before its parade.
+fn hall_of_fame_teams(gb: &GameBoy) -> u8 {
+    gb.core().mmu().read(sym::wNumHoFTeams.address)
+}
+
 /// The cartridge and the recreation from where the segment starts, the one after the other, each
-/// through its own agent, to the next overworld decision. `Err` names what differs.
+/// through its own agent, to the next overworld decision, or to the Hall of Fame. `Err` names what
+/// differs.
 pub(crate) fn replay(segment: &Segment) -> Result<(), String> {
     let mut cartridge = Cartridge::from_state(&segment.state);
     cartridge.gb.restore_sram(&segment.sram).unwrap();
@@ -480,15 +531,19 @@ pub(crate) fn replay(segment: &Segment) -> Result<(), String> {
     stand_still(&mut cartridge.gb);
 
     let (policy, done, missing) = ReplayPolicy::new(&segment.answers);
-    let (hold, asked) = (Arc::clone(&policy.hold), Arc::clone(&policy.asked));
+    let (hold, asked, spent) = (Arc::clone(&policy.hold), Arc::clone(&policy.asked), Arc::clone(&policy.spent));
     let mut agent = PokemonAgent::new(Box::new(policy));
     let mut cache = MapMetadataCache::default();
     // The emulated agent waits a while in the overworld before it asks, and can ask while a script
     // still holds the player, and the native one does neither: the recreation is made where the
     // cartridge stands once its agent has asked and the overworld polls free, at its next poll.
+    let teams = hall_of_fame_teams(&cartridge.gb);
     hold.store(true, Ordering::Relaxed);
     let (mut settling, mut waited) = (Tape::default(), MachineCycles::ZERO);
     while !asked.load(Ordering::Relaxed) || settling.idle_frames().is_none() {
+        if hall_of_fame_teams(&cartridge.gb) != teams {
+            return Err("the ceremony began before the cartridge's agent asked: the segment's action was chosen where the player is not free".into());
+        }
         if waited > MachineCycles::from_duration(std::time::Duration::from_secs(BUDGET_SECS)) {
             return Err("the cartridge never asked for its first overworld action".into());
         }
@@ -506,9 +561,25 @@ pub(crate) fn replay(segment: &Segment) -> Result<(), String> {
     let (world, overworld) = (super::bridge::world(&cartridge.gb), super::bridge::overworld(&cartridge.gb));
     let mut gb = cartridge.gb;
 
+    // The game won: the ceremony, the credits and the reset follow with no overworld between, and the
+    // recreation's ceremony takes the overworld off the stack, so each side is compared as it stood
+    // last before its ceremony counted the team.
+    let won = |gb: &GameBoy| hall_of_fame_teams(gb) != teams;
+    let mut before_the_ceremony = None;
     let mut tape = Tape::default();
     let mut ran = MachineCycles::ZERO;
-    while !done.load(Ordering::Relaxed) {
+    // The recreation reads its first command at the first poll after the bridge, so the cartridge's
+    // agent is ticked here, with no time passing, until it has pressed something for that poll.
+    for _ in 0..BRIDGE_TICKS {
+        let mut api = PokemonApi::with_cache(&mut gb, &mut cache);
+        api.debug_set_options(&crate::pokemon::options::HEADLESS_OPTIONS);
+        let pad = api.read_joypad_state();
+        if JoypadButton::iter().any(|button| pad.is_button_pressed(button)) {
+            break;
+        }
+        agent.update(&mut api, AGENT_RESOLUTION)?;
+    }
+    while !done.load(Ordering::Relaxed) && !won(&gb) {
         if ran > MachineCycles::from_duration(std::time::Duration::from_secs(BUDGET_SECS)) {
             return Err(format!("the cartridge never asked for its next overworld action: {:?}",
                                PokemonApi::with_cache(&mut gb, &mut cache).on_screen_text(false)));
@@ -523,6 +594,9 @@ pub(crate) fn replay(segment: &Segment) -> Result<(), String> {
         let mut api = PokemonApi::with_cache(&mut gb, &mut cache);
         api.debug_set_options(&crate::pokemon::options::HEADLESS_OPTIONS);
         agent.update(&mut api, slice)?;
+        if !won(&gb) && gb.core().mmu().read(sym::wCurMap.address) == Map::HallOfFame as u8 {
+            before_the_ceremony = agent.observe_state(&PokemonApi::with_cache(&mut gb, &mut cache)).ok().map(|state| compared(&state));
+        }
     }
     if let Some(missing) = missing.lock().unwrap().take() {
         return Err(format!("the cartridge: {missing}"));
@@ -530,7 +604,7 @@ pub(crate) fn replay(segment: &Segment) -> Result<(), String> {
     // The emulated agent can ask while a map script still holds the player, waiting out a sound or
     // with the pad ignored, which it cannot tell from the overworld: the comparison is taken once the
     // overworld polls free.
-    while tape.idle_frames().is_none() {
+    while tape.idle_frames().is_none() && !won(&gb) {
         if ran > MachineCycles::from_duration(std::time::Duration::from_secs(BUDGET_SECS)) {
             return Err("the cartridge never polled in the overworld after its agent asked".into());
         }
@@ -539,9 +613,16 @@ pub(crate) fn replay(segment: &Segment) -> Result<(), String> {
         let mut api = PokemonApi::with_cache(&mut gb, &mut cache);
         api.debug_set_options(&crate::pokemon::options::HEADLESS_OPTIONS);
         agent.update(&mut api, slice)?;
+        if !won(&gb) && gb.core().mmu().read(sym::wCurMap.address) == Map::HallOfFame as u8 {
+            before_the_ceremony = agent.observe_state(&PokemonApi::with_cache(&mut gb, &mut cache)).ok().map(|state| compared(&state));
+        }
     }
-    // What the agent shows a policy, trees it cut on this visit cleared, as the native agent's is.
-    let theirs = compared(&agent.observe_state(&PokemonApi::with_cache(&mut gb, &mut cache))?);
+    let ended = won(&gb);
+    let theirs = match ended {
+        true => before_the_ceremony.ok_or("the cartridge won the game from outside the Hall of Fame")?,
+        // What the agent shows a policy, trees it cut on this visit cleared, as the native agent's is.
+        false => compared(&agent.observe_state(&PokemonApi::with_cache(&mut gb, &mut cache))?),
+    };
     let asked = tape.bytes.len();
     let idle = tape.idle_frames().unwrap_or(0);
     tape.run(&mut gb, MachineCycles::from_duration(std::time::Duration::from_secs(STAND_ON_SECS)));
@@ -552,14 +633,28 @@ pub(crate) fn replay(segment: &Segment) -> Result<(), String> {
     }
     let mut game = Game::new(world, GameRng::split(tape.bytes, tape.wander), Pacing::Faithful);
     game.push(Mode::Overworld(overworld));
-    let (policy, done, missing) = ReplayPolicy::new(&segment.answers);
+    // What the cartridge answered before it was bridged, a trainer who saw the player while its agent
+    // waited to ask, is behind the recreation already.
+    let spent = spent.lock().unwrap().clone();
+    let answers: Vec<Answer> = segment.answers.iter().enumerate()
+        .filter(|(place, _)| !spent.contains(place)).map(|(_, answer)| answer.clone()).collect();
+    let (policy, done, missing) = ReplayPolicy::new(&answers);
     let mut agent = NativeAgent::new(game, Box::new(policy))?;
     // A tape that runs out is the recreation drawing more than the cartridge did: a divergence.
+    let mut before_the_ceremony = None;
     let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut idled = 0;
         for frame in 0..BUDGET_SECS * 60 {
-            // As long idle as the cartridge stood before its agent asked.
-            if done.load(Ordering::Relaxed) {
+            if ended {
+                if agent.game().world().hall_of_fame_teams != teams {
+                    return Ok(agent);
+                }
+                if agent.game().world().location.map == Map::HallOfFame
+                    && let Ok(state) = agent.game_state() {
+                    before_the_ceremony = Some(compared(&state));
+                }
+            } else if done.load(Ordering::Relaxed) {
+                // As long idle as the cartridge stood before its agent asked.
                 if idled >= idle {
                     return Ok(agent);
                 }
@@ -569,6 +664,10 @@ pub(crate) fn replay(segment: &Segment) -> Result<(), String> {
             if std::env::var_os("GB_A4A_TRACE").is_some() {
                 let location = &agent.game().world().location;
                 println!("[a4a] frame {frame} at ({}, {}) {:?} status {:?}", location.x, location.y, location.map, agent.game().status());
+            }
+            if std::env::var_os("GB_A4A_PEOPLE").is_some()
+                && let Some(Mode::Overworld(overworld)) = agent.game().modes().iter().rev().find(|mode| matches!(mode, Mode::Overworld(_))) {
+                println!("[a4a] recreation frame {frame}{}", people_line(overworld.sprites()));
             }
             agent.tick()?;
             if std::env::var_os("GB_A4A_DEBUG").is_some() && agent.game().rng().wandered() != wandered {
@@ -596,7 +695,10 @@ pub(crate) fn replay(segment: &Segment) -> Result<(), String> {
     // A person's row has no square in its id, because a person has none that holds still.
     let talked = matches!(segment.answers.first(), Some(Answer::Overworld(id)) if id.matches(':').count() == 1);
     let theirs = theirs.paced_apart(talked);
-    let ours = compared(&agent.game_state()?).paced_apart(talked);
+    let ours = match before_the_ceremony {
+        Some(ours) => ours,
+        None => compared(&agent.game_state()?),
+    }.paced_apart(talked);
     let differ = differences(&ours, &theirs);
     if differ.is_empty() {
         return Ok(());
@@ -651,6 +753,7 @@ mod tests {
     fn every_row_from_every_fixture_ends_where_the_cartridge_ends() {
         let dir = std::env::var("GB_A4A_DIR").map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pokemon/data"));
+        // A tour's dumped segment carries its answers beside it and replays as it was recorded.
         let mut states: Vec<_> = std::fs::read_dir(&dir).unwrap()
             .map(|entry| entry.unwrap().path())
             .filter(|path| path.extension().is_some_and(|e| e == "bin"))
@@ -664,15 +767,32 @@ mod tests {
         std::thread::scope(|scope| for _ in 0..workers {
             scope.spawn(|| while let Some(path) = states.get(next.fetch_add(1, Ordering::Relaxed)) {
                 let state = std::fs::read(path).unwrap();
+                let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+                if let Ok(answers) = std::fs::read(path.with_extension("json")) {
+                    let answers: Vec<Answer> = serde_json::from_slice(&answers).unwrap();
+                    let result = std::panic::catch_unwind(|| replay(&segment(&state, answers)))
+                        .unwrap_or_else(|_| Err("panicked".into()));
+                    *replayed.lock().unwrap() += 1;
+                    if let Err(why) = result {
+                        println!("DIFFERS {name}: {}", why.replace('\n', " | "));
+                        failed.lock().unwrap().push(name);
+                    }
+                    continue;
+                }
                 let mut cartridge = Cartridge::from_state(&state);
                 if !(0..300).any(|_| cartridge.frame()) {
                     continue;
                 }
-                let name = path.file_stem().unwrap().to_string_lossy().into_owned();
                 let ids: Vec<String> = PokemonApi::new(&mut cartridge.gb).game_state().unwrap()
                     .map.actions().iter().map(|a| a.id()).collect();
                 let row = std::env::var("GB_A4A_ROW").ok();
-                for id in ids.into_iter().filter(|id| row.as_ref().is_none_or(|row| id == row)) {
+                let mut ids: Vec<String> = ids.into_iter().filter(|id| row.as_ref().is_none_or(|row| id == row)).collect();
+                // A row named for a save named is replayed though this poll does not list it: a tour
+                // segment's agent may ask at a later one.
+                if ids.is_empty() && only.is_some() && let Some(row) = row {
+                    ids.push(row);
+                }
+                for id in ids {
                     let result = std::panic::catch_unwind(|| replay(&segment(&state, vec![Answer::Overworld(id.clone())])))
                         .unwrap_or_else(|_| Err("panicked".into()));
                     *replayed.lock().unwrap() += 1;
@@ -686,6 +806,23 @@ mod tests {
         let (replayed, failed) = (replayed.into_inner().unwrap(), failed.into_inner().unwrap());
         assert!(replayed > 0, "no fixture polled with a row to replay");
         assert!(failed.is_empty(), "{} of {replayed} rows differ:\n{}", failed.len(), failed.join("\n"));
+    }
+
+    /// A traded mon's OT ID takes both random bytes, the second read out of HRAM after the call. The
+    /// Underground Path girl's trade is forgotten first, with a Nidoran♂ written into the lead slot.
+    #[test]
+    fn an_in_game_trade_ends_where_the_cartridge_ends() {
+        let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(include_bytes!("../pokemon/data/postgame-trades.bin")).unwrap();
+        let mmu = gb.core_mut().mmu_mut();
+        let at = sym::wCompletedInGameTradeFlags.address + 1;
+        mmu.write(at, mmu.read(at) & !(1 << 1));
+        let nidoran = PokemonSpecies::NidoranMale as u8;
+        mmu.write(sym::wPartySpecies.address, nidoran);
+        mmu.write(sym::wPartyMon1.address, nidoran);
+        let state = gb.save_state().unwrap();
+        let answers = ["Route5:17,28:Warp", "UndergroundPathRoute5:LittleGirl"].map(|id| Answer::Overworld(id.into()));
+        replay(&segment(&state, answers.to_vec())).unwrap();
     }
 
     #[test]

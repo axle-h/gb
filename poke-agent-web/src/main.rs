@@ -1,4 +1,5 @@
 mod cli;
+mod console;
 mod host;
 mod web;
 

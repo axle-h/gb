@@ -88,6 +88,7 @@ pub(super) fn the_world(gb: &GameBoy) -> World {
         player_name: name_at(gb, pokered_symbols::wPlayerName.address),
         party: the_party(gb),
         options,
+        cartridge_bugs: true,
         ..World::default()
     };
     let events = pokered_symbols::wEventFlags.address;

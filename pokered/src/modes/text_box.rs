@@ -217,8 +217,17 @@ impl TextBox {
         None
     }
 
+    fn printed_if_ended(transition: &Transition, ctx: &mut Ctx) {
+        if matches!(transition, Transition::Pop(_)) {
+            ctx.printed.push(ctx.screen.ui.clone());
+        }
+    }
+
     /// `ScrollTextUpOneLine` after `scrolled` of them, and on to the second line after both.
     fn scroll(&mut self, ctx: &mut Ctx, scrolled: u8) -> Transition {
+        if scrolled == 0 {
+            ctx.printed.push(ctx.screen.ui.clone());
+        }
         if scrolled == 2 {
             self.dest = SECOND_LINE;
             self.phase = Phase::Running;
@@ -360,11 +369,15 @@ impl ModeUpdate for TextBox {
     /// `PrintText`'s `Delay3` after drawing the box is loading and not modelled, so the first
     /// command runs in the frame the box goes up.
     fn open(&mut self, ctx: &mut Ctx) -> Transition {
-        self.drawn(ctx, Self::run)
+        let transition = self.drawn(ctx, Self::run);
+        Self::printed_if_ended(&transition, ctx);
+        transition
     }
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
-        self.drawn(ctx, Self::step)
+        let transition = self.drawn(ctx, Self::step);
+        Self::printed_if_ended(&transition, ctx);
+        transition
     }
 
     fn status(&self) -> Status {
@@ -785,6 +798,28 @@ mod tests {
         frames_until(&mut game, |g| !g.audio().sound_finished());
         assert!((4..8).any(|channel| game.audio().channel_sound_id(channel) == sounds::SFX_SWAP.0));
         frames_until(&mut game, |g| row(g, 14) == "AB");
+    }
+
+    /// At `Instant` a scroll and the end come in the frame the lines are printed, so no frame's
+    /// screen shows the first line: the frame hands the host each surface a line was about to leave.
+    #[test]
+    fn a_line_scrolled_away_within_a_frame_is_handed_to_the_host() {
+        let world = World { player_name: encode("RED").unwrap(), ..World::default() };
+        let mut game = Game::new(world, GameRng::seeded(0), Pacing::Instant);
+        game.push(Mode::TextBox(TextBox::script(vec![
+            TextCommand::PromptButton,
+            TextCommand::Text(encode("AB<LINE>CD<SCROLL>EF@").unwrap()),
+        ])));
+        let mut printed = game.frame(Input::Command(Command::Advance)).printed;
+        while !game.modes().is_empty() {
+            printed.extend(game.frame(Input::None).printed);
+        }
+        let rows: Vec<(String, String)> = printed.iter().map(|ui| {
+            let mut game = Game::new(World::default(), GameRng::seeded(0), Pacing::Instant);
+            game.screen_mut().ui = ui.clone();
+            (row(&game, 14), row(&game, 16))
+        }).collect();
+        assert_eq!(rows, [("AB".into(), "CD".into()), ("CD".into(), "EF".into())]);
     }
 
     #[test]

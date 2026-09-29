@@ -134,6 +134,14 @@ impl Oracle {
     }
 }
 
+/// `cases` less every one that repeats an earlier one exactly, in order: for a sweep whose seeds
+/// or neighbourhoods overlap, which would otherwise ask the same question twice.
+#[cfg(feature = "slow-tests")]
+pub fn distinct<I: serde::Serialize, O: serde::Serialize>(cases: Vec<Case<I, O>>) -> Vec<Case<I, O>> {
+    let mut seen = std::collections::HashSet::new();
+    cases.into_iter().filter(|case| seen.insert(serde_json::to_string(case).unwrap())).collect()
+}
+
 /// Writes `pokered/fixtures/<system>/<routine>.jsonl`, and only under `GB_REGEN_FIXTURES=1`.
 #[cfg(feature = "slow-tests")]
 pub fn write_fixture<I: serde::Serialize, O: serde::Serialize>(system: &str, routine: &str, cases: &[Case<I, O>]) {

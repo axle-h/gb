@@ -27,13 +27,17 @@ fn mon(species: PokemonSpecies, level: u8) -> Named<PartyMon> {
 }
 
 fn game(map: Map, x: u8, y: u8, facing: SpriteFacing, setup: impl FnOnce(&mut World)) -> Game {
+    seeded_game(9, map, x, y, facing, setup)
+}
+
+fn seeded_game(seed: u64, map: Map, x: u8, y: u8, facing: SpriteFacing, setup: impl FnOnce(&mut World)) -> Game {
     let mut world = World { player_name: encode("RED").unwrap(), ..World::default() };
     world.location = Location { map, x, y, facing, last_map: Map::PalletTown, ..Location::default() };
     world.party = vec![mon(PokemonSpecies::Pidgey, 40)];
     world.events.set(EVENT_FOLLOWED_OAK_INTO_LAB);
     world.money = [0x00, 0x10, 0x00];
     setup(&mut world);
-    let mut game = Game::new(world, GameRng::seeded(9), Pacing::Faithful);
+    let mut game = Game::new(world, GameRng::seeded(seed), Pacing::Faithful);
     game.push(Mode::Overworld(Overworld::new()));
     play_until(&mut game, 600, &mut |_| 0, free);
     game
@@ -280,6 +284,30 @@ fn the_vermilion_gym_cans_hold_two_locks_and_a_wrong_can_shuts_the_first_again()
     });
     press_a(&mut again);
     play_until(&mut again, 2000, &mut |_| 0, |game| free(game) && !game.world().events.is_set(EVENT_1ST_LOCK_OPENED));
+}
+
+/// Where can 0's first lock puts the second, over a run of seeds.
+fn second_locks_from_can_0(cartridge_bugs: bool) -> Vec<u8> {
+    (0..16).map(|seed| {
+        let mut game = seeded_game(seed, Map::VermilionGym, 1, 8, SpriteFacing::Up, |world| {
+            beaten_gym_trainers(world);
+            world.scripts.trash_cans = [0, 0];
+            world.cartridge_bugs = cartridge_bugs;
+        });
+        press_a(&mut game);
+        play_until(&mut game, 2000, &mut |_| 0, |game| free(game) && game.world().events.is_set(EVENT_1ST_LOCK_OPENED));
+        game.world().scripts.trash_cans[1]
+    }).collect()
+}
+
+#[test]
+fn the_second_lock_is_always_in_a_can_next_to_the_first() {
+    let seconds = second_locks_from_can_0(false);
+    assert!(seconds.iter().all(|can| [1, 3].contains(can)), "{seconds:?}");
+    assert!(seconds.contains(&1) && seconds.contains(&3), "{seconds:?}");
+
+    let seconds = second_locks_from_can_0(true);
+    assert!(seconds.contains(&0), "the cartridge can put both locks in can 0: {seconds:?}");
 }
 
 #[test]

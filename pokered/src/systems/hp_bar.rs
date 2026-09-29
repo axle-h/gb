@@ -28,7 +28,7 @@ pub enum HpBarColour {
 }
 
 impl HpBarColour {
-    /// `PartyMonSpeeds`: the V-blanks one animation frame lasts, before the SGB adds its own.
+    /// `PartyMonSpeeds`: the V-blanks one animation frame lasts, before the DMG adds its own.
     pub fn animation_speed(self) -> u8 {
         match self {
             Self::Green => 5,

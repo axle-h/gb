@@ -24,14 +24,9 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 use pokered::audio::data::{sounds, AudioBank};
 use pokered::audio::engine::TraceInput;
-use pokered::audio::synth::{Synth, SAMPLE_RATE};
+use pokered::audio::synth::{Synth, HEADROOM, SAMPLE_RATE};
 use pokered::audio::{Channel, Voices, Write};
 use crate::native::apu::GbApu;
-
-/// `Audio::mix` scales by `NR50`'s own table, which tops out at 1, and then divides by seven
-/// again, so the APU backend arrives at a seventh of the scale the hardware's DACs describe. The
-/// synth is at full scale. This is the whole of the difference in gain between them.
-const APU_SCALE: f32 = 7.0;
 
 /// How far apart the two are looked for, in frames, when the delay is being measured.
 const ALIGNMENT: isize = 64;
@@ -118,8 +113,8 @@ fn rendered(frames: &[Vec<Write>], channel: Option<Channel>) -> ([Vec<f32>; 2], 
         Some(channel) => frames.iter().map(|frame| one_channel(channel, frame)).collect(),
         None => frames.to_vec(),
     };
-    let apu = play(&mut GbApu::new(SAMPLE_RATE), &frames, APU_SCALE);
-    let synth = play(&mut Synth::new(), &frames, 1.0);
+    let apu = play(&mut GbApu::new(SAMPLE_RATE), &frames, 1.0);
+    let synth = play(&mut Synth::new(), &frames, HEADROOM);
     (apu, synth)
 }
 

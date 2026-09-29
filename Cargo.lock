@@ -864,9 +864,9 @@ dependencies = [
 
 [[package]]
 name = "lz4_flex"
-version = "0.11.5"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08ab2867e3eeeca90e844d1940eab391c9dc5228783db2ed999acbc0a9ed375a"
+checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
 dependencies = [
  "twox-hash",
 ]
@@ -1107,6 +1107,7 @@ dependencies = [
  "image",
  "opus-rs",
  "poke-agent",
+ "pokered",
  "rust-embed",
  "serde",
  "serde_json",
@@ -1133,6 +1134,7 @@ name = "pokered"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.9.3",
+ "lz4_flex",
  "poke-core",
  "rand 0.10.2",
  "rand_pcg",

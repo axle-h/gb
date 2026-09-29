@@ -3,7 +3,7 @@
 //!
 //! `AnimatePartyMon` runs once before every read of the pad and ends in the loop's one
 //! `DelayFrame`, so the selected icon's animation is the menu's frame clock. Its speed is the mon's
-//! HP bar colour, one frame longer on a DMG than on an SGB; this is a DMG.
+//! HP bar colour, at the DMG's speed in every colour mode.
 
 use poke_core::item::ItemId;
 use poke_core::move_name::PokemonMoveName;
@@ -24,8 +24,6 @@ use crate::systems::print_num::{print_number, NumberFormat};
 
 /// `<LV>`, the two-tile ":L" the level is printed after.
 const LEVEL: u8 = 0x6E;
-/// `wOnSGB`, which only the icons' speed reads here.
-const ON_SGB: bool = false;
 /// The first entry's name, and two rows to the next.
 const NAME_X: usize = 3;
 const STATUS_X: usize = 17;
@@ -234,7 +232,7 @@ impl PartyMenu {
         let party: Vec<_> = ctx.world.party.iter().map(|held| held.mon.mon.species).collect();
         let current = self.input.current;
         let colour = ctx.menu.party_hp_bar_colours.get(current as usize).copied().flatten().unwrap_or(HpBarColour::Green);
-        animate_party_mon(&mut ctx.screen.sprites, &mut self.input.anim_counter, current, colour, &party, ON_SGB);
+        animate_party_mon(&mut ctx.screen.sprites, &mut self.input.anim_counter, current, colour, &party);
     }
 }
 

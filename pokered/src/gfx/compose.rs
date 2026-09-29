@@ -63,6 +63,15 @@ impl Screen {
     /// The hardware's rules: ten objects a line in OAM order, the leftmost drawn on top and OAM
     /// order breaking ties, and `BEHIND_BG` losing to any background colour but 0.
     pub fn frame(&self) -> Framebuffer {
+        self.compose(self.effects.bgp, self.effects.obp0, self.effects.obp1)
+    }
+
+    /// The frame through the palettes the cartridge's SGB path would have written.
+    pub fn sgb_frame(&self) -> Framebuffer {
+        self.compose(self.effects.bgp_pick().sgb, self.effects.obp0_pick().sgb, self.effects.obp1)
+    }
+
+    fn compose(&self, bgp: u8, obp0: u8, obp1: u8) -> Framebuffer {
         let mut shades = vec![0; WIDTH * HEIGHT];
         let mut sources = vec![Source::Background; WIDTH * HEIGHT];
         for y in 0..HEIGHT {
@@ -73,7 +82,7 @@ impl Screen {
             line.sort_by_key(|&(index, o)| (o.x, index));
             for x in 0..WIDTH {
                 let background = self.background(x, y);
-                let mut shade = apply(self.effects.bgp, background);
+                let mut shade = apply(bgp, background);
                 let mut source = Source::Background;
                 for &(_, object) in &line {
                     let ox = x + 8;
@@ -90,9 +99,9 @@ impl Screen {
                     }
                     if object.attributes & Object::BEHIND_BG == 0 || background == 0 {
                         let (palette, from) = if object.attributes & Object::OBP1 != 0 {
-                            (self.effects.obp1, Source::Object1)
+                            (obp1, Source::Object1)
                         } else {
-                            (self.effects.obp0, Source::Object0)
+                            (obp0, Source::Object0)
                         };
                         shade = apply(palette, colour);
                         source = from;

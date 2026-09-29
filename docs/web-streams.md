@@ -38,6 +38,8 @@ to quote is for a moving screen: an idle one costs almost nothing.
   falls back to 44.1 kHz under a header saying 48.
 - Nothing is encoded while nobody listens, and the listener count is read as an edge: the backlog and
   the part-built frame are thrown away on 0→1 so a new listener does not hear a fragment hours old.
+- A native run's synth exists only while someone listens and is rebuilt from the engine's
+  standing writes on the edge in (`console::Native::synth`), which stands in for the drain above.
 - Encoding is on the emulator thread and wrapped in `catch_unwind`. On the first panic the encoder is
   dropped and never rebuilt, or a restart re-enters the same panic fifty times a second.
 - The 12-byte header is ours and must never become an `OpusHead`: WebCodecs treats a supplied

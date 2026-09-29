@@ -15,6 +15,11 @@ pub mod files {
     pub const META: &str = "meta.json";
     pub const STATE: &str = "state.gbst";
     pub const SRAM: &str = "sram.bin";
+    /// A run on the recreation: the whole game, `pokered::Game::save`, in place of the two above.
+    pub const GAME: &str = "game.pkrd";
+    /// Beside it, the save the game last wrote of itself (the SAVE menu, a box change, the Hall of
+    /// Fame): what CONTINUE powers on into, as `sram.bin` is the cartridge's.
+    pub const GAME_SAVE: &str = "save.pkrd";
     pub const TRANSCRIPT: &str = "transcript.jsonl";
     /// Legacy: nothing writes it, and only the archiver reads it.
     pub const MEMORIES: &str = "memories";
@@ -167,9 +172,30 @@ impl std::ops::Add for RunProgress {
     }
 }
 
+/// Which game a run is played on, and so which file holds it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GameKind {
+    /// The cartridge on the emulator: `state.gbst` and `sram.bin`.
+    #[default]
+    Emulated,
+    /// The recreation, `pokered::Game`: `game.pkrd`.
+    Native,
+}
+
+impl GameKind {
+    /// The file a resume reads. A process resumes only runs of its own kind.
+    pub const fn state_file(self) -> &'static str {
+        match self {
+            GameKind::Emulated => files::STATE,
+            GameKind::Native => files::GAME,
+        }
+    }
+}
+
 /// One run's directory, and the only thing that writes into it.
 pub struct RunDir {
     path: PathBuf,
+    kind: GameKind,
     meta: Mutex<RunMeta>,
     /// The totals `meta.json` held when this directory was opened.
     baseline: RunProgress,
@@ -185,8 +211,19 @@ pub enum Origin {
 }
 
 impl RunDir {
-    /// Resolve a run directory and open it.
+    /// Resolve an emulated run's directory and open it.
     pub fn open(
+        root: &Path,
+        new_run: bool,
+        model: &str,
+        validate: &dyn Fn(&[u8]) -> bool,
+    ) -> Result<(Self, Origin, Option<Vec<u8>>), String> {
+        Self::open_for(GameKind::Emulated, root, new_run, model, validate)
+    }
+
+    /// Resolve a run directory of `kind` and open it.
+    pub fn open_for(
+        kind: GameKind,
         root: &Path,
         new_run: bool,
         model: &str,
@@ -196,13 +233,14 @@ impl RunDir {
             .map_err(|e| format!("could not create the run directory {}: {e}", root.display()))?;
 
         if !new_run {
-            for candidate in resumable(root) {
-                let state = match std::fs::read(candidate.join(files::STATE)) {
+            for candidate in resumable(root, kind.state_file()) {
+                let state = match std::fs::read(candidate.join(kind.state_file())) {
                     Ok(bytes) if validate(&bytes) => bytes,
                     Ok(_) => {
                         eprintln!(
-                            "run {}: state.gbst does not load — starting a fresh run instead",
+                            "run {}: {} does not load — starting a fresh run instead",
                             candidate.display(),
+                            kind.state_file(),
                         );
                         continue;
                     }
@@ -216,7 +254,7 @@ impl RunDir {
                 meta.resumed_from.push(iso8601(SystemTime::now()));
                 // Read before the first checkpoint overwrites it, so the totals stay the run's.
                 let baseline = meta.progress();
-                let run = Self { path: candidate, meta: Mutex::new(meta), baseline };
+                let run = Self { path: candidate, kind, meta: Mutex::new(meta), baseline };
                 run.write_meta()?;
                 return Ok((run, Origin::Resumed, Some(state)));
             }
@@ -229,6 +267,7 @@ impl RunDir {
         let run = Self {
             meta: Mutex::new(RunMeta::new(run_id, model.to_string())),
             path,
+            kind,
             baseline: RunProgress::default(),
         };
         run.write_meta()?;
@@ -237,6 +276,10 @@ impl RunDir {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn kind(&self) -> GameKind {
+        self.kind
     }
 
     pub fn transcript_path(&self) -> PathBuf {
@@ -261,6 +304,24 @@ impl RunDir {
     pub fn checkpoint(&self, state: &[u8], sram: &[u8], progress: RunProgress) -> Result<(), String> {
         write_atomically(&self.path.join(files::STATE), state)?;
         write_atomically(&self.path.join(files::SRAM), sram)?;
+        self.checkpointed(progress)
+    }
+
+    /// A native run's checkpoint: the whole game, and the game's own save once it has written one.
+    pub fn checkpoint_game(&self, game: &[u8], save: Option<&[u8]>, progress: RunProgress) -> Result<(), String> {
+        write_atomically(&self.path.join(files::GAME), game)?;
+        if let Some(save) = save {
+            write_atomically(&self.path.join(files::GAME_SAVE), save)?;
+        }
+        self.checkpointed(progress)
+    }
+
+    /// The native game's own save, if it has written one.
+    pub fn game_save(&self) -> Option<Vec<u8>> {
+        std::fs::read(self.path.join(files::GAME_SAVE)).ok()
+    }
+
+    fn checkpointed(&self, progress: RunProgress) -> Result<(), String> {
         {
             let mut meta = self.meta.lock().expect("run meta lock poisoned");
             meta.last_checkpoint_at = Some(iso8601(SystemTime::now()));
@@ -329,15 +390,16 @@ impl CurrentRun {
 
     /// Open a fresh run directory beside the current one and make it current, returning it.
     pub fn start_new(&self) -> Result<Arc<RunDir>, String> {
-        let (run, _, _) = RunDir::open(&self.root, true, &self.model, &|_| false)?;
+        let kind = self.get().kind();
+        let (run, _, _) = RunDir::open_for(kind, &self.root, true, &self.model, &|_| false)?;
         let run = Arc::new(run);
         *self.inner.write().expect("current run lock poisoned") = Arc::clone(&run);
         Ok(run)
     }
 }
 
-/// Every child of `root` that has a `state.gbst`, newest first.
-pub(crate) fn resumable(root: &Path) -> Vec<PathBuf> {
+/// Every child of `root` that has a `state_file`, newest first.
+pub(crate) fn resumable(root: &Path, state_file: &str) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
     let mut candidates: Vec<(SystemTime, PathBuf)> = entries
         .flatten()
@@ -345,7 +407,7 @@ pub(crate) fn resumable(root: &Path) -> Vec<PathBuf> {
         .filter(|path| path.is_dir())
         .filter(|path| path.file_name() != Some(std::ffi::OsStr::new(files::HALL_OF_FAME)))
         .filter_map(|path| {
-            let modified = std::fs::metadata(path.join(files::STATE)).ok()?.modified().ok()?;
+            let modified = std::fs::metadata(path.join(state_file)).ok()?.modified().ok()?;
             Some((modified, path))
         })
         .collect();

@@ -25,8 +25,8 @@ use crate::systems::battle::trainer::{read_trainer, RIVAL3};
 use crate::systems::battle::experience::{gain_experience, ExpEvent};
 use crate::systems::battle::modified_stats::{apply_badge_stat_boosts, apply_burn_and_paralysis_penalties};
 use crate::systems::battle::turn::{check_for_disobedience, check_num_attacks_left, check_status_conditions,
-                                    decrement_pp, decrease_own_hp, metronome_pick_move, mirror_move_copy_move,
-                                    Continuation, MoveMenu};
+                                    decrement_pp, decrease_own_hp, drain_leech_seed, metronome_pick_move,
+                                    mirror_move_copy_move, Continuation, MoveMenu};
 use crate::systems::battle::turn_order::first_to_move;
 use crate::systems::battle::ai::{select_enemy_move, trainer_ai, AiAction, CANNOT_MOVE};
 use crate::systems::battle::{effect, status, Battle, BattleKind, BattleMon, CriticalHitOrOhko, Side,
@@ -569,6 +569,7 @@ impl BattleMode {
             self.battle_type = BattleType::Safari;
         }
         let mut battle = Battle::new(BattleKind::Wild, &ctx.world.party[0].mon, vec![]);
+        battle.cartridge_bugs = ctx.world.cartridge_bugs;
         load_enemy_mon_data(&mut battle, &mut ctx.world.pokedex, species, level, 0, ctx.rng);
         self.enemy_nick = species.name();
         self.battle = Some(battle);
@@ -681,6 +682,7 @@ impl BattleMode {
         let party = read_trainer(class, number, lone_attack, rival_starter, ctx.world.player_id);
         self.prize_money = party.money;
         let mut battle = Battle::new(BattleKind::Trainer, &ctx.world.party[0].mon, party.mons);
+        battle.cartridge_bugs = ctx.world.cartridge_bugs;
         battle.trainer_class = class;
         battle.ai_count = 0xFF;
         battle.enemy.mon.party_pos = 0xFF;
@@ -918,6 +920,8 @@ impl BattleMode {
         self.push(Present::SaveScreen1);
         self.first_mons_not_out_yet = false;
         let battle = self.battle_mut();
+        battle.player.counter_damage = 0;
+        battle.enemy.counter_damage = 0;
         if battle.player.status2.intersects(Status2::NEEDS_TO_RECHARGE | Status2::USING_RAGE) {
             self.goto(Step::SelectEnemyMove);
             return;
@@ -938,8 +942,7 @@ impl BattleMode {
             return;
         }
         let battle = self.battle_mut();
-        if battle.player.mon.status & (status::FRZ | status::SLP_MASK) != 0
-            || battle.player.status1.intersects(Status1::STORING_ENERGY | Status1::USING_TRAPPING_MOVE) {
+        if player_moves_for_itself(battle) {
             self.goto(Step::SelectEnemyMove);
             return;
         }
@@ -1465,12 +1468,7 @@ impl BattleMode {
         let battle = self.battle.as_mut().expect("a battle");
         if battle.side(side).status2.contains(Status2::SEEDED) {
             let (old, other_old) = (battle.side(side).mon.hp, battle.side(side.other()).mon.hp);
-            let drained = decrease_own_hp(battle, side);
-            let other = &mut battle.side_mut(side.other()).mon;
-            other.hp = other.hp.wrapping_add(drained);
-            if other.hp >= other.stats[0] {
-                other.hp = other.stats[0];
-            }
+            drain_leech_seed(battle, side);
             let (new, other_new) = (battle.side(side).mon.hp, battle.side(side.other()).mon.hp);
             self.play_battle_animation(anim::ABSORB, side.other());
             self.whose_turn = side;
@@ -1932,7 +1930,8 @@ impl BattleMode {
             }
         }
         battle.player.status1.remove(Status1::ATTACKING_MULTIPLE_TIMES);
-        battle.player.bide_accumulated_damage &= 0xFF;
+        // The cartridge zeroes only the high byte, so the low one carries into the next enemy.
+        battle.player.bide_accumulated_damage &= if battle.cartridge_bugs { 0xFF } else { 0 };
         battle.enemy.status1 = Status1::empty();
         battle.enemy.status2 = Status2::empty();
         battle.enemy.status3 = Status3::empty();
@@ -2249,4 +2248,95 @@ fn stat_name(move_effect: u8) -> Vec<u8> {
         _ => move_effect.wrapping_sub(effect::ATTACK_DOWN_SIDE_EFFECT),
     };
     poke_core::charmap::encode(NAMES.get(index as usize).copied().unwrap_or("")).expect("encodes")
+}
+
+/// Asleep, frozen, storing energy or trapping: the turn after the menu is taken without a move.
+fn player_moves_for_itself(battle: &Battle) -> bool {
+    battle.player.mon.status & (status::FRZ | status::SLP_MASK) != 0
+        || battle.player.status1.intersects(Status1::STORING_ENERGY | Status1::USING_TRAPPING_MOVE)
+}
+
+/// FIGHT on this turn opens no move list: the player's own state takes the turn, or the enemy's
+/// trapping move leaves it none.
+pub(super) fn fight_chooses_no_move(battle: &Battle) -> bool {
+    player_moves_for_itself(battle) || battle.enemy.status1.contains(Status1::USING_TRAPPING_MOVE)
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use crate::audio::data::AudioBank;
+    use crate::audio::engine::AudioEngine;
+    use crate::gfx::Screen;
+    use crate::input::Pad;
+    use crate::modes::menu_input::CursorMemory;
+    use crate::party::Named;
+    use crate::rng::GameRng;
+    use crate::systems::battle::{Arena, Status1, Status2};
+    use crate::world::World;
+    use crate::Pacing;
+    use super::super::BattleMode;
+    use super::*;
+
+    /// A wild battle already under way, the baseline arena's, with the cartridge's bugs as asked.
+    pub(in super::super) fn battle_mode(cartridge_bugs: bool) -> (BattleMode, World) {
+        let Arena { mut battle, party, .. } = Arena::baseline();
+        battle.cartridge_bugs = cartridge_bugs;
+        let mut mode = BattleMode::wild(battle.enemy.mon.species, battle.enemy.mon.level);
+        mode.battle = Some(battle);
+        let party = party.into_iter().map(|mon| Named { nick: mon.mon.species.name(), mon, ot: vec![] }).collect();
+        (mode, World { party, cartridge_bugs, ..World::default() })
+    }
+
+    pub(in super::super) fn with_ctx<T>(world: &mut World, f: impl FnOnce(&mut Ctx) -> T) -> T {
+        let (mut pad, mut rng, mut counter, mut screen) = (Pad::default(), GameRng::seeded(1), 0, Screen::default());
+        let (mut menu, mut audio, mut events) = (CursorMemory::default(), AudioEngine::new(AudioBank::Two), Vec::new());
+        let mut ctx = Ctx {
+            world, pad: &mut pad, rng: &mut rng, frame_counter: &mut counter, screen: &mut screen,
+            menu: &mut menu, audio: &mut audio, events: &mut events, pacing: Pacing::Faithful,
+            update_sprites: false, menu_key_pressed: false, save_game: false, saved_player_id: None,
+            printed: Vec::new(),
+        };
+        f(&mut ctx)
+    }
+
+    #[test]
+    fn a_wild_mon_fainting_clears_all_of_bides_damage() {
+        let bide_left_after_a_faint = |cartridge_bugs| {
+            let (mut mode, mut world) = battle_mode(cartridge_bugs);
+            mode.battle_mut().player.bide_accumulated_damage = 0x0123;
+            mode.battle_mut().enemy.mon.hp = 0;
+            with_ctx(&mut world, |ctx| mode.call_faint_enemy_pokemon(ctx));
+            mode.b().player.bide_accumulated_damage
+        };
+        assert_eq!(bide_left_after_a_faint(false), 0);
+        assert_eq!(bide_left_after_a_faint(true), 0x23, "the cartridge zeroes the high byte only");
+    }
+
+    #[test]
+    fn a_jump_kick_that_misses_crashes_for_an_eighth_of_what_it_would_have_done() {
+        let hi_jump_kick = |cartridge_bugs, landed: bool| {
+            let (mut mode, world) = battle_mode(cartridge_bugs);
+            let battle = mode.battle_mut();
+            battle.player.selected_move = PokemonMoveName::HiJumpKick as u8;
+            battle.player.current_move = MoveData::of_move(PokemonMoveName::HiJumpKick);
+            if landed {
+                battle.player.status2 |= Status2::USING_X_ACCURACY;
+            } else {
+                battle.enemy.status1 |= Status1::INVULNERABLE;
+            }
+            let party: Vec<PartyMon> = world.party.iter().map(|named| named.mon.clone()).collect();
+            calc_move_damage(battle, &party, Side::Player, &mut GameRng::seeded(3));
+            assert_eq!(battle.move_missed, !landed);
+            if landed {
+                return battle.damage;
+            }
+            let hp = battle.player.mon.hp;
+            mode.print_move_failure_text(Side::Player);
+            hp - mode.b().player.mon.hp
+        };
+        let would_have_done = hi_jump_kick(false, true);
+        assert!(would_have_done >= 16, "{would_have_done}");
+        assert_eq!(hi_jump_kick(false, false), would_have_done / 8);
+        assert_eq!(hi_jump_kick(true, false), 1, "the cartridge's miss has zeroed the damage first");
+    }
 }

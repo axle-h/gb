@@ -444,7 +444,9 @@ impl BattleDriver {
                 let Some(menu) = battle.menu.as_ref() else { return Drive::Done };
                 let (press, answers) = match (command, decision) {
                     (Command::Fight(slot), Decision::BattleMoves) => (menu.press_toward(*slot), true),
-                    (Command::Fight(_), Decision::BattleMenu) => (menu.press_toward(menus::FIGHT), false),
+                    // A turn with no move to choose is taken by FIGHT itself.
+                    (Command::Fight(_), Decision::BattleMenu) =>
+                        (menu.press_toward(menus::FIGHT), battle.battle().is_some_and(flow::fight_chooses_no_move)),
                     (Command::Run | Command::SwitchPokemon(_) | Command::UseItem { .. }, Decision::BattleMoves) => (Joypad::B, false),
                     (Command::UseItem { .. }, Decision::BattleMenu) => (menu.press_toward(menus::ITEM), false),
                     (Command::Run, Decision::BattleMenu) => (menu.press_toward(menus::RUN), true),
@@ -550,9 +552,27 @@ mod tests {
             &mut GameRng::tape(vec![])).mon.exp, "BIRD fought too, and shares it");
     }
 
+    /// Trapped, FIGHT takes the turn without a move list, so the command ends there: carried on, it
+    /// would press FIGHT again at the next turn's menu, a decision nobody was asked.
+    #[test]
+    fn a_fight_on_a_turn_with_no_move_to_choose_ends_on_fight() {
+        use crate::systems::battle::Status1;
+        let mut game = game(BattleMode::wild(PokemonSpecies::Magikarp, 5));
+        assert_eq!(settle(&mut game), Some(Decision::Text));
+        command(&mut game, Command::Advance);
+        assert_eq!(settle(&mut game), Some(Decision::BattleMenu));
+        let Some(Mode::Battle(battle)) = game.modes.last_mut() else { unreachable!() };
+        let enemy = &mut battle.battle_mut().enemy;
+        enemy.status1.insert(Status1::USING_TRAPPING_MOVE);
+        enemy.num_attacks_left = 3;
+        assert_eq!(game.frame(Input::Command(Command::Fight(0))).reply, Some(Reply::Accepted));
+        let done = (0..3000).find(|_| game.frame(Input::None).events.contains(&Event::CommandDone(Command::Fight(0))));
+        assert!(done.is_some_and(|frames| frames < 10), "FIGHT ended the command only after {done:?} frames");
+    }
+
     #[test]
     fn a_safari_battle_is_played_by_rock_bait_and_ball() {
-        let mut game = game(BattleMode::wild(PokemonSpecies::Rhyhorn, 25));
+        let game = game(BattleMode::wild(PokemonSpecies::Rhyhorn, 25));
         let mut world = game.world().clone();
         world.location.map = poke_core::map::Map::SafariZoneCenter;
         world.safari_balls = 30;
@@ -834,6 +854,7 @@ mod tests {
         let mut world = game(BattleMode::wild(PokemonSpecies::Magikarp, 5)).world().clone();
         world.party[0].mon.mon.pp = pp;
         world.bag = crate::systems::inventory::Inventory::bag(vec![BagItem::new(item, 1)]);
+        world.cartridge_bugs = true;
         let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
         game.push(Mode::Battle(BattleMode::wild(PokemonSpecies::Magikarp, 5)));
         assert_eq!(settle(&mut game), Some(Decision::Text));

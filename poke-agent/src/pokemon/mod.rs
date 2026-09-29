@@ -600,23 +600,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
     }
 
     fn write_player_name(&mut self, name: &str) -> Result<(), String> {
-        let name = name.trim();
-        if name.is_empty() {
-            // No em dash: this reaches the page inside a `Notice`.
-            return Err("a player name cannot be empty; the game's own screen refuses one".to_string());
-        }
-        let mut bytes = PokemonString::from_string(name).0;
-        match bytes.iter().position(|&b| b == PokemonString::TERMINATOR) {
-            Some(end) if end > MAX_PLAYER_NAME => {
-                bytes[MAX_PLAYER_NAME] = PokemonString::TERMINATOR;
-                bytes.truncate(MAX_PLAYER_NAME + 1);
-            }
-            Some(_) => {}
-            None => {
-                bytes.truncate(MAX_PLAYER_NAME);
-                bytes.push(PokemonString::TERMINATOR);
-            }
-        }
+        let bytes = player_name_bytes(name)?;
         self.mmu_mut().write_pointer_slice(&pokered_symbols::wPlayerName, &bytes)
     }
 
@@ -624,6 +608,29 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         self.mmu().read_game_options()
     }
 
+}
+
+/// `name` as the game keeps a player's name: trimmed, cut to the seven characters the naming
+/// screen allows, and terminated.
+pub fn player_name_bytes(name: &str) -> Result<Vec<u8>, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        // No em dash: this reaches the page inside a `Notice`.
+        return Err("a player name cannot be empty; the game's own screen refuses one".to_string());
+    }
+    let mut bytes = PokemonString::from_string(name).0;
+    match bytes.iter().position(|&b| b == PokemonString::TERMINATOR) {
+        Some(end) if end > MAX_PLAYER_NAME => {
+            bytes[MAX_PLAYER_NAME] = PokemonString::TERMINATOR;
+            bytes.truncate(MAX_PLAYER_NAME + 1);
+        }
+        Some(_) => {}
+        None => {
+            bytes.truncate(MAX_PLAYER_NAME);
+            bytes.push(PokemonString::TERMINATOR);
+        }
+    }
+    Ok(bytes)
 }
 
 #[derive(Debug, Clone, Default)]

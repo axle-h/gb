@@ -120,9 +120,9 @@ impl Wheels {
 
     /// `SlotMachine_StopOrAnimWheel1`..`3` in turn, `stopping` being
     /// `wStoppingWhichSlotMachineWheel`. True when wheel 3 has come to rest, which ends the spin.
-    pub fn stop_or_anim(&mut self, stopping: u8, flags: u8) -> bool {
+    pub fn stop_or_anim(&mut self, stopping: u8, flags: u8, cartridge_bugs: bool) -> bool {
         for index in 0..2 {
-            if !self.stops(index, stopping, flags) {
+            if !self.stops(index, stopping, flags, cartridge_bugs) {
                 self.anim(index);
             }
         }
@@ -136,7 +136,7 @@ impl Wheels {
 
     /// Whether wheel 1 or 2 stays where it is this frame. A wheel is asked only once its turn has
     /// come and only on an odd offset, where a symbol is centred rather than two halves showing.
-    fn stops(&mut self, index: usize, stopping: u8, flags: u8) -> bool {
+    fn stops(&mut self, index: usize, stopping: u8, flags: u8, cartridge_bugs: bool) -> bool {
         if stopping < index as u8 + 1 || self.offsets[index] % 2 == 0 {
             return false;
         }
@@ -144,18 +144,22 @@ impl Wheels {
             return true;
         }
         self.slip[index] -= 1;
-        let stop = if index == 0 { self.stop_wheel1_early(flags) } else { self.stop_wheel2_early(flags) };
+        let stop = if index == 0 { self.stop_wheel1_early(flags, cartridge_bugs) } else { self.stop_wheel2_early(flags) };
         if stop {
             self.slip[index] = 0;
         }
         stop
     }
 
-    /// `SlotMachine_StopWheel1Early`: wheel 1 stops on anything but a cherry. In seven-and-bar mode
-    /// its loop compares each tile with `HIGH(SLOTS7)` for *less than*, which no symbol ever is, so
-    /// the wheel never stops early and lands wherever the slip counter runs out.
-    fn stop_wheel1_early(&self, flags: u8) -> bool {
-        flags & CAN_WIN_WITH_7_OR_BAR == 0 && wheel_tiles(self.offsets)[0][1] != CHERRY
+    /// `SlotMachine_StopWheel1Early`: wheel 1 stops on anything but a cherry, or in seven-and-bar
+    /// mode as soon as a seven shows.
+    fn stop_wheel1_early(&self, flags: u8, cartridge_bugs: bool) -> bool {
+        let tiles = wheel_tiles(self.offsets)[0];
+        if flags & CAN_WIN_WITH_7_OR_BAR == 0 {
+            return tiles[1] != CHERRY;
+        }
+        // The cartridge tests each tile for less than a seven, which none is, so it never stops.
+        !cartridge_bugs && tiles.contains(&SEVEN)
     }
 
     /// `SlotMachine_StopWheel2Early`: wheel 2 stops where wheels 1 and 2 could still line up. In
@@ -374,10 +378,27 @@ mod tests {
     fn every_harvested_case_of_a_spinning_frame() {
         for (input, output, _) in cases::<SpinCase, SpinOutput>(include_str!("../../fixtures/slots/stop_or_anim_wheels.jsonl")) {
             let mut wheels = input.wheels;
-            let stopped = wheels.stop_or_anim(input.stopping, input.flags);
+            let stopped = wheels.stop_or_anim(input.stopping, input.flags, true);
             assert_eq!(SpinOutput { wheels, stopped }, output,
                 "{:?} stopping {} flags ${:02X}", input.wheels, input.stopping, input.flags);
         }
+    }
+
+    #[test]
+    fn in_seven_and_bar_mode_wheel_1_stops_early_on_a_seven() {
+        let showing = |offset: u8, seven: bool| wheel_tiles([offset; 3])[0].contains(&SEVEN) == seven;
+        let spin = |offset: u8, cartridge_bugs: bool| {
+            let mut wheels = Wheels { offsets: [offset, Wheels::START, Wheels::START], slip: [SLIP; 2] };
+            wheels.stop_or_anim(1, CAN_WIN_WITH_7_OR_BAR, cartridge_bugs);
+            wheels
+        };
+        let seven = (1..WHEEL_WRAP).step_by(2).find(|&offset| showing(offset, true)).expect("a seven shows");
+        let stopped = spin(seven, false);
+        assert_eq!((stopped.offsets[0], stopped.slip[0]), (seven, 0));
+        assert_eq!(spin(seven, true).offsets[0], seven + 1, "the cartridge spins on past it");
+
+        let none = (1..WHEEL_WRAP).step_by(2).find(|&offset| showing(offset, false)).expect("no seven shows");
+        assert_eq!(spin(none, false).offsets[0], none + 1);
     }
 
     #[derive(Debug, PartialEq, Eq, serde::Deserialize)]

@@ -21,13 +21,14 @@ use crate::systems::ball::{throw, BallInput, Throw};
 use crate::systems::battle::effects::stat_modifiers::stat_modifier_up_effect;
 use crate::systems::battle::effects::BattleText;
 use crate::systems::battle::enemy::load_enemy_mon_data;
+use crate::systems::battle::modified_stats::{apply_badge_stat_boosts, calculate_modified_stats};
 use crate::systems::battle::{effect, status, BattleKind, Side, Status2, Status3};
 use crate::systems::item_use::ItemUse;
 use super::animation::{anim, animation_type, AnimBattle, Routine};
 use super::flow::Step;
 use super::present::Present;
 use super::text::{far, local};
-use super::{BattleMode, BattleType};
+use super::{BattleMode, BattleType, Opponent};
 
 /// `OldManItemList`.
 const OLD_MAN_ITEM_LIST: [(ItemId, u8); 1] = [(ItemId::PokeBall, 50)];
@@ -188,6 +189,7 @@ impl BattleMode {
         self.action_taken = used;
         let before = self.party_before.take().expect("the party was noted before the item");
         let out = self.b().player_mon_number as usize;
+        let badges = ctx.world.badges;
         for (slot, named) in ctx.world.party.iter().enumerate() {
             let mon = &named.mon.mon;
             let (old_hp, old_status) = (before.hp[slot], before.status[slot]);
@@ -199,20 +201,33 @@ impl BattleMode {
             if slot != out {
                 continue;
             }
-            let player = &mut battle.player;
             if mon.hp != old_hp {
-                player.mon.hp = mon.hp;
+                battle.player.mon.hp = mon.hp;
                 if before.item == ItemId::FullRestore {
-                    player.mon.status = 0;
+                    // `.updateInBattleData`: the cartridge clears the status byte alone, leaving the
+                    // stat penalty it caused and Toxic's flag.
+                    let cured = battle.player.mon.status != 0;
+                    battle.player.mon.status = 0;
+                    if cured && !battle.cartridge_bugs {
+                        battle.player.status3.remove(Status3::BADLY_POISONED);
+                        calculate_modified_stats(battle, Side::Player);
+                        apply_badge_stat_boosts(battle, badges);
+                    }
                 }
             } else if old_status != 0 && mon.status == 0 {
-                // `.cureStatusAilment`: the party's stats over the battle mon's, stages and all.
-                player.mon.status = 0;
-                player.status3.remove(Status3::BADLY_POISONED);
-                player.mon.stats = named.mon.stats;
+                // `.cureStatusAilment`.
+                battle.player.mon.status = 0;
+                battle.player.status3.remove(Status3::BADLY_POISONED);
+                // The cartridge copies the party's stats over the battle mon's, stages, badge boosts and all.
+                if battle.cartridge_bugs {
+                    battle.player.mon.stats = named.mon.stats;
+                } else {
+                    calculate_modified_stats(battle, Side::Player);
+                    apply_badge_stat_boosts(battle, badges);
+                }
             }
             if mon.pp != before.pp[slot] {
-                player.mon.pp = mon.pp;
+                battle.player.mon.pp = mon.pp;
             }
         }
         self.goto(Step::AfterUseBagItem);
@@ -344,12 +359,15 @@ impl BattleMode {
 
     /// `ItemUseBall` from `.captured` to `AddPartyMon` or `SendNewMonToBox`.
     fn caught(&mut self, ctx: &mut Ctx) {
-        // The mon is loaded again as though transformed, so its DVs, HP and status stay; a mon that
-        // really was transformed is taken to be a Ditto.
+        // The mon is loaded again as though transformed, so its DVs, HP and status stay.
         let battle = self.battle.as_mut().expect("a battle");
         let (hp, status_byte) = (battle.enemy.mon.hp, battle.enemy.mon.status);
         let species = if battle.enemy.status3.contains(Status3::TRANSFORMED) {
-            PokemonSpecies::Ditto
+            // The cartridge takes a transformed mon for a Ditto, though Mirror Move can transform anything.
+            match self.opponent {
+                Opponent::Wild { species, .. } if !battle.cartridge_bugs => species,
+                _ => PokemonSpecies::Ditto,
+            }
         } else {
             battle.enemy.status3.insert(Status3::TRANSFORMED);
             battle.transformed_enemy_original_dvs = battle.enemy.mon.dvs;
@@ -439,5 +457,85 @@ impl BattleMode {
             numbers: vec![],
         });
         self.goto(Step::AfterUseBagItem);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::systems::battle::effects::volatile::transform_effect;
+    use crate::systems::battle::{stat, stat_mod};
+    use super::super::flow::tests::{battle_mode, with_ctx};
+    use super::*;
+
+    #[test]
+    fn curing_the_mon_out_keeps_its_stat_stages_and_badge_boosts() {
+        let after_a_cure = |cartridge_bugs| {
+            let (mut mode, mut world) = battle_mode(cartridge_bugs);
+            world.badges = 1;
+            let player = &mut mode.battle_mut().player;
+            let unmodified = player.unmodified_stats;
+            player.stat_mods[stat_mod::ATTACK] = 9;
+            player.mon.stats[stat::ATTACK] = unmodified[stat::ATTACK] * 2;
+            player.mon.stats[stat::SPEED] = unmodified[stat::SPEED] / 4;
+            player.mon.status = status::PAR;
+            let mon = &world.party[0].mon.mon;
+            mode.party_before = Some(PartyBefore { item: ItemId::ParlyzHeal, hp: vec![mon.hp], status: vec![status::PAR], pp: vec![mon.pp] });
+            with_ctx(&mut world, |ctx| mode.item_used_from_party(ctx));
+            let player = &mode.b().player;
+            assert_eq!(player.mon.status, 0);
+            (unmodified, world.party[0].mon.stats, player.mon.stats)
+        };
+        let (unmodified, _, stats) = after_a_cure(false);
+        let doubled = unmodified[stat::ATTACK] * 2;
+        assert_eq!(stats[stat::ATTACK], doubled + doubled / 8, "+2, and the Boulder Badge's eighth");
+        assert_eq!(stats[stat::SPEED], unmodified[stat::SPEED], "the paralysis penalty lifted");
+        let (_, party, stats) = after_a_cure(true);
+        assert_eq!(stats, party, "the cartridge's copy of the party's stats wipes the stage and the boost");
+    }
+
+    #[test]
+    fn a_full_restore_on_a_hurt_mon_lifts_the_penalty_and_toxic_with_the_status() {
+        let after_a_full_restore = |cartridge_bugs, status_byte| {
+            let (mut mode, mut world) = battle_mode(cartridge_bugs);
+            world.badges = 1;
+            let player = &mut mode.battle_mut().player;
+            let unmodified = player.unmodified_stats;
+            player.stat_mods[stat_mod::ATTACK] = 9;
+            player.mon.stats[stat::ATTACK] = unmodified[stat::ATTACK] * 2;
+            player.mon.stats[stat::SPEED] = unmodified[stat::SPEED] / 4;
+            player.mon.status = status_byte;
+            if status_byte == status::PSN {
+                player.status3 |= Status3::BADLY_POISONED;
+            }
+            let mon = &world.party[0].mon.mon;
+            mode.party_before = Some(PartyBefore { item: ItemId::FullRestore, hp: vec![mon.hp - 1], status: vec![status_byte], pp: vec![mon.pp] });
+            with_ctx(&mut world, |ctx| mode.item_used_from_party(ctx));
+            let player = &mode.b().player;
+            assert_eq!((player.mon.status, player.mon.hp), (0, world.party[0].mon.mon.hp));
+            (unmodified, player.mon.stats, player.status3.contains(Status3::BADLY_POISONED))
+        };
+        let (unmodified, stats, _) = after_a_full_restore(false, status::PAR);
+        let doubled = unmodified[stat::ATTACK] * 2;
+        assert_eq!(stats[stat::ATTACK], doubled + doubled / 8, "+2, and the Boulder Badge's eighth");
+        assert_eq!(stats[stat::SPEED], unmodified[stat::SPEED], "the paralysis penalty lifted");
+        assert!(!after_a_full_restore(false, status::PSN).2, "Toxic's flag cleared");
+        let (unmodified, stats, _) = after_a_full_restore(true, status::PAR);
+        assert_eq!(stats[stat::SPEED], unmodified[stat::SPEED] / 4, "the cartridge leaves the speed quartered");
+        assert!(after_a_full_restore(true, status::PSN).2, "and Toxic's flag set");
+    }
+
+    #[test]
+    fn a_caught_mon_that_had_transformed_is_the_species_it_was() {
+        let caught = |cartridge_bugs| {
+            let (mut mode, mut world) = battle_mode(cartridge_bugs);
+            let dvs = mode.b().enemy.mon.dvs;
+            transform_effect(mode.battle_mut(), Side::Enemy);
+            assert_eq!(mode.b().enemy.mon.species, PokemonSpecies::Tauros);
+            with_ctx(&mut world, |ctx| mode.caught(ctx));
+            assert_eq!(mode.b().enemy.mon.dvs, dvs, "its own DVs, either way");
+            mode.b().enemy.mon.species
+        };
+        assert_eq!(caught(false), PokemonSpecies::Rattata);
+        assert_eq!(caught(true), PokemonSpecies::Ditto, "the cartridge takes any transformed mon for a Ditto");
     }
 }

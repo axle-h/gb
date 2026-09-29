@@ -1324,6 +1324,11 @@ impl Script<'_, '_> {
         self.ctx.world.badges |= 1 << bit;
     }
 
+    /// `World::cartridge_bugs`.
+    pub fn cartridge_bugs(&self) -> bool {
+        self.ctx.world.cartridge_bugs
+    }
+
     /// `BIT_GAVE_SAFFRON_GUARDS_DRINK`.
     pub fn gave_saffron_guards_drink(&self) -> bool {
         self.ctx.world.scripts.gave_saffron_guards_drink
@@ -1634,7 +1639,10 @@ impl Overworld {
             let code = self.rt.stack.pop().expect("a script always returns to the overworld's loop");
             let flow = match code {
                 Code::Runtime(Routine::AfterRunMapScript) => return self.after_run_map_script(ctx),
-                Code::Runtime(Routine::AfterDisplayDialogue) => return self.check_for_opponent(ctx),
+                Code::Runtime(Routine::AfterDisplayDialogue) => {
+                    self.offer_poll = true;
+                    return self.check_for_opponent(ctx);
+                }
                 Code::Runtime(Routine::EnterMapAfterBattle) => return self.enter_map(ctx),
                 Code::Runtime(Routine::HandleBlackOut) => return self.handle_black_out(ctx),
                 Code::Runtime(Routine::SpecialEnterMap) => return self.special_enter_map(ctx),
@@ -1990,7 +1998,8 @@ mod tests {
         let mut ctx = Ctx {
             world: &mut world, pad: &mut pad, rng: &mut rng, frame_counter: &mut counter, screen: &mut screen,
             menu: &mut menu, audio: &mut audio, events: &mut events, pacing: Pacing::Faithful,
-            update_sprites: false, save_game: false, saved_player_id: None,
+            update_sprites: false, menu_key_pressed: false, save_game: false, saved_player_id: None,
+            printed: Vec::new(),
         };
         let mut overworld = Overworld::new();
         overworld.enter(&mut ctx);

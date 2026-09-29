@@ -224,11 +224,27 @@ const TICK_BUDGET: u32 = 1200;
 const TRADE_TICK_BUDGET: u32 = 2400;
 
 /// A one-NPC script that opens the party menu and needs the cursor driven to a chosen slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PartyScript {
     Daycare,
     NameRater,
-    Trade { at: Map, npc: MapSprite, give: PokemonSpecies },
+    Trade { at: Map, #[serde(with = "trader")] npc: MapSprite, give: PokemonSpecies },
+}
+
+/// A trader by name, read back from the one table of trades: a sprite's name is `&'static`.
+mod trader {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use poke_core::map::MapSprite;
+
+    pub fn serialize<S: Serializer>(npc: &MapSprite, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(npc.name)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<MapSprite, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        crate::pokemon::postgame::trades::TRADES.iter().map(|trade| trade.npc).find(|npc| npc.name == name)
+            .ok_or_else(|| serde::de::Error::custom(format!("no trader {name}")))
+    }
 }
 
 impl PartyScript {

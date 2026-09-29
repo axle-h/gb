@@ -57,7 +57,7 @@ const BLINK_PER_FRAME: u32 = 4454;
 const SYMBOL_TILES: u8 = 0x25;
 
 /// `SlotMachine_SpinWheels`' `.loop1`, twenty turns of `DelayFrames 2`, and `.loop2`'s `DelayFrame`
-/// plus `DelayFrames 2` on a Game Boy that is not an SGB.
+/// plus the DMG's `DelayFrames 2`, in every colour mode.
 const WIND_TURNS: u8 = 20;
 const WIND_FRAMES: u8 = 2;
 const SPIN_FRAMES: u8 = 3;
@@ -450,7 +450,8 @@ impl ModeUpdate for SlotMachine {
                     ctx.audio.play_sound(sounds::SFX_SLOTS_STOP_WHEEL);
                 }
                 let (stopping, flags) = (self.stopping, self.flags);
-                let stopped = self.step_wheels(ctx, |wheels| wheels.stop_or_anim(stopping, flags));
+                let cartridge_bugs = ctx.world.cartridge_bugs;
+                let stopped = self.step_wheels(ctx, |wheels| wheels.stop_or_anim(stopping, flags, cartridge_bugs));
                 if stopped {
                     return self.check_for_matches(ctx);
                 }
@@ -657,7 +658,8 @@ mod tests {
             let Self { machine, modes, world, rng, pad, frame_counter, screen, menu, audio, .. } = self;
             let mut events: Vec<Event> = Vec::new();
             let mut ctx = Ctx { world, pad, rng, screen, menu, audio, frame_counter, events: &mut events,
-                                pacing: Pacing::Instant, update_sprites: false, save_game: false, saved_player_id: None };
+                                pacing: Pacing::Instant, update_sprites: false, menu_key_pressed: false, save_game: false, saved_player_id: None,
+                                printed: Vec::new() };
             self.left |= f(machine, modes, &mut ctx);
         }
 

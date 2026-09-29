@@ -93,7 +93,7 @@ pub fn record(
 
     // Written first so its own timestamp can go in the JSON beside it.
     let state_captured_at = match published.latest_save_state() {
-        Some((state, at)) => run::write_atomically(&dir.join(files::STATE), &state).ok().map(|()| at),
+        Some((state, at)) => run::write_atomically(&dir.join(run.kind().state_file()), &state).ok().map(|()| at),
         None => None,
     };
 

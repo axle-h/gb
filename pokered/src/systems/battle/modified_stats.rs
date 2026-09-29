@@ -49,6 +49,23 @@ pub fn apply_badge_stat_boosts(battle: &mut Battle, badges: u8) {
     }
 }
 
+/// The penalty and the badge boost that belong to one stat, 0 to 3 for attack to special, of the
+/// mon whose stat it is, in the order a mon sent out gets them: for a stat just worked out afresh.
+pub fn apply_penalty_and_badge_boost_to(battle: &mut Battle, whose: Side, which: usize, badges: u8) {
+    let index = stat::ATTACK + which;
+    let side = battle.side_mut(whose);
+    let value = &mut side.mon.stats[index];
+    if index == stat::SPEED && side.mon.status & status::PAR != 0 {
+        *value = (*value >> 2).max(1);
+    }
+    if index == stat::ATTACK && side.mon.status & status::BRN != 0 {
+        *value = (*value >> 1).max(1);
+    }
+    if whose == Side::Player && badges & 1 << (which * 2) != 0 {
+        *value = value.wrapping_add(*value >> 3).min(MAX_STAT_VALUE);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::Value;

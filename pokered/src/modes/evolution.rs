@@ -151,7 +151,9 @@ impl Evolution {
             if self.can_evolve & 1 << self.slot != 0 {
                 let party_mon = &ctx.world.party[self.slot as usize].mon;
                 let old = *self.old_species.get_or_insert(party_mon.mon.species);
-                if let Some((at, into)) = next_evolution(old, party_mon.level, self.cur_item, self.force, self.entry) {
+                // After a battle `wCurItem` holds a species, which the cartridge compares against the stones.
+                let cur_item = (!self.in_battle || ctx.world.cartridge_bugs).then_some(self.cur_item);
+                if let Some((at, into)) = next_evolution(old, party_mon.level, cur_item, self.force, self.entry) {
                     self.entry = at + 1;
                     self.new_species = Some(into);
                     self.occurred = true;

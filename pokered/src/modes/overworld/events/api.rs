@@ -812,12 +812,19 @@ fn gym_trash(s: &mut Script, event: HiddenEvent) -> Flow {
         return predef_in(f, 0x26).ret();
     }
     s.set_event(EVENT_1ST_LOCK_OPENED);
-    let entry = sym::GymTrashCans + 5 * can as u16;
-    let mask = rom_slice(entry)[0];
-    // A mask with no bit in common with the random byte gives `$ff`, and the neighbour is read from
-    // past the end of the table.
-    let offset = (mask & s.ctx.rng.random().rotate_left(4)).wrapping_sub(1);
-    s.ctx.world.scripts.trash_cans[1] = rom_slice(entry + 1 + offset as u16)[0] & 0x0F;
+    let entry = &rom_slice(sym::GymTrashCans + 5 * can as u16)[..5];
+    let (mask, neighbours) = (entry[0], &entry[1..]);
+    let draw = s.ctx.rng.random().rotate_left(4);
+    s.ctx.world.scripts.trash_cans[1] = if s.ctx.world.cartridge_bugs {
+        // The cartridge ANDs the mask with the draw and subtracts one, so no common bit reads the
+        // bank's zero padding 255 bytes on and can 0 holds the second lock from anywhere.
+        match (mask & draw).checked_sub(1) {
+            Some(offset) => neighbours[offset as usize] & 0x0F,
+            None => 0,
+        }
+    } else {
+        neighbours[(draw % mask) as usize] & 0x0F
+    };
     predef_in(f, 0x3B).ret()
 }
 

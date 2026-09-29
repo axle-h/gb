@@ -528,7 +528,7 @@ view! {
     }
 }
 
-pub fn status(state: &GameState, api: &PokemonApi<'_>) -> StatusView {
+pub fn status(state: &GameState, readout: &(impl Readout + ?Sized)) -> StatusView {
     StatusView {
         trainer: state.name.to_default_string(),
         trainer_id: state.player_id,
@@ -540,7 +540,7 @@ pub fn status(state: &GameState, api: &PokemonApi<'_>) -> StatusView {
             .map(|badge| BadgeView { name: format!("{badge}"), earned: state.badges.contains(*badge) })
             .collect(),
         money: state.money,
-        playtime: playtime(api),
+        playtime: playtime(readout),
         party: state.pokemon.iter()
             .map(|mon| PartyMonView {
                 nickname: mon.nickname.to_default_string(),

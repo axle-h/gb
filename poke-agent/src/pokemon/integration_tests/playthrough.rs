@@ -254,30 +254,10 @@ fn hall_of_fame_playthrough() {
 /// A new game on the recreation, in Red's room with the preset names, with battle animations on
 /// or off and the rest of the options as a served run plays them, at `pacing`.
 pub(crate) fn native_new_game(seed: u64, battle_animation: bool, pacing: pokered::Pacing) -> pokered::Game {
-    use pokered::command::{Command, Decision};
-    use pokered::mode::{Mode, Status};
-    use pokered::rng::GameRng;
     use pokered::world::{BattleStyle, Options, TextSpeed};
-    use pokered::{Game, Input, Pacing};
-
-    let mut game = Game::power_on(None, GameRng::seeded(seed), Pacing::Instant);
-    for _ in 0..60_000 {
-        if matches!(game.modes(), [Mode::Overworld(_)]) {
-            let mut world = game.world().clone();
-            world.options = Options { text_speed: TextSpeed::Fast, battle_animation, battle_style: BattleStyle::Set };
-            let mut game = Game::new(world, GameRng::seeded(seed), pacing);
-            game.push(Mode::Overworld(pokered::modes::overworld::Overworld::new()));
-            return game;
-        }
-        let command = match game.status() {
-            Status::Waiting(Decision::TitleScreen | Decision::Text) => Some(Command::Advance),
-            Status::Waiting(Decision::MainMenu) => Some(Command::ChooseOption(0)),
-            Status::Waiting(Decision::IntroNameMenu) => Some(Command::ChooseOption(1)),
-            _ => None,
-        };
-        game.frame(command.map_or(Input::None, Input::Command));
-    }
-    panic!("the intro never reached Red's room: {:?}", game.status());
+    let options = Options { text_speed: TextSpeed::Fast, battle_animation, battle_style: BattleStyle::Set };
+    crate::pokemon::native_agent::new_game(|| pokered::rng::GameRng::seeded(seed), options, pacing)
+        .unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// Where [`native_full_playthrough`] leaves the game it stalled in, for [`probe_native_stall`].

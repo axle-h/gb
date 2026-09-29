@@ -7,7 +7,6 @@ pub mod modes;
 pub mod party;
 pub mod rng;
 pub mod scripts;
-pub mod sequence;
 pub mod systems;
 pub mod world;
 
@@ -60,6 +59,8 @@ pub struct Frame {
     /// The game's own save, written this frame: what the SAVE menu, a box change and the Hall of
     /// Fame hand the host to keep. `Game::save`'s bytes.
     pub save: Option<Vec<u8>>,
+    /// The message box as each text box left it this frame; see `Ctx::printed`.
+    pub printed: Vec<UiSurface>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +84,9 @@ pub struct Game {
 }
 
 const SAVE_MAGIC: &[u8; 4] = b"PKRD";
-const SAVE_VERSION: u16 = 1;
+const SAVE_VERSION: u16 = 2;
+/// The same MessagePack body without the lz4 block around it; still read, since saves of it exist.
+const UNCOMPRESSED_SAVE_VERSION: u16 = 1;
 
 impl Game {
     pub fn new(world: World, rng: GameRng, pacing: Pacing) -> Self {
@@ -171,6 +174,11 @@ impl Game {
         self.frames
     }
 
+    /// `wJoyIgnore`: the buttons the game is not listening to.
+    pub fn joy_ignore(&self) -> Joypad {
+        self.pad.ignore
+    }
+
     pub fn push(&mut self, mode: Mode) {
         let mut events = Vec::new();
         self.with_ctx(&mut events, |modes, ctx| apply(modes, Transition::Push(mode), ctx));
@@ -204,12 +212,13 @@ impl Game {
 
         self.pad.input = buttons;
         self.screen.tiles.update_moving_bg_tiles();
+        self.audio.cartridge_bugs = self.world.cartridge_bugs;
         let audio = self.audio.frame();
         self.world.play_time.track();
         self.frame_counter = self.frame_counter.saturating_sub(1);
         self.frames += 1;
 
-        let save_game = self.with_ctx(&mut events, |modes, ctx| {
+        let (save_game, printed) = self.with_ctx(&mut events, |modes, ctx| {
             if let Some(top) = modes.last_mut() {
                 let transition = top.update(ctx);
                 apply(modes, transition, ctx);
@@ -222,7 +231,7 @@ impl Game {
             self.save()
         });
 
-        Frame { events, status: self.status(), reply, audio, save }
+        Frame { events, status: self.status(), reply, audio, save, printed }
     }
 
     pub fn status(&self) -> Status {
@@ -246,23 +255,32 @@ impl Game {
         }
     }
 
-    fn with_ctx(&mut self, events: &mut Vec<Event>, f: impl FnOnce(&mut Vec<Mode>, &mut Ctx)) -> bool {
+    /// Runs `f`, and answers whether the game asked to be saved and what its text boxes printed.
+    fn with_ctx(&mut self, events: &mut Vec<Event>, f: impl FnOnce(&mut Vec<Mode>, &mut Ctx)) -> (bool, Vec<UiSurface>) {
         let Self { world, modes, rng, pad, frame_counter, screen, menu, audio, pacing, saved_player_id, .. } = self;
+        audio.cartridge_bugs = world.cartridge_bugs;
         let mut ctx = Ctx { world, pad, rng, screen, menu, audio, frame_counter, events, pacing: *pacing,
-                            update_sprites: false, save_game: false, saved_player_id: *saved_player_id };
+                            update_sprites: false, menu_key_pressed: false, save_game: false, saved_player_id: *saved_player_id,
+                            printed: Vec::new() };
         f(modes, &mut ctx);
         if ctx.update_sprites
             && let Some(Mode::Overworld(overworld)) = modes.iter_mut().rev().find(|mode| matches!(mode, Mode::Overworld(_)))
         {
             overworld.update_sprites_under(&mut ctx);
         }
-        ctx.save_game
+        if ctx.menu_key_pressed
+            && let Some(Mode::Overworld(overworld)) = modes.iter_mut().rev().find(|mode| matches!(mode, Mode::Overworld(_)))
+        {
+            overworld.disarm_turn();
+        }
+        (ctx.save_game, ctx.printed)
     }
 
     pub fn save(&self) -> Vec<u8> {
         let mut bytes = SAVE_MAGIC.to_vec();
         bytes.extend(SAVE_VERSION.to_le_bytes());
-        bytes.extend(rmp_serde::to_vec_named(self).expect("a game always serialises"));
+        let body = rmp_serde::to_vec_named(self).expect("a game always serialises");
+        bytes.extend(lz4_flex::compress_prepend_size(&body));
         bytes
     }
 
@@ -270,10 +288,12 @@ impl Game {
         let body = bytes.strip_prefix(SAVE_MAGIC).ok_or("not a pokered save")?;
         let (version, body) = body.split_at_checked(2).ok_or("a truncated save")?;
         let version = u16::from_le_bytes([version[0], version[1]]);
-        if version != SAVE_VERSION {
-            return Err(format!("save version {version}, expected {SAVE_VERSION}"));
-        }
-        let mut game: Self = rmp_serde::from_slice(body).map_err(|e| e.to_string())?;
+        let body = match version {
+            SAVE_VERSION => std::borrow::Cow::Owned(lz4_flex::decompress_size_prepended(body).map_err(|e| e.to_string())?),
+            UNCOMPRESSED_SAVE_VERSION => std::borrow::Cow::Borrowed(body),
+            _ => return Err(format!("save version {version}, expected {SAVE_VERSION}")),
+        };
+        let mut game: Self = rmp_serde::from_slice(&body).map_err(|e| e.to_string())?;
         game.pacing = pacing;
         Ok(game)
     }
@@ -324,11 +344,25 @@ mod tests {
     }
 
     #[test]
+    fn a_save_is_compressed_and_a_version_one_save_still_loads() {
+        let mut game = battle_game(BattleMode::wild(PokemonSpecies::Onix, 20));
+        for _ in 0..200 {
+            game.frame(Input::None);
+        }
+        let body = rmp_serde::to_vec_named(&game).unwrap();
+        assert!(game.save().len() < body.len() / 2, "{} bytes of {}", game.save().len(), body.len());
+        let mut version_one = SAVE_MAGIC.to_vec();
+        version_one.extend(UNCOMPRESSED_SAVE_VERSION.to_le_bytes());
+        version_one.extend(body);
+        assert_eq!(Game::load(&version_one, Pacing::Faithful).unwrap().save(), game.save());
+    }
+
+    #[test]
     fn a_save_from_something_else_is_an_error() {
         assert!(Game::load(b"GBST\x01\x00", Pacing::Faithful).is_err());
         let mut save = Game::new(World::default(), GameRng::seeded(1), Pacing::Faithful).save();
         save[4] = 99;
-        assert_eq!(Game::load(&save, Pacing::Faithful).unwrap_err(), "save version 99, expected 1");
+        assert_eq!(Game::load(&save, Pacing::Faithful).unwrap_err(), "save version 99, expected 2");
     }
 
     use std::hash::{Hash, Hasher};

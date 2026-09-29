@@ -99,7 +99,7 @@ pub enum PictureId {
     GamblerAsleep = 0x48,
 }
 
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, strum_macros::Display, strum_macros::FromRepr)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, strum_macros::Display, strum_macros::FromRepr, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum PlayerFacingDirection {
     #[default]

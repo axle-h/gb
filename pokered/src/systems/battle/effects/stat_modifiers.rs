@@ -6,7 +6,7 @@ use crate::rng::Rng;
 use crate::systems::math::{divide, multiply};
 use crate::systems::stats::MAX_STAT_VALUE;
 use super::super::accuracy::move_hit_test;
-use super::super::modified_stats::{apply_badge_stat_boosts, apply_burn_and_paralysis_penalties};
+use super::super::modified_stats::{apply_badge_stat_boosts, apply_burn_and_paralysis_penalties, apply_penalty_and_badge_boost_to};
 use super::super::{effect, stat, Battle, Side, Status1, Status2, MAX_STAT_LEVEL};
 use super::BattleText;
 
@@ -23,10 +23,10 @@ fn modified(unmodified: u16, stat_mod: u8) -> u16 {
 }
 
 /// `StatModifierUpEffect`: one stage, or two for the `_UP2` effects without passing +6, and
-/// nothing at +6 already or at a stat of exactly 999. The stat is worked out from the unmodified one
-/// with no penalties or badge boosts, and then the player's badge boosts are applied to every stat
-/// again, and the *other* mon's paralysis and burn penalties again, however many times before.
+/// nothing at +6 already or at a stat of exactly 999. The stat is worked out afresh from the
+/// unmodified one, then given back its own penalty and badge boost.
 pub fn stat_modifier_up_effect(battle: &mut Battle, user: Side, badges: u8) -> Vec<BattleText> {
+    let cartridge_bugs = battle.cartridge_bugs;
     let side = battle.side_mut(user);
     let move_effect = side.current_move.effect;
     let mut which = move_effect.wrapping_sub(effect::ATTACK_UP1_EFFECT);
@@ -41,11 +41,13 @@ pub fn stat_modifier_up_effect(battle: &mut Battle, user: Side, badges: u8) -> V
     if move_effect >= effect::ATTACK_UP1_EFFECT + 8 {
         stage = (stage + 1).min(MAX_STAT_LEVEL);
     }
+    let old_stage = side.stat_mods[which];
     side.stat_mods[which] = stage;
     if which < 4 {
         let index = stat::ATTACK + which;
         if side.mon.stats[index] == MAX_STAT_VALUE {
-            side.stat_mods[which] -= 1;
+            // The cartridge takes back one stage of a +2.
+            side.stat_mods[which] = if cartridge_bugs { stage - 1 } else { old_stage };
             return vec![BattleText::NothingHappenedText];
         }
         side.mon.stats[index] = modified(side.unmodified_stats[index], stage).min(MAX_STAT_VALUE);
@@ -53,10 +55,7 @@ pub fn stat_modifier_up_effect(battle: &mut Battle, user: Side, badges: u8) -> V
     if side.current_move.animation == PokemonMoveName::Minimize as u8 {
         side.minimized = 1;
     }
-    if user == Side::Player {
-        apply_badge_stat_boosts(battle, badges);
-    }
-    apply_burn_and_paralysis_penalties(battle, user.other());
+    reapply_penalties_and_boosts(battle, user, user, which, badges);
     vec![BattleText::MonsStatsRoseText]
 }
 
@@ -64,9 +63,9 @@ pub fn stat_modifier_up_effect(battle: &mut Battle, user: Side, badges: u8) -> V
 /// before anything else, a substitute blocks it, and a side effect lands a third of the time
 /// without a hit test while the move itself takes one. One stage, or two for the `_DOWN2` effects,
 /// not below -6, and nothing for a stat of exactly 1. The stat is worked out afresh, never below 1,
-/// then the player's badge boosts are applied again when the enemy used it, and the target's
-/// paralysis and burn penalties again. A side effect that fails says nothing.
+/// then given back its own penalty and badge boost. A side effect that fails says nothing.
 pub fn stat_modifier_down_effect(battle: &mut Battle, user: Side, badges: u8, rng: &mut impl Rng) -> Vec<BattleText> {
+    let cartridge_bugs = battle.cartridge_bugs;
     let move_effect = battle.side(user).current_move.effect;
     let side_effect = move_effect >= effect::ATTACK_DOWN_SIDE_EFFECT;
     let missed = |battle: &Battle| match side_effect || battle.move_didnt_miss {
@@ -107,26 +106,42 @@ pub fn stat_modifier_down_effect(battle: &mut Battle, user: Side, badges: u8, rn
     if move_effect >= effect::ATTACK_DOWN2_EFFECT - 0x16 && !side_effect {
         stage = (stage - 1).max(1);
     }
+    let old_stage = side.stat_mods[which];
     side.stat_mods[which] = stage;
     if which < 4 {
         let index = stat::ATTACK + which;
         if side.mon.stats[index] == 1 {
-            side.stat_mods[which] += 1;
+            // The cartridge gives back one stage of a -2.
+            side.stat_mods[which] = if cartridge_bugs { stage + 1 } else { old_stage };
             return cant_lower();
         }
         side.mon.stats[index] = modified(side.unmodified_stats[index], stage).max(1);
     }
-    if user == Side::Enemy {
-        apply_badge_stat_boosts(battle, badges);
-    }
-    apply_burn_and_paralysis_penalties(battle, target);
+    reapply_penalties_and_boosts(battle, user, target, which, badges);
     vec![BattleText::MonsStatsFellText]
+}
+
+/// After `user`'s move changed `whose` stat `which`. The cartridge applies the player's badge
+/// boosts to every stat again, compounding them, whenever the player's stat moved, and the
+/// paralysis and burn penalties again to the mon not moving, while the stat worked out afresh keeps
+/// neither unless one of those lands on it.
+fn reapply_penalties_and_boosts(battle: &mut Battle, user: Side, whose: Side, which: usize, badges: u8) {
+    if battle.cartridge_bugs {
+        if whose == Side::Player {
+            apply_badge_stat_boosts(battle, badges);
+        }
+        apply_burn_and_paralysis_penalties(battle, user.other());
+    } else if which < 4 {
+        apply_penalty_and_badge_boost_to(battle, whose, which, badges);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use crate::rng::GameRng;
     use super::super::super::fixture::{each_case, side};
+    use super::super::super::{status, Arena, BASE_STAT_LEVEL};
     use super::*;
 
     #[test]
@@ -141,5 +156,65 @@ mod tests {
         each_case(include_str!("../../../../fixtures/battle/stat_modifier_down_effect.jsonl"), |arena, input, rng| {
             json!(stat_modifier_down_effect(&mut arena.battle, side(input), arena.badges, rng))
         });
+    }
+
+    /// The baseline battle playing the fixes, `user` about to use a move with `move_effect`.
+    fn playing(arena: &mut Arena, user: Side, move_effect: u8) -> &mut Battle {
+        arena.battle.cartridge_bugs = false;
+        let current_move = &mut arena.battle.side_mut(user).current_move;
+        current_move.effect = move_effect;
+        current_move.accuracy = 255;
+        &mut arena.battle
+    }
+
+    /// An enemy stat-down move that neither misses outright nor misses its hit test.
+    fn enemy_hits() -> GameRng {
+        GameRng::tape(vec![ENEMY_STAT_DOWN_MISS, 0])
+    }
+
+    #[test]
+    fn a_badge_boost_is_applied_once_however_many_stat_moves_follow() {
+        let mut arena = Arena::baseline();
+        let badges = 0xFF;
+        apply_badge_stat_boosts(&mut arena.battle, badges);
+        let sent_out = arena.battle.player.mon.stats;
+        let unmodified = arena.battle.player.unmodified_stats;
+        for _ in 0..2 {
+            stat_modifier_up_effect(playing(&mut arena, Side::Player, effect::DEFENSE_UP1_EFFECT), Side::Player, badges);
+        }
+        stat_modifier_down_effect(playing(&mut arena, Side::Enemy, effect::ATTACK_DOWN1_EFFECT), Side::Enemy, badges, &mut enemy_hits());
+        let stats = arena.battle.player.mon.stats;
+        let boosted = |value: u16| value + (value >> 3);
+        assert_eq!(stats[stat::DEFENSE], boosted(modified(unmodified[stat::DEFENSE], BASE_STAT_LEVEL + 2)));
+        assert_eq!(stats[stat::ATTACK], boosted(modified(unmodified[stat::ATTACK], BASE_STAT_LEVEL - 1)));
+        assert_eq!((stats[stat::SPEED], stats[stat::SPECIAL]), (sent_out[stat::SPEED], sent_out[stat::SPECIAL]));
+    }
+
+    #[test]
+    fn a_stat_move_leaves_the_other_mons_penalties_alone_and_keeps_its_own() {
+        let mut arena = Arena::baseline();
+        arena.battle.enemy.mon.status = status::PAR | status::BRN;
+        apply_burn_and_paralysis_penalties(&mut arena.battle, Side::Enemy);
+        let inflicted = arena.battle.enemy.mon.stats;
+        stat_modifier_up_effect(playing(&mut arena, Side::Player, effect::SPEED_UP1_EFFECT), Side::Player, 0);
+        assert_eq!(arena.battle.enemy.mon.stats, inflicted);
+
+        stat_modifier_up_effect(playing(&mut arena, Side::Enemy, effect::SPEED_UP2_EFFECT), Side::Enemy, 0);
+        let unmodified = arena.battle.enemy.unmodified_stats;
+        assert_eq!(arena.battle.enemy.mon.stats[stat::SPEED], modified(unmodified[stat::SPEED], BASE_STAT_LEVEL + 2) >> 2);
+        assert_eq!(arena.battle.enemy.mon.stats[stat::ATTACK], inflicted[stat::ATTACK]);
+    }
+
+    #[test]
+    fn a_two_stage_move_that_does_nothing_leaves_the_stage_as_it_was() {
+        let mut arena = Arena::baseline();
+        arena.battle.player.mon.stats[stat::ATTACK] = MAX_STAT_VALUE;
+        let texts = stat_modifier_up_effect(playing(&mut arena, Side::Player, effect::ATTACK_UP2_EFFECT), Side::Player, 0);
+        assert_eq!((texts, arena.battle.player.stat_mods[0]), (vec![BattleText::NothingHappenedText], BASE_STAT_LEVEL));
+
+        arena.battle.player.mon.stats[stat::DEFENSE] = 1;
+        let battle = playing(&mut arena, Side::Enemy, effect::DEFENSE_DOWN2_EFFECT);
+        let texts = stat_modifier_down_effect(battle, Side::Enemy, 0, &mut enemy_hits());
+        assert_eq!((texts, arena.battle.player.stat_mods[1]), (vec![BattleText::NothingHappenedText], BASE_STAT_LEVEL));
     }
 }

@@ -24,7 +24,7 @@ pub const HOLE: u8 = 2;
 
 /// `PlayerSpinningFacingOrder`, which is the sprite facings in the order a spin runs them.
 const SPIN_ORDER: [u8; 4] = [0x0, 0x8, 0x4, 0xC];
-/// `GetPlayerTeleportAnimFrameDelay` off an SGB.
+/// `GetPlayerTeleportAnimFrameDelay`: the DMG's three, in every colour mode.
 const SPIN_STEP_FRAMES: u8 = 3;
 /// `PlayerSpinWhileMovingUpOrDown`'s two runs: up off the top of the screen, and down to where the
 /// player stands.

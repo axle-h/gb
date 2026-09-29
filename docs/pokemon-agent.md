@@ -41,8 +41,7 @@ can break in silence.
   goes back to reading once the menu is off the screen, and only on a tick the policy did not answer:
   the scripted policies answer at once, and their timing is the golden replay.
 - A catch's battle ends when the naming screen closes, not when `wIsInBattle` clears, so
-  `BattleEnded` and the reader's last box are emitted there. Every tree cut on the map is forgotten
-  with it: a battle reloads the map and they have all grown back.
+  `BattleEnded` and the reader's last box are emitted there.
 
 ## Closed loops under A
 
@@ -65,15 +64,18 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   route, `OverworldMovement` tests for a border warp before consulting one. Fixing one half does
   nothing.
 - `map_uses_runtime_blocks` lists every map `ReplaceTileBlock` rewrites. A map missing from it is
-  offered rows through closed doors, and no finished-game fixture can show that. The recreation reads
-  Silph's floors and the other rewritten maps live as well (`native::live_blocks`); Silph 11F's
-  card-key door is tile `$5E`, not `$18` or `$24` (`apply_card_key_doors`).
+  offered rows through closed doors, and no finished-game fixture can show that; Silph's floors are in
+  it, as their shut card-key doors are floor in the ROM. The recreation reads the few maps left out
+  live as well (`native::live_blocks`); Silph 11F's card-key door is tile `$5E`, not `$18` or `$24`
+  (`apply_card_key_doors`).
 - Seafoam B4F refuses Surf at its stairs only until both boulders are down (`IsSurfingAllowed`), so
   `no_surf_mount` follows `strong_current_below`.
 - The floor menu is up when the screen says so, never when `wListMenuID` does: it still reads the
   floor list long after the menu closed, so a second ride navigates a menu that is not there.
 - A lift's doors lead where the live `wWarpEntries` says, the floor it was entered from until the
   panel picks another; the ROM's table is written for one floor (`with_live_exits`).
+- A cut tree is read off the live block map (`with_trees_cut`), never remembered by an agent: the
+  cut lasts until the map is next loaded, a battle included, and an agent made from a save saw none.
 - A map script can cancel a warp the tiles call fine. `map_warp_gate_specs` is deliberately tiny:
   withholding a real door is how a floor loses its only exit, so only a refusal proved in the
   cartridge's own source goes in. `WarpTrigger::Unknown` is never dropped either — unsure is not no.
@@ -204,15 +206,24 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   (`trade_give`), the roof girl's and the fossil scientist's menus their first row
   (`FIRST_ROW_TALKS`), a faint's party menu the first mon standing (`forced_switch`), and Route 17 a
   held B (`idle_input`).
-- Its reader reads the message box only while the game prints or waits on a page, never while a
-  battle animates, and flushes at the overworld or a battle menu. The recreation is never read
-  mid-draw, so it breaks a page on one mismatch (`PokemonTextReader::untorn`).
+- Its reader reads only what a text box printed: the message box after a frame that ends with a
+  `TextBox` or an `Evolution` on top, and every surface `Frame.printed` hands over, because at
+  `Instant` a text prints, scrolls and ends inside one frame (`NativeAgent::play`). A menu, the
+  naming grid and a battle's own boxes are other modes. It flushes where the emulated agent splits
+  its text (`flush_text`): the overworld back on top with no walk on, a battle's first frame, its
+  menu and `BattleEnded`. The recreation is never read mid-draw, so it breaks a page on one mismatch
+  (`PokemonTextReader::untorn`).
 - A walk is bounded on progress as well as on a lost route (`MAX_STALE_STEPS`: a current takes back
-  every step), and a task's walk waits `MAX_TASK_BLOCKED_POLLS` for someone to move before giving up.
+  every step), and a task's walk waits `MAX_TASK_BLOCKED_POLLS` for someone to move before giving up
+  (a prize counter the emulated agent's `BLOCKED_TICKS`).
 - A harness that drives the game itself (the credits) calls `host_took_the_screen`, or the agent waits
   for ever on a command that will never report back.
-- A walk carries a held direction from step to step through `Overworld::poll_offered`, as the
-  emulated agent's pad does; nothing else may take that poll, which runs the map's script first.
+- The native watchdog's clock is reset by `NativeAgent::asked`, called beside every `pick_*`; a new
+  call site without it wakes the policy on a healthy run.
+- A walk, or a task's walk up to what it faces and out of a lift (`task_walking`), carries a held
+  direction on through `Overworld::poll_offered`, as the emulated agent's pad does: after a landing,
+  a bump or a text. Nothing else may take that poll, which runs the map's script first. A menu's key
+  disarms the turn (`Ctx::menu_key_pressed`), and an arrow tile carries a walk rather than ending it.
 - The emulated agent asks only when the player is free: a d-pad bit in `wJoyIgnore` reads as
   `GameMode::Script`, and `blackout_in_flight` holds the ask from any battle's end until its map is
   entered again, which `wIsInBattle` alone does not cover. `RunningScript` presses nothing while a

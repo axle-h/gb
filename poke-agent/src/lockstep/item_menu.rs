@@ -68,9 +68,10 @@ pub(super) fn the_bag(gb: &GameBoy) -> Inventory {
 }
 
 /// Everything these screens read: the name, the events, the text speed, the money and the coins,
-/// the bag, the party. Only those: a test comparing anything else, such as the badges, the rival's
-/// name, the Pokedex or a party member's OT, has to fill it itself, or the difference it sees is
-/// this world's rather than what it is testing. The party here carries no OT; `status_screen`'s does.
+/// the bag, the party, and the cartridge's bugs. Only those: a test comparing anything else, such as
+/// the badges, the rival's name, the Pokedex or a party member's OT, has to fill it itself, or the
+/// difference it sees is this world's rather than what it is testing. The party here carries no OT;
+/// `status_screen`'s does.
 pub(super) fn the_world(gb: &GameBoy) -> World {
     let mmu = gb.core().mmu();
     let mut world = World {
@@ -79,6 +80,7 @@ pub(super) fn the_world(gb: &GameBoy) -> World {
         bag: the_bag(gb),
         money: mmu.read_slice(sym::wPlayerMoney.address, 3).try_into().unwrap(),
         coins: mmu.read_slice(sym::wPlayerCoins.address, 2).try_into().unwrap(),
+        cartridge_bugs: true,
         ..World::default()
     };
     world.options.text_speed = match mmu.read_game_options().expect("the fixture's options").text_speed {

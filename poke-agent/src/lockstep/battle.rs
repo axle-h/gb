@@ -347,6 +347,7 @@ fn recreation(gb: &GameBoy, opponent: Opponent, lead: Lead, tape: Vec<u8>) -> Ga
 pub(super) fn recreation_with(gb: &GameBoy, opponent: Opponent, lead: Lead, tape: Vec<u8>, skip_seams: bool) -> Game {
     let mmu = gb.core().mmu();
     let mut world = the_world(gb);
+    world.cartridge_bugs = true;
     world.player_id = word(gb, sym::wPlayerID.address);
     world.badges = mmu.read_pointer(&sym::wObtainedBadges);
     world.bag = super::item_menu::the_bag(gb);

@@ -15,11 +15,16 @@ pub fn tile_passable(tileset: TileSetId, tile: u8) -> bool {
     collision_tiles(tileset).contains(&tile)
 }
 
-/// `CheckForTilePairCollisions`, walking the table's bytes as the routine does. A row whose first
-/// tile matches and whose second does not leaves the pointer on that second tile, which the next
-/// pass then reads as a tileset: the table is parsed out of step from there on.
+/// `CheckForTilePairCollisions`.
 pub fn tile_pair_collision(tileset: u8, standing: u8, front: u8, water: bool) -> bool {
     let table = rom_slice(if water { pokered_symbols::TilePairCollisionsWater } else { pokered_symbols::TilePairCollisionsLand });
+    pair_in(table, tileset, standing, front)
+}
+
+/// The routine's walk over a table's bytes. No switch keeps the cartridge's version: a row whose
+/// first tile matched and second did not left it a byte out of step, which the shipped tables never
+/// make a difference to (no row of theirs repeats a tileset's first tile further down).
+fn pair_in(table: &[u8], tileset: u8, standing: u8, front: u8) -> bool {
     let mut hl = 0;
     loop {
         let a = table[hl];
@@ -36,6 +41,7 @@ pub fn tile_pair_collision(tileset: u8, standing: u8, front: u8, water: bool) ->
             if table[hl] == front {
                 return true;
             }
+            hl += 1;
             continue;
         }
         hl += 1;
@@ -146,6 +152,15 @@ mod tests {
         for ((tileset, standing, front, water), collides, _) in cases::<(u8, u8, u8, bool), bool>(include_str!("../../../fixtures/overworld/tile_pair_collisions.jsonl")) {
             assert_eq!(tile_pair_collision(tileset, standing, front, water), collides, "{tileset} ${standing:02X} ${front:02X} {water}");
         }
+    }
+
+    #[test]
+    fn a_pair_whose_first_tile_alone_matches_leaves_the_table_in_step() {
+        const CAVERN: u8 = TileSetId::Cavern as u8;
+        let table = [CAVERN, 0x20, 0x05, CAVERN, 0x20, 0x06, 0xFF];
+        assert!(pair_in(&table, CAVERN, 0x20, 0x06));
+        assert!(pair_in(&table, CAVERN, 0x06, 0x20));
+        assert!(!pair_in(&table, CAVERN, 0x20, 0x07));
     }
 
     #[test]

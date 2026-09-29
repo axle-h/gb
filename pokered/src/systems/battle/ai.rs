@@ -13,7 +13,8 @@ use crate::systems::math::divide;
 use super::damage::{ai_get_type_effectiveness, AI_NEUTRAL};
 use super::effects::stat_modifiers::stat_modifier_up_effect;
 use super::effects::BattleText;
-use super::{effect, status, Battle, BattleKind, Status1, Status2, Status3};
+use super::modified_stats::calculate_modified_stat;
+use super::{effect, stat, status, Battle, BattleKind, Side, Status1, Status2, Status3};
 
 /// `AIEnemyTrainerChooseMoves`'s starting score: the lowest score wins.
 const NEUTRAL_SCORE: u8 = 10;
@@ -241,7 +242,8 @@ pub fn trainer_ai(battle: &mut Battle, badges: u8, rng: &mut impl Rng) -> (Optio
         Blackbelt => (random < PERCENT_13_LESS_1).then_some(Use::Item(ItemId::XAttack)),
         Giovanni => (random < PERCENT_25_PLUS_1).then_some(Use::Item(ItemId::GuardSpec)),
         CooltrainerM | Koga => (random < PERCENT_25_PLUS_1).then_some(Use::Item(ItemId::XAttack)),
-        // The 25% gate is compared and never tested.
+        // The cartridge compares the 25% gate and never tests it.
+        CooltrainerF if random >= PERCENT_25_PLUS_1 && !battle.cartridge_bugs => None,
         CooltrainerF => if below(10, battle) { item(ItemId::HyperPotion) }
             else if below(5, battle) { Some(Use::Switch) } else { None },
         Brock => (battle.enemy.mon.status != 0).then_some(Use::Item(ItemId::FullHeal)),
@@ -308,7 +310,7 @@ fn ai_use_item(battle: &mut Battle, item: ItemId, badges: u8) -> Vec<BattleText>
                 ItemId::XSpeed => effect::SPEED_UP1_EFFECT,
                 _ => effect::SPECIAL_UP1_EFFECT,
             };
-            let texts = stat_modifier_up_effect(battle, super::Side::Enemy, badges);
+            let texts = stat_modifier_up_effect(battle, Side::Enemy, badges);
             battle.enemy.current_move.animation = saved.animation;
             battle.enemy.current_move.effect = saved.effect;
             return texts;
@@ -319,14 +321,25 @@ fn ai_use_item(battle: &mut Battle, item: ItemId, badges: u8) -> Vec<BattleText>
 
 const XSTATITEM_DUPLICATE_ANIM: u8 = 0xAF;
 
-/// `AICureStatus`: the status byte of the mon out and of its party copy, and Toxic's flag.
+/// `AICureStatus`: the status byte of the mon out and of its party copy, and Toxic's flag. The stat
+/// paralysis or a burn lowered is worked out again.
 fn ai_cure_status(battle: &mut Battle) {
     let pos = battle.enemy.mon.party_pos as usize;
     if let Some(mon) = battle.enemy_party.get_mut(pos) {
         mon.mon.status = 0;
     }
+    let cured = battle.enemy.mon.status;
     battle.enemy.mon.status = 0;
     battle.enemy.status3.remove(Status3::BADLY_POISONED);
+    // The cartridge leaves the speed quartered or the attack halved.
+    if battle.cartridge_bugs {
+        return;
+    }
+    for (penalty, index) in [(status::PAR, stat::SPEED), (status::BRN, stat::ATTACK)] {
+        if cured & penalty != 0 {
+            calculate_modified_stat(battle, Side::Enemy, index - stat::ATTACK);
+        }
+    }
 }
 
 /// `AISwitchIfEnoughMons`: a switch if two or more of the party have HP. `SwitchEnemyMon` copies the
@@ -348,7 +361,10 @@ fn ai_switch_if_enough_mons(battle: &mut Battle) -> (Option<AiAction>, Vec<Battl
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
+    use crate::rng::GameRng;
     use super::super::fixture::each_case;
+    use super::super::modified_stats::apply_burn_and_paralysis_penalties;
+    use super::super::BASE_STAT_LEVEL;
     use super::*;
 
     #[test]
@@ -364,6 +380,42 @@ mod tests {
             select_enemy_move(&mut arena.battle, rng);
             Value::Null
         });
+    }
+
+    /// The baseline battle playing the fixes, against a trainer whose class has `routine`.
+    fn against(routine: AiRoutine) -> super::super::Arena {
+        let mut arena = super::super::Arena::baseline();
+        arena.battle.cartridge_bugs = false;
+        arena.battle.kind = BattleKind::Trainer;
+        arena.battle.ai_count = 0xFF;
+        arena.battle.trainer_class = (1..).find(|&class| AiRoutine::of(ai_pointer(class).1) == routine).unwrap();
+        arena
+    }
+
+    #[test]
+    fn cooltrainer_f_heals_or_switches_a_quarter_of_the_time() {
+        for (random, action) in [(PERCENT_25_PLUS_1, None), (0, Some(AiAction::UseItem(ItemId::HyperPotion)))] {
+            let mut arena = against(AiRoutine::CooltrainerF);
+            arena.battle.enemy.mon.hp = 1;
+            assert_eq!(trainer_ai(&mut arena.battle, 0, &mut GameRng::tape(vec![random])).0, action, "{random}");
+        }
+    }
+
+    #[test]
+    fn a_full_heal_lifts_the_penalty_its_status_left() {
+        for (cured, which) in [(status::PAR, stat::SPEED), (status::BRN, stat::ATTACK)] {
+            let mut arena = against(AiRoutine::Brock);
+            let enemy = &mut arena.battle.enemy;
+            enemy.stat_mods[which - stat::ATTACK] = BASE_STAT_LEVEL + 1;
+            calculate_modified_stat(&mut arena.battle, Side::Enemy, which - stat::ATTACK);
+            let before = arena.battle.enemy.mon.stats;
+            arena.battle.enemy.mon.status = cured;
+            apply_burn_and_paralysis_penalties(&mut arena.battle, Side::Enemy);
+            assert_ne!(arena.battle.enemy.mon.stats, before);
+            let (action, _) = trainer_ai(&mut arena.battle, 0, &mut GameRng::tape(vec![0]));
+            assert_eq!(action, Some(AiAction::UseItem(ItemId::FullHeal)));
+            assert_eq!(arena.battle.enemy.mon.stats, before, "{cured}");
+        }
     }
 
     #[test]

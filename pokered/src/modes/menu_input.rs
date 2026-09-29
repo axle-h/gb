@@ -152,6 +152,7 @@ impl MenuInput {
             }
             return None;
         }
+        ctx.menu_key_pressed = true;
         let mut stopped_at_an_end = false;
         if keys.contains(Joypad::UP) {
             if self.current > 0 {

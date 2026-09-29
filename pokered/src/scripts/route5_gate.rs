@@ -6,7 +6,7 @@ use poke_core::symbols::pokered_map_scripts::{SCRIPT_ROUTE5GATE_DEFAULT, SCRIPT_
 use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
-use super::{text_at, Flow, Script};
+use super::{text_at, Code, Flow, Script};
 
 /// `PLAYER_DIR_LEFT`.
 const PLAYER_DIR_LEFT: u8 = 2;
@@ -23,7 +23,7 @@ pub struct State {
 pub enum Label {
     Thirsty,
     MovedBack,
-    /// The shared text's own branches, whichever gate it was reached from.
+    /// The shared text turning a thirsty player back, as the cartridge does from any gate.
     SharedThirsty,
     GaveDrink,
 }
@@ -64,20 +64,24 @@ fn player_moving(rt: &mut Script) -> Flow {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     match text_id {
-        TEXT_ROUTE5GATE_GUARD => Some(guard_text(rt)),
+        TEXT_ROUTE5GATE_GUARD => Some(guard_text(rt, Label::Thirsty)),
         _ => None,
     }
 }
 
-/// `SaffronGateGuardText`, which every Saffron gate's text table points at: it walks the player up
-/// and arms Route 5's gate script whichever of the four gates they are standing in.
-pub fn guard_text(rt: &mut Script) -> Flow {
+/// `SaffronGateGuardText`, which every Saffron gate's text table points at. A thirsty player is
+/// turned back by `thirsty`, the gate's own push and script.
+pub fn guard_text(rt: &mut Script, thirsty: impl Into<Code>) -> Flow {
     if rt.gave_saffron_guards_drink() {
         return rt.print_text(text_at(sym::SaffronGateGuardThanksForTheDrinkText)).ret();
     }
     match rt.remove_guard_drink() {
         Some(_) => rt.print_text(text_at(sym::SaffronGateGuardGiveDrinkText)).then(Label::GaveDrink),
-        None => rt.print_text(text_at(sym::SaffronGateGuardGeeImThirstyText)).then(Label::SharedThirsty),
+        None => {
+            let flow = rt.print_text(text_at(sym::SaffronGateGuardGeeImThirstyText));
+            // The cartridge walks the player up and arms Route 5's gate script from every gate.
+            if rt.cartridge_bugs() { flow.then(Label::SharedThirsty) } else { flow.then(thirsty) }
+        }
     }
 }
 

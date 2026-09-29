@@ -11,7 +11,7 @@ use crate::pokemon::menu::TextBoxId;
 use crate::pokemon::{PokemonApi, PokemonApiTrait};
 
 /// Which way an item is moving between the bag and PC item storage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PcItemOp {
     Deposit,
     Withdraw,

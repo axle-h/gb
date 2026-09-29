@@ -153,33 +153,45 @@ pub fn check_status_conditions(battle: &mut Battle, party: &[PartyMon], side: Si
 }
 
 /// `HandleSelfConfusionDamage` and the enemy's copy inside its status check: a typeless 40-power
-/// hit on its own defense, which stands in for the target's for the calculation and so is doubled
-/// by the *target's* Reflect. It never crits, is not randomised, and leaves the move's power at 40
-/// and its type Normal. It lands on the mon itself, or on the other mon's substitute if the mon has
-/// one of its own.
+/// hit on its own defense under its own Reflect, which stand in for the target's for the
+/// calculation. It never crits, is not randomised, and lands on the mon itself.
 pub fn handle_self_confusion_damage(battle: &mut Battle, party: &[PartyMon], side: Side) -> Vec<BattleText> {
     let mut texts = vec![BattleText::HurtItselfText];
+    let bugs = battle.cartridge_bugs;
     let target_defense = battle.side(side.other()).mon.stats[stat::DEFENSE];
+    let target_status3 = battle.side(side.other()).status3;
     battle.side_mut(side.other()).mon.stats[stat::DEFENSE] = battle.side(side).mon.stats[stat::DEFENSE];
+    // The cartridge leaves the target's Reflect in play.
+    if !bugs {
+        let own_reflect = battle.side(side).status3 & Status3::HAS_REFLECT_UP;
+        let target = &mut battle.side_mut(side.other()).status3;
+        *target = *target - Status3::HAS_REFLECT_UP | own_reflect;
+    }
     let me = battle.side_mut(side);
-    let saved_effect = me.current_move.effect;
+    let saved = me.current_move;
     me.current_move.effect = 0;
     me.current_move.power = 40;
     me.current_move.move_type = 0;
     battle.critical_hit_or_ohko = CriticalHitOrOhko::Normal;
     let vars = get_damage_vars(battle, party, side).expect("40 power");
     calculate_damage(battle, side, vars);
-    battle.side_mut(side).current_move.effect = saved_effect;
-    battle.side_mut(side.other()).mon.stats[stat::DEFENSE] = target_defense;
+    let me = battle.side_mut(side);
+    me.current_move.effect = saved.effect;
+    // The cartridge leaves power 40 and Normal type behind, which Counter reads.
+    if !bugs {
+        (me.current_move.power, me.current_move.move_type) = (saved.power, saved.move_type);
+    }
+    let target = battle.side_mut(side.other());
+    target.mon.stats[stat::DEFENSE] = target_defense;
+    target.status3 = target_status3;
     texts.extend(apply_damage_to_pokemon(battle, side, side));
     texts
 }
 
 /// `HandlePoisonBurnLeechSeed` at the end of `side`'s turn: an eighth of an eighth of the max HP in
 /// sixteen bits that assume a max below 1024, at least 1 in the low byte, off the mon for poison or a
-/// burn and again for Leech Seed, which gives the other mon what the drain would have been even when
-/// less was left. Badly poisoned, each drain counts the toxic counter up and multiplies by it,
-/// Leech Seed's included. Whether the mon fainted.
+/// burn and again for Leech Seed, which gives the other mon what it drained. Badly poisoned, each
+/// poison drain counts the toxic counter up and multiplies by it. Whether the mon fainted.
 pub fn handle_poison_burn_leech_seed(battle: &mut Battle, side: Side) -> (bool, Vec<BattleText>) {
     let mut texts = vec![];
     let me = battle.side(side);
@@ -188,24 +200,44 @@ pub fn handle_poison_burn_leech_seed(battle: &mut Battle, side: Side) -> (bool, 
         decrease_own_hp(battle, side);
     }
     if battle.side(side).status2.contains(Status2::SEEDED) {
-        let drained = decrease_own_hp(battle, side);
-        let other = &mut battle.side_mut(side.other()).mon;
-        other.hp = other.hp.wrapping_add(drained);
-        if other.hp >= other.stats[0] {
-            other.hp = other.stats[0];
-        }
+        drain_leech_seed(battle, side);
         texts.push(BattleText::HurtByLeechSeedText);
     }
     (battle.side(side).mon.hp == 0, texts)
 }
 
-/// `HandlePoisonBurnLeechSeed_DecreaseOwnHP`: the damage worked out, whatever of it was left to take.
+/// `HandlePoisonBurnLeechSeed_DecreaseOwnHP` for poison or a burn: the damage worked out, whatever
+/// of it was left to take.
 pub fn decrease_own_hp(battle: &mut Battle, side: Side) -> u16 {
+    // The cartridge multiplies a burn by the toxic counter too, when the flag outlived the poison.
+    let toxic = battle.cartridge_bugs || battle.side(side).mon.status & status::PSN != 0;
+    lose_residual_hp(battle, side, toxic)
+}
+
+/// `HandlePoisonBurnLeechSeed_DecreaseOwnHP` and `_IncreaseEnemyHP` for Leech Seed: the drain onto
+/// the other mon, up to its max.
+pub fn drain_leech_seed(battle: &mut Battle, side: Side) {
+    let cartridge_bugs = battle.cartridge_bugs;
+    let before = battle.side(side).mon.hp;
+    // The cartridge multiplies the drain by the toxic counter, and heals all of it even when less
+    // was left.
+    let damage = lose_residual_hp(battle, side, cartridge_bugs);
+    let drained = if cartridge_bugs { damage } else { before - battle.side(side).mon.hp };
+    let other = &mut battle.side_mut(side.other()).mon;
+    other.hp = other.hp.wrapping_add(drained);
+    if other.hp >= other.stats[0] {
+        other.hp = other.stats[0];
+    }
+}
+
+/// An eighth of an eighth of the max HP, times the toxic counter counted up when badly poisoned and
+/// `toxic`, off the mon's HP, never below 0.
+fn lose_residual_hp(battle: &mut Battle, side: Side, toxic: bool) -> u16 {
     let me = battle.side_mut(side);
     let quarter = me.mon.stats[0] >> 2;
     let low = ((quarter & 0xFF) as u8 >> 2).max(1);
     let mut damage = (quarter >> 8) << 8 | low as u16;
-    if me.status3.contains(Status3::BADLY_POISONED) {
+    if toxic && me.status3.contains(Status3::BADLY_POISONED) {
         me.toxic_counter = me.toxic_counter.wrapping_add(1);
         let ticks = if me.toxic_counter == 0 { 256 } else { me.toxic_counter as u16 };
         damage = damage.wrapping_mul(ticks);
@@ -408,6 +440,33 @@ mod tests {
         each_case(include_str!("../../../fixtures/battle/handle_poison_burn_leech_seed.jsonl"), |arena, input, _| {
             json!(handle_poison_burn_leech_seed(&mut arena.battle, side(input)))
         });
+    }
+
+    /// The baseline battle playing the fixes, the enemy seeded and badly poisoned 5 turns in with
+    /// `status`, at `hp` against a player at 1 HP: the enemy's HP, the player's and the toxic counter
+    /// after the enemy's turn.
+    fn seeded(status: u8, hp: u16) -> (u16, u16, u8) {
+        let mut arena = super::super::Arena::baseline();
+        let battle = &mut arena.battle;
+        battle.cartridge_bugs = false;
+        battle.player.mon.hp = 1;
+        let enemy = &mut battle.enemy;
+        enemy.mon.status = status;
+        enemy.mon.hp = hp;
+        enemy.status2 |= Status2::SEEDED;
+        enemy.status3 |= Status3::BADLY_POISONED;
+        enemy.toxic_counter = 5;
+        handle_poison_burn_leech_seed(battle, Side::Enemy);
+        (battle.enemy.mon.hp, battle.player.mon.hp, battle.enemy.toxic_counter)
+    }
+
+    #[test]
+    fn only_poison_counts_toxic_and_leech_seed_heals_what_it_drained() {
+        let sixteenth = super::super::Arena::baseline().battle.enemy.mon.stats[stat::MAX_HP] >> 4;
+        assert_eq!(seeded(status::PSN, 200), (200 - 7 * sixteenth, 1 + sixteenth, 6));
+        assert_eq!(seeded(status::BRN, 200), (200 - 2 * sixteenth, 1 + sixteenth, 5));
+        assert_eq!(seeded(2, 200), (200 - sixteenth, 1 + sixteenth, 5));
+        assert_eq!(seeded(2, 1), (0, 2, 5));
     }
 
     #[test]

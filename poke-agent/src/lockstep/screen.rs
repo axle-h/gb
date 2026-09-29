@@ -174,10 +174,10 @@ fn settled_cgb(state: &[u8]) -> GameBoy {
 
 fn assert_same_colours(state: &[u8], name: &str) {
     let gb = settled_cgb(state);
-    let ours = ColourMode::Gbc.rgb(&screen_from(&gb));
+    let ours = ColourMode::Gbc.rgba(&screen_from(&gb));
     let lcd: Vec<u8> = gb.core().mmu().ppu().screenshot().pixels().flat_map(|pixel| pixel.0).collect();
     let wrong: Vec<(usize, usize)> = (0..WIDTH * HEIGHT)
-        .filter(|&i| ours[i * 3..i * 3 + 3] != lcd[i * 3..i * 3 + 3])
+        .filter(|&i| ours[i * 4..i * 4 + 3] != lcd[i * 3..i * 3 + 3] || ours[i * 4 + 3] != 0xFF)
         .map(|i| (i % WIDTH, i / WIDTH))
         .collect();
     assert!(wrong.is_empty(), "{name}: {} pixels differ, first {:?}", wrong.len(), &wrong[..wrong.len().min(8)]);

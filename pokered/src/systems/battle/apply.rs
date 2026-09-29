@@ -4,6 +4,7 @@
 use poke_core::move_name::PokemonMoveName;
 use crate::rng::Rng;
 use super::effects::stat_modifiers::stat_modifier_up_effect;
+use super::damage::{FIGHTING, NORMAL};
 use super::effects::BattleText;
 use super::{effect, Battle, Side, Status2, MAX_STAT_LEVEL};
 
@@ -12,9 +13,8 @@ const DRAGON_RAGE_DAMAGE: u8 = 40;
 
 /// `ApplyAttackToEnemyPokemon` or `ApplyAttackToPlayerPokemon` for `attacker`'s move: a one-hit KO's
 /// 65535, half the target's HP for Super Fang, the user's level for Seismic Toss and Night Shade, 20
-/// and 40 for Sonic Boom and Dragon Rage, and for Psywave a random byte below one and a half times
-/// the level, in a byte, which the player's copy also draws again at 0. A move with no power
-/// deals nothing.
+/// and 40 for Sonic Boom and Dragon Rage, and for Psywave a random byte from 1 to below one and a
+/// half times the level, in a byte, and never below 2. A move with no power deals nothing.
 pub fn apply_attack_to_pokemon(battle: &mut Battle, attacker: Side, rng: &mut impl Rng) -> Vec<BattleText> {
     let user = battle.side(attacker);
     let (current, level) = (user.current_move, user.mon.level);
@@ -32,10 +32,15 @@ pub fn apply_attack_to_pokemon(battle: &mut Battle, attacker: Side, rng: &mut im
             } else if name == PokemonMoveName::DragonRage as u8 {
                 DRAGON_RAGE_DAMAGE
             } else {
-                let bound = level.wrapping_add(level >> 1);
+                let mut bound = level.wrapping_add(level >> 1);
+                // The cartridge lets the enemy roll 0, and the player's roll never ends at level 1.
+                let zero_allowed = battle.cartridge_bugs && attacker == Side::Enemy;
+                if !battle.cartridge_bugs {
+                    bound = bound.max(2);
+                }
                 loop {
                     let random = rng.random();
-                    if (attacker == Side::Enemy || random != 0) && random < bound {
+                    if (zero_allowed || random != 0) && random < bound {
                         break random;
                     }
                 }
@@ -50,12 +55,25 @@ pub fn apply_attack_to_pokemon(battle: &mut Battle, attacker: Side, rng: &mut im
 
 /// `ApplyDamageToEnemyPokemon` or `ApplyDamageToPlayerPokemon`: `wDamage` off `target`'s HP, or
 /// off a substitute if it has one; overkill leaves 0 HP and `wDamage` what the HP was. `turn` is
-/// `hWhoseTurn`, which `AttackSubstitute` reads: self-inflicted damage hits the *other* substitute.
+/// `hWhoseTurn`: damage a mon does itself ignores substitutes. What `turn`'s move did to the other
+/// mon is kept for Counter.
 pub fn apply_damage_to_pokemon(battle: &mut Battle, target: Side, turn: Side) -> Vec<BattleText> {
     if battle.damage == 0 {
         return vec![];
     }
-    if battle.side(target).status2.contains(Status2::HAS_SUBSTITUTE_UP) {
+    let texts = damage_hp_or_substitute(battle, target, turn);
+    let current = battle.side(turn).current_move;
+    if !battle.cartridge_bugs && target != turn && current.power != 0
+        && matches!(current.move_type, NORMAL | FIGHTING) && current.animation != PokemonMoveName::Counter as u8 {
+        battle.side_mut(turn).counter_damage = battle.damage;
+    }
+    texts
+}
+
+fn damage_hp_or_substitute(battle: &mut Battle, target: Side, turn: Side) -> Vec<BattleText> {
+    // The cartridge swaps `hWhoseTurn` for self-inflicted damage, so it hits the *other* substitute.
+    let self_inflicted = target == turn && !battle.cartridge_bugs;
+    if battle.side(target).status2.contains(Status2::HAS_SUBSTITUTE_UP) && !self_inflicted {
         return attack_substitute(battle, turn);
     }
     let damage = battle.damage;
@@ -112,8 +130,12 @@ pub fn handle_building_rage(battle: &mut Battle, attacker: Side, badges: u8) -> 
 
 #[cfg(test)]
 mod tests {
+    use poke_core::moves::MoveData;
     use serde_json::{json, Value};
+    use crate::rng::GameRng;
     use super::super::fixture::{each_case, side};
+    use super::super::turn::handle_self_confusion_damage;
+    use super::super::Arena;
     use super::*;
 
     #[test]
@@ -121,6 +143,38 @@ mod tests {
         each_case(include_str!("../../../fixtures/battle/apply_attack_to_pokemon.jsonl"), |arena, input, rng| {
             json!([Value::Null, apply_attack_to_pokemon(&mut arena.battle, side(input), rng)])
         });
+    }
+
+    fn psywave(attacker: Side) -> u16 {
+        let mut arena = Arena::baseline();
+        arena.battle.cartridge_bugs = false;
+        let user = arena.battle.side_mut(attacker);
+        user.current_move = MoveData::of_move(PokemonMoveName::Psywave);
+        user.mon.level = 1;
+        apply_attack_to_pokemon(&mut arena.battle, attacker, &mut GameRng::tape(vec![0, 1]));
+        arena.battle.damage
+    }
+
+    #[test]
+    fn psywave_at_level_1_does_1_for_either_side() {
+        assert_eq!(psywave(Side::Player), 1);
+        assert_eq!(psywave(Side::Enemy), 1);
+    }
+
+    #[test]
+    fn damage_a_mon_does_itself_ignores_substitutes() {
+        let mut arena = Arena::baseline();
+        arena.battle.cartridge_bugs = false;
+        for side in [Side::Player, Side::Enemy] {
+            let combatant = arena.battle.side_mut(side);
+            combatant.status2 |= Status2::HAS_SUBSTITUTE_UP;
+            combatant.substitute_hp = 50;
+        }
+        let party = arena.party.clone();
+        handle_self_confusion_damage(&mut arena.battle, &party, Side::Player);
+        let (player, enemy) = (&arena.battle.player, &arena.battle.enemy);
+        assert!(player.mon.hp < player.mon.stats[0]);
+        assert_eq!((player.substitute_hp, enemy.substitute_hp), (50, 50));
     }
 
     #[test]

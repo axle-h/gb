@@ -2,11 +2,12 @@
 //! engine a player can switch at run time.
 //!
 //! Input: a [`Screen`], whose composed [`Framebuffer`] has already been through `BGP`, `OBP0` and
-//! `OBP1`. Output: RGB, three bytes a pixel, of [`ColourMode::size`].
+//! `OBP1`. Output: RGBA, [`BYTES_PER_PIXEL`] bytes a pixel, of [`ColourMode::size`].
 //!
 //! Exact: the DMG ramp `gb` puts on the LCD; the CGB's compatibility mapping, which takes a shade
 //! back through the register that produced it and into CGB palette 0 for the background and
-//! palette 0 or 1 for objects; the SGB's per-cell palettes, which are [`crate::gfx::sgb`]'s.
+//! palette 0 or 1 for objects; the SGB's per-cell palettes, which are [`crate::gfx::sgb`]'s, over
+//! the frame composed through the registers the cartridge's `wOnSGB` branches pick for an SGB.
 //!
 //! Nothing here is state: a mode is a choice made at the moment of painting, so a host can offer
 //! all four and switch between them mid-frame.
@@ -38,8 +39,18 @@ pub enum Source {
     Object1,
 }
 
+/// Bytes `R, G, B, A` in memory, which is SDL's `RGBA32` on any endianness, so a host uploads a
+/// frame into a texture of that format as it stands.
+pub const BYTES_PER_PIXEL: usize = 4;
+
+const OPAQUE: u8 = 0xFF;
+
 /// The shades as they reach the LCD, which is the ramp every committed screenshot depends on.
-const DMG: [[u8; 3]; 4] = [[0xFF; 3], [0xAA; 3], [0x55; 3], [0x00; 3]];
+const DMG: [[u8; BYTES_PER_PIXEL]; 4] = [grey(0xFF), grey(0xAA), grey(0x55), grey(0x00)];
+
+const fn grey(level: u8) -> [u8; BYTES_PER_PIXEL] {
+    [level, level, level, OPAQUE]
+}
 
 /// What a CGB boot ROM installs for `POKEMON RED`: combination 13 of `gb::boot_palette`, which is
 /// `palette_comb 3, 4, 4`, so the background and the `OBP1` objects share the red ramp and the
@@ -57,14 +68,13 @@ impl ColourMode {
         }
     }
 
-    /// RGB, three bytes a pixel, row by row.
-    pub fn rgb(self, screen: &Screen) -> Vec<u8> {
-        let frame = screen.frame();
+    /// RGBA, row by row.
+    pub fn rgba(self, screen: &Screen) -> Vec<u8> {
         match self {
-            ColourMode::Dmg => frame.shades.iter().flat_map(|&shade| DMG[shade as usize]).collect(),
-            ColourMode::Gbc => gbc(&frame),
-            ColourMode::Sgb => sgb(screen, &frame),
-            ColourMode::SgbBorder => border::rgb(&sgb(screen, &frame)),
+            ColourMode::Dmg => screen.frame().shades.iter().flat_map(|&shade| DMG[shade as usize]).collect(),
+            ColourMode::Gbc => gbc(&screen.frame()),
+            ColourMode::Sgb => sgb(screen),
+            ColourMode::SgbBorder => border::rgba(&sgb(screen)),
         }
     }
 }
@@ -82,8 +92,9 @@ fn gbc(frame: &Framebuffer) -> Vec<u8> {
         .collect()
 }
 
-fn sgb(screen: &Screen, frame: &Framebuffer) -> Vec<u8> {
-    let mut out = Vec::with_capacity(WIDTH * HEIGHT * 3);
+fn sgb(screen: &Screen) -> Vec<u8> {
+    let frame = screen.sgb_frame();
+    let mut out = Vec::with_capacity(WIDTH * HEIGHT * BYTES_PER_PIXEL);
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let palette = screen.sgb.cell_palette(x / 8, y / 8);
@@ -93,11 +104,11 @@ fn sgb(screen: &Screen, frame: &Framebuffer) -> Vec<u8> {
     out
 }
 
-/// A `0bBBBBBGGGGGRRRRR` colour widened to 24 bits the way the hardware does, each channel's top
-/// bits replicated into its low ones.
-pub(crate) fn rgb555(colour: u16) -> [u8; 3] {
+/// A `0bBBBBBGGGGGRRRRR` colour widened to 8 bits a channel the way the hardware does, each
+/// channel's top bits replicated into its low ones, and opaque.
+pub(crate) fn rgb555(colour: u16) -> [u8; BYTES_PER_PIXEL] {
     let expand = |channel: u16| ((channel << 3) | (channel >> 2)) as u8;
-    [expand(colour & 0x1F), expand((colour >> 5) & 0x1F), expand((colour >> 10) & 0x1F)]
+    [expand(colour & 0x1F), expand((colour >> 5) & 0x1F), expand((colour >> 10) & 0x1F), OPAQUE]
 }
 
 #[cfg(test)]
@@ -108,9 +119,9 @@ mod tests {
 
     #[test]
     fn a_colour_widens_the_way_the_hardware_widens_it() {
-        assert_eq!(rgb555(0x7FFF), [0xFF; 3]);
-        assert_eq!(rgb555(0x0000), [0x00; 3]);
-        assert_eq!(rgb555(0x421F), [0xFF, 0x84, 0x84], "the boot palette's salmon");
+        assert_eq!(rgb555(0x7FFF), [0xFF; 4]);
+        assert_eq!(rgb555(0x0000), [0x00, 0x00, 0x00, 0xFF]);
+        assert_eq!(rgb555(0x421F), [0xFF, 0x84, 0x84, 0xFF], "the boot palette's salmon");
     }
 
     #[test]
@@ -126,12 +137,12 @@ mod tests {
         let screen = Screen::default();
         for mode in [ColourMode::Dmg, ColourMode::Gbc, ColourMode::Sgb, ColourMode::SgbBorder] {
             let (width, height) = mode.size();
-            let rgb = mode.rgb(&screen);
-            assert_eq!(rgb.len(), width * height * 3, "{mode:?}");
+            let rgba = mode.rgba(&screen);
+            assert_eq!(rgba.len(), width * height * 4, "{mode:?}");
         }
-        assert_eq!(&ColourMode::Dmg.rgb(&screen)[..3], &[0xFF; 3]);
-        assert_eq!(&ColourMode::Gbc.rgb(&screen)[..3], &[0xFF; 3]);
-        assert_eq!(&ColourMode::Sgb.rgb(&screen)[..3], &[0xFF, 0xEF, 0xFF], "31,29,31");
+        assert_eq!(&ColourMode::Dmg.rgba(&screen)[..4], &[0xFF; 4]);
+        assert_eq!(&ColourMode::Gbc.rgba(&screen)[..4], &[0xFF; 4]);
+        assert_eq!(&ColourMode::Sgb.rgba(&screen)[..4], &[0xFF, 0xEF, 0xFF, 0xFF], "31,29,31");
     }
 
     /// The SGB colours the screen rather than the game's layers, so what a cell's palette is
@@ -147,12 +158,26 @@ mod tests {
             player: PAL_BLACK,
             enemy: PAL_GRAYMON,
         });
-        let rgb = ColourMode::Sgb.rgb(&screen);
+        let rgba = ColourMode::Sgb.rgba(&screen);
         let at = |x: usize, y: usize| {
-            let i = (y * WIDTH + x) * 3;
-            [rgb[i], rgb[i + 1], rgb[i + 2]]
+            let i = (y * WIDTH + x) * 4;
+            [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
         };
         assert_eq!(at(4 * 8, 8 * 8), rgb555(super_palette(PAL_BLACK)[3]), "the player's mon");
         assert_eq!(at(15 * 8, 3 * 8), rgb555(super_palette(PAL_GRAYMON)[3]), "the enemy's");
+    }
+
+    /// `AnimationDarkenMonPalette`'s pick, painted: the colour modes that are not an SGB see the
+    /// DMG's register, the SGB ones the SGB's, whichever mode is chosen when.
+    #[test]
+    fn a_palette_picked_by_wonsgb_follows_the_colour_mode() {
+        use crate::gfx::layers::SgbPick;
+        let mut screen = Screen::default();
+        screen.effects.pick_bgp(SgbPick { dmg: 0xF9, sgb: 0xF4 });
+        assert_eq!(&ColourMode::Dmg.rgba(&screen)[..4], &DMG[1], "0xF9 takes colour 0 to shade 1");
+        assert_eq!(&ColourMode::Sgb.rgba(&screen)[..4], &[0xFF, 0xEF, 0xFF, 0xFF], "0xF4 keeps it at shade 0");
+
+        screen.effects.bgp = 0xE4;
+        assert_eq!(screen.sgb_frame(), screen.frame(), "a write that knows nothing of the SGB ends the pick");
     }
 }

@@ -28,6 +28,25 @@ pub const HEADLESS_OPTIONS: GameOptions = GameOptions {
     ..SERVED_OPTIONS
 };
 
+impl GameOptions {
+    /// The same choices as the recreation keeps them.
+    pub fn native(&self) -> pokered::world::Options {
+        use pokered::world;
+        pokered::world::Options {
+            text_speed: match self.text_speed {
+                TextSpeed::Slow => world::TextSpeed::Slow,
+                TextSpeed::Medium => world::TextSpeed::Medium,
+                TextSpeed::Fast => world::TextSpeed::Fast,
+            },
+            battle_animation: self.battle_animations_on,
+            battle_style: match self.battle_style {
+                BattleStyle::Set => world::BattleStyle::Set,
+                BattleStyle::Shift => world::BattleStyle::Shift,
+            },
+        }
+    }
+}
+
 pub trait GameOptionsReader {
     fn read_game_options(&self) -> Result<GameOptions, String>;
 }

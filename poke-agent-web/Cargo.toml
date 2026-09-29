@@ -11,6 +11,8 @@ slow-tests = []
 [dependencies]
 gb = { path = "../gb" }
 poke-agent = { path = "../poke-agent" }
+# The recreation, for a run served with `GB_GAME=native`.
+pokered = { path = "../pokered" }
 axum = "0.8"
 base64 = "0.22"
 # `/api/video`'s per-connection deflate stream, and the codec bench's yardstick.

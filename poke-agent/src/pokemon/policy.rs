@@ -627,7 +627,7 @@ pub enum PolicyStep {
 }
 
 /// A non-walking action the agent performs itself (menus, field moves) for the front step.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum FieldMove {
     /// Reorder the party so `slot` becomes the lead (RAM write, no menus).
     ReorderParty { slot: u8 },

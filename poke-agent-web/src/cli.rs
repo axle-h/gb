@@ -46,6 +46,11 @@ ENVIRONMENT (any policy):
                                 cgb is compatibility mode, so Pokemon Red comes out red-tinted
                                 exactly as it does on real hardware, and the video stream costs
                                 about 1.6x as much for the extra colours
+    GB_GAME                     What is played: emulated, the cartridge on the emulator, or
+                                native, the recreation in Rust [default: emulated]. A native
+                                run keeps game.pkrd where an emulated one keeps state.gbst and
+                                sram.bin, and each resumes only runs of its own kind. Under
+                                native, GB_HARDWARE=cgb paints the recreation in the CGB's colours
     GB_AUDIO_BITRATE            What /api/audio's Opus stream targets, in bits per second
                                 [default: 24000; 0 turns sound off]. Nothing is encoded until a
                                 viewer turns the page's speaker on
@@ -215,7 +220,7 @@ mod tests {
     fn the_usage_names_every_flag_and_variable() {
         for name in [
             "--port", "--policy", "--new-run", "--help",
-            "GB_PORT", "GB_POLICY", "GB_RUN_DIR", "GB_STATUS_HZ", "GB_HARDWARE", "GB_AUDIO_BITRATE",
+            "GB_PORT", "GB_POLICY", "GB_RUN_DIR", "GB_STATUS_HZ", "GB_HARDWARE", "GB_GAME", "GB_AUDIO_BITRATE",
             "OPENAI_API_KEY", "GB_MODEL", "OPENAI_BASE_URL",
             "GB_CONTEXT_LIMIT", "GB_TEMPERATURE", "GB_MAX_TOOL_STEPS", "GB_STUCK_TIMEOUT_SECS",
             // Every spelling `--policy` and `GB_POLICY` accept: `--help` is the only discovery.

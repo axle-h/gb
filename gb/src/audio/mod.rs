@@ -29,6 +29,11 @@ mod reference;
 
 pub const GB_SAMPLE_RATE: usize = 1048576; // Game Boy native audio frequency
 
+/// The mix reaches ±1 with all four channels at full amplitude, and the resampler's band-limited
+/// steps ring past it, so the output is scaled by this to keep those peaks under full scale. It is
+/// the recreation's `synth::HEADROOM`, so the two backends play at one level.
+const HEADROOM: f32 = 1.0 / 1.3;
+
 #[derive(Debug, Clone)]
 pub struct Audio {
     enabled: bool,
@@ -349,7 +354,7 @@ impl Audio {
         let channel4 = self.panning.channel4.pan(self.channel4.output_f32());
 
         let volume = self.master_volume.volume_sample();
-        volume * (channel1 + channel2 + channel3 + channel4) / 4.0
+        volume * (channel1 + channel2 + channel3 + channel4) * (HEADROOM / 4.0)
     }
 
     /// Hand the mixed output level to the resampler and advance its clock by `delta`.

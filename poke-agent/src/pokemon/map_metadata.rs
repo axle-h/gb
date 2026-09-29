@@ -671,9 +671,9 @@ impl MapMetadataCache {
             metadata: if map_uses_runtime_blocks(map) {
                 Arc::new(mmu.read_map_metadata_runtime(map)?)
             } else if crate::pokemon::tile_map::elevator_for(map).is_some() {
-                Arc::new(with_live_exits(mmu, &*self.read_map(mmu, map)?, warp_entry_exits(mmu)))
+                with_live_trees(mmu, map, Arc::new(with_live_exits(mmu, &*self.read_map(mmu, map)?, warp_entry_exits(mmu))))
             } else {
-                self.read_map(mmu, map)?
+                with_live_trees(mmu, map, self.read_map(mmu, map)?)
             },
             player_position: Point8 {
                 x: mmu.read_pointer(&pokered_symbols::wXCoord),
@@ -723,9 +723,9 @@ impl MapMetadataReader for MMU {
                 metadata: if map_uses_runtime_blocks(map) {
                     Arc::new(self.read_map_metadata_runtime(map)?)
                 } else if crate::pokemon::tile_map::elevator_for(map).is_some() {
-                    Arc::new(with_live_exits(self, &self.read_map_metadata(map)?, warp_entry_exits(self)))
+                    with_live_trees(self, map, Arc::new(with_live_exits(self, &self.read_map_metadata(map)?, warp_entry_exits(self))))
                 } else {
-                    Arc::new(self.read_map_metadata(map)?)
+                    with_live_trees(self, map, Arc::new(self.read_map_metadata(map)?))
                 },
                 player_position: Point8 {
                     x: self.read_pointer(&pokered_symbols::wXCoord),
@@ -748,20 +748,76 @@ impl MapMetadataReader for MMU {
 }
 
 /// Every map `ReplaceTileBlock` rewrites, built from the live `wOverworldMap` instead of ROM. A map
-/// missing here is offered rows through closed doors, and no finished-game fixture can show it.
+/// missing here is offered rows through closed doors, and no finished-game fixture can show it: a
+/// Silph card-key door the load code shuts is floor in the ROM's blocks.
 pub fn map_uses_runtime_blocks(map: Map) -> bool {
-    matches!(map,
-        Map::PokemonMansion1F | Map::PokemonMansion2F | Map::PokemonMansion3F
-        | Map::PokemonMansionB1F | Map::CinnabarGym
-        | Map::VictoryRoad1F | Map::VictoryRoad2F | Map::VictoryRoad3F
-        | Map::LoreleisRoom | Map::BrunosRoom | Map::AgathasRoom | Map::LancesRoom | Map::ChampionsRoom
-        | Map::VermilionGym | Map::GameCorner)
+    map_has_card_key_doors(map)
+        || matches!(map,
+            Map::PokemonMansion1F | Map::PokemonMansion2F | Map::PokemonMansion3F
+            | Map::PokemonMansionB1F | Map::CinnabarGym
+            | Map::VictoryRoad1F | Map::VictoryRoad2F | Map::VictoryRoad3F
+            | Map::LoreleisRoom | Map::BrunosRoom | Map::AgathasRoom | Map::LancesRoom | Map::ChampionsRoom
+            | Map::VermilionGym | Map::GameCorner)
 }
 
 /// [`MapMetadata`] for one of the maps a script rewrites the blocks of, given the live block map
 /// rather than the cartridge's. `rom` is read for the header and the tileset only.
 pub fn metadata_from_live_blocks(rom: &MMU, map: Map, blocks: Vec<u8>) -> Result<MapMetadata, String> {
     rom.finish_map_metadata(map, rom.read_map_header(map)?, blocks)
+}
+
+/// `metadata` with every tree the live block map no longer draws as floor. A cut lasts until the map
+/// is next loaded, and nothing but the live blocks says whether it has been; `live` reads the block
+/// at `(x, y)`, in blocks from the map's own corner.
+pub fn with_trees_cut(metadata: Arc<MapMetadata>, live: impl Fn(usize, usize) -> u8) -> Arc<MapMetadata> {
+    let Some(tree) = metadata.map_header.tileset.cut_tree_tile_id() else { return metadata };
+    let dimensions = metadata.dimensions();
+    let (exp_width, width) = (dimensions.full_width(), metadata.map_header.width as usize);
+    const TILES: usize = MapMetadata::TILES_PER_META;
+    const BLOCK: usize = MapMetadata::BLOCK_TILE_WIDTH;
+    let felled: Vec<usize> = metadata.meta_tiles_base.iter().enumerate()
+        .filter(|(_, tile)| **tile == MetaTile::CutTree)
+        .filter(|&(index, _)| {
+            // A connection strip's tree is the neighbour's.
+            let (Some(mx), Some(my)) = ((index % exp_width).checked_sub(dimensions.west_extra),
+                                        (index / exp_width).checked_sub(dimensions.north_extra)) else { return false };
+            if mx >= dimensions.meta_width || my >= dimensions.meta_height {
+                return false;
+            }
+            // The bottom-left sub-tile, the one `build_meta_tiles_base` classified.
+            let (tile_x, tile_y) = (mx * TILES, my * TILES + 1);
+            let (block_x, block_y) = (tile_x / BLOCK, tile_y / BLOCK);
+            let block = live(block_x, block_y);
+            block != metadata.map_data[block_x + block_y * width]
+                && metadata.tileset_data.get(block as usize * MapMetadata::BLOCK_TILES + tile_x % BLOCK + tile_y % BLOCK * BLOCK)
+                    != Some(&tree)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if felled.is_empty() {
+        return metadata;
+    }
+    let mut cut = (*metadata).clone();
+    for index in felled {
+        cut.meta_tiles_base[index] = MetaTile::Empty;
+    }
+    Arc::new(cut)
+}
+
+/// A block of the live `wOverworldMap`, which keeps a border of three blocks round the map.
+fn live_block(mmu: &MMU, width: usize) -> impl Fn(usize, usize) -> u8 + '_ {
+    const BORDER: usize = 3;
+    move |x, y| mmu.read(pokered_symbols::wOverworldMap.address + ((y + BORDER) * (width + BORDER * 2) + x + BORDER) as u16)
+}
+
+/// The cartridge's tables for `map`, with the trees cut on this visit taken down once its header is
+/// loaded: before that `wOverworldMap` may still be the last map's.
+fn with_live_trees(mmu: &MMU, map: Map, metadata: Arc<MapMetadata>) -> Arc<MapMetadata> {
+    if !map_header_is_loaded(mmu, map) {
+        return metadata;
+    }
+    let width = metadata.map_header.width as usize;
+    with_trees_cut(metadata, live_block(mmu, width))
 }
 
 /// The two halves of `MapMetadataReader`.
@@ -821,17 +877,10 @@ impl MapMetadataInternals for MMU {
     }
 
     fn read_map_metadata_runtime(&self, map: Map) -> Result<MapMetadata, String> {
-        const BORDER: usize = 3;
         let map_header = self.read_map_header(map)?;
         let (w, h) = (map_header.width as usize, map_header.height as usize);
-        let stride = w + BORDER * 2;
-        let base = pokered_symbols::wOverworldMap.address;
-        let mut map_data = vec![0u8; w * h];
-        for by in 0..h {
-            for bx in 0..w {
-                map_data[bx + by * w] = self.read(base + ((by + BORDER) * stride + (bx + BORDER)) as u16);
-            }
-        }
+        let live = live_block(self, w);
+        let map_data = (0..h).flat_map(|by| (0..w).map(move |bx| (bx, by))).map(|(bx, by)| live(bx, by)).collect();
         self.finish_map_metadata(map, map_header, map_data)
     }
 }
@@ -1250,6 +1299,24 @@ mod test {
             assert!(is_water_tile_id(WATER, true, tileset), "{tileset:?} keeps its real water");
         }
         assert!(!is_water_tile_id(WATER, false, TileSetId::House));
+    }
+
+    /// A Silph door the load code shuts is floor in the ROM's blocks, so the reader takes the floor
+    /// from `wOverworldMap`: without the Card Key a shut door is a wall, not a way west.
+    #[test]
+    fn a_silph_door_the_load_code_shut_is_a_wall_without_the_card_key() {
+        let mut gb = gb::game_boy::GameBoy::dmg(POKERED);
+        gb.load_state(include_bytes!("data/soak-silph-co.bin")).expect("the fixture loads");
+        let mut current = gb.core().mmu().read_current_map().unwrap();
+        assert_eq!(current.metadata.map, Map::SilphCo3F);
+        // The fixture holds the key, so the lock is put on by hand.
+        current.card_key_locked = true;
+        let map = MetaTileMap::new(&current);
+        // `SilphCo3FGateCallbackScript`'s gates, the east column of blocks (4, 4) and (8, 4), both
+        // shut here.
+        for (x, y) in [(9, 8), (9, 9), (17, 8), (17, 9)] {
+            assert_eq!(map.meta_tiles[x + y * map.width], MetaTile::Obstacle, "the door at ({x}, {y})");
+        }
     }
 
     /// Warp destinations match the disassembly's map objects.

@@ -188,6 +188,18 @@ pub enum AgentEvent {
 }
 
 impl AgentEvent {
+    /// `action` chosen in `state`. An item is used on someone, who is the actor of the sentence.
+    pub fn battle_action_started(state: &GameState, action: BattleAction) -> Self {
+        let actor = match action {
+            BattleAction::UseItem { target: Some(target), .. } => state.pokemon
+                .get(target as usize)
+                .map(|mon| mon.nickname.to_default_string())
+                .unwrap_or_else(|| active_pokemon_name(state)),
+            _ => active_pokemon_name(state),
+        };
+        AgentEvent::BattleActionStarted { actor, opponent: opponent_pokemon_name(state), action }
+    }
+
     pub fn text_box_from_reader(reader: &PokemonTextReader) -> Self {
         Self::TextBox { message: reader.to_string() }
     }
@@ -694,8 +706,6 @@ pub struct PokemonAgent {
     route_lost_to_people: bool,
     /// The map the agent was last on, to detect warp and connection landings.
     last_map: Option<Map>,
-    /// Trees the agent has cut down, by `(map, expanded tile position)`.
-    cut_tiles: std::collections::HashSet<(Map, Point8)>,
     /// The naming screen open now follows a catch, so its closing is the battle's end.
     naming_after_battle: bool,
     /// Silph Co door-graphic walls ($18/$24 that won't open), by `(map, tile position)`.
@@ -792,7 +802,6 @@ impl PokemonAgent {
             route_lost_ticks: 0,
             route_lost_to_people: false,
             last_map: None,
-            cut_tiles: std::collections::HashSet::new(),
             naming_after_battle: false,
             blocked_tiles: std::collections::HashSet::new(),
             card_key_found: false,
@@ -825,7 +834,6 @@ impl PokemonAgent {
         self.cycles = MachineCycles::default();
         self.world_graph = WorldGraph::new();
         self.last_map = None;
-        self.cut_tiles.clear();
         self.naming_after_battle = false;
         self.blocked_tiles.clear();
         self.card_key_found = false;
@@ -1095,17 +1103,9 @@ impl PokemonAgent {
         true
     }
 
-    /// The game state with cut trees cleared and learned walls overlaid.
+    /// The game state with learned walls overlaid.
     pub(crate) fn observe_state(&self, api: &PokemonApi) -> Result<crate::pokemon::GameState, String> {
         let mut state = api.game_state()?;
-        for &(map, pos) in &self.cut_tiles {
-            if state.map.map == map {
-                let idx = pos.x as usize + pos.y as usize * state.map.width;
-                if state.map.meta_tiles.get(idx) == Some(&MetaTile::CutTree) {
-                    state.map.meta_tiles[idx] = MetaTile::Empty;
-                }
-            }
-        }
         // Door walls found at run time and squares this visit was turned back off are obstacles.
         for &(map, pos) in self.blocked_tiles.iter().chain(self.turned_back_tiles.iter()) {
             if state.map.map == map {
@@ -1121,8 +1121,8 @@ impl PokemonAgent {
     /// A presses on a card-key door before treating it as a wall.
     const DOOR_OPEN_ATTEMPTS: u32 = 40;
 
-    /// On Silph Co, the card-key-door tile ($18/$24) the player faces: a door or a wall that
-    /// `ReplaceTileBlock` put in at run time, invisible to the `MetaTileMap`.
+    /// On Silph Co, the card-key-door tile ($18/$24) the player faces: a door `ReplaceTileBlock` put
+    /// in at run time, or a wall drawn with the same tile.
     fn handle_card_key_door(&mut self, api: &mut PokemonApi) -> bool {
         use crate::pokemon::map_metadata::{map_has_card_key_doors, PlayerFacingDirection};
         let Ok(state) = api.game_state() else { return false; };
@@ -1378,8 +1378,6 @@ impl PokemonAgent {
 
             self.event(AgentEvent::BattleEnded);
             self.set_state(AgentState::Idle);
-            // A battle reloads the map, so any tree cut on it has regrown.
-            self.cut_tiles.clear();
         }
     }
 
@@ -1388,8 +1386,6 @@ impl PokemonAgent {
         self.set_state(AgentState::Idle);
         if std::mem::take(&mut self.naming_after_battle) {
             self.event(AgentEvent::BattleEnded);
-            // A battle reloads the map, so any tree cut on it has regrown.
-            self.cut_tiles.clear();
         }
     }
 
@@ -1832,8 +1828,6 @@ impl PokemonAgent {
                     if self.last_map != Some(game_state.map.map) {
                         self.last_map = Some(game_state.map.map);
                         self.world_graph.observe(game_state.map.map, api.raw_player_coords(), &game_state.map);
-                        // Cut trees regrow on map re-entry.
-                        self.cut_tiles.clear();
                         // Turned-back squares may stop being true.
                         self.turned_back_tiles.clear();
                         self.turn_back_watch = None;
@@ -2494,25 +2488,22 @@ CascadeBadge; not cutting".to_string(),
                     }
 
                     BattleState::AwaitingPolicy { delay, menu_gone } => {
-                        let gone_before = *menu_gone;
-                        if delay.tick(delta_cycles) {
+                        // A menu drawn a tick too long after the last choice, or a successful escape's
+                        // say, is no menu: whatever replaced it waits on A that only `WaitingForMenu`
+                        // presses, and a policy asked there spends its answer on nothing.
+                        let ready = delay.tick(delta_cycles);
+                        if ready && !battle_menu_is_showing(api) {
+                            *menu_gone += 1;
+                            if *menu_gone >= 2 {
+                                self.set_battle_state(BattleState::default());
+                            }
+                        } else if ready {
+                            *menu_gone = 0;
                             let game_state = api.game_state()?;
                             self.poll_policy(&game_state, api);
                             if let Some(action) = self.policy.pick_battle_action(&game_state) {
                                 let active = game_state.battle.as_ref().map(|b| b.active_party_slot).unwrap_or(0);
-                                // An item is used on someone, who is the actor of the sentence.
-                                let actor = match action {
-                                    BattleAction::UseItem { target: Some(target), .. } => game_state.pokemon
-                                        .get(target as usize)
-                                        .map(|mon| mon.nickname.to_default_string())
-                                        .unwrap_or_else(|| active_pokemon_name(&game_state)),
-                                    _ => active_pokemon_name(&game_state),
-                                };
-                                new_events.push(AgentEvent::BattleActionStarted {
-                                    actor,
-                                    opponent: opponent_pokemon_name(&game_state),
-                                    action,
-                                });
+                                new_events.push(AgentEvent::battle_action_started(&game_state, action));
                                 if let BattleAction::UseItem { item, target, .. } = action {
                                     let start_qty = game_state.bag.iter()
                                         .find(|b| b.id == item.id).map(|b| b.quantity).unwrap_or(0);
@@ -2526,16 +2517,6 @@ CascadeBadge; not cutting".to_string(),
                                     return Ok(());
                                 }
                                 self.set_battle_state(BattleState::Navigating { action, delay: DelayContext::default(), ticks: 0, stable: 0 });
-                            } else {
-                                // A menu drawn a frame too long after the last choice, a successful
-                                // escape's say: whatever replaced it waits on A that only
-                                // `WaitingForMenu` presses, and a policy that waits never would.
-                                let gone = if battle_menu_is_showing(api) { 0 } else { gone_before + 1 };
-                                if gone >= 2 {
-                                    self.set_battle_state(BattleState::default());
-                                } else if let AgentState::Battle(BattleState::AwaitingPolicy { menu_gone, .. }) = &mut self.state {
-                                    *menu_gone = gone;
-                                }
                             }
                         }
                     }
@@ -3085,7 +3066,6 @@ CascadeBadge; not cutting".to_string(),
             }
             AgentState::CuttingTree { press, entered_menu, tree_pos, slot, move_index, from_row } => {
                 if entered_menu && game_mode == GameMode::Overworld {
-                    self.cut_tiles.insert((api.game_state()?.map.map, tree_pos));
                     if from_row {
                         self.event(AgentEvent::OverworldActionCompleted {
                             destination: MetaTile::Cut { at: tree_pos } });
@@ -3890,6 +3870,36 @@ mod tests {
         }
         assert!(agent.blocked_tiles.contains(&(Map::PalletTown, Point8 { x: 1, y: 1 })),
                 "only the maps with card-key doors are forgiven");
+    }
+
+    /// The Hall of Fame's last script lets go of the pad before the ceremony, from inside the map
+    /// script, where the overworld never polls again: the player is not free there.
+    #[test]
+    fn nothing_is_asked_of_the_policy_in_the_hall_of_fame() {
+        use gb::ram::ROM;
+        struct Counting(std::rc::Rc<std::cell::Cell<u32>>);
+        impl Policy for Counting {
+            fn name(&self) -> &'static str { "counting" }
+            fn pick_overworld_action(&mut self, _: &GameState, _: &WorldGraph) -> Option<OverworldAction> {
+                self.0.set(self.0.get() + 1);
+                None
+            }
+            fn pick_battle_action(&mut self, _: &GameState) -> Option<BattleAction> { None }
+        }
+        let mut gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(include_bytes!("data/hall-of-fame-lead-in.bin")).expect("the fixture loads");
+        let teams = gb.core().mmu().read(pokered_symbols::wNumHoFTeams.address);
+        let asked = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut agent = PokemonAgent::new(Box::new(Counting(std::rc::Rc::clone(&asked))));
+        for _ in 0..500 {
+            if gb.core().mmu().read(pokered_symbols::wNumHoFTeams.address) != teams {
+                break;
+            }
+            let slice = gb.run(AGENT_RESOLUTION);
+            agent.update(&mut crate::pokemon::PokemonApi::new(&mut gb), slice).unwrap();
+        }
+        assert_ne!(gb.core().mmu().read(pokered_symbols::wNumHoFTeams.address), teams, "the ceremony counts the team");
+        assert_eq!(asked.get(), 0, "asked for an overworld action on the way into the ceremony");
     }
 
     /// A battle turn formats as a sentence.

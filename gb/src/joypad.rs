@@ -80,7 +80,7 @@ impl Activation for JoypadRegister {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum_macros::EnumIter, strum_macros::Display)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum_macros::EnumIter, strum_macros::Display, serde::Serialize, serde::Deserialize)]
 pub enum JoypadButton {
     Up,
     Down,

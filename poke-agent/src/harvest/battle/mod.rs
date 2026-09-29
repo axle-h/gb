@@ -324,6 +324,7 @@ fn read_side(oracle: &Oracle, at: &SideAt) -> Combatant {
             animation: current[0], effect: current[1], power: current[2], move_type: current[3],
             accuracy: current[4], pp: current[5],
         },
+        counter_damage: 0,
     }
 }
 
@@ -444,6 +445,7 @@ fn read_arena(oracle: &Oracle) -> Arena {
             total_pay_day_money: oracle.read(sym::wTotalPayDayMoney, 3).try_into().unwrap(),
             transformed_enemy_original_dvs: Dvs(oracle.read(sym::wTransformedEnemyMonOriginalDVs, 2).try_into().unwrap()),
             safari_escape_factor: byte(sym::wSafariEscapeFactor),
+            cartridge_bugs: true,
             safari_bait_factor: byte(sym::wSafariBaitFactor),
         },
         party: read_party(oracle, sym::wPartyCount, sym::wPartyMons),

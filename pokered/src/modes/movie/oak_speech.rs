@@ -446,15 +446,19 @@ fn prepare(ctx: &mut Ctx) {
     clear_screen(&mut ctx.screen.ui);
     ctx.screen.tiles.load_text_box_tiles();
 
-    // `PrepareOakSpeech` zeroes everything from `wPlayerName` to `wBoxDataEnd` but the options, the
-    // letter delay and `wStatusFlags6`, then names both players for a debug new game. Its
-    // `InitOptions` is the main menu's, which knows whether the option screen was visited.
+    // `PrepareOakSpeech` zeroes everything from `wPlayerName` to `wBoxDataEnd` but the options and
+    // the letter delay, then names both players for a debug new game. Its `InitOptions` is the main
+    // menu's, which knows whether the option screen was visited.
     let old = std::mem::take(ctx.world);
     let world = &mut *ctx.world;
+    world.cartridge_bugs = old.cartridge_bugs;
     world.options = old.options;
     world.no_text_delay = old.no_text_delay;
     world.one_frame_letter_delay = old.one_frame_letter_delay;
     world.hall_of_fame = old.hall_of_fame;
+    // The cartridge keeps `wStatusFlags6` too, so a save made on Cycling Road starts the new game
+    // stuck on the bike.
+    world.location.always_on_bike = old.cartridge_bugs && old.location.always_on_bike;
     world.player_name = poke_core::charmap::encode("NINTEN").expect("encodes");
     world.rival_name = poke_core::charmap::encode("SONY").expect("encodes");
 
@@ -466,3 +470,44 @@ fn prepare(ctx: &mut Ctx) {
     ctx.screen.tiles.animation.kind = 0;
 }
 
+
+#[cfg(test)]
+mod tests {
+    use crate::command::{Command, Decision};
+    use crate::mode::{Mode, Status};
+    use crate::modes::main_menu::NEW_GAME;
+    use crate::rng::GameRng;
+    use crate::world::World;
+    use crate::{Game, Input, Pacing};
+
+    /// A new game started over a save made on Cycling Road.
+    fn new_game_over_a_cycling_road_save(cartridge_bugs: bool) -> World {
+        let mut save = World { player_id: 1, cartridge_bugs, ..World::default() };
+        save.location.always_on_bike = true;
+        let mut game = Game::power_on(Some(save), GameRng::seeded(2), Pacing::Faithful);
+        for _ in 0..30_000 {
+            if matches!(game.modes(), [Mode::Overworld(_)]) {
+                return game.world().clone();
+            }
+            let command = match game.status() {
+                Status::Waiting(Decision::TitleScreen | Decision::Text) => Some(Command::Advance),
+                Status::Waiting(Decision::MainMenu) => Some(Command::ChooseOption(NEW_GAME)),
+                Status::Waiting(Decision::IntroNameMenu) => Some(Command::ChooseOption(1)),
+                _ => None,
+            };
+            game.frame(command.map_or(Input::None, Input::Command));
+        }
+        panic!("no new game: {:?}", game.status());
+    }
+
+    #[test]
+    fn a_new_game_gets_off_the_bike_a_save_left_it_on() {
+        let world = new_game_over_a_cycling_road_save(false);
+        assert!(!world.location.always_on_bike);
+        assert!(!world.cartridge_bugs);
+
+        let world = new_game_over_a_cycling_road_save(true);
+        assert!(world.location.always_on_bike, "the cartridge carries `BIT_ALWAYS_ON_BIKE` over");
+        assert!(world.cartridge_bugs, "the switch outlives the rebuilt world");
+    }
+}

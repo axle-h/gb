@@ -22,8 +22,6 @@ const RAISED: u8 = 0x77;
 const CURSOR: u8 = 0xED;
 /// A leftover from the Japanese version, blank in English.
 const JAPANESE_NO: u8 = 0xC9;
-/// `wOnSGB`, which only changes how fast the icon bobs.
-const ON_SGB: bool = false;
 /// `AnimatePartyMon_ForceSpeed1` takes the yellow speed whatever the mon's HP bar says, and slot 0
 /// whatever the grid cursor is on: it saves `wCurrentMenuItem` around the call.
 const ICON_COLOUR: HpBarColour = HpBarColour::Yellow;
@@ -293,7 +291,7 @@ impl NamingScreen {
     /// a nickname screen has an icon in OAM for it to move.
     fn animate(&mut self, ctx: &mut Ctx) {
         let party: Vec<_> = self.species.into_iter().collect();
-        animate_party_mon(&mut ctx.screen.sprites, &mut self.anim_counter, 0, ICON_COLOUR, &party, ON_SGB);
+        animate_party_mon(&mut ctx.screen.sprites, &mut self.anim_counter, 0, ICON_COLOUR, &party);
     }
 
     /// `.ABStartReturnPoint` onwards: the name, the underscores and the cursor.

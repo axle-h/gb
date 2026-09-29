@@ -90,6 +90,10 @@ pub struct World {
     pub text: TextVars,
     /// Where the player stands: the map, the square, the facing, and the map state a save keeps.
     pub location: Location,
+    /// Play the cartridge's mechanical and audio bugs rather than their fixes. Off in play; on
+    /// wherever the recreation is compared with the cartridge, and carried into a new game.
+    #[serde(default)]
+    pub cartridge_bugs: bool,
 }
 
 /// `NUM_EVENTS`: the event space, most of it unused.

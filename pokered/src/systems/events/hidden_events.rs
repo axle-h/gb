@@ -74,12 +74,15 @@ pub fn hidden_coin_index(map: Map, x: u8, y: u8) -> u8 {
     find_hidden_item_or_coins_index(pokered_symbols::HiddenCoinCoords, map, x, y)
 }
 
-/// `HiddenCoins`' amount, BCD, from its argument less `COIN`. Forty is a typo in the cartridge that
-/// gives twenty, and anything it does not name is a hundred.
-pub fn hidden_coins_amount(argument: u8) -> [u8; 2] {
+/// `HiddenCoins`' amount, BCD, from its argument less `COIN`: anything it does not name is a
+/// hundred.
+pub fn hidden_coins_amount(argument: u8, cartridge_bugs: bool) -> [u8; 2] {
     match argument.wrapping_sub(poke_core::item::ItemId::Coin as u8) {
         10 => [0x00, 0x10],
-        20 | 40 => [0x00, 0x20],
+        20 => [0x00, 0x20],
+        // The cartridge jumps to the twenty for forty too.
+        40 if cartridge_bugs => [0x00, 0x20],
+        40 => [0x00, 0x40],
         _ => [0x01, 0x00],
     }
 }
@@ -209,9 +212,16 @@ mod tests {
     }
 
     #[test]
-    fn the_bench_guy_answers_the_left_facing_and_the_coins_forty_are_twenty() {
+    fn the_bench_guy_answers_the_left_facing() {
         assert_eq!(bench_guy_text(Map::ViridianPokecenter, SpriteFacing::Left as u8), Some(0x0F));
-        assert_eq!(hidden_coins_amount(poke_core::item::ItemId::Coin as u8 + 40), [0, 0x20]);
-        assert_eq!(hidden_coins_amount(poke_core::item::ItemId::Coin as u8 + 100), [1, 0]);
+    }
+
+    #[test]
+    fn the_forty_coin_spot_gives_forty() {
+        let coin = poke_core::item::ItemId::Coin as u8;
+        assert_eq!(hidden_coins_amount(coin + 40, false), [0, 0x40]);
+        assert_eq!(hidden_coins_amount(coin + 40, true), [0, 0x20], "the cartridge gives twenty");
+        assert_eq!(hidden_coins_amount(coin + 20, false), [0, 0x20]);
+        assert_eq!(hidden_coins_amount(coin + 100, false), [1, 0]);
     }
 }

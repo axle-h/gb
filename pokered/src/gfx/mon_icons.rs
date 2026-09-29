@@ -80,10 +80,10 @@ pub fn write_mon_party_sprite_oam(sprites: &mut Vec<Object>, slot: usize, specie
 /// shows frame two for its second half. At zero every icon goes back to frame one, which is
 /// `wMonPartySpritesSavedOAM` copied back; the icons the party would write are the same objects.
 ///
-/// `sgb` is `wOnSGB`, which the speed is one frame shorter for.
+/// `GetAnimationSpeed` adds `wOnSGB xor 1`: the DMG's extra frame, in every colour mode.
 pub fn animate_party_mon(sprites: &mut Vec<Object>, counter: &mut u8, current: u8, colour: HpBarColour,
-                         party: &[PokemonSpecies], sgb: bool) {
-    let speed = colour.animation_speed() + !sgb as u8;
+                         party: &[PokemonSpecies]) {
+    let speed = colour.animation_speed() + 1;
     if *counter == 0 {
         for (slot, &species) in party.iter().enumerate() {
             write_mon_party_sprite_oam(sprites, slot, species);
@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(sprites[..4].iter().map(|o| o.tile).collect::<Vec<_>>(), [8, 9, 10, 11]);
         assert!(sprites[..4].iter().all(|o| o.attributes == 0));
         let mut counter = 6;
-        animate_party_mon(&mut sprites, &mut counter, 0, HpBarColour::Green, &[PokemonSpecies::Kabuto], false);
+        animate_party_mon(&mut sprites, &mut counter, 0, HpBarColour::Green, &[PokemonSpecies::Kabuto]);
         assert_eq!(sprites[..4].iter().map(|o| (o.y, o.tile)).collect::<Vec<_>>(), [(17, 8), (17, 9), (25, 10), (25, 11)]);
     }
 
@@ -151,7 +151,7 @@ mod tests {
         let mut counter = 0;
         let mut tiles = Vec::new();
         for _ in 0..24 {
-            animate_party_mon(&mut sprites, &mut counter, 1, HpBarColour::Green, &party, false);
+            animate_party_mon(&mut sprites, &mut counter, 1, HpBarColour::Green, &party);
             tiles.push(sprites[4].tile);
         }
         let quadruped = 9 << 2;

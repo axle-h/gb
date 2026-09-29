@@ -58,9 +58,8 @@ fn player_moving(rt: &mut Script) -> Flow {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     match text_id {
-        // The guard's own words are `SaffronGateGuardText`, which every gate shares: it walks the
-        // player up and arms Route 5's gate script wherever it is read from.
-        TEXT_ROUTE8GATE_GUARD => Some(super::route5_gate::guard_text(rt)),
+        // The guard's own words are `SaffronGateGuardText`, which every gate shares.
+        TEXT_ROUTE8GATE_GUARD => Some(super::route5_gate::guard_text(rt, Label::Thirsty)),
         _ => None,
     }
 }

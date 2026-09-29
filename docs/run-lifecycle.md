@@ -13,6 +13,8 @@ Read before touching `poke-agent/src/run/`, `poke-agent-web/src/host.rs`'s new-r
   challenge so the browser collects the password and the SPA holds no token; nothing links to it,
   since a GET that resets the game must not be reachable by a prefetch or a middle-click. Browsers
   cache Basic credentials, so a refresh of that page starts another run and the page says so.
+- A run is emulated or native (`GB_GAME`) and a process resumes only its own kind, by the file
+  `GameKind::state_file` names; a new run in place stays the kind of the one it replaces.
 - A run directory has exactly one writer, and everything that needs to know which reads `CurrentRun`
   per write. The one exception is `llm::history`, which captures its directory so a turn in flight
   when the swap lands is filed with the old game.
@@ -43,6 +45,11 @@ Read before touching `poke-agent/src/run/`, `poke-agent-web/src/host.rs`'s new-r
 - `check_hall_of_fame` reads the MMU directly, above `update`'s game-mode read (which returns on
   every screen transition, and a ceremony is made of them), and seeds its baseline from RAM on the
   first tick so a resume does not re-announce a victory.
+- `NativeAgent::check_hall_of_fame` is the same rule on `World::hall_of_fame_teams`, and runs on
+  the frames the host drives through the credits as well as the agent's own.
+- A native run keeps the game's own save, `Frame.save`, as `save.pkrd` beside `game.pkrd`, and a
+  console with no run to start next powers on into it after the credits, as CONTINUE loads the
+  cartridge's (`Native::advance`).
 - The archive nests under `hall-of-fame/`, and that is load-bearing: `run::resumable` lists direct
   children of `$GB_RUN_DIR` and continues the newest.
 - `archive` copies every artifact by name. There is no "copy everything", so a new run-directory

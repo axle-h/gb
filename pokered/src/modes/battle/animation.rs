@@ -6,10 +6,10 @@
 //! before it left (the palette it saves, the counter a ball's shake rewinds). An `Op` is one write
 //! or one wait; an op that reads the screen reads it when it runs.
 //!
-//! Exact: every frame count, every coordinate and tile, the flips, the sounds and when they start.
-//! Faithful: `hWhoseTurn` is the animation's own, SGB palettes are the DMG's, and the waits for the
-//! tile map to reach VRAM (`BattleAnimCopyTileMapToVRAM` and the `Delay3`s around a screen copy)
-//! are not modelled.
+//! Exact: every frame count, every coordinate and tile, the flips, the sounds and when they start,
+//! and both palettes a `wOnSGB` branch picks. Faithful: `hWhoseTurn` is the animation's own, and
+//! the waits for the tile map to reach VRAM (`BattleAnimCopyTileMapToVRAM` and the `Delay3`s
+//! around a screen copy) are not modelled.
 
 use poke_core::battle_anims::{attack_animation, base_coord, frame_block, move_sound, subanimation, tile_id_list,
                               tilemap, AnimCommand, SubanimEntry, FIRST_SE_ID, NO_SOUND};
@@ -20,7 +20,7 @@ use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use crate::audio::data::{sounds, SoundId};
-use crate::gfx::layers::{Object, TileMap, Window};
+use crate::gfx::layers::{Object, SgbPick, TileMap, Window};
 use crate::gfx::tiles::{V_CHARS0, V_CHARS2};
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::mode::Ctx;
@@ -142,8 +142,8 @@ pub mod se {
 const POKE_BALL: u8 = 0x04;
 const GREAT_BALL: u8 = 0x03;
 const ULTRA_BALL: u8 = 0x02;
-/// `wAnimPalette` and the `rOBP0` `SetAnimationPalette` writes, off an SGB.
-const ANIM_PALETTE: u8 = 0xE4;
+/// `wAnimPalette`, which `SetAnimationPalette` picks by `wOnSGB`.
+const ANIM_PALETTE: SgbPick = SgbPick { dmg: 0xE4, sgb: 0xF0 };
 const OBP1_PALETTE: u8 = 0x6C;
 /// `rWY` and `rWX` as the battle keeps them.
 const WX: u8 = 7;
@@ -222,7 +222,7 @@ enum Step {
     /// The next frame block of the subanimation playing.
     FrameBlock,
     /// `PlayAnimation`'s `pop af; ldh [rOBP0], a` after a subanimation.
-    RestoreObp0(u8),
+    RestoreObp0(SgbPick),
     SpecialEffect(u8),
     /// `PlayApplyingAttackAnimation`.
     ApplyingAttack,
@@ -253,8 +253,10 @@ enum Op {
     Wait(u16),
     WaitForSound,
     Bgp(u8),
-    Obp0(u8),
     Obp1(u8),
+    /// A write through a `wOnSGB` branch.
+    PickBgp(SgbPick),
+    PickObp0(SgbPick),
     /// `rOBP0` exclusive-or'd, the flash of an Ultra or Master Ball.
     Obp0Xor(u8),
     /// `AnimationFlashScreen`'s `push af` and `pop af` of `rBGP`.
@@ -343,7 +345,7 @@ pub struct Animation {
     sub: Option<Sub>,
     /// `wNumShakes`.
     num_shakes: u8,
-    saved_bgp: u8,
+    saved_bgp: SgbPick,
     /// `wTileMapBackup` and `wTileMapBackup2` as the animation left them, for the battle to take.
     pub screen1: Option<UiSurface>,
     pub screen2: Option<UiSurface>,
@@ -442,7 +444,7 @@ impl Animation {
             waiting_for_sound: false,
             sub: None,
             num_shakes: 0,
-            saved_bgp: 0,
+            saved_bgp: SgbPick::both(0),
             screen1: None,
             screen2: None,
             h_scx: None,
@@ -510,8 +512,8 @@ impl Animation {
                 self.call([Step::SpecialEffect(id)]);
             }
             Step::Command(AnimCommand::Subanimation { tileset, delay, sound, id }) => {
-                let saved = ctx.screen.effects.obp0;
-                self.op(Op::Obp0(ANIM_PALETTE));
+                let saved = ctx.screen.effects.obp0_pick();
+                self.op(Op::PickObp0(ANIM_PALETTE));
                 self.op(Op::LoadAnimTiles(tileset));
                 let start = load_subanimation(id, self.turn);
                 let entries = subanimation(id).entries;
@@ -521,7 +523,7 @@ impl Animation {
                 }
                 self.call([Step::FrameBlock, Step::RestoreObp0(saved)]);
             }
-            Step::RestoreObp0(saved) => self.op(Op::Obp0(saved)),
+            Step::RestoreObp0(saved) => self.op(Op::PickObp0(saved)),
             Step::FrameBlock => self.frame_block(),
             Step::SpecialEffect(id) => self.special_effect(id, ctx),
             Step::ApplyingAttack => self.applying_attack(),
@@ -550,8 +552,9 @@ impl Animation {
                 self.id = id;
                 self.kind = kind;
                 self.op(Op::WaitForSound);
-                // `SetAnimationPalette`.
-                self.op(Op::Obp0(ANIM_PALETTE));
+                // `SetAnimationPalette`: `rOBP0` is `wAnimPalette` on an SGB only in the trade's ball.
+                let trade = (anim::TRADE_BALL_DROP_ANIM..=anim::TRADE_BALL_POOF_ANIM).contains(&id);
+                self.op(Op::PickObp0(if trade { ANIM_PALETTE } else { SgbPick::both(ANIM_PALETTE.dmg) }));
                 self.op(Op::Obp1(OBP1_PALETTE));
                 if id == 0 {
                     return self.call([Step::Finish]);
@@ -857,7 +860,7 @@ impl Animation {
             se::DARK_SCREEN_FLASH => self.flash_screen(),
             se::DARK_SCREEN_PALETTE => self.op(Op::Bgp(0x6F)),
             se::RESET_SCREEN_PALETTE => self.op(Op::Bgp(0xE4)),
-            se::DARKEN_MON_PALETTE => self.op(Op::Bgp(0xF9)),
+            se::DARKEN_MON_PALETTE => self.op(Op::PickBgp(SgbPick { dmg: 0xF9, sgb: 0xF4 })),
             se::LIGHT_SCREEN_PALETTE => self.op(Op::Bgp(0x90)),
             se::SHAKE_SCREEN => self.shake_horizontally(8),
             se::WATER_DROPLETS_EVERYWHERE => self.water_droplets_everywhere(),
@@ -883,10 +886,10 @@ impl Animation {
             se::SLIDE_MON_DOWN_AND_HIDE => self.slide_mon_down_and_hide(),
             se::TRANSFORM_MON => self.change_mon_pic(self.battle.enemy_species, self.battle.player_species),
             se::LEAVES_FALLING => {
-                let saved = ctx.screen.effects.obp0;
-                self.op(Op::Obp0(ANIM_PALETTE));
+                let saved = ctx.screen.effects.obp0_pick();
+                self.op(Op::PickObp0(ANIM_PALETTE));
                 self.falling_objects(0x37, 3);
-                self.op(Op::Obp0(saved));
+                self.op(Op::PickObp0(saved));
             }
             se::PETALS_FALLING => {
                 self.falling_objects(0x71, 20);
@@ -972,13 +975,13 @@ impl Animation {
         self.op(Op::Unsplit);
     }
 
-    /// `AnimationFlashScreenLong`: `FlashScreenLongMonochrome` three times, two frames a palette the
-    /// first time and one after.
+    /// `AnimationFlashScreenLong`: `FlashScreenLongMonochrome`, or `FlashScreenLongSGB` on an SGB,
+    /// three times, two frames a palette the first time and one after.
     fn flash_screen_long(&mut self) {
-        let palettes: Vec<u8> = rom_slice(sym::FlashScreenLongMonochrome).iter().copied().take_while(|&bgp| bgp != 1).collect();
+        let palettes = flash_screen_long_palettes();
         for cycle in (1..=3).rev() {
             for &bgp in &palettes {
-                self.ops.extend([Op::Bgp(bgp), Op::Wait(if cycle == 3 { 2 } else { 1 })]);
+                self.ops.extend([Op::PickBgp(bgp), Op::Wait(if cycle == 3 { 2 } else { 1 })]);
             }
         }
     }
@@ -1320,10 +1323,14 @@ impl Animation {
         match op {
             Op::Wait(frames) => self.wait = frames,
             Op::WaitForSound => self.waiting_for_sound = true,
-            Op::Bgp(bgp) => screen.effects.bgp = bgp,
-            Op::Obp0(obp0) => screen.effects.obp0 = obp0,
+            Op::Bgp(bgp) => screen.effects.pick_bgp(SgbPick::both(bgp)),
             Op::Obp1(obp1) => screen.effects.obp1 = obp1,
-            Op::Obp0Xor(bits) => screen.effects.obp0 ^= bits,
+            Op::PickBgp(bgp) => screen.effects.pick_bgp(bgp),
+            Op::PickObp0(obp0) => screen.effects.pick_obp0(obp0),
+            Op::Obp0Xor(bits) => {
+                let obp0 = screen.effects.obp0_pick();
+                screen.effects.pick_obp0(SgbPick { dmg: obp0.dmg ^ bits, sgb: obp0.sgb ^ bits });
+            }
             Op::Split { wx, wy, first_row, background } => {
                 let mut tiles = TileMap::filled(BLANK);
                 for row in first_row as usize..SCREEN_TILES_Y {
@@ -1345,8 +1352,8 @@ impl Animation {
             }
             Op::ScxBy(step) => screen.effects.scx = screen.effects.scx.wrapping_add(step),
             Op::CopyToBackground => screen.background = Some(tile_map(ui)),
-            Op::SaveBgp => self.saved_bgp = screen.effects.bgp,
-            Op::RestoreBgp => screen.effects.bgp = self.saved_bgp,
+            Op::SaveBgp => self.saved_bgp = screen.effects.bgp_pick(),
+            Op::RestoreBgp => screen.effects.pick_bgp(self.saved_bgp),
             Op::Obp1Xor(bits) => screen.effects.obp1 ^= bits,
             Op::FrontPicToSprites => {
                 for tile in 0..PIC * PIC {
@@ -1486,6 +1493,14 @@ impl Animation {
     }
 }
 
+/// `FlashScreenLongMonochrome` beside `FlashScreenLongSGB`, to their `db 1`.
+fn flash_screen_long_palettes() -> Vec<SgbPick> {
+    let table = |symbol| rom_slice(symbol).iter().copied().take_while(|&bgp| bgp != 1);
+    table(sym::FlashScreenLongMonochrome).zip(table(sym::FlashScreenLongSGB))
+        .map(|(dmg, sgb)| SgbPick { dmg, sgb })
+        .collect()
+}
+
 /// The tile map as `vBGMap0` holds it after a copy: the 20 by 18, blank beyond.
 fn tile_map(ui: &UiSurface) -> TileMap {
     let mut tiles = TileMap::filled(BLANK);
@@ -1515,6 +1530,36 @@ mod tests {
         assert_eq!(anim::BAIT_ANIM, id("BAIT_ANIM"));
         assert_eq!(anim::XSTATITEM_ANIM, id("XSTATITEM_ANIM"));
         assert_eq!(anim::ENEMY_HUD_SHAKE_ANIM, id("ENEMY_HUD_SHAKE_ANIM"));
+    }
+
+    /// `dc 3, 3, 2, 1` against `dc 3, 3, 2, 0`: the SGB's table keeps colour 0 white.
+    #[test]
+    fn the_long_flash_walks_the_sgb_s_own_table_beside_the_dmg_s() {
+        let palettes = flash_screen_long_palettes();
+        assert_eq!(palettes.len(), 12);
+        assert_eq!(palettes[0], SgbPick { dmg: 0xF9, sgb: 0xF8 });
+        assert_eq!(palettes[11], SgbPick::both(0xE4), "both end on the normal palette");
+    }
+
+    fn set_animation_palette(id: u8) -> Op {
+        let battle = AnimBattle {
+            player_species: PokemonSpecies::Pikachu, enemy_species: PokemonSpecies::Pidgey, damage_multipliers: 0,
+            trainer_battle: false, item: 0, ball_data: 0, animations_on: true, h_scx: 0,
+            mons: Default::default(), hp_bar_colours: Default::default(),
+        };
+        let mut animation = Animation::new(Routine::MoveAnimation { id, kind: 0 }, Side::Player, battle);
+        animation.routine(Routine::MoveAnimation { id, kind: 0 });
+        animation.ops.into_iter().find(|op| matches!(op, Op::PickObp0(_))).expect("SetAnimationPalette")
+    }
+
+    /// `rOBP0` is `$F0` on an SGB for the trade's ball and `$E4` for every other animation;
+    /// `wAnimPalette` is `$F0` on an SGB for all of them.
+    #[test]
+    fn set_animation_palette_picks_obp0_by_wonsgb() {
+        assert_eq!(set_animation_palette(anim::POUND), Op::PickObp0(SgbPick::both(0xE4)));
+        assert_eq!(set_animation_palette(anim::TRADE_BALL_DROP_ANIM), Op::PickObp0(ANIM_PALETTE));
+        assert_eq!(set_animation_palette(anim::TRADE_BALL_POOF_ANIM), Op::PickObp0(ANIM_PALETTE));
+        assert_eq!(ANIM_PALETTE, SgbPick { dmg: 0xE4, sgb: 0xF0 });
     }
 }
 

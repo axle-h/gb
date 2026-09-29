@@ -123,7 +123,7 @@ pub struct SellState {
 
 const TICK_BUDGET: u16 = 1200;
 /// How long a walk to a counter waits on someone standing in the way before giving up.
-const BLOCKED_TICKS: u16 = 250;
+pub(crate) const BLOCKED_TICKS: u16 = 250;
 
 impl SellState {
     pub fn new(item: BagItem, clerk: (Point8, crate::pokemon::map_metadata::PlayerFacingDirection), api: &PokemonApi<'_>) -> Self {
@@ -302,7 +302,7 @@ pub fn sell_tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: SellStat
 }
 
 /// The nine Game Corner prizes in Red.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Prize {
     Abra,
     Clefairy,

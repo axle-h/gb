@@ -11,6 +11,7 @@ use std::sync::Arc;
 use gb::mmu::MMU;
 use poke_core::geometry::Point8;
 use poke_core::sprite::{PictureId, PlayerFacingDirection, Sprite, SpriteFacing};
+use pokered::gfx::ui::UiSurface;
 use pokered::mode::{Mode, ModeUpdate, Status};
 use pokered::modes::overworld::Overworld;
 use pokered::party::{BoxMon, Named, PartyMon};
@@ -106,12 +107,14 @@ impl NativeGame {
                 false => GameMode::WildBattle,
             },
             Mode::NamingScreen(_) => GameMode::NamingScreen,
-            // An overworld that is not waiting on the player is running a script or a scripted walk,
-            // or showing a text's last page itself.
-            Mode::Overworld(_) => match top.status() {
+            // Busy is a step, a jump or a fade as well as a script, and the emulated reading tells
+            // them apart by the font and by what holds the pad.
+            Mode::Overworld(overworld) => match top.status() {
                 Status::Waiting(pokered::command::Decision::Overworld) => GameMode::Overworld,
                 Status::Waiting(_) => GameMode::TextBox,
-                _ => GameMode::Script,
+                _ if overworld.font_loaded() => GameMode::TextBox,
+                _ if overworld.held_by_a_script(self.game.joy_ignore()) => GameMode::Script,
+                _ => GameMode::Overworld,
             },
             _ => GameMode::TextBox,
         }
@@ -133,6 +136,10 @@ impl NativeGame {
             Arc::new(crate::pokemon::map_metadata::with_live_exits(&self.rom, &*self.maps.read_map(&self.rom, map)?, exits))
         } else {
             self.maps.read_map(&self.rom, map)?
+        };
+        let metadata = match overworld.view().width == metadata.map_header.width {
+            true => crate::pokemon::map_metadata::with_trees_cut(metadata, live_block(overworld)),
+            false => metadata,
         };
 
         Ok(CurrentMap {
@@ -162,14 +169,10 @@ impl NativeGame {
 
     /// The maps whose blocks a script rewrites, where the live block map is the map.
     fn runtime_metadata(&self, map: Map, overworld: &Overworld) -> Result<MapMetadata, String> {
-        const BORDER: usize = pokered::systems::map_data::MAP_BORDER;
         let view = overworld.view();
         let (w, h) = (view.width as usize, view.height as usize);
-        let stride = w + BORDER * 2;
-        let blocks = (0..h)
-            .flat_map(|by| (0..w).map(move |bx| (by, bx)))
-            .map(|(by, bx)| view.blocks[(by + BORDER) * stride + (bx + BORDER)])
-            .collect();
+        let live = live_block(overworld);
+        let blocks = (0..h).flat_map(|by| (0..w).map(move |bx| (bx, by))).map(|(bx, by)| live(bx, by)).collect();
         crate::pokemon::map_metadata::metadata_from_live_blocks(&self.rom, map, blocks)
     }
 
@@ -308,35 +311,40 @@ fn facing_as_player_direction(facing: SpriteFacing) -> PlayerFacingDirection {
 impl NativeGame {
     /// The text in the message box at the foot of the screen, without the menus above it.
     pub fn message_box_text(&self) -> Option<String> {
-        /// `on_screen_text`'s `MESSAGE_BOX_MIN_Y`.
-        const MESSAGE_BOX_MIN_Y: usize = 13;
-        self.text_on_rows(MESSAGE_BOX_MIN_Y)
+        (self.game_mode() != GameMode::Overworld).then(|| message_box_text(self.game.ui()))
     }
 
-    /// The emulated reader decodes the font's tiles wherever VRAM's map shows them; here the UI
-    /// surface holds charmap bytes, and the font is every byte from `$80` up.
     fn text_on_rows(&self, from: usize) -> Option<String> {
-        use pokered::gfx::ui::{SCREEN_TILES_X, SCREEN_TILES_Y};
-        if self.game_mode() == GameMode::Overworld {
-            return None;
-        }
-        let ui = self.game.ui();
-        let lines: Vec<String> = (from..SCREEN_TILES_Y).filter_map(|y| {
-            let mut line = Vec::new();
-            let mut last_x = None;
-            for x in 0..SCREEN_TILES_X {
-                let Some(byte) = ui.cover(x, y).filter(|&byte| byte >= 0x80) else { continue };
-                // 64 is the space glyph; never two in a row.
-                if last_x.is_some_and(|last| x - last > 1) && line.last() != Some(&64) {
-                    line.push(64);
-                }
-                line.push(byte as usize - 0x80);
-                last_x = Some(x);
-            }
-            (!line.is_empty()).then(|| poke_core::font::render_font_string(&line, false).trim().to_string())
-        }).collect();
-        Some(lines.join(" "))
+        (self.game_mode() != GameMode::Overworld).then(|| text_on_rows(self.game.ui(), from))
     }
+}
+
+/// The text in the message box's rows of `ui`.
+pub fn message_box_text(ui: &UiSurface) -> String {
+    /// `on_screen_text`'s `MESSAGE_BOX_MIN_Y`.
+    const MESSAGE_BOX_MIN_Y: usize = 13;
+    text_on_rows(ui, MESSAGE_BOX_MIN_Y)
+}
+
+/// The emulated reader decodes the font's tiles wherever VRAM's map shows them; here the UI surface
+/// holds charmap bytes, and the font is every byte from `$80` up.
+fn text_on_rows(ui: &UiSurface, from: usize) -> String {
+    use pokered::gfx::ui::{SCREEN_TILES_X, SCREEN_TILES_Y};
+    let lines: Vec<String> = (from..SCREEN_TILES_Y).filter_map(|y| {
+        let mut line = Vec::new();
+        let mut last_x = None;
+        for x in 0..SCREEN_TILES_X {
+            let Some(byte) = ui.cover(x, y).filter(|&byte| byte >= 0x80) else { continue };
+            // 64 is the space glyph; never two in a row.
+            if last_x.is_some_and(|last| x - last > 1) && line.last() != Some(&64) {
+                line.push(64);
+            }
+            line.push(byte as usize - 0x80);
+            last_x = Some(x);
+        }
+        Some(poke_core::font::render_font_string(&line, false).trim().to_string()).filter(|line| !line.is_empty())
+    }).collect();
+    lines.join(" ")
 }
 
 impl crate::pokemon::observe::Readout for NativeGame {
@@ -365,12 +373,19 @@ impl crate::pokemon::observe::Readout for NativeGame {
     }
 }
 
-/// A map whose blocks a script rewrites. The emulated reader reads a few of them live and learns
+/// A block of the recreation's live block map, by its coordinates from the map's own corner.
+fn live_block(overworld: &Overworld) -> impl Fn(usize, usize) -> u8 + '_ {
+    const BORDER: usize = pokered::systems::map_data::MAP_BORDER;
+    let view = overworld.view();
+    let stride = view.width as usize + BORDER * 2;
+    move |x, y| view.blocks[(y + BORDER) * stride + x + BORDER]
+}
+
+/// A map whose blocks a script rewrites. The emulated reader reads most of them live and learns
 /// the rest a refused walk at a time; the recreation holds its live blocks anyway, so every one is
-/// read from them: a Silph door the load code shuts is floor in the cartridge's own blocks.
+/// read from them.
 fn live_blocks(map: Map) -> bool {
     crate::pokemon::map_metadata::map_uses_runtime_blocks(map)
-        || crate::pokemon::map_metadata::map_has_card_key_doors(map)
         || matches!(map, Map::GameCorner | Map::VermilionDock | Map::RocketHideoutB1F | Map::RocketHideoutB4F)
 }
 

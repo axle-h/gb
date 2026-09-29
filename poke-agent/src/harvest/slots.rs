@@ -170,7 +170,7 @@ fn harvest_slots() {
     use pokered::systems::slots::{BAR, CAN_WIN, CAN_WIN_WITH_7_OR_BAR, CHERRY, BIRD, FISH, MOUSE, LUCKY, NOT_LUCKY, SEVEN, WHEEL_WRAP};
     use rand::{RngExt, SeedableRng};
     use serde::Serialize;
-    use super::{write_fixture, Case};
+    use super::{distinct, write_fixture, Case};
     let mut oracle = oracle();
     let mut rng = rand::rngs::StdRng::seed_from_u64(0x5107);
 
@@ -191,7 +191,7 @@ fn harvest_slots() {
     }
     let rolls: std::collections::BTreeSet<u8> = cases.iter().filter_map(|case| case.rng.first().copied()).collect();
     assert!(rolls.len() > 200, "only {} of the 256 rolls were reached", rolls.len());
-    write_fixture("slots", "set_flags", &cases);
+    write_fixture("slots", "set_flags", &distinct(cases));
 
     let every_offset: Vec<[u8; 3]> = (0..WHEEL_WRAP)
         .flat_map(|a| (0..WHEEL_WRAP).map(move |b| [a, b, (a + 2 * b) % WHEEL_WRAP]))
@@ -262,7 +262,7 @@ fn harvest_slots() {
             }
         }
     }
-    write_fixture("slots", "slot_reward", &cases);
+    write_fixture("slots", "slot_reward", &distinct(cases));
 
     let cases: Vec<_> = (0..=255u8).map(|byte| {
         seed(&mut oracle, byte);

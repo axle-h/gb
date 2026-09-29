@@ -19,6 +19,7 @@ use pokered::systems::inventory::Inventory;
 use pokered::systems::overworld::location::Ahead;
 use pokered::systems::overworld::sprites::{SpriteState, Sprites};
 use pokered::systems::overworld::Location;
+use pokered::systems::overworld::encounters::WildMons;
 use pokered::systems::play_time::PlayTime;
 use pokered::systems::stats::Dvs;
 use pokered::world::{BattleStyle, TextSpeed, World};
@@ -320,6 +321,7 @@ pub(super) fn world(gb: &GameBoy) -> World {
         safari_steps: mmu.read_u16_be(sym::wSafariSteps.address),
         no_text_delay: flag(&sym::wStatusFlags5, BIT_NO_TEXT_DELAY),
         location: location(gb),
+        cartridge_bugs: true,
         ..World::default()
     };
 
@@ -412,10 +414,25 @@ pub(super) fn overworld(gb: &GameBoy) -> Overworld {
             mmu.read_pointer(&sym::wNumberOfNoRandomBattleStepsLeft),
         )
         .with_step_counter(mmu.read_pointer(&sym::wStepCounter))
+        .with_wild_mons(wild_mons(gb))
         .with_blocks(mmu.read_slice(sym::wOverworldMap.address, blocks))
         .with_warps(mmu.read_slice(sym::wWarpEntries.address, 4 * mmu.read_pointer(&sym::wNumberOfWarps) as usize)
             .chunks(4).map(|entry| Warp { y: entry[0], x: entry[1], destination_warp: entry[2], destination_map: entry[3] })
             .collect())
+}
+
+fn wild_mons(gb: &GameBoy) -> WildMons {
+    let mmu = gb.core().mmu();
+    let slots = |at: u16| std::array::from_fn(|i| {
+        let pair = mmu.read_slice(at + 2 * i as u16, 2);
+        (pair[0], pair[1])
+    });
+    WildMons {
+        grass_rate: mmu.read_pointer(&sym::wGrassRate),
+        grass: slots(sym::wGrassMons.address),
+        water_rate: mmu.read_pointer(&sym::wWaterRate),
+        water: slots(sym::wWaterMons.address),
+    }
 }
 
 /// The recreation re-made from a cartridge that has just polled in the overworld.
@@ -432,6 +449,14 @@ mod tests {
     use crate::pokemon::{PokemonApi, PokemonApiTrait};
     use super::super::game_state::{compared, differences};
     use super::super::overworld::Cartridge;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use crate::pokemon::GameState;
+    use crate::pokemon::actions::OverworldAction;
+    use crate::pokemon::agent::{PokemonAgent, AGENT_RESOLUTION};
+    use crate::pokemon::policy::{FieldMove, Policy};
+    use crate::pokemon::tile::MetaTile;
+    use crate::pokemon::world_graph::WorldGraph;
 
     /// Long enough for a fixture saved mid-walk to finish the step and poll; one saved in a battle,
     /// a text or a menu never polls without a press, and is not what this compares.
@@ -464,5 +489,59 @@ mod tests {
         println!("bridged {bridged} of {}; skipped {skipped:?}", states.len());
         assert!(failed.is_empty(), "{} of {bridged} differ:\n{}", failed.len(), failed.join("\n"));
         assert!(bridged >= states.len() * 3 / 4, "only {bridged} of {} polled: {skipped:?}", states.len());
+    }
+
+    /// Cuts the tree in front once, then notes the next ask.
+    struct CutOnce {
+        cut: bool,
+        asked: Arc<AtomicBool>,
+    }
+
+    impl Policy for CutOnce {
+        fn name(&self) -> &'static str {
+            "cut once"
+        }
+
+        fn pick_overworld_action(&mut self, _: &GameState, _: &WorldGraph) -> Option<OverworldAction> {
+            self.asked.store(self.cut, Ordering::Relaxed);
+            None
+        }
+
+        fn pick_battle_action(&mut self, _: &GameState) -> Option<poke_core::battle::BattleAction> {
+            None
+        }
+
+        fn pick_field_move(&mut self, _: &GameState) -> Option<FieldMove> {
+            (!std::mem::replace(&mut self.cut, true)).then_some(FieldMove::CutTree)
+        }
+    }
+
+    /// A tree cut on this visit is read as cut from the game alone, on both sides: a replay starts
+    /// from a save, with an agent that saw nothing cut.
+    #[test]
+    fn a_tree_cut_before_the_save_is_floor_on_both_sides() {
+        let mut cartridge = Cartridge::from_state(include_bytes!("../pokemon/data/route8-cut-trees.bin"));
+        assert!((0..BUDGET).any(|_| cartridge.frame()));
+        let state = PokemonApi::new(&mut cartridge.gb).game_state().unwrap();
+        let tree = state.map.actions().into_iter()
+            .find_map(|action| match action.tile { MetaTile::Cut { at } if action.route.len() <= 1 => Some(at), _ => None })
+            .expect("a tree beside the player");
+
+        let asked = Arc::new(AtomicBool::new(false));
+        let mut agent = PokemonAgent::new(Box::new(CutOnce { cut: false, asked: Arc::clone(&asked) }));
+        for _ in 0..3000 {
+            if asked.load(Ordering::Relaxed) {
+                break;
+            }
+            let ran = cartridge.gb.run(AGENT_RESOLUTION);
+            agent.update(&mut PokemonApi::new(&mut cartridge.gb), ran).unwrap();
+        }
+        assert!(asked.load(Ordering::Relaxed), "the cut never finished");
+        assert!((0..BUDGET).any(|_| cartridge.frame()));
+
+        let at = |state: &GameState| state.map.meta_tiles[tree.x as usize + tree.y as usize * state.map.width];
+        assert_eq!(at(&PokemonApi::new(&mut cartridge.gb).game_state().unwrap()), MetaTile::Empty, "the cartridge");
+        let native = NativeGame::new(game(&cartridge.gb, GameRng::seeded(0))).unwrap();
+        assert_eq!(at(&native.game_state().unwrap()), MetaTile::Empty, "the recreation");
     }
 }

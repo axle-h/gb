@@ -60,7 +60,7 @@ fn read_boxed_pokemon(mmu: &MMU, index: u16) -> Option<BoxedPokemon> {
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PcBoxOp {
     Deposit { slot: u8 },
     Withdraw { box_slot: u8 },

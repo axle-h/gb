@@ -55,6 +55,11 @@ use super::{Channel, Voices, Write};
 /// and the sub-unit arithmetic below is exact only at this rate.
 pub const SAMPLE_RATE: u32 = 48_000;
 
+/// What a sink scales the output by. The synth reaches ±1 with four channels at full amplitude,
+/// and its output filters ring past it: the Indigo Plateau theme peaks at 1.25. This keeps those
+/// samples heard rather than squared off, and it is the level `gb`'s APU plays at.
+pub const HEADROOM: f32 = 1.0 / 1.3;
+
 /// Internal samples per output sample. Four puts the first image at 192 kHz, where a pulse
 /// channel has next to nothing left.
 const OVERSAMPLE: u64 = 4;

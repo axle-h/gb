@@ -29,7 +29,7 @@ pub struct BattleState {
     pub enemy_catch_rate: u8,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BattleAction {
     Fight { slot: u8, battle_move: PokemonMove },
     /// `target` is the party slot for an item that asks which Pokémon, as the agent's `item_use::helps_in_battle` decides.

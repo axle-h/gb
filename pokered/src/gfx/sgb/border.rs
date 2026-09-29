@@ -1,7 +1,7 @@
 //! The SGB border: `gfx/sgb/red_border.{2bpp,tilemap}` and `BorderPalettes`, the picture the
 //! console draws round the game.
 //!
-//! Input: the 160x144 RGB the colour mode painted. Output: 256x224 RGB with that picture in the
+//! Input: the 160x144 RGBA the colour mode painted. Output: 256x224 RGBA with that picture in the
 //! middle of it. Exact: the tilemap, the tiles and the three palettes, all read from the ROM where
 //! `LoadSGB` would have transferred them.
 //!
@@ -9,6 +9,7 @@
 
 use poke_core::rom_gfx::rom_slice;
 use poke_core::symbols::pokered_symbols;
+use crate::gfx::colour::{rgb555, BYTES_PER_PIXEL};
 use crate::gfx::compose;
 use crate::gfx::tiles::pixel;
 
@@ -28,11 +29,11 @@ const PALETTES: usize = 0x800;
 const FIRST_PALETTE: usize = 4;
 const PALETTE_BYTES: usize = 32;
 
-/// The border round `inner`, which is `compose::WIDTH` by `compose::HEIGHT` RGB.
-pub fn rgb(inner: &[u8]) -> Vec<u8> {
+/// The border round `inner`, which is `compose::WIDTH` by `compose::HEIGHT` RGBA.
+pub fn rgba(inner: &[u8]) -> Vec<u8> {
     let data = rom_slice(pokered_symbols::BorderPalettes);
     let tiles = rom_slice(pokered_symbols::SGBBorderGraphics);
-    let mut out = vec![0u8; WIDTH * HEIGHT * 3];
+    let mut out = vec![0u8; WIDTH * HEIGHT * BYTES_PER_PIXEL];
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let cell = (y / 8) * TILEMAP_WIDTH + x / 8;
@@ -45,16 +46,17 @@ pub fn rgb(inner: &[u8]) -> Vec<u8> {
             let colour = pixel(bytes, tx, ty);
             let inside = (INNER_X..INNER_X + compose::WIDTH).contains(&x)
                 && (INNER_Y..INNER_Y + compose::HEIGHT).contains(&y);
-            let at = (y * WIDTH + x) * 3;
+            let at = (y * WIDTH + x) * BYTES_PER_PIXEL;
             // Colour 0 is the SNES's transparency: the game shows through it in the middle, and
             // the backdrop, which is colour 0 of the first border palette, shows through outside.
-            out[at..at + 3].copy_from_slice(&match (colour, inside) {
+            let span = at..at + BYTES_PER_PIXEL;
+            match (colour, inside) {
                 (0, true) => {
-                    let from = ((y - INNER_Y) * compose::WIDTH + x - INNER_X) * 3;
-                    [inner[from], inner[from + 1], inner[from + 2]]
+                    let from = ((y - INNER_Y) * compose::WIDTH + x - INNER_X) * BYTES_PER_PIXEL;
+                    out[span].copy_from_slice(&inner[from..from + BYTES_PER_PIXEL]);
                 }
-                _ => crate::gfx::colour::rgb555(border_palette(data, palette)[colour as usize]),
-            });
+                _ => out[span].copy_from_slice(&rgb555(border_palette(data, palette)[colour as usize])),
+            }
         }
     }
     out
@@ -85,15 +87,16 @@ mod tests {
 
     #[test]
     fn the_middle_is_the_game_and_the_edge_is_the_border() {
-        let inner = vec![0x40u8; compose::WIDTH * compose::HEIGHT * 3];
-        let out = rgb(&inner);
-        assert_eq!(out.len(), WIDTH * HEIGHT * 3);
+        let inner = vec![0x40u8; compose::WIDTH * compose::HEIGHT * BYTES_PER_PIXEL];
+        let out = rgba(&inner);
+        assert_eq!(out.len(), WIDTH * HEIGHT * BYTES_PER_PIXEL);
         let at = |x: usize, y: usize| {
-            let i = (y * WIDTH + x) * 3;
-            [out[i], out[i + 1], out[i + 2]]
+            let i = (y * WIDTH + x) * BYTES_PER_PIXEL;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
         };
-        assert_eq!(at(INNER_X, INNER_Y), [0x40; 3], "the game's top-left corner");
-        assert_eq!(at(WIDTH / 2, HEIGHT / 2), [0x40; 3], "and its middle");
-        assert_ne!(at(0, 0), [0x40; 3], "the border's own corner");
+        assert_eq!(at(INNER_X, INNER_Y), [0x40; 4], "the game's top-left corner");
+        assert_eq!(at(WIDTH / 2, HEIGHT / 2), [0x40; 4], "and its middle");
+        assert_eq!(at(0, 0)[3], 0xFF, "the border is opaque");
+        assert_ne!(at(0, 0), [0x40; 4], "the border's own corner");
     }
 }

@@ -17,7 +17,7 @@ use crate::pokemon::tile_map::MetaTileMap;
 use crate::pokemon::{GameState, PokemonApi, PokemonApiTrait};
 
 /// The rods worst to best, which is the `Ord` [`Rod::best_in_bag`] takes the maximum of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Rod { Old, Good, Super }
 
 impl Rod {

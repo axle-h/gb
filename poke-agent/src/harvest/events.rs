@@ -252,7 +252,7 @@ mod harvest {
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
     use strum::IntoEnumIterator;
-    use super::super::{write_fixture, Case};
+    use super::super::{distinct, write_fixture, Case};
     use super::*;
 
     const FACINGS: [u8; 4] = [SpriteFacing::Down as u8, SpriteFacing::Up as u8, SpriteFacing::Left as u8, SpriteFacing::Right as u8];
@@ -426,7 +426,7 @@ mod harvest {
             .collect();
         let found = cases.iter().filter(|case| case.output.is_some()).count();
         assert!(found > 500, "only {found} found among {}", cases.len());
-        write_fixture("events", "check_for_hidden_event", &cases);
+        write_fixture("events", "check_for_hidden_event", &distinct(cases));
 
         let cases: Vec<_> = bookshelf_inputs().into_iter()
             .map(|input| Case { input, output: print_bookshelf_text(&mut oracle, input), rng: vec![] })

@@ -113,7 +113,7 @@ fn the_recreation_writes_what_the_running_cartridge_writes() {
     // game rather than to the audio engine, so it is read across rather than zeroed.
     let no_audio_fade_out = gb.core().mmu().read(pokered_symbols::wStatusFlags2.address) & 1 << 1 != 0;
 
-    let mut engine = AudioEngine::new(song.bank);
+    let mut engine = AudioEngine::cartridge(song.bank);
     engine.no_audio_fade_out = no_audio_fade_out;
     engine.play_sound(SoundId::STOP_ALL_MUSIC);
     engine.play_music(song);

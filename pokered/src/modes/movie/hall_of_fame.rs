@@ -35,6 +35,9 @@ use super::wait::{Tick, Wait};
 const TILEMAP_MON_PIC: usize = 0;
 /// Where `vBackPic` starts in `vChars2`.
 const BACK_PIC_TILE: u8 = 0x31;
+/// `.ScrollPic`'s pixels a frame, both ways: the back pic's is the DMG's `e = 4` in every colour
+/// mode, where an SGB doubles it.
+const SCROLL_STEP: u8 = 4;
 /// `CreditsOrder`'s commands, counting down from `$FF` past the strings.
 const CRED_TEXT_FADE_MON: u8 = 0xFF;
 const CRED_TEXT_MON: u8 = 0xFE;
@@ -170,7 +173,7 @@ impl HallOfFame {
                 self.show(ctx, 0);
             }
             Phase::ScrollBack(mon) => {
-                self.screen.scx = self.screen.scx.wrapping_add(4);
+                self.screen.scx = self.screen.scx.wrapping_add(SCROLL_STEP);
                 if self.screen.scx != 0xA0 {
                     self.wait = Wait::frames(1);
                 } else {
@@ -181,7 +184,7 @@ impl HallOfFame {
                 }
             }
             Phase::ScrollFront(mon) => {
-                self.screen.scx = self.screen.scx.wrapping_sub(4);
+                self.screen.scx = self.screen.scx.wrapping_sub(SCROLL_STEP);
                 if self.screen.scx != 0 {
                     self.wait = Wait::frames(1);
                 } else if (mon as usize) < ctx.world.party.len() {

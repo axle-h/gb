@@ -9,10 +9,10 @@
 //! long the channel then waits.
 //!
 //! Exact, all of it: note length and the delay counter's fractional part, the frequency table and
-//! its octave shifts, vibrato, the pitch slide including its borrow bug, the duty cycle rotation,
-//! the sound effect priority rules, the fade-out's volume steps and the cry modifiers. The frame
-//! counts are exact too, because the engine ticks once a frame and nothing in it waits on anything
-//! else.
+//! its octave shifts, vibrato, the pitch slide, the duty cycle rotation, the sound effect priority
+//! rules, the fade-out's volume steps and the cry modifiers. The frame counts are exact too,
+//! because the engine ticks once a frame and nothing in it waits on anything else. The engine's
+//! bugs are fixed unless [`AudioEngine::cartridge_bugs`] asks for them.
 //!
 //! What comes out is a [`Write`] per register the cartridge would have written, in order, so a
 //! backend renders the same sound without the engine knowing what a backend is, and no oscillator
@@ -247,6 +247,10 @@ pub struct AudioEngine {
     /// next VBlank, so a save taken between the two has to keep it.
     #[serde(default)]
     out: Vec<Write>,
+    /// `World::cartridge_bugs`, which `Game` copies here: play the engine's bugs rather than their
+    /// fixes.
+    #[serde(default)]
+    pub cartridge_bugs: bool,
 }
 
 impl Default for AudioBank {
@@ -258,6 +262,11 @@ impl Default for AudioBank {
 impl AudioEngine {
     pub fn new(bank: AudioBank) -> Self {
         Self { bank, saved_bank: bank, ..Default::default() }
+    }
+
+    /// The engine with the cartridge's bugs, for a comparison with the cartridge.
+    pub fn cartridge(bank: AudioBank) -> Self {
+        Self { cartridge_bugs: true, ..Self::new(bank) }
     }
 
     pub fn bank(&self) -> AudioBank {
@@ -931,7 +940,11 @@ impl AudioEngine {
             u16::from_be_bytes(self.sfx_tempo)
         };
         let delay = multiply_add(self.channels[c].note_delay_counter_fractional_part, scaled, tempo);
-        let [counter, fractional] = delay.to_be_bytes();
+        let [mut counter, fractional] = delay.to_be_bytes();
+        // The cartridge lets a tempo below `$0100` round a delay to 0, which counts down from 255.
+        if counter == 0 && !self.cartridge_bugs {
+            counter = 1;
+        }
         self.channels[c].note_delay_counter_fractional_part = fractional;
         self.channels[c].note_delay_counter = counter;
         if self.channels[c].executing_music() || !self.channels[c].test(BIT_NOISE_OR_SFX) {
@@ -961,10 +974,12 @@ impl AudioEngine {
         let octave = self.channels[c].octave;
         let (mut d, mut e) = self.calculate_frequency(command >> 4, octave);
         if self.channels[c].test(BIT_PITCH_SLIDE_ON) {
-            // A note that arms a pitch slide does not sound at its own pitch for its first frame:
-            // the divide below runs in the frequency's own registers and this is what it leaves.
-            // The slide itself still starts from the right frequency, which was stored first.
-            (d, e) = self.init_pitch_slide_vars(c, d, e);
+            let leftovers = self.init_pitch_slide_vars(c, d, e);
+            // The cartridge divides in the frequency's own registers, so a note that arms a slide
+            // sounds the divide's leftovers for its first frame.
+            if self.cartridge_bugs {
+                (d, e) = leftovers;
+            }
         }
         if c < CHAN5 && self.channels[c + CHAN5].sound_id != 0 {
             return Flow::Done;
@@ -1023,9 +1038,9 @@ impl AudioEngine {
         let d = (d | 0x80) & 0xC7;
         self.write_channel_register(c, REG_FREQUENCY_LO, e);
         self.write_channel_register(c, REG_FREQUENCY_LO + 1, d);
-        // A bug kept on purpose: engines 1 and 3 detune every channel while a cry is playing,
-        // music included, because they do not ask which channel this is. `AUDIO_2` does.
-        if self.bank != AudioBank::Two || c >= CHAN5 {
+        // The cartridge's engines 1 and 3 do not ask which channel this is, so a cry detunes the
+        // music under it too.
+        if c >= CHAN5 || (self.cartridge_bugs && self.bank != AudioBank::Two) {
             self.apply_frequency_modifier(c, d, e);
         }
     }
@@ -1056,11 +1071,13 @@ impl AudioEngine {
         (CRY_SFX_START.0..CRY_SFX_END.0).contains(&self.channels[CHAN5].sound_id)
     }
 
-    /// `AudioN_IsBattleSFX`, which only `AUDIO_2` has, and which asks about channels 5 and 8 at
-    /// once by *or*-ing their ids together rather than testing either.
+    /// `AudioN_IsBattleSFX`, which only `AUDIO_2` has: whether channel 5 or channel 8 is playing a
+    /// battle sound effect.
     fn is_battle_sfx(&self) -> bool {
-        let id = self.channels[CHAN8].sound_id | self.channels[CHAN5].sound_id;
-        (BATTLE_SFX_START.0..BATTLE_SFX_END.0).contains(&id)
+        let battle = |id: u8| (BATTLE_SFX_START.0..BATTLE_SFX_END.0).contains(&id);
+        let (noise, pulse) = (self.channels[CHAN8].sound_id, self.channels[CHAN5].sound_id);
+        // The cartridge *or*s the two ids together and tests that.
+        if self.cartridge_bugs { battle(noise | pulse) } else { battle(noise) || battle(pulse) }
     }
 
     fn cry_or_battle_sfx(&self) -> bool {
@@ -1146,7 +1163,7 @@ impl AudioEngine {
 
     /// `AudioN_InitPitchSlideVars`: divide the distance to the target by how many frames the slide
     /// has, to get the step and its fractional part. Returns the two registers it leaves behind,
-    /// which the caller goes on to treat as a frequency.
+    /// which the cartridge's caller goes on to treat as a frequency.
     fn init_pitch_slide_vars(&mut self, c: usize, d: u8, e: u8) -> (u8, u8) {
         let channel = &mut self.channels[c];
         channel.pitch_slide_current_frequency_high_byte = d;
@@ -1164,10 +1181,15 @@ impl AudioEngine {
             let (low, borrow) = channel.pitch_slide_target_frequency_low_byte
                 .overflowing_sub(channel.pitch_slide_current_frequency_low_byte);
             difference_low = low;
-            // The bug: the borrow comes off the *current* frequency's high byte rather than the
-            // target's, so a slide upwards whose low byte has to borrow comes out $200 too far.
-            let borrowed = channel.pitch_slide_current_frequency_high_byte.wrapping_sub(borrow as u8);
-            difference_high = channel.pitch_slide_target_frequency_high_byte.wrapping_sub(borrowed);
+            let (current_high, target_high) =
+                (channel.pitch_slide_current_frequency_high_byte, channel.pitch_slide_target_frequency_high_byte);
+            // The cartridge takes the borrow off the current frequency's high byte rather than the
+            // target's, so a slide upwards whose low byte borrows comes out $200 too far.
+            difference_high = if self.cartridge_bugs {
+                target_high.wrapping_sub(current_high.wrapping_sub(borrow as u8))
+            } else {
+                target_high.wrapping_sub(current_high).wrapping_sub(borrow as u8)
+            };
             channel.res(BIT_PITCH_SLIDE_DECREASING);
         } else {
             channel.set(BIT_PITCH_SLIDE_DECREASING);
@@ -1190,9 +1212,6 @@ impl AudioEngine {
         channel.pitch_slide_frequency_steps = quotient;
         channel.pitch_slide_frequency_steps_fractional_part = remainder;
         channel.pitch_slide_current_frequency_fractional_part = remainder;
-        // The divide runs in the same two registers the note's frequency arrived in, and the
-        // caller saves them only after this returns. What comes back is therefore what the note
-        // plays for its first frame; see `note_pitch`.
         (quotient, e)
     }
 
@@ -1319,12 +1338,10 @@ impl AudioEngine {
         self.sfx_tempo = [1, 0];
         self.music_wave_instrument = 0;
         self.sfx_wave_instrument = 0;
-        // `$a0` bytes from `wChannelCommandPointers` stops at the end of
-        // `wChannelPitchSlideCurrentFrequencyLowBytes`, so both pitch slide *target* arrays survive
-        // a stop, as do the fractional delays, the octaves and the volumes. Then `$18` bytes of
-        // ones, which is the three counters and not the fractional part beside them.
         for c in 0..NUM_CHANNELS {
-            let kept = self.channels[c];
+            let kept = if self.cartridge_bugs { self.channels[c] } else { ChannelState::default() };
+            // The cartridge's clear stops one array short: the pitch slide targets, the fractional
+            // delays, the octaves and the volumes survive a stop.
             self.channels[c] = ChannelState {
                 loop_counter: 1,
                 note_delay_counter: 1,
@@ -1466,8 +1483,8 @@ impl CueTrace {
 }
 
 impl CueInput {
-    pub fn play(&self) -> CueTrace {
-        let mut engine = AudioEngine::new(self.bank);
+    pub fn play(&self, cartridge_bugs: bool) -> CueTrace {
+        let mut engine = AudioEngine { cartridge_bugs, ..AudioEngine::new(self.bank) };
         engine.engine_play_sound(SoundId::STOP_ALL_MUSIC);
         engine.take_writes();
         let mut trace = CueTrace::default();
@@ -1591,22 +1608,115 @@ mod tests {
         }
     }
 
-    /// Safari Zone opens with `pitch_slide 1, 4, A_` and then `note C_, 1`. C_ at octave 3 is
-    /// `$060B`, and `$0C` is what the low byte would be once perfect pitch has raised it — but what
-    /// reaches the hardware is `$FF`, the remains of the slide's own division.
-    #[test]
-    fn a_note_that_arms_a_pitch_slide_sounds_the_divides_leftovers_first() {
+    /// The low bytes of the frequencies a frame writes to channel 1.
+    fn pulse1_lows(writes: &[Write]) -> Vec<u8> {
         use super::super::Channel;
-        let mut engine = playing(sounds::MUSIC_SAFARI_ZONE);
-        let lows: Vec<u8> = engine
-            .frame()
+        writes
             .iter()
             .filter_map(|write| match write {
                 Write::PeriodLow { channel: Channel::Pulse1, low } => Some(*low),
                 _ => None,
             })
-            .collect();
-        assert_eq!(lows, [0xFF]);
+            .collect()
+    }
+
+    /// Safari Zone opens with `pitch_slide 1, 4, A_` and then `note C_, 1`. C_ at octave 3 is
+    /// `$060B`, and perfect pitch raises it to `$060C`, which is what the note sounds. The cartridge
+    /// sounds `$FF`, the remains of the slide's own division.
+    #[test]
+    fn a_note_that_arms_a_pitch_slide_sounds_its_own_frequency_first() {
+        assert_eq!(pulse1_lows(&playing(sounds::MUSIC_SAFARI_ZONE).frame()), [0x0C]);
+        let mut cartridge = playing(sounds::MUSIC_SAFARI_ZONE);
+        cartridge.cartridge_bugs = true;
+        assert_eq!(pulse1_lows(&cartridge.frame()), [0xFF]);
+    }
+
+    /// An upward slide from `$0180` to `$0270` is `$F0` over the slide's frames. The cartridge
+    /// borrows the low byte's carry from the wrong high byte and makes it `$2F0`.
+    #[test]
+    fn a_slide_upwards_measures_the_distance_it_has_to_go() {
+        let slide = |cartridge_bugs: bool| {
+            let mut engine = AudioEngine { cartridge_bugs, ..AudioEngine::new(AudioBank::One) };
+            engine.channels[0].note_delay_counter = 17;
+            engine.channels[0].pitch_slide_length_modifier = 1;
+            engine.channels[0].pitch_slide_target_frequency_high_byte = 0x02;
+            engine.channels[0].pitch_slide_target_frequency_low_byte = 0x70;
+            engine.init_pitch_slide_vars(0, 0x01, 0x80);
+            let channel = engine.channels[0];
+            assert!(!channel.test(BIT_PITCH_SLIDE_DECREASING));
+            // The divide's quotient is one more than the whole steps, and its remainder less the
+            // divisor is what is left in the fractional part.
+            (channel.pitch_slide_frequency_steps, channel.pitch_slide_frequency_steps_fractional_part)
+        };
+        assert_eq!(slide(false), (0xF0 / 16 + 1, 0));
+        assert_eq!(slide(true), ((0x2F0 / 16 + 1) as u8, 0));
+    }
+
+    /// A cry's frequency modifier bends the cry and nothing else: the music on channel 1 under it
+    /// keeps its pitch. The cartridge's engines 1 and 3 detune the music too.
+    #[test]
+    fn a_cry_leaves_the_music_under_it_in_tune() {
+        let detuned = |cartridge_bugs: bool| {
+            let mut engine = AudioEngine { cartridge_bugs, ..AudioEngine::new(AudioBank::One) };
+            engine.engine_play_sound(SoundId::STOP_ALL_MUSIC);
+            engine.play_music(sounds::MUSIC_PALLET_TOWN);
+            engine.play_cry(1);
+            engine.frequency_modifier = 0x40;
+            engine.take_writes();
+            engine.apply_wave_pattern_and_frequency(0, 0x06, 0x0B);
+            pulse1_lows(&engine.take_writes())
+        };
+        assert_eq!(detuned(false), [0x0B]);
+        assert_eq!(detuned(true), [0x0B, 0x4B]);
+    }
+
+    /// `AUDIO_2` asks whether channel 5 or channel 8 plays a battle sound, which the cartridge does
+    /// by testing the two ids *or*-ed together: a drum under a battle sound can make it not one.
+    #[test]
+    fn a_battle_sound_is_one_whatever_the_noise_channel_holds() {
+        let battle = |cartridge_bugs: bool, pulse: SoundId, noise: u8| {
+            let mut engine = AudioEngine { cartridge_bugs, ..AudioEngine::new(AudioBank::Two) };
+            engine.channels[CHAN5].sound_id = pulse.0;
+            engine.channels[CHAN8].sound_id = noise;
+            engine.is_battle_sfx()
+        };
+        let last = SoundId(BATTLE_SFX_END.0 - 1);
+        assert!(battle(false, last, 0x13));
+        assert!(!battle(true, last, 0x13));
+        assert!(battle(false, BATTLE_SFX_START, 0));
+    }
+
+    /// A stop clears every channel array, so nothing the last sound left decides where the next
+    /// one's notes land. The cartridge's clear stops one array short.
+    #[test]
+    fn a_stop_leaves_nothing_of_what_played() {
+        let stopped = |cartridge_bugs: bool| {
+            let mut engine = AudioEngine { cartridge_bugs, ..AudioEngine::new(AudioBank::One) };
+            engine.engine_play_sound(SoundId::STOP_ALL_MUSIC);
+            engine.play_music(sounds::MUSIC_SAFARI_ZONE);
+            engine.play_cry(1);
+            (0..30).for_each(|_| { engine.frame(); });
+            engine.engine_play_sound(SoundId::STOP_ALL_MUSIC);
+            engine.channels
+        };
+        let clean = ChannelState { loop_counter: 1, note_delay_counter: 1, note_speed: 1, ..ChannelState::default() };
+        assert_eq!(stopped(false), [clean; NUM_CHANNELS]);
+        assert_ne!(stopped(true), [clean; NUM_CHANNELS]);
+    }
+
+    /// A tempo below `$0100` can scale a one-frame note to less than a frame. It lasts a frame; the
+    /// cartridge rounds it to 0, which counts down from 255.
+    #[test]
+    fn a_note_shorter_than_a_frame_lasts_one() {
+        let length = |cartridge_bugs: bool| {
+            let mut engine = AudioEngine { cartridge_bugs, ..AudioEngine::new(AudioBank::One) };
+            engine.music_tempo = [0, 0x60];
+            engine.channels[0].note_speed = 1;
+            engine.note_length(0, 0);
+            engine.channels[0].note_delay_counter
+        };
+        assert_eq!(length(false), 1);
+        assert_eq!(length(true), 0);
     }
 
     /// Every sound in the cartridge, in all three copies of the engine, against the registers the
@@ -1619,7 +1729,7 @@ mod tests {
             include_str!("../../fixtures/audio/audio_3.jsonl"),
         ] {
             for (input, frames, _) in crate::fixtures::cases::<TraceInput, Vec<String>>(jsonl) {
-                let mut engine = AudioEngine::new(input.bank);
+                let mut engine = AudioEngine::cartridge(input.bank);
                 engine.engine_play_sound(SoundId::STOP_ALL_MUSIC);
                 engine.engine_play_sound(input.id);
                 engine.take_writes();
@@ -1637,7 +1747,7 @@ mod tests {
         let jsonl = include_str!("../../fixtures/audio/cues.jsonl");
         let cases = crate::fixtures::cases::<CueInput, CueTrace>(jsonl);
         for (input, expected, _) in cases {
-            let actual = input.play();
+            let actual = input.play(true);
             for (frame, (actual, expected)) in actual.writes.iter().zip(&expected.writes).enumerate() {
                 assert_eq!(actual, expected, "{input:?}, frame {frame}");
             }

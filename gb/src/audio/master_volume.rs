@@ -37,8 +37,9 @@ impl MasterVolume {
         self.right_volume
     }
 
+    /// `NR50`'s gain on each side, 1 at its loudest.
     pub fn volume_sample(&self) -> AudioSample {
-        AudioSample::new(Self::to_f32(self.left_volume), Self::to_f32(self.right_volume)) / 7.0
+        AudioSample::new(Self::to_f32(self.left_volume), Self::to_f32(self.right_volume))
     }
 
     pub fn vin_left(&self) -> bool {

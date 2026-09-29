@@ -59,9 +59,12 @@ fn free(game: &Game) -> bool {
 }
 
 /// A party that settles a scripted battle in a turn rather than grinding it out or being slept
-/// through: these tests are about what the map does either side of a battle, not the battle.
+/// through: these tests are about what the map does either side of a battle, not the battle. The
+/// player's own, so it obeys with no badges.
 fn one_shot(world: &mut World) {
-    world.party = vec![mon(PokemonSpecies::Mewtwo, 70)];
+    let mut mewtwo = mon(PokemonSpecies::Mewtwo, 70);
+    mewtwo.mon.mon.ot_id = world.player_id;
+    world.party = vec![mewtwo];
 }
 
 /// A toggleable object a new game starts with hidden, which a script somewhere else would show.
@@ -1157,18 +1160,36 @@ fn the_route_6_gate_turns_a_thirsty_player_back_south() {
     assert_eq!((game.world().location.x, game.world().location.y), (3, 3), "walked back down");
 }
 
-/// Every Saffron gate's text table points at the one `SaffronGateGuardText`, so talking to the guard
-/// in any of them presses UP and arms the Route 5 gate's script, wherever the player is standing.
+/// Every Saffron gate's text table points at the one `SaffronGateGuardText`, and the cartridge's
+/// presses UP and arms the Route 5 gate's script, wherever the player is standing.
 #[test]
 fn talking_to_the_route_6_gate_guard_runs_the_route_5_gate_s_code() {
     use poke_core::symbols::pokered_map_scripts::SCRIPT_ROUTE5GATE_PLAYER_MOVING;
-    let mut game = game(Map::Route6Gate, 5, 2, SpriteFacing::Right, 5, |_| {});
+    let mut game = game(Map::Route6Gate, 5, 2, SpriteFacing::Right, 5, |world| world.cartridge_bugs = true);
     play_until(&mut game, 600, free);
     command(&mut game, Command::Interact);
     play_until(&mut game, 20_000, |game| {
         game.world().scripts.maps.route5_gate.cur_script == SCRIPT_ROUTE5GATE_PLAYER_MOVING
     });
     assert_eq!(game.world().scripts.maps.route6_gate.cur_script, 0, "its own script was never armed");
+}
+
+/// Talked to, the Route 6 guard turns a thirsty player back the way his own gate does: down, on
+/// his own gate's script. The square is behind the counter, so the press only turns the player.
+#[test]
+fn talking_to_the_route_6_gate_guard_turns_the_player_back_south() {
+    use poke_core::symbols::pokered_map_scripts::{SCRIPT_ROUTE6GATE_DEFAULT, SCRIPT_ROUTE6GATE_PLAYER_MOVING};
+    let mut game = game(Map::Route6Gate, 5, 2, SpriteFacing::Right, 5, |_| {});
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Interact);
+    play_until(&mut game, 20_000, |game| {
+        game.world().scripts.maps.route6_gate.cur_script == SCRIPT_ROUTE6GATE_PLAYER_MOVING
+    });
+    play_until(&mut game, 20_000, |game| {
+        free(game) && game.world().scripts.maps.route6_gate.cur_script == SCRIPT_ROUTE6GATE_DEFAULT
+    });
+    assert_eq!(game.world().scripts.maps.route5_gate.cur_script, 0, "Route 5's script was never armed");
+    assert_eq!(game.world().location.facing, SpriteFacing::Down, "pressed down, against the counter");
 }
 
 /// Route 6 is a plain trainer map: its table is the one every trainer map runs.

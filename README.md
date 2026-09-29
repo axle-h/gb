@@ -235,6 +235,7 @@ All environment variables, never flags — the API key has to be one, so the res
 | `GB_PORT`, `GB_STATUS_HZ` | the server |
 | `GB_AUDIO_BITRATE` | the Opus stream's target, bits/s (`24000`); `0` turns sound off entirely |
 | `GB_HARDWARE` | which Game Boy the cartridge runs on: `dmg` (default) or `cgb` |
+| `GB_GAME` | what is played: `emulated` (default), or `native`, the recreation, whose run keeps `game.pkrd` in place of `state.gbst` and `sram.bin` |
 | `GB_RESTORE_HISTORY` | resume a run's conversation as well as its save (`1`); `0` starts it over |
 | `GB_ADMIN_TOKEN` | enables the three admin endpoints; unset means all three 404 |
 | `GB_REGEN_FIXTURES` | let a test overwrite the fixture it snapshots; off by default |

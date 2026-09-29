@@ -155,7 +155,7 @@ fn hidden_coins(s: &mut Script, event: HiddenEvent) -> Flow {
     if flag_action(&mut world.hidden_coins, index, FlagAction::Test) != 0 {
         return Flow::Return;
     }
-    let amount = hidden_events::hidden_coins_amount(event.argument);
+    let amount = hidden_events::hidden_coins_amount(event.argument, world.cartridge_bugs);
     world.text.money.insert(TextMoney::Coins, amount.to_vec());
     add_bcd(&mut world.coins, &amount);
     flag_action(&mut world.hidden_coins, index, FlagAction::Set);

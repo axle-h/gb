@@ -216,7 +216,14 @@ impl PokemonEncoding for MMU {
                     // into the floor has played, with every button ignored until then. B3F's
                     // `MoveObjectScript` returns without resetting once the current is calmed.
                     use crate::pokemon::map::Map;
-                    let script = match self.read_pointer(&pokered_symbols::wCurMap) {
+                    let map = self.read_pointer(&pokered_symbols::wCurMap);
+                    // No square of the Hall of Fame is ever the player's: its scripts walk the player
+                    // in to Oak, and the last lets go of the pad to run the ceremony from inside the
+                    // map script, where the overworld never polls again.
+                    if map == Map::HallOfFame as u8 {
+                        return GameMode::Script;
+                    }
+                    let script = match map {
                         map if map == Map::SeafoamIslandsB3F as u8 => Some(
                             match self.read_pointer(&pokered_symbols::wSeafoamIslandsB3FCurScript) {
                                 2 if !crate::pokemon::map_metadata::strong_current_below(self, Map::SeafoamIslandsB2F) => 0,

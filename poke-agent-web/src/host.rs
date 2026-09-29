@@ -3,19 +3,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use gb::cycles::MachineCycles;
-use gb::game_boy::GameBoy;
 use gb::model::Model;
-use poke_agent::pokemon::agent::{AgentEvent, PokemonAgent};
-use poke_agent::pokemon::map_metadata::MapMetadataCache;
-use poke_agent::pokemon::options::{SERVED_OPTIONS, keep_game_options};
+use poke_agent::pokemon::agent::AgentEvent;
 use poke_agent::pokemon::policy::{LLM_POLICY_NAME, Policy};
-use poke_agent::pokemon::{PokemonApi, PokemonApiTrait, observe};
-use poke_agent::run::{CurrentRun, RunProgress};
+use poke_agent::run::{CurrentRun, GameKind, RunProgress};
 use poke_agent::published::{
     FrameSnapshot, Published, RunStatus, StatusSnapshot, UiEventBody, now_ms,
 };
+use crate::console::Console;
 use crate::web::audio::{self, AudioEncoder};
-use crate::web::video::{Frame, VideoEncoder};
+use crate::web::video::VideoEncoder;
 
 /// One machine cycle at the real hardware's rate — the unit the pacing loop spends wall clock in.
 const REALTIME_CYCLE_DURATION: Duration = MachineCycles::from_m(1).to_duration();
@@ -49,6 +46,8 @@ pub struct HostConfig {
     pub model: Model,
     /// Whether the state this host is starting from is a new game rather than a resumed one.
     pub fresh_game: bool,
+    /// The cartridge on the emulator or the recreation, from `GB_GAME`.
+    pub game: GameKind,
 }
 
 /// What the HTTP layer is allowed to ask the emulator thread for.
@@ -116,21 +115,13 @@ impl Default for HostConfig {
             fresh_game: false,
             // The DMG is the default and the tests depend on it.
             model: Model::Dmg,
+            game: GameKind::Emulated,
         }
     }
 }
 
-/// Re-apply everything about the APU that a save state does not carry.
-fn tune_audio(gb: &mut GameBoy, target_speed: f64) {
-    let audio = gb.core_mut().mmu_mut().audio_mut();
-    audio.set_output_sample_rate(audio::SAMPLE_RATE);
-    audio.set_emulation_speed(target_speed.max(f64::MIN_POSITIVE));
-}
-
 pub struct EmulatorHost {
-    gb: GameBoy,
-    agent: PokemonAgent,
-    map_cache: MapMetadataCache,
+    console: Console,
     published: Arc<Published>,
     encoder: VideoEncoder,
     /// `None` when `HostConfig::audio_bitrate` is, which is the whole of "audio is off".
@@ -177,16 +168,18 @@ pub struct EmulatorHost {
 }
 
 impl EmulatorHost {
-    /// Build a host running `policy` from `save_state`.
+    /// Build a host running `policy` from `save_state`, which is a `state.gbst` or a `game.pkrd`
+    /// as `config.game` says.
     pub fn new(
         save_state: &[u8],
         policy: Box<dyn Policy>,
         published: Arc<Published>,
         config: HostConfig,
     ) -> Result<Self, String> {
-        let mut gb = GameBoy::new(poke_agent::pokemon::roms::POKERED, config.model);
-        gb.load_state(save_state).map_err(|e| format!("could not load the starting state: {e}"))?;
-        tune_audio(&mut gb, config.target_speed);
+        let mut console = Console::new(config.game, save_state, policy, config.model, config.target_speed)?;
+        if let Some(save) = config.run.as_ref().and_then(|current| current.get().game_save()) {
+            console.restore_game_save(save);
+        }
 
         let now = Instant::now();
         let cycle_duration = REALTIME_CYCLE_DURATION.div_f64(config.target_speed.max(f64::MIN_POSITIVE));
@@ -195,9 +188,7 @@ impl EmulatorHost {
         // another's turns.
         let turns_at_run_start = published.turns();
         let mut host = Self {
-            gb,
-            agent: PokemonAgent::new(policy),
-            map_cache: MapMetadataCache::default(),
+            console,
             published,
             encoder: VideoEncoder::default(),
             audio: config.audio_bitrate.map(AudioEncoder::new),
@@ -238,17 +229,13 @@ impl EmulatorHost {
     /// Hold the game to [`SERVED_OPTIONS`], a new run and a resume alike. Called before every
     /// slice, because the credits' soft reset and Continue restore whatever the save was written with.
     fn keep_served_options(&mut self) {
-        keep_game_options(self.gb.core_mut().mmu_mut(), &SERVED_OPTIONS);
+        self.console.keep_served_options();
     }
 
     /// Put the policy's name on the trainer card, if it has one.
     fn name_the_player(&mut self) {
-        let Some(name) = self.agent.policy_player_name() else { return };
-        let written = {
-            let mut api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
-            api.write_player_name(&name)
-        };
-        match written {
+        let Some(name) = self.console.policy_player_name() else { return };
+        match self.console.write_player_name(&name) {
             Ok(()) => println!("poke-agent-web — the player is called {name}"),
             Err(error) => {
                 self.published.publish_event(UiEventBody::Notice {
@@ -311,7 +298,7 @@ impl EmulatorHost {
     /// Write the run's state to disk, if this host has somewhere to write it.
     fn checkpoint(&mut self) {
         let Some(run) = self.config.run.as_ref().map(|current| current.get()) else { return };
-        let state = match self.gb.save_state() {
+        let state = match self.console.save_state() {
             Ok(state) => state,
             Err(failure) => {
                 self.published.publish_event(UiEventBody::Notice {
@@ -321,7 +308,7 @@ impl EmulatorHost {
                 return;
             }
         };
-        if let Err(failure) = run.checkpoint(&state, &self.gb.dump_sram(), self.progress()) {
+        if let Err(failure) = self.console.checkpoint(&run, &state, self.progress()) {
             self.published.publish_event(UiEventBody::Notice {
                 level: "error",
                 message: format!("could not checkpoint the run: {failure}"),
@@ -359,21 +346,20 @@ impl EmulatorHost {
         }
 
         self.checkpoint();
-        let state = match self.gb.save_state() {
+        let state = match self.console.save_state() {
             Ok(state) => state,
             Err(failure) => return self.complain(format!("could not save the winning state: {failure}")),
         };
 
-        // Read here: `game_state()` needs the emulator, and the archive job does not have it.
-        let (badges, pokedex_owned, pokedex_seen, money, party, playtime_maxed) = self.final_state();
+        // Read here: `game_state()` needs the game, and the archive job does not have it.
+        let (badges, pokedex_owned, pokedex_seen, money, party, playtime_maxed) = self.console.final_state();
         // After the checkpoint above, which folds this process's figures onto the run's baseline.
         let meta = run.meta();
         let usage = self.published.usage();
         let job = poke_agent::run::hall_of_fame::ArchiveJob {
             root: current.root().to_path_buf(),
             run_dir: run.path().to_path_buf(),
-            state,
-            sram: self.gb.dump_sram(),
+            saves: self.console.archive_files(state),
             until_seq: seq,
             completion: poke_agent::run::hall_of_fame::Completion {
                 archive: String::new(), // filled in by `archive`, which chooses the directory
@@ -382,9 +368,9 @@ impl EmulatorHost {
                 completed_at: poke_agent::run::iso8601(std::time::SystemTime::now()),
                 started_at: meta.started_at.clone(),
                 app_version: crate::cli::VERSION.to_string(),
-                policy: self.agent.policy_name().to_string(),
+                policy: self.console.policy_name().to_string(),
                 // `RunMeta::model` is the policy's name under every policy but the LLM.
-                model: (self.agent.policy_name() == LLM_POLICY_NAME)
+                model: (self.console.policy_name() == LLM_POLICY_NAME)
                     .then(|| meta.model.clone()),
                 playtime_seconds: *playtime_seconds,
                 playtime: playtime.clone(),
@@ -440,31 +426,6 @@ impl EmulatorHost {
         }
     }
 
-    /// The winning run's final tally, for the ledger row.
-    fn final_state(&mut self) -> (u32, usize, usize, u32, Vec<poke_agent::run::hall_of_fame::PartyMember>, bool) {
-        use poke_agent::pokemon::symbols::{DmgPointerRead, pokered_symbols};
-        let api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
-        let maxed = api.mmu().read_pointer(&pokered_symbols::wPlayTimeMaxed) != 0;
-        let Ok(state) = api.game_state() else { return (0, 0, 0, 0, Vec::new(), maxed) };
-        let party = state
-            .pokemon
-            .iter()
-            .map(|mon| poke_agent::run::hall_of_fame::PartyMember {
-                nickname: mon.nickname.to_default_string(),
-                species: format!("{:?}", mon.species),
-                level: mon.level,
-            })
-            .collect();
-        (
-            state.badges.bits().count_ones(),
-            state.pokedex_owned.species().len(),
-            state.pokedex_seen.species().len(),
-            state.money,
-            party,
-            maxed,
-        )
-    }
-
     /// Publish an error notice and print it.
     fn complain(&self, message: String) {
         eprintln!("poke-agent-web — {message}");
@@ -481,19 +442,11 @@ impl EmulatorHost {
         let run = current.start_new()?;
         let run_id = run.run_id();
 
-        self.gb = GameBoy::new(poke_agent::pokemon::roms::POKERED, self.config.model);
-        self.gb
-            .load_state(poke_agent::pokemon::data::START_OF_GAME)
-            .map_err(|e| format!("could not load the start-of-game state: {e}"))?;
-        self.map_cache = MapMetadataCache::default();
-        self.keep_served_options();
-        self.agent.restart(Some(run.path()));
+        self.console.restart(run.path())?;
         // A new game names its trainer again, since the policy may have changed.
         self.name_the_player();
 
         self.encoder.restart();
-        // The reload above dropped both APU settings.
-        tune_audio(&mut self.gb, self.config.target_speed);
         if let Some(audio) = self.audio.as_mut() {
             audio.restart();
         }
@@ -529,7 +482,7 @@ impl EmulatorHost {
     /// Throw away the model's memory of this run and leave the run itself alone.
     fn clear_conversation(&mut self) -> Result<String, String> {
         let run = self.config.run.as_ref().map(|current| current.get());
-        self.agent.clear_conversation(run.as_ref().map(|run| run.path()))?;
+        self.console.clear_conversation(run.as_ref().map(|run| run.path()))?;
         let run_id = run.map(|run| run.run_id()).unwrap_or_default();
         self.published.publish_event(UiEventBody::Notice {
             level: "info",
@@ -594,7 +547,7 @@ impl EmulatorHost {
             self.keep_served_options();
             // `agent.run`, not `gb.run` and one `agent.update`.
             let result;
-            (ran, result) = self.agent.run(&mut self.gb, &mut self.map_cache, min_cycles);
+            (ran, result) = self.console.advance(min_cycles);
             self.emulated += ran;
             self.ahead_by_cycles += ran - min_cycles;
 
@@ -614,7 +567,7 @@ impl EmulatorHost {
             // A save state for whatever the model is about to complain about.
             let awaiting = matches!(self.published.run_status(), RunStatus::AwaitingLlm { .. });
             if awaiting && !self.awaiting_llm {
-                match self.gb.save_state() {
+                match self.console.save_state() {
                     Ok(state) => self.published.publish_save_state(state),
                     // Nothing here may cost a tick.
                     Err(failure) => eprintln!("could not capture a turn's save state: {failure}"),
@@ -622,7 +575,7 @@ impl EmulatorHost {
             }
             self.awaiting_llm = awaiting;
 
-            let events = self.agent.drain_events();
+            let events = self.console.drain_events();
             for event in events {
                 let seq = self.published.publish_event(UiEventBody::Agent {
                     kind: event_kind(&event),
@@ -692,7 +645,7 @@ impl EmulatorHost {
             // Ahead of the drain rather than after it, so the two throw the same moment away:
             // `set_output_enabled` clears the blip buffer, and the read below then finds nothing.
             self.set_audio_output(true);
-            while self.gb.core_mut().mmu_mut().audio_mut().read_samples_f32(&mut self.audio_scratch) > 0 {}
+            while self.console.read_samples(&mut self.audio_scratch) > 0 {}
             return;
         }
         // Every tick, not just on the edge: `MMU::reset` replaces the whole `Audio` and a
@@ -700,7 +653,7 @@ impl EmulatorHost {
         self.set_audio_output(true);
 
         loop {
-            let frames = self.gb.core_mut().mmu_mut().audio_mut().read_samples_f32(&mut self.audio_scratch);
+            let frames = self.console.read_samples(&mut self.audio_scratch);
             if frames == 0 {
                 break;
             }
@@ -722,14 +675,13 @@ impl EmulatorHost {
         }
     }
 
-    /// Run the APU's mixer and resampler, or do not.
+    /// Make samples, or do not.
     fn set_audio_output(&mut self, enabled: bool) {
-        self.gb.core_mut().mmu_mut().audio_mut().set_output_enabled(enabled);
+        self.console.set_audio_output(enabled);
     }
 
     fn publish_video(&mut self) {
-        // Copied out: the encoder borrows `self` mutably and the LCD lives inside the `GameBoy`.
-        let frame: Box<Frame> = Box::new(*self.gb.core().mmu().ppu().lcd());
+        let frame = self.console.screen();
         let Some(delta) = self.encoder.encode(&frame) else {
             return; // nothing moved on screen, so nothing goes on the wire
         };
@@ -741,8 +693,7 @@ impl EmulatorHost {
     /// Sample the game state and publish it if it says something new or the keepalive is due.
     fn publish_status(&mut self, now: Instant) {
         // `game_state` reads a lot of RAM and can legitimately fail mid-transition.
-        let api = PokemonApi::with_cache(&mut self.gb, &mut self.map_cache);
-        let game = api.game_state().ok().map(|state| observe::status(&state, &api));
+        let game = self.console.status();
         let snapshot = StatusSnapshot {
             // `run_started`, not the process's own clock.
             wall_ms: now
@@ -756,12 +707,12 @@ impl EmulatorHost {
             dropped_ms: self.dropped.as_millis() as u64,
             target_speed: self.config.target_speed,
             // Asked of the decider rather than configured beside it, so the two cannot disagree.
-            policy: self.agent.policy_name(),
+            policy: self.console.policy_name(),
             // Who is playing, for the page's title and header.
-            model: (self.agent.policy_name() == LLM_POLICY_NAME)
+            model: (self.console.policy_name() == LLM_POLICY_NAME)
                 .then(|| self.config.run.as_ref().map(|run| run.model().to_string()))
                 .flatten(),
-            agent_state: self.agent.state_debug(),
+            agent_state: self.console.state_debug(),
             frame_seq: self.encoder.seq(),
             game,
             run: self.published.run_status(),
@@ -819,6 +770,8 @@ fn event_kind(event: &AgentEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gb::game_boy::GameBoy;
+    use poke_agent::pokemon::options::SERVED_OPTIONS;
     use poke_agent::pokemon::policy::RandomPolicy;
     use poke_agent::published::{UiEvent, UiEventBody};
     use crate::web::video::VideoDecoder;
@@ -1176,7 +1129,7 @@ mod tests {
             host.tick();
         }
         assert!(
-            !host.gb.core().mmu().audio().output_enabled(),
+            !host.console.emulated().gb.core().mmu().audio().output_enabled(),
             "the APU was still mixing and resampling with nobody attached",
         );
 
@@ -1184,7 +1137,7 @@ mod tests {
         let _listener = published.join_audio();
         host.tick();
         assert!(
-            host.gb.core().mmu().audio().output_enabled(),
+            host.console.emulated().gb.core().mmu().audio().output_enabled(),
             "a listener attached and the APU never started synthesising again",
         );
     }
@@ -1237,7 +1190,7 @@ mod tests {
         let speed = host.config.target_speed;
 
         let tuned = |host: &EmulatorHost| {
-            let audio = host.gb.core().mmu().audio();
+            let audio = host.console.emulated().gb.core().mmu().audio();
             (audio.output_sample_rate(), audio.emulation_speed())
         };
         assert_eq!(tuned(&host), (audio::SAMPLE_RATE, speed), "EmulatorHost::new left the APU untuned");
@@ -1315,7 +1268,7 @@ mod tests {
         // …then the shutdown checkpoint, so the comparison below is exact.
         host.checkpoint();
         let before = {
-            let api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            let api = host.console.api();
             api.game_state().expect("a readable state")
         };
         drop(host);
@@ -1333,7 +1286,7 @@ mod tests {
         )
         .expect("the checkpoint loads");
         let after = {
-            let api = PokemonApi::with_cache(&mut second.gb, &mut second.map_cache);
+            let api = second.console.api();
             api.game_state().expect("a readable state")
         };
 
@@ -1374,7 +1327,7 @@ mod tests {
             std::thread::sleep(Duration::from_micros(500));
         }
         let played = {
-            let api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            let api = host.console.api();
             api.game_state().expect("a readable state")
         };
         assert!(host.emulated.to_duration() >= Duration::from_secs(8), "the host barely ran");
@@ -1392,12 +1345,12 @@ mod tests {
                 "the outgoing run was not checkpointed — everything since its last write is gone");
 
         let restarted = {
-            let api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            let api = host.console.api();
             api.game_state().expect("a readable state")
         };
         let start = {
             let mut fresh = host_with(Published::new(), |_| {});
-            let api = PokemonApi::with_cache(&mut fresh.gb, &mut fresh.map_cache);
+            let api = fresh.console.api();
             api.game_state().expect("a readable state")
         };
         assert_eq!(restarted.map.player_position, start.map.player_position,
@@ -1424,7 +1377,7 @@ mod tests {
             battle_style: BattleStyle::Shift,
             text_speed: TextSpeed::Medium,
         };
-        let options = |host: &EmulatorHost| host.gb.core().mmu().read_game_options();
+        let options = |host: &EmulatorHost| host.console.emulated().gb.core().mmu().read_game_options();
 
         // A resume, from a save written before the host held anything.
         let mut gb = GameBoy::dmg(poke_agent::pokemon::roms::POKERED);
@@ -1439,7 +1392,7 @@ mod tests {
         assert_eq!(options(&host), Ok(SERVED_OPTIONS), "a resume kept the save's options");
 
         // The game putting its own back, as Continue does after the credits.
-        host.gb.core_mut().mmu_mut().write_game_options(&cartridge_defaults).expect("writable");
+        host.console.emulated_mut().gb.core_mut().mmu_mut().write_game_options(&cartridge_defaults).expect("writable");
         let deadline = Instant::now() + Duration::from_secs(5);
         while host.emulated == MachineCycles::ZERO && Instant::now() < deadline {
             host.tick();
@@ -1449,7 +1402,7 @@ mod tests {
         assert_eq!(options(&host), Ok(SERVED_OPTIONS), "a tick did not put the served options back");
 
         // A new run, before its first tick.
-        host.gb.core_mut().mmu_mut().write_game_options(&cartridge_defaults).expect("writable");
+        host.console.emulated_mut().gb.core_mut().mmu_mut().write_game_options(&cartridge_defaults).expect("writable");
         host.start_new_run().expect("a host with a run directory starts another");
         assert_eq!(options(&host), Ok(SERVED_OPTIONS), "a new run started on the cartridge's options");
     }
@@ -1565,7 +1518,7 @@ mod tests {
         }
         assert!(host.emulated.to_duration() >= Duration::from_secs(8), "the host barely ran");
         let played = {
-            let api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            let api = host.console.api();
             api.game_state().expect("a readable state")
         };
 
@@ -1578,7 +1531,7 @@ mod tests {
         assert_eq!(current.get().run_id(), before.run_id(), "a clear must not swap the run directory");
         assert!(!before.path().join("state.gbst").exists(), "a clear must not checkpoint, let alone reset");
         let after = {
-            let api = PokemonApi::with_cache(&mut host.gb, &mut host.map_cache);
+            let api = host.console.api();
             api.game_state().expect("a readable state")
         };
         // The trainer ID, not the map: a restart mints a new one, and the walk may take the stairs.
@@ -1608,5 +1561,274 @@ mod tests {
         let refusal = mailbox.request(ControlRequest::NewRun).expect_err("the clear is outstanding");
         assert!(refusal.contains("conversation"), "the refusal names the wrong command: {refusal}");
         drop(receiver);
+    }
+
+    fn native_host(published: Arc<Published>, tweak: impl FnOnce(&mut HostConfig)) -> EmulatorHost {
+        let state = crate::console::native_start_of_game().expect("a new native game");
+        host_from(&state, published, |config| {
+            config.game = GameKind::Native;
+            tweak(config);
+        })
+    }
+
+    /// The recreation behind the same host: a moving heartbeat and a screen that decodes.
+    #[test]
+    fn a_native_host_publishes_a_moving_game_and_decodable_video() {
+        let published = Published::new();
+        let mut events = published.subscribe_events();
+        let mut host = native_host(Arc::clone(&published), |_| {});
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut statuses: Vec<StatusSnapshot> = Vec::new();
+        while statuses.len() < 40 && Instant::now() < deadline {
+            host.tick();
+            while let Ok(UiEvent { body, .. }) = events.try_recv() {
+                if let UiEventBody::Status(status) = body {
+                    statuses.push(*status);
+                }
+            }
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert!(statuses.len() >= 40, "only {} status heartbeats arrived", statuses.len());
+        assert!(statuses.iter().all(|s| s.game.is_some()), "a heartbeat could not read the game state");
+        assert_eq!(statuses[0].policy, "random");
+        let positions: std::collections::HashSet<_> =
+            statuses.iter().filter_map(|s| s.game.as_ref()).map(|g| (g.map.clone(), g.position.x, g.position.y)).collect();
+        assert!(positions.len() > 1, "the player never moved: {positions:?}");
+
+        let keyframe = published.latest_keyframe().expect("a keyframe should have been published");
+        let mut decoder = VideoDecoder::default();
+        decoder.apply(&keyframe.bytes).expect("the host's own keyframe should decode");
+        let snapshot = published.latest_frame();
+        assert_eq!(snapshot.seq, keyframe.seq);
+        assert_eq!(decoder.pixels(), snapshot.pixels.as_ref());
+        // Red's room in the DMG's four greys, and no other colour.
+        let shades: std::collections::HashSet<_> = snapshot.pixels.iter().copied().collect();
+        assert!(shades.len() > 1 && shades.len() <= 4, "{} colours on a DMG screen", shades.len());
+    }
+
+    /// The synth behind the Opus stream: nothing made until someone listens, then the theme.
+    #[test]
+    fn a_native_host_publishes_decodable_audio_only_to_a_listener() {
+        let published = Published::new();
+        // Real time, since the synth makes a second of samples per second of game.
+        let mut host = native_host(Arc::clone(&published), |config| config.target_speed = 1.0);
+        let quiet = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < quiet {
+            host.tick();
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert!(!host.console.native().synthesising(), "a synth was built with nobody listening");
+
+        let mut listener = published.join_audio();
+        let mut packets = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while packets.len() < 25 && Instant::now() < deadline {
+            host.tick();
+            while let Ok(packet) = listener.try_recv() {
+                packets.push(packet);
+            }
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert!(packets.len() >= 25, "only {} packets in 20 s", packets.len());
+        let mut decoder =
+            opus_rs::OpusDecoder::new(audio::SAMPLE_RATE as i32, audio::CHANNELS as usize).expect("decoder");
+        let mut frame = vec![0.0f32; audio::FRAME_SAMPLES];
+        let mut loudest = 0.0f32;
+        for packet in &packets {
+            let samples = decoder.decode(packet, audio::FRAME_SAMPLES, &mut frame).expect("decode");
+            assert_eq!(samples, audio::FRAME_SAMPLES);
+            loudest = loudest.max(frame.iter().fold(0.0f32, |a, s| a.max(s.abs())));
+        }
+        assert!(loudest > 0.01, "half a second of the Pallet Town theme came back silent");
+
+        drop(listener);
+        host.tick();
+        assert!(!host.console.native().synthesising(), "the synth outlived its last listener");
+    }
+
+    /// A native run checkpoints the whole game as `game.pkrd`, and a resume opens it where it was.
+    #[test]
+    fn a_native_run_checkpoints_and_resumes_where_it_stopped() {
+        use poke_agent::run::{Origin, RunDir, files};
+
+        let scratch = poke_agent::run::Scratch::new("host-native-resume");
+        let validate = |bytes: &[u8]| pokered::Game::load(bytes, pokered::Pacing::Faithful).is_ok();
+        let (run, origin, _) =
+            RunDir::open_for(GameKind::Native, &scratch.0, false, "random", &validate).expect("a fresh run");
+        assert_eq!(origin, Origin::Fresh);
+        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let run = current.get();
+        let mut host = native_host(Published::new(), |config| {
+            config.run = Some(Arc::clone(&current));
+            config.checkpoint_interval = Duration::from_millis(20);
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            host.tick();
+            if host.emulated.to_duration() > Duration::from_secs(3) && run.path().join(files::GAME).is_file() {
+                break;
+            }
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert!(run.path().join(files::GAME).is_file(), "the periodic checkpoint never fired");
+        assert!(!run.path().join(files::STATE).exists() && !run.path().join(files::SRAM).exists(),
+                "a native run wrote the emulator's files");
+        host.checkpoint();
+        let before = host.console.native().agent.game().world().clone();
+        let frames = host.console.native().agent.game().frames();
+        drop(host);
+
+        // An emulated process does not take a native run for its own.
+        let (emulated, origin, _) = RunDir::open(&scratch.0, false, "random", &|_| true).expect("opens");
+        assert_eq!(origin, Origin::Fresh);
+        assert_ne!(emulated.run_id(), run.run_id());
+
+        let (resumed, origin, state) =
+            RunDir::open_for(GameKind::Native, &scratch.0, false, "random", &validate).expect("resumable");
+        assert_eq!(origin, Origin::Resumed);
+        assert_eq!(resumed.run_id(), run.run_id(), "it continues the same run rather than forking");
+        let mut second = EmulatorHost::new(
+            &state.expect("a game was checkpointed"),
+            Box::new(RandomPolicy::default()),
+            Published::new(),
+            HostConfig { game: GameKind::Native, ..HostConfig::default() },
+        )
+        .expect("the checkpoint loads");
+        assert_eq!(second.console.native().agent.game().world(), &before, "the resume is another world");
+        assert_eq!(second.console.native().agent.game().frames(), frames);
+    }
+
+    /// The game's own save is kept beside `game.pkrd` as the cartridge's is beside `state.gbst`, a
+    /// resume reads it back, and it is what the console powers on into once the credits end.
+    #[test]
+    fn a_native_run_keeps_the_games_own_save_and_continues_from_it() {
+        use poke_agent::run::{RunDir, files};
+        use pokered::mode::Mode;
+
+        let scratch = poke_agent::run::Scratch::new("host-native-game-save");
+        let (run, _, _) =
+            RunDir::open_for(GameKind::Native, &scratch.0, false, "random", &|_| true).expect("a fresh run");
+        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let run = current.get();
+        let mut host = native_host(Published::new(), |config| {
+            config.run = Some(Arc::clone(&current));
+            config.checkpoint_interval = Duration::from_secs(3_600);
+        });
+        host.console.native().agent.game_mut().push(Mode::SaveMenu(pokered::modes::save_menu::SaveMenu::new()));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while host.console.native().save().is_none() && Instant::now() < deadline {
+            host.tick();
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        let saved = host.console.native().save().expect("the SAVE menu wrote the game").to_vec();
+        host.checkpoint();
+        assert_eq!(std::fs::read(run.path().join(files::GAME_SAVE)).expect("save.pkrd"), saved);
+
+        // The credits over, with money spent since the save.
+        let mut world = host.console.native().agent.game().world().clone();
+        let saved_money = world.money;
+        world.money = [0x00, 0x00, 0x01];
+        *host.console.native().agent.game_mut() =
+            pokered::Game::new(world, pokered::rng::GameRng::seeded(1), pokered::Pacing::Faithful);
+        host.tick();
+        let game = host.console.native().agent.game();
+        assert!(matches!(game.modes().first(), Some(Mode::Movie(_))), "the console came back on");
+        assert_eq!(game.world().money, saved_money, "CONTINUE is the save, not the world the credits ended in");
+        drop(host);
+
+        let mut resumed = native_host(Published::new(), |config| config.run = Some(Arc::clone(&current)));
+        assert_eq!(resumed.console.native().save(), Some(&saved[..]), "a resume forgot the game's save");
+    }
+
+    /// `POST /api/new-run` on a native run: a new game in a new directory of the same kind.
+    #[test]
+    fn a_native_new_run_starts_a_new_game_in_a_native_directory() {
+        use poke_agent::run::{RunDir, files};
+
+        let scratch = poke_agent::run::Scratch::new("host-native-new-run");
+        let (run, _, _) =
+            RunDir::open_for(GameKind::Native, &scratch.0, false, "random", &|_| true).expect("a fresh run");
+        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let control = Arc::new(ControlRequests::default());
+        let first = current.get();
+        let published = Published::new();
+        let mut host = native_host(Arc::clone(&published), |config| {
+            config.run = Some(Arc::clone(&current));
+            config.control = Some(Arc::clone(&control));
+            config.checkpoint_interval = Duration::from_secs(3600);
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while host.emulated.to_duration() < Duration::from_secs(8) && Instant::now() < deadline {
+            host.tick();
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        let played = host.console.native().agent.game().frames();
+
+        let receiver = control.request(ControlRequest::NewRun).expect("the mailbox is empty");
+        host.tick();
+        receiver.blocking_recv().expect("the emulator answered").expect("a new run");
+        let second = current.get();
+        assert_ne!(second.run_id(), first.run_id());
+        assert_eq!(second.kind(), GameKind::Native);
+        assert!(first.path().join(files::GAME).is_file(), "the outgoing run was not checkpointed");
+        let frames = host.console.native().agent.game().frames();
+        assert!(frames < played, "the recreation kept playing the old game: {frames} frames against {played}");
+        assert_eq!(host.console.native().agent.game().world().location.map, poke_agent::pokemon::map::Map::RedsHouse2F);
+    }
+
+    /// A native win is filed as an emulated one is, with the whole game in place of the two files.
+    #[test]
+    fn a_finished_native_run_is_filed_with_its_game_and_the_next_one_starts() {
+        use poke_agent::run::{RunDir, files, hall_of_fame};
+
+        let scratch = poke_agent::run::Scratch::new("host-native-hall-of-fame");
+        let (run, _, _) =
+            RunDir::open_for(GameKind::Native, &scratch.0, false, "random", &|_| true).expect("a fresh run");
+        let published = Published::new();
+        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let finished = current.get();
+        let finished_id = finished.run_id();
+        let stop = Arc::new(AtomicBool::new(false));
+        let transcript =
+            poke_agent::run::transcript::spawn(Arc::clone(&current), Arc::clone(&published), Arc::clone(&stop))
+                .expect("a transcript writer");
+        let mut host = native_host(Arc::clone(&published), |config| {
+            config.run = Some(Arc::clone(&current));
+            config.checkpoint_interval = Duration::from_secs(3_600);
+        });
+        // The first tick seeds the count, as a resume's would.
+        let warmup = Instant::now() + Duration::from_millis(100);
+        while Instant::now() < warmup {
+            host.tick();
+        }
+        host.console.restore_game_save(b"PKRDsaved".to_vec());
+        // What the ceremony's first frame does.
+        let world = host.console.native().agent.game_mut().world_mut();
+        world.hall_of_fame_teams += 1;
+        world.badges = 0xFF;
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while current.get().run_id() == finished_id && Instant::now() < deadline {
+            host.tick();
+        }
+        stop.store(true, Ordering::Relaxed);
+        assert_ne!(current.get().run_id(), finished_id, "the game was won and nothing started the next run");
+        assert_eq!(current.get().kind(), GameKind::Native);
+
+        let rows = hall_of_fame::top(&scratch.0, 10);
+        assert_eq!(rows.len(), 1, "one championship, one row");
+        assert_eq!(rows[0].run_id, finished_id);
+        assert_eq!(rows[0].teams, 1);
+        assert_eq!(rows[0].badges, 8);
+        let archive = scratch.0.join(files::HALL_OF_FAME).join(&rows[0].archive);
+        assert!(archive.join(files::GAME).is_file(), "the game at the moment of victory");
+        assert_eq!(std::fs::read(archive.join(files::GAME_SAVE)).ok().as_deref(), Some(&b"PKRDsaved"[..]), "the game's own save");
+        assert!(!archive.join(files::STATE).exists(), "a native win filed an emulator state");
+        assert!(finished.path().join(files::GAME).is_file(), "the outgoing run was checkpointed");
+        assert!(finished.already_archived(1));
+
+        published.publish_event(UiEventBody::Notice { level: "info", message: "done".into() });
+        let _ = transcript.join();
     }
 }

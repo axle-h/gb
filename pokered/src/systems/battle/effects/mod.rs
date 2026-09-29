@@ -141,7 +141,7 @@ pub fn jump_move_effect(battle: &mut Battle, party: &mut [PartyMon], user: Side,
         RECOIL_EFFECT => recoil_effect(battle, user),
         CONFUSION_EFFECT => confusion_effect(battle, user, rng),
         CONFUSION_SIDE_EFFECT => confusion_side_effect(battle, user, rng),
-        HEAL_EFFECT => heal_effect(battle, user),
+        HEAL_EFFECT => heal_effect(battle, user, badges),
         TRANSFORM_EFFECT => transform_effect(battle, user),
         LIGHT_SCREEN_EFFECT | REFLECT_EFFECT => reflect_light_screen_effect(battle, user),
         PARALYZE_EFFECT => paralyze_effect(battle, user, rng),
@@ -190,9 +190,20 @@ pub fn read_player_mon_cur_hp_and_status(battle: &Battle, party: &mut [PartyMon]
 
 #[cfg(test)]
 mod tests {
+    use poke_core::move_name::PokemonMoveName;
+    use poke_core::moves::MoveData;
     use serde_json::json;
     use super::super::fixture::{each_case, side};
+    use super::super::Arena;
     use super::*;
+
+    /// The baseline battle playing the fixes, `user` about to use `name`.
+    pub(super) fn using(user: Side, name: PokemonMoveName) -> Arena {
+        let mut arena = Arena::baseline();
+        arena.battle.cartridge_bugs = false;
+        arena.battle.side_mut(user).current_move = MoveData::of_move(name);
+        arena
+    }
 
     macro_rules! effect_fixtures {
         ($($name:ident: $file:literal;)+) => {$(

@@ -254,6 +254,11 @@ pub struct Combatant {
     pub minimized: u8,
     /// `wPlayerMoveNum` to `wPlayerMoveMaxPP`: the move being used, as the routines have left it.
     pub current_move: MoveData,
+    /// What this side's move did to the other this turn, if Counter can strike it back: 0 unless
+    /// it was a Normal or Fighting move with power other than Counter. Kept only with the
+    /// cartridge's bugs off.
+    #[serde(default)]
+    pub counter_damage: u16,
 }
 
 impl Combatant {
@@ -336,6 +341,9 @@ pub struct Battle {
     pub safari_bait_factor: u8,
     #[serde(default)]
     pub safari_escape_factor: u8,
+    /// `World::cartridge_bugs`, as the battle began.
+    #[serde(default)]
+    pub cartridge_bugs: bool,
 }
 
 impl Battle {
@@ -366,6 +374,7 @@ impl Battle {
             transformed_enemy_original_dvs: Dvs::default(),
             safari_bait_factor: 0,
             safari_escape_factor: 0,
+            cartridge_bugs: false,
         }
     }
 
@@ -436,6 +445,7 @@ impl Combatant {
             used_move: 0,
             minimized: 0,
             current_move: MoveData { animation: 0, effect: 0, power: 0, move_type: 0, accuracy: 0, pp: 0 },
+            counter_damage: 0,
             mon,
         }
     }
@@ -443,8 +453,8 @@ impl Combatant {
 
 impl Arena {
     /// What a battle fixture's input is laid over: the player's level 50 Tauros against a wild
-    /// level 50 Rattata, both at full health with nothing volatile. Changing it invalidates every
-    /// battle fixture.
+    /// level 50 Rattata, both at full health with nothing volatile, playing the cartridge's bugs.
+    /// Changing it invalidates every battle fixture.
     pub fn baseline() -> Arena {
         use crate::rng::GameRng;
         use crate::systems::add_mon::{new_party_mon, Origin};
@@ -452,6 +462,7 @@ impl Arena {
         let (player, enemy) = (mon(PokemonSpecies::Tauros), mon(PokemonSpecies::Rattata));
         let mut battle = Battle::new(BattleKind::Wild, &player, vec![enemy.clone()]);
         battle.enemy = Combatant::new(BattleMon::from_party(&enemy));
+        battle.cartridge_bugs = true;
         Arena {
             battle,
             party: vec![player],

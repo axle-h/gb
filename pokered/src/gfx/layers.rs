@@ -63,6 +63,9 @@ impl Object {
 
 /// `rBGP`, `rOBP0`, `rOBP1` and the background scroll, with a scroll per line for the effects that
 /// change `rSCX` mid-frame.
+///
+/// The three registers are the DMG's. Where a `wOnSGB` branch picks a different palette for the
+/// SGB, the SGB's pick rides beside it, and only the SGB colour modes read it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Effects {
     pub bgp: u8,
@@ -71,12 +74,63 @@ pub struct Effects {
     pub scx: u8,
     pub scy: u8,
     pub line_scx: Option<Vec<u8>>,
+    #[serde(default)]
+    sgb_bgp: Option<SgbPick>,
+    #[serde(default)]
+    sgb_obp0: Option<SgbPick>,
+}
+
+/// A register written through a `wOnSGB` branch: the DMG's value and the SGB's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SgbPick {
+    pub dmg: u8,
+    pub sgb: u8,
+}
+
+impl SgbPick {
+    pub const fn both(value: u8) -> Self {
+        Self { dmg: value, sgb: value }
+    }
+
+    /// The SGB's value stands only while the register still holds the DMG's, so a write that knows
+    /// nothing of the SGB ends it.
+    fn over(pick: Option<Self>, register: u8) -> u8 {
+        pick.filter(|pick| pick.dmg == register).map_or(register, |pick| pick.sgb)
+    }
+
+    fn unless_same(self) -> Option<Self> {
+        (self.dmg != self.sgb).then_some(self)
+    }
+}
+
+impl Effects {
+    pub fn pick_bgp(&mut self, pick: SgbPick) {
+        self.bgp = pick.dmg;
+        self.sgb_bgp = pick.unless_same();
+    }
+
+    pub fn pick_obp0(&mut self, pick: SgbPick) {
+        self.obp0 = pick.dmg;
+        self.sgb_obp0 = pick.unless_same();
+    }
+
+    /// `rBGP` on both paths, for a `push af` of it.
+    pub fn bgp_pick(&self) -> SgbPick {
+        SgbPick { dmg: self.bgp, sgb: SgbPick::over(self.sgb_bgp, self.bgp) }
+    }
+
+    pub fn obp0_pick(&self) -> SgbPick {
+        SgbPick { dmg: self.obp0, sgb: SgbPick::over(self.sgb_obp0, self.obp0) }
+    }
 }
 
 /// `GBPalNormal`.
 impl Default for Effects {
     fn default() -> Self {
-        Self { bgp: 0b11100100, obp0: 0b11010000, obp1: 0b11100100, scx: 0, scy: 0, line_scx: None }
+        Self {
+            bgp: 0b11100100, obp0: 0b11010000, obp1: 0b11100100, scx: 0, scy: 0, line_scx: None,
+            sgb_bgp: None, sgb_obp0: None,
+        }
     }
 }
 

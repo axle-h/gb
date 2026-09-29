@@ -83,10 +83,9 @@ pub struct ArchiveJob {
     /// The run directory being filed, still the current run.
     pub run_dir: PathBuf,
     pub meta: RunMeta,
-    /// `gb.save_state()` at the moment the counter moved, held rather than re-read from the
-    /// checkpoint so the two cannot differ.
-    pub state: Vec<u8>,
-    pub sram: Vec<u8>,
+    /// The game at the moment the counter moved, by file name: `state.gbst` and `sram.bin`, or
+    /// `game.pkrd`. Held rather than re-read from the checkpoint so the two cannot differ.
+    pub saves: Vec<(&'static str, Vec<u8>)>,
     /// The seq `publish_event` returned for the completion event: where the transcript follow stops.
     pub until_seq: u64,
     /// The row to append; [`archive`] fills in its `archive` field.
@@ -107,10 +106,9 @@ pub fn archive(job: &ArchiveJob) -> Result<String, String> {
     std::fs::create_dir_all(&into)
         .map_err(|e| format!("could not create {}: {e}", into.display()))?;
 
-    std::fs::write(into.join(files::STATE), &job.state)
-        .map_err(|e| format!("could not write the archived save state: {e}"))?;
-    std::fs::write(into.join(files::SRAM), &job.sram)
-        .map_err(|e| format!("could not write the archived sram: {e}"))?;
+    for (file, bytes) in &job.saves {
+        std::fs::write(into.join(file), bytes).map_err(|e| format!("could not write the archived {file}: {e}"))?;
+    }
 
     // Followed, not copied: another thread writes the completion event after this is triggered.
     follow_lines(
@@ -335,8 +333,7 @@ mod tests {
             root: scratch.0.clone(),
             run_dir: run.path().to_path_buf(),
             meta: run.meta(),
-            state: b"GBSTwinning".to_vec(),
-            sram: b"sram".to_vec(),
+            saves: vec![(files::STATE, b"GBSTwinning".to_vec()), (files::SRAM, b"sram".to_vec())],
             until_seq: 41,
             completion: row(&run.run_id(), 22_364, false, "2026-08-12T14:30:00Z"),
         };
@@ -373,7 +370,7 @@ mod tests {
         assert_eq!(rows[0].archive, name, "the row points at the directory that was written");
         assert_eq!(rows[0].playtime_seconds, 22_364);
 
-        let candidates = resumable(&scratch.0);
+        let candidates = resumable(&scratch.0, files::STATE);
         assert_eq!(candidates, vec![run.path().to_path_buf()],
             "hall-of-fame/ must be invisible to the resume scan, or poke-agent-web resumes a finished game");
     }

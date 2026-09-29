@@ -31,7 +31,7 @@ use gb::game_boy::GameBoy;
 use crate::host::{ControlRequest, ControlRequests, EmulatorHost, HostConfig};
 use gb::model::Model;
 use poke_agent::pokemon::policy::RandomPolicy;
-use poke_agent::run::{CurrentRun, Origin, RunDir, transcript};
+use poke_agent::run::{CurrentRun, GameKind, Origin, RunDir, transcript};
 use poke_agent::published::{self, Published};
 
 /// Proxies close an idle connection.
@@ -79,12 +79,14 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         ServePolicy::Llm => llm.as_ref().expect("built above").model.clone(),
     };
 
+    let game = game_kind(std::env::var("GB_GAME").ok().as_deref())?;
     let root = std::env::var("GB_RUN_DIR")
         .ok()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(poke_agent::run::DEFAULT_ROOT));
-    let (run, origin, resumed) = RunDir::open(&root, new_run, &model, &|bytes| {
-        GameBoy::dmg(poke_agent::pokemon::roms::POKERED).load_state(bytes).is_ok()
+    let (run, origin, resumed) = RunDir::open_for(game, &root, new_run, &model, &|bytes| match game {
+        GameKind::Emulated => GameBoy::dmg(poke_agent::pokemon::roms::POKERED).load_state(bytes).is_ok(),
+        GameKind::Native => pokered::Game::load(bytes, pokered::Pacing::Faithful).is_ok(),
     })?;
     // Nothing holds the `RunDir` directly from here on: `POST /api/new-run` can replace it, and
     // every writer has to move with it.
@@ -100,7 +102,11 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         run.run_id(),
         run.path().display(),
     );
-    let starting_state = resumed.unwrap_or_else(|| poke_agent::pokemon::data::START_OF_GAME.to_vec());
+    let starting_state = match (resumed, game) {
+        (Some(state), _) => state,
+        (None, GameKind::Emulated) => poke_agent::pokemon::data::START_OF_GAME.to_vec(),
+        (None, GameKind::Native) => crate::console::native_start_of_game()?,
+    };
 
     // Started before the emulator so the run's first event is in it; the counter continues from
     // the last process's, so `/api/history?since=` holds across a restart.
@@ -183,8 +189,9 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
             status_interval: status_interval()?,
             model: hardware_model(std::env::var("GB_HARDWARE").ok().as_deref())?,
             audio_bitrate,
-            // Only a game from `START_OF_GAME` is named after its player; a resume keeps its trainer.
+            // Only a game from the beginning is named after its player; a resume keeps its trainer.
             fresh_game: matches!(origin, Origin::Fresh),
+            game,
             ..HostConfig::default()
         },
         Arc::clone(&shutdown),
@@ -225,6 +232,16 @@ fn status_interval() -> Result<Duration, String> {
     match value.trim().parse::<f64>() {
         Ok(hz) if (0.1..=60.0).contains(&hz) => Ok(Duration::from_secs_f64(1.0 / hz)),
         _ => Err(format!("`GB_STATUS_HZ={value}` is not a rate between 0.1 and 60")),
+    }
+}
+
+/// What is played, from `GB_GAME`: the cartridge on the emulator, or the recreation.
+fn game_kind(value: Option<&str>) -> Result<GameKind, String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(HostConfig::default().game),
+        Some(value) if value.eq_ignore_ascii_case("emulated") => Ok(GameKind::Emulated),
+        Some(value) if value.eq_ignore_ascii_case("native") => Ok(GameKind::Native),
+        Some(value) => Err(format!("`GB_GAME={value}` is not `emulated` or `native`")),
     }
 }
 
@@ -723,6 +740,18 @@ mod tests {
 
         let error = hardware_model(Some("color")).unwrap_err();
         assert!(error.contains("GB_HARDWARE") && error.contains("color"), "{error}");
+    }
+
+    /// `GB_GAME` defaults to the emulator, so a deployment that never heard of it is unchanged.
+    #[test]
+    fn the_game_variable_defaults_to_the_emulator_and_refuses_anything_it_does_not_know() {
+        assert_eq!(game_kind(None), Ok(GameKind::Emulated));
+        assert_eq!(game_kind(Some("  ")), Ok(GameKind::Emulated));
+        assert_eq!(game_kind(Some("emulated")), Ok(GameKind::Emulated));
+        assert_eq!(game_kind(Some(" Native ")), Ok(GameKind::Native), "trimmed and case-insensitive");
+
+        let error = game_kind(Some("pokered")).unwrap_err();
+        assert!(error.contains("GB_GAME") && error.contains("pokered"), "{error}");
     }
 
     /// What `/api/video` writes inflates as one stream and splits back into the messages sent.

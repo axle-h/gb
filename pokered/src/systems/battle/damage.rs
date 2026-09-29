@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::party::PartyMon;
 use crate::rng::Rng;
 use crate::systems::math::{divide, multiply};
-use crate::systems::stats::{calc_stat, Stat};
+use crate::systems::stats::{calc_stat, Stat, MAX_STAT_VALUE};
 use super::accuracy::move_hit_test;
 use super::{effect, stat, Battle, CriticalHitOrOhko, Side, Status2, Status3, MAX_NEUTRAL_DAMAGE,
             MIN_NEUTRAL_DAMAGE, SPECIAL};
@@ -24,9 +24,9 @@ pub struct DamageVars {
     pub level: u8,
 }
 
-/// `CriticalHitTest`: half the attacker's base speed, doubled, or halved again under Focus Energy
-/// where it should have doubled; then doubled twice for a high-critical move and halved for any
-/// other. A move with no power draws nothing.
+/// `CriticalHitTest`: half the attacker's base speed, doubled, and doubled again under Focus
+/// Energy; then doubled twice for a high-critical move and halved for any other. A move with no
+/// power draws nothing.
 pub fn critical_hit_test(battle: &mut Battle, attacker: Side, rng: &mut impl Rng) {
     battle.critical_hit_or_ohko = CriticalHitOrOhko::Normal;
     let user = battle.side(attacker);
@@ -35,7 +35,12 @@ pub fn critical_hit_test(battle: &mut Battle, attacker: Side, rng: &mut impl Rng
         return;
     }
     let doubled = |rate: u8| rate.checked_mul(2).unwrap_or(0xFF);
-    rate = if user.status2.contains(Status2::GETTING_PUMPED) { rate >> 1 } else { doubled(rate) };
+    rate = match (user.status2.contains(Status2::GETTING_PUMPED), battle.cartridge_bugs) {
+        (false, _) => doubled(rate),
+        // The cartridge shifts right under Focus Energy, a quarter of the unfocused rate.
+        (true, true) => rate >> 1,
+        (true, false) => doubled(doubled(rate)),
+    };
     rate = if high_critical_moves().contains(&user.current_move.animation) { doubled(doubled(rate)) } else { rate >> 1 };
     if rng.random().rotate_left(3) < rate {
         battle.critical_hit_or_ohko = CriticalHitOrOhko::CriticalHit;
@@ -51,11 +56,11 @@ pub enum Counter {
     Resolved,
 }
 
-const NORMAL: u8 = 0;
-const FIGHTING: u8 = 1;
+pub(super) const NORMAL: u8 = 0;
+pub(super) const FIGHTING: u8 = 1;
 
-/// `HandleCounterMove`: twice `wDamage`, whoever dealt it, if the target last chose a Normal or
-/// Fighting move with power that was not Counter, and then the usual hit test.
+/// `HandleCounterMove`: twice the damage the target's Normal or Fighting move did to the Counter
+/// user this turn, and then the usual hit test.
 pub fn handle_counter_move(battle: &mut Battle, attacker: Side, rng: &mut impl Rng) -> Counter {
     let counter = PokemonMoveName::Counter as u8;
     if battle.side(attacker).selected_move != counter {
@@ -63,6 +68,17 @@ pub fn handle_counter_move(battle: &mut Battle, attacker: Side, rng: &mut impl R
     }
     battle.move_missed = true;
     let target = battle.side(attacker.other());
+    if !battle.cartridge_bugs {
+        if target.counter_damage == 0 {
+            return Counter::Resolved;
+        }
+        battle.damage = target.counter_damage.saturating_mul(2);
+        battle.move_missed = false;
+        move_hit_test(battle, attacker, rng);
+        return Counter::Resolved;
+    }
+    // The cartridge reads the move the target last selected, which the menu cursor sets, and
+    // doubles `wDamage` whoever dealt it.
     if target.selected_move == counter || target.current_move.power == 0
         || !matches!(target.current_move.move_type, NORMAL | FIGHTING) || battle.damage == 0 {
         return Counter::Resolved;
@@ -74,10 +90,9 @@ pub fn handle_counter_move(battle: &mut Battle, attacker: Side, rng: &mut impl R
 }
 
 /// `GetDamageVarsForPlayerAttack` and `GetDamageVarsForEnemyAttack`: `None` for a move with no
-/// power, having zeroed `wDamage` either way. Reflect and Light Screen double the defense without
-/// a cap; a critical hit reads the attacker's party stat and the defender's stat worked out afresh
-/// instead, which drops stat modifiers, badge boosts and the screens alike. A stat over a byte
-/// scales both by four and keeps the low byte, so a defense can come out 0.
+/// power, having zeroed `wDamage` either way. Reflect and Light Screen double the defense, up to
+/// 999; a critical hit reads both mons' unmodified stats instead, which drops stat modifiers, badge
+/// boosts and the screens alike. A stat over a byte scales both by four, neither below 1.
 pub fn get_damage_vars(battle: &mut Battle, party: &[PartyMon], attacker: Side) -> Option<DamageVars> {
     battle.damage = 0;
     let user = battle.side(attacker);
@@ -91,13 +106,21 @@ pub fn get_damage_vars(battle: &mut Battle, party: &[PartyMon], attacker: Side) 
     } else {
         (stat::SPECIAL, stat::SPECIAL, Status3::HAS_LIGHT_SCREEN_UP)
     };
+    let bugs = battle.cartridge_bugs;
     let mut defense_stat = target.mon.stats[defense];
     if target.status3.contains(screen) {
         defense_stat = defense_stat.wrapping_shl(1);
+        // The cartridge has no cap, and a doubled stat of 1024 or more wraps in the scaling.
+        if !bugs {
+            defense_stat = defense_stat.min(MAX_STAT_VALUE);
+        }
     }
     let mut attack_stat = user.mon.stats[offense];
     let critical = battle.critical_hit_or_ohko != CriticalHitOrOhko::Normal;
-    if critical {
+    if critical && !bugs {
+        (attack_stat, defense_stat) = (user.unmodified_stats[offense], target.unmodified_stats[defense]);
+    } else if critical {
+        // The cartridge reads the player's party stat, from before any Transform.
         let party_stat = |index: usize| party[battle.player_mon_number as usize].stats[index];
         (attack_stat, defense_stat) = match attacker {
             Side::Player => (party_stat(offense), get_enemy_mon_stat(battle, defense)),
@@ -107,6 +130,10 @@ pub fn get_damage_vars(battle: &mut Battle, party: &[PartyMon], attacker: Side) 
     if (attack_stat | defense_stat) > 0xFF {
         defense_stat >>= 2;
         attack_stat = (attack_stat >> 2).max(1);
+        // The cartridge lets a defense of 1 to 3 scale to 0, and hangs dividing by it.
+        if !bugs {
+            defense_stat = defense_stat.max(1);
+        }
     }
     let mut level = user.mon.level;
     if critical {
@@ -223,15 +250,23 @@ pub fn adjust_damage_for_move_type(battle: &mut Battle, attacker: Side) {
 
 /// `$10`: what `AIGetTypeEffectiveness` answers when no row applies, where `EFFECTIVE` is 10.
 pub const AI_NEUTRAL: u8 = 0x10;
+const EFFECTIVE: u16 = 10;
 
-/// `AIGetTypeEffectiveness`: the enemy's move type against the player's mon, the first matching
-/// row alone, so a double weakness reads as one and a weakness and a resistance as the first.
+/// `AIGetTypeEffectiveness`: the enemy's move type against the player's mon, as the product of
+/// every matching row in tenths, and `AI_NEUTRAL` where that comes to neutral.
 pub fn ai_get_type_effectiveness(battle: &Battle) -> u8 {
     let move_type = battle.enemy.current_move.move_type;
     let types = battle.player.mon.types;
-    matchups().into_iter()
-        .find(|&(attacking, defending, _)| attacking == move_type && types.contains(&defending))
-        .map_or(AI_NEUTRAL, |(_, _, multiplier)| multiplier)
+    let mut rows = matchups().into_iter()
+        .filter(move |&(attacking, defending, _)| attacking == move_type && types.contains(&defending));
+    if battle.cartridge_bugs {
+        // The cartridge answers the first matching row alone, so a dual type is misread.
+        return rows.next().map_or(AI_NEUTRAL, |(_, _, multiplier)| multiplier);
+    }
+    match rows.fold(EFFECTIVE, |product, (_, _, multiplier)| product * multiplier as u16 / EFFECTIVE) {
+        EFFECTIVE => AI_NEUTRAL,
+        product => product as u8,
+    }
 }
 
 /// `85 percent + 1`: the least random factor `RandomizeDamage` keeps.
@@ -286,8 +321,18 @@ pub fn calc_move_damage(battle: &mut Battle, party: &[PartyMon], attacker: Side,
             }
             adjust_damage_for_move_type(battle, attacker);
             randomize_damage(battle, rng);
+            let potential = battle.damage;
             move_hit_test(battle, attacker, rng);
+            // Jump Kick's crash is an eighth of this, which the cartridge's miss has already zeroed.
+            if battle.move_missed && move_effect == effect::JUMP_KICK_EFFECT && !battle.cartridge_bugs {
+                battle.damage = potential;
+            }
         }
+    }
+    // A trapping move that hits ends the target's recharge; the cartridge's `trapping_effect` has
+    // already ended it, hit or miss.
+    if !battle.cartridge_bugs && !battle.move_missed && move_effect == effect::TRAPPING_EFFECT {
+        battle.side_mut(attacker.other()).status2.remove(Status2::NEEDS_TO_RECHARGE);
     }
     match (battle.move_missed, move_effect) {
         (false, _) => MoveDamage::Hit,
@@ -298,9 +343,134 @@ pub fn calc_move_damage(battle: &mut Battle, party: &[PartyMon], attacker: Side,
 
 #[cfg(test)]
 mod tests {
+    use poke_core::moves::MoveData;
     use serde_json::{json, Value};
+    use crate::rng::GameRng;
+    use super::super::apply::apply_damage_to_pokemon;
     use super::super::fixture::{each_case, side};
+    use super::super::turn::handle_self_confusion_damage;
+    use super::super::{Arena, Status1};
     use super::*;
+
+    const FLYING: u8 = 2;
+
+    fn arena(player: PokemonMoveName, enemy: PokemonMoveName) -> Arena {
+        let mut arena = Arena::baseline();
+        arena.battle.cartridge_bugs = false;
+        arena.battle.player.current_move = MoveData::of_move(player);
+        arena.battle.player.selected_move = player as u8;
+        arena.battle.enemy.current_move = MoveData::of_move(enemy);
+        arena.battle.enemy.selected_move = enemy as u8;
+        arena
+    }
+
+    #[test]
+    fn focus_energy_doubles_the_critical_hit_rate() {
+        // Tauros: half its base speed of 110, doubled, doubled again, then halved for Tackle.
+        let mut arena = arena(PokemonMoveName::Tackle, PokemonMoveName::Tackle);
+        arena.battle.player.status2 |= Status2::GETTING_PUMPED;
+        critical_hit_test(&mut arena.battle, Side::Player, &mut GameRng::tape(vec![109u8.rotate_right(3)]));
+        assert_eq!(arena.battle.critical_hit_or_ohko, CriticalHitOrOhko::CriticalHit);
+    }
+
+    #[test]
+    fn a_doubled_defense_stops_at_999() {
+        let mut arena = arena(PokemonMoveName::Tackle, PokemonMoveName::Tackle);
+        arena.battle.enemy.mon.stats[stat::DEFENSE] = 600;
+        arena.battle.enemy.status3 |= Status3::HAS_REFLECT_UP;
+        let vars = get_damage_vars(&mut arena.battle, &arena.party, Side::Player).unwrap();
+        assert_eq!(vars.defense, (999 >> 2) as u8);
+    }
+
+    #[test]
+    fn a_scaled_defense_is_never_0() {
+        let mut arena = arena(PokemonMoveName::Tackle, PokemonMoveName::Tackle);
+        arena.battle.player.mon.stats[stat::ATTACK] = 300;
+        arena.battle.enemy.mon.stats[stat::DEFENSE] = 3;
+        let vars = get_damage_vars(&mut arena.battle, &arena.party, Side::Player).unwrap();
+        assert_eq!(vars.defense, 1);
+        calculate_damage(&mut arena.battle, Side::Player, vars);
+        assert!(arena.battle.damage > 0);
+    }
+
+    #[test]
+    fn a_critical_hit_reads_the_transformed_stats() {
+        let mut arena = arena(PokemonMoveName::Tackle, PokemonMoveName::Tackle);
+        arena.battle.player.status3 |= Status3::TRANSFORMED;
+        arena.battle.player.unmodified_stats[stat::ATTACK] = 200;
+        arena.battle.enemy.unmodified_stats[stat::DEFENSE] = 77;
+        arena.battle.critical_hit_or_ohko = CriticalHitOrOhko::CriticalHit;
+        let vars = get_damage_vars(&mut arena.battle, &arena.party, Side::Player).unwrap();
+        assert_eq!((vars.attack, vars.defense), (200, 77));
+    }
+
+    #[test]
+    fn the_ai_reads_both_types() {
+        let mut arena = arena(PokemonMoveName::Tackle, PokemonMoveName::Submission);
+        arena.battle.player.mon.types = [NORMAL, FLYING];
+        assert_eq!(ai_get_type_effectiveness(&arena.battle), AI_NEUTRAL);
+        arena.battle.player.mon.types = [NORMAL, NORMAL];
+        assert_eq!(ai_get_type_effectiveness(&arena.battle), 20);
+    }
+
+    /// Counter against what `enemy`'s move just did to the player, after `setup`.
+    fn counter(enemy: PokemonMoveName, setup: impl FnOnce(&mut Arena)) -> Arena {
+        let mut arena = arena(PokemonMoveName::Counter, enemy);
+        setup(&mut arena);
+        handle_counter_move(&mut arena.battle, Side::Player, &mut GameRng::tape(vec![]));
+        arena
+    }
+
+    #[test]
+    fn counter_doubles_what_the_target_did_to_the_user() {
+        let arena = counter(PokemonMoveName::Tackle, |arena| {
+            arena.battle.damage = 30;
+            apply_damage_to_pokemon(&mut arena.battle, Side::Player, Side::Enemy);
+        });
+        assert_eq!((arena.battle.move_missed, arena.battle.damage), (false, 60));
+    }
+
+    #[test]
+    fn counter_misses_what_the_user_did_itself() {
+        let arena = counter(PokemonMoveName::Tackle, |arena| {
+            arena.battle.player.current_move = MoveData::of_move(PokemonMoveName::Tackle);
+            arena.battle.damage = 30;
+            apply_damage_to_pokemon(&mut arena.battle, Side::Enemy, Side::Player);
+            arena.battle.player.current_move = MoveData::of_move(PokemonMoveName::Counter);
+        });
+        assert!(arena.battle.move_missed);
+    }
+
+    #[test]
+    fn counter_misses_a_confused_target_that_hurt_itself() {
+        let arena = counter(PokemonMoveName::Thunderbolt, |arena| {
+            arena.battle.enemy.status1 |= Status1::CONFUSED;
+            let party = arena.party.clone();
+            handle_self_confusion_damage(&mut arena.battle, &party, Side::Enemy);
+            assert!(arena.battle.damage > 0);
+        });
+        assert!(arena.battle.move_missed);
+        assert_eq!(arena.battle.enemy.current_move, MoveData::of_move(PokemonMoveName::Thunderbolt));
+    }
+
+    /// The damage a confused player does itself with Reflect up on `reflecting` sides.
+    fn confusion_damage(reflecting: &[Side]) -> u16 {
+        let mut arena = arena(PokemonMoveName::Tackle, PokemonMoveName::Tackle);
+        for &side in reflecting {
+            arena.battle.side_mut(side).status3 |= Status3::HAS_REFLECT_UP;
+        }
+        let party = arena.party.clone();
+        handle_self_confusion_damage(&mut arena.battle, &party, Side::Player);
+        let player = &arena.battle.player.mon;
+        player.stats[stat::MAX_HP] - player.hp
+    }
+
+    #[test]
+    fn confusion_damage_is_under_the_users_own_reflect() {
+        let plain = confusion_damage(&[]);
+        assert!(confusion_damage(&[Side::Player]) < plain);
+        assert_eq!(confusion_damage(&[Side::Enemy]), plain);
+    }
 
     #[test]
     fn every_harvested_case_of_critical_hit_test() {

@@ -256,6 +256,7 @@ impl PlaceString {
     }
 
     fn scroll(&mut self, ctx: &mut Ctx, answered: &mut u32) -> Option<Printed> {
+        ctx.printed.push(ctx.screen.ui.clone());
         Self::scroll_up_one_line(&mut ctx.screen.ui);
         self.phase = Phase::Scrolling { scrolled: 1, frames: self.delay(ctx, 5) };
         self.after_delay(ctx, answered)

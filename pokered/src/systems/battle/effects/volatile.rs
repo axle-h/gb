@@ -105,13 +105,16 @@ pub fn charge_effect(battle: &mut Battle, user: Side) -> Vec<BattleText> {
     vec![BattleText::ChargeMoveEffectText]
 }
 
-/// `TrappingEffect`, once per move: the target's recharge ends before any hit test, and 1 to 4
-/// more turns follow, weighted as the multi-hit moves are.
+/// `TrappingEffect`, once per move, before the hit test: 1 to 4 more turns follow, weighted as the
+/// multi-hit moves are. The target's recharge ends when the move hits, in `calc_move_damage`.
 pub fn trapping_effect(battle: &mut Battle, user: Side, rng: &mut impl Rng) -> Vec<BattleText> {
     if battle.side(user).status1.contains(Status1::USING_TRAPPING_MOVE) {
         return vec![];
     }
-    clear_hyper_beam(battle, user);
+    // The cartridge ends it here, so a miss frees the target too.
+    if battle.cartridge_bugs {
+        clear_hyper_beam(battle, user);
+    }
     let side = battle.side_mut(user);
     side.status1 |= Status1::USING_TRAPPING_MOVE;
     let low = rng.random() & 3;
@@ -190,17 +193,21 @@ pub fn conversion_effect(battle: &mut Battle, user: Side) -> Vec<BattleText> {
     vec![BattleText::ConvertedTypeText]
 }
 
-/// `TransformEffect_`. Its out-of-reach test reads the player's own flags on the player's turn and
-/// nothing on the enemy's, and the player's turn zeroes `wPlayerMoveListIndex` on the way. The user
-/// takes the target's species, types, catch rate, moves, DVs, and stats but for level and HP, 5 PP
+/// `TransformEffect_`. A target out of reach makes it fail, and the player's turn zeroes
+/// `wPlayerMoveListIndex` on the way. The user takes the target's species, types, catch rate, moves, DVs, and stats but for level and HP, 5 PP
 /// for each move up to the first empty slot, and the target's unmodified stats and stat modifiers;
 /// the enemy keeps its own DVs aside.
 pub fn transform_effect(battle: &mut Battle, user: Side) -> Vec<BattleText> {
     if user == Side::Player {
         battle.player.move_list_index = 0;
-        if battle.player.status1.contains(Status1::INVULNERABLE) {
-            return vec![BattleText::ButItFailedText];
-        }
+    }
+    // The cartridge tests the player's own flags on the player's turn and nothing on the enemy's.
+    let out_of_reach = match battle.cartridge_bugs {
+        true => user == Side::Player && battle.player.status1.contains(Status1::INVULNERABLE),
+        false => battle.side(user.other()).status1.contains(Status1::INVULNERABLE),
+    };
+    if out_of_reach {
+        return vec![BattleText::ButItFailedText];
     }
     let target = battle.side(user.other()).clone();
     if user == Side::Enemy {
@@ -291,4 +298,44 @@ pub fn pay_day_effect(battle: &mut Battle, user: Side) -> Vec<BattleText> {
     let money = [0, hundreds[3], tens[3] << 4 | ones];
     add_bcd(&mut battle.total_pay_day_money, &money);
     vec![BattleText::CoinsScatteredText]
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::rng::GameRng;
+    use super::super::super::damage::calc_move_damage;
+    use super::super::tests::using;
+    use super::*;
+
+    #[test]
+    fn transform_fails_on_a_target_out_of_reach_and_only_then() {
+        for user in [Side::Player, Side::Enemy] {
+            let mut arena = using(user, PokemonMoveName::Transform);
+            arena.battle.side_mut(user.other()).status1 |= Status1::INVULNERABLE;
+            assert_eq!(transform_effect(&mut arena.battle, user), vec![BattleText::ButItFailedText], "{user:?}");
+            assert!(!arena.battle.side(user).status3.contains(Status3::TRANSFORMED));
+
+            arena.battle.side_mut(user.other()).status1.remove(Status1::INVULNERABLE);
+            arena.battle.side_mut(user).status1 |= Status1::INVULNERABLE;
+            assert_eq!(transform_effect(&mut arena.battle, user), vec![BattleText::TransformedText], "{user:?}");
+        }
+    }
+
+    /// The player's Wrap on an enemy that must recharge, `hit_roll` its hit test's random byte:
+    /// whether the enemy still must.
+    fn wrap_leaves_it_recharging(hit_roll: u8) -> bool {
+        let mut arena = using(Side::Player, PokemonMoveName::Wrap);
+        arena.battle.enemy.status2 |= Status2::NEEDS_TO_RECHARGE;
+        trapping_effect(&mut arena.battle, Side::Player, &mut GameRng::tape(vec![0]));
+        let party = arena.party.clone();
+        calc_move_damage(&mut arena.battle, &party, Side::Player, &mut GameRng::tape(vec![0xFF, 0xFF, hit_roll]));
+        assert_eq!(arena.battle.move_missed, hit_roll == 0xFF);
+        arena.battle.enemy.status2.contains(Status2::NEEDS_TO_RECHARGE)
+    }
+
+    #[test]
+    fn a_missed_wrap_leaves_the_target_recharging() {
+        assert!(wrap_leaves_it_recharging(0xFF));
+        assert!(!wrap_leaves_it_recharging(0));
+    }
 }
