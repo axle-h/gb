@@ -22,7 +22,6 @@ pub mod players_pc;
 mod tests;
 
 use poke_core::symbols::pokered_events::{EVENT_GOT_POKEDEX, EVENT_MET_BILL};
-use poke_core::symbols::{pokered_symbols as sym, DmgPointer};
 use poke_core::text_script::far_text;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, SoundId};
@@ -147,25 +146,25 @@ impl PcMenu {
         ui.text_box_border(0, 0, 14, height);
         update_sprites(ctx);
         let ui = &mut ctx.screen.ui;
-        let bills = if ctx.world.events.is_set(EVENT_MET_BILL) { sym::BillsPCText } else { sym::SomeonesPCText };
+        let bills = if ctx.world.events.is_set(EVENT_MET_BILL) { "BillsPCText" } else { "SomeonesPCText" };
         place_rom_string(ui, 2, 2, bills);
         let name = &ctx.world.player_name;
         ui.place(2, 4, name);
-        place_rom_string(ui, 2 + name.len(), 4, sym::PlayersPCText);
+        place_rom_string(ui, 2 + name.len(), 4, "PlayersPCText");
         self.max = match (dex, league) {
             (false, _) => {
-                place_rom_string(ui, 2, 6, sym::LogOffPCText);
+                place_rom_string(ui, 2, 6, "LogOffPCText");
                 2
             }
             (true, false) => {
-                place_rom_string(ui, 2, 6, sym::OaksPCText);
-                place_rom_string(ui, 2, 8, sym::LogOffPCText);
+                place_rom_string(ui, 2, 6, "OaksPCText");
+                place_rom_string(ui, 2, 8, "LogOffPCText");
                 3
             }
             (true, true) => {
-                place_rom_string(ui, 2, 6, sym::OaksPCText);
-                place_rom_string(ui, 2, 8, sym::PKMNLeaguePCText);
-                place_rom_string(ui, 2, 10, sym::LogOffPCText);
+                place_rom_string(ui, 2, 6, "OaksPCText");
+                place_rom_string(ui, 2, 8, "PKMNLeaguePCText");
+                place_rom_string(ui, 2, 10, "LogOffPCText");
                 4
             }
         };
@@ -298,8 +297,8 @@ pub(crate) fn print(label: &str, ctx: &mut Ctx) -> Transition {
 
 /// `PrintText` of a text by its address, for one whose wait is in the `text_far` wrapper rather
 /// than in the text itself.
-pub(crate) fn print_at(at: DmgPointer, ctx: &mut Ctx) -> Transition {
-    let script = poke_core::text_script::decode(at).expect("the PC's texts are in the cartridge");
+pub(crate) fn print_at(label: &str, ctx: &mut Ctx) -> Transition {
+    let script = far_text(label).expect("the PC's texts are in the cartridge");
     update_sprites(ctx);
     Transition::Push(Mode::TextBox(TextBox::script(script)))
 }
@@ -316,10 +315,10 @@ pub(crate) fn update_sprites(ctx: &mut Ctx) {
     ctx.update_sprites = true;
 }
 
-/// `PlaceString` of a string in the cartridge, ligatures expanded.
-fn place_rom_string(ui: &mut UiSurface, x: usize, y: usize, at: DmgPointer) {
+/// `PlaceString` of a `db` string, ligatures expanded.
+fn place_rom_string(ui: &mut UiSurface, x: usize, y: usize, label: &str) {
     let mut column = x;
-    for &byte in poke_core::rom_gfx::rom_slice(at).iter().take_while(|&&b| b != ch::TERMINATOR) {
+    for &byte in poke_core::tables::db_string(label).iter().take_while(|&&b| b != ch::TERMINATOR) {
         let tiles = ligature(byte).map_or_else(|| vec![byte], <[u8]>::to_vec);
         ui.place(column, y, &tiles);
         column += tiles.len();

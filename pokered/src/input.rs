@@ -45,6 +45,11 @@ impl Pad {
         self.pressed &= !self.ignore;
     }
 
+    /// What the last `poll` read, against which the next press is an edge.
+    pub fn polled(&self) -> Joypad {
+        self.last
+    }
+
     /// `JoypadLowSensitivity`, returning `hJoy5`: new presses only, or with `repeat_held` what is
     /// held, once and then every 5 frames after 30.
     pub fn low_sensitivity(&mut self, frame_counter: &mut u8) -> Joypad {

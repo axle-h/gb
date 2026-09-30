@@ -399,7 +399,7 @@ fn gates_open(run: &mut LlmRun) -> u8 {
 fn answers_the_first_quiz_machine(answer: &'static str) -> (LlmRun, Arc<Mutex<Seen>>, u8) {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let brain = walk_in_then(&["CinnabarGym"], vec![
-        Call::new("choose_action", serde_json::json!({ "id": format!("CinnabarGym:15,8:{answer}"), "summary": "quiz" })),
+        Call::new("choose_action", serde_json::json!({ "id": format!("CinnabarGym:15,7:{answer}"), "summary": "quiz" })),
     ], Arc::clone(&seen));
     let mut run = LlmRun::builder(include_bytes!("../data/at-cinnabar.bin"))
         .named("cinnabar-quiz")
@@ -488,7 +488,7 @@ fn a_seafoam_hole_says_where_the_current_below_leaves_the_player() {
         let rows = request.menu_rows();
         let here = request.situation().lines()
             .find_map(|line| line.strip_prefix("Location: ")).unwrap_or_default().to_string();
-        let hole = rows.iter().find(|(id, _)| id == "SeafoamIslandsB3F:6,16:Warp").map(|(id, _)| id.clone());
+        let hole = rows.iter().find(|(id, _)| id == "SeafoamIslandsB3F:3,16:Warp").map(|(id, _)| id.clone());
         log.lock().expect("not poisoned").push((here, rows));
         match hole {
             Some(id) => Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "down the hole" })),
@@ -505,7 +505,7 @@ fn a_seafoam_hole_says_where_the_current_below_leaves_the_player() {
     });
     let turns = turns.lock().expect("not poisoned");
     let (_, first) = turns.first().expect("no overworld turn was asked");
-    let row = first.iter().find(|(id, _)| id == "SeafoamIslandsB3F:6,16:Warp")
+    let row = first.iter().find(|(id, _)| id == "SeafoamIslandsB3F:3,16:Warp")
         .unwrap_or_else(|| panic!("the hole is not a row: {first:?}"));
     assert!(row.1.contains("SeafoamIslandsB4F, arriving at (7, 10)"), "the hole's row: {}", row.1);
     assert!(below, "never asked a turn on B4F: {:?}", turns.iter().map(|(here, _)| here).collect::<Vec<_>>());
@@ -740,7 +740,7 @@ fn a_second_vending_machine_sells_its_own_drink() {
     let told = Arc::new(Mutex::new(false));
     let log = Arc::clone(&told);
     let mut leg = 0;
-    let mut picks = vec!["CeladonMartRoof:11,2:VendingMachine2", "CeladonMartRoof:10,2:VendingMachine1"];
+    let mut picks = vec!["CeladonMartRoof:11,1:VendingMachine2", "CeladonMartRoof:10,1:VendingMachine1"];
     let brain = move |request: &TurnRequest| {
         if request.is_battle() {
             return Reply::call("choose_battle_action", serde_json::json!({ "id": "run", "summary": "not now" }));

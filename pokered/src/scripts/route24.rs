@@ -1,16 +1,14 @@
 //! `Route24_Script`: the Nugget Bridge's six trainers, and the seventh at the top who pays out and
 //! then turns out to be a Rocket.
 
+use poke_core::tables::trainers;
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_ROUTE24_ROCKET, EVENT_GOT_NUGGET,
     EVENT_NUGGET_REWARD_AVAILABLE};
-use poke_core::symbols::pokered_local_labels::Route24CooltrainerM1Text as words;
 use poke_core::symbols::pokered_map_scripts::*;
-use poke_core::symbols::pokered_symbols::{Route24TrainerHeader0, Route24TrainerHeader1, Route24TrainerHeader2,
-    Route24TrainerHeader3, Route24TrainerHeader4, Route24TrainerHeader5, Route24TrainerHeaders};
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
-use super::{text_at, Code, Flow, Script};
+use super::{text_named, Code, Flow, Script};
 
 const PAD_CTRL_PAD: Joypad = Joypad::UP.union(Joypad::DOWN).union(Joypad::LEFT).union(Joypad::RIGHT);
 
@@ -43,7 +41,7 @@ pub enum Label {
 pub fn script(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().route24.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, Route24TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::Route24TrainerHeaders);
     let entry: Code = match index {
         SCRIPT_ROUTE24_AFTER_ROCKET_BATTLE => Label::AfterRocketBattle.into(),
         SCRIPT_ROUTE24_PLAYER_MOVING => Label::PlayerMoving.into(),
@@ -78,12 +76,12 @@ fn set_default_script(rt: &mut Script) -> Flow {
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
         TEXT_ROUTE24_COOLTRAINER_M1 => return Some(cooltrainer_m1_text(rt)),
-        TEXT_ROUTE24_COOLTRAINER_M2 => Route24TrainerHeader0,
-        TEXT_ROUTE24_COOLTRAINER_M3 => Route24TrainerHeader1,
-        TEXT_ROUTE24_COOLTRAINER_F1 => Route24TrainerHeader2,
-        TEXT_ROUTE24_YOUNGSTER1 => Route24TrainerHeader3,
-        TEXT_ROUTE24_COOLTRAINER_F2 => Route24TrainerHeader4,
-        TEXT_ROUTE24_YOUNGSTER2 => Route24TrainerHeader5,
+        TEXT_ROUTE24_COOLTRAINER_M2 => trainers::Route24TrainerHeader0,
+        TEXT_ROUTE24_COOLTRAINER_M3 => trainers::Route24TrainerHeader1,
+        TEXT_ROUTE24_COOLTRAINER_F1 => trainers::Route24TrainerHeader2,
+        TEXT_ROUTE24_YOUNGSTER1 => trainers::Route24TrainerHeader3,
+        TEXT_ROUTE24_COOLTRAINER_F2 => trainers::Route24TrainerHeader4,
+        TEXT_ROUTE24_YOUNGSTER2 => trainers::Route24TrainerHeader5,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())
@@ -93,9 +91,9 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 fn cooltrainer_m1_text(rt: &mut Script) -> Flow {
     rt.reset_event(EVENT_NUGGET_REWARD_AVAILABLE);
     if rt.check_event(EVENT_GOT_NUGGET) {
-        return rt.print_text(text_at(words::YouCouldBecomeATopLeaderText)).ret();
+        return rt.print_text(text_named("Route24CooltrainerM1Text.YouCouldBecomeATopLeaderText")).ret();
     }
-    rt.print_text(text_at(words::YouBeatOurContestText)).then(Label::ContestPrize)
+    rt.print_text(text_named("Route24CooltrainerM1Text.YouBeatOurContestText")).then(Label::ContestPrize)
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -136,14 +134,14 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::ContestPrize => {
             if !rt.give_item(ItemId::Nugget, 1) {
-                return rt.print_text(text_at(words::NoRoomText)).then(Label::NoRoom);
+                return rt.print_text(text_named("Route24CooltrainerM1Text.NoRoomText")).then(Label::NoRoom);
             }
             rt.set_event(EVENT_GOT_NUGGET);
-            rt.print_text(text_at(words::ReceivedNuggetText)).then(Label::NuggetReceived)
+            rt.print_text(text_named("Route24CooltrainerM1Text.ReceivedNuggetText")).then(Label::NuggetReceived)
         }
-        Label::NuggetReceived => rt.print_text(text_at(words::JoinTeamRocketText)).then(Label::JoinRocket),
+        Label::NuggetReceived => rt.print_text(text_named("Route24CooltrainerM1Text.JoinTeamRocketText")).then(Label::JoinRocket),
         Label::JoinRocket => {
-            rt.save_end_battle_text(words::DefeatedText);
+            rt.save_end_battle_text("Route24CooltrainerM1Text.DefeatedText");
             rt.engage_map_trainer(rt.sprite_index(), 0);
             rt.clear_joy_held();
             set_script(rt, SCRIPT_ROUTE24_AFTER_ROCKET_BATTLE);

@@ -13,8 +13,6 @@
 //! Not modelled: the palette writes, which no mode makes yet, and `UpdateSprites`.
 
 use poke_core::base_stats::BaseStats;
-use poke_core::rom_gfx::rom_slice;
-use poke_core::symbols::pokered_symbols;
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
 use crate::gfx::sgb::{determine_palette_id_out_of_battle, PaletteCommand};
@@ -84,11 +82,12 @@ impl StatusScreen {
     fn draw_first_page(&self, ctx: &mut Ctx) {
         let tiles = &mut ctx.screen.tiles;
         tiles.load_hp_bar_and_status_tiles();
-        let one_bpp = |start: poke_core::symbols::DmgPointer, count: usize| &rom_slice(start)[..count * TILE_BYTES_1BPP];
-        tiles.load_1bpp(V_CHARS2 + 0x6D, one_bpp(pokered_symbols::BattleHudTiles1, 3));
-        tiles.load_1bpp(V_CHARS2 + 0x78, one_bpp(pokered_symbols::BattleHudTiles2, 1));
-        tiles.load_1bpp(V_CHARS2 + 0x76, one_bpp(pokered_symbols::BattleHudTiles3, 2));
-        tiles.load_1bpp(V_CHARS2 + BOLD_P as usize, one_bpp(pokered_symbols::PTile, 1));
+        use poke_core::gfx::{battle, font};
+        let one_bpp = |tiles: &'static [u8], count: usize| &tiles[..count * TILE_BYTES_1BPP];
+        tiles.load_1bpp(V_CHARS2 + 0x6D, one_bpp(battle::BATTLE_HUD_1, 3));
+        tiles.load_1bpp(V_CHARS2 + 0x78, one_bpp(battle::BATTLE_HUD_2, 1));
+        tiles.load_1bpp(V_CHARS2 + 0x76, one_bpp(battle::BATTLE_HUD_3, 2));
+        tiles.load_1bpp(V_CHARS2 + BOLD_P as usize, one_bpp(font::P, 1));
 
         let PartyMon { mon, level, stats } = &self.mon.mon;
         let ui = &mut ctx.screen.ui;

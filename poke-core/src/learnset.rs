@@ -1,14 +1,10 @@
 //! Which Pokémon a TM or HM will teach, read out of the cartridge's base-stats table.
 
 use crate::item::ItemId;
-use crate::mon_gfx::base_stats_entry;
+use crate::base_stats::BaseStats;
 use crate::move_name::PokemonMoveName;
-use crate::rom_gfx::rom_slice;
 use crate::species::PokemonSpecies;
-use crate::symbols::pokered_symbols;
-
-/// Offset of the 7-byte TM/HM flag array in a base-stats entry (`wMonHLearnset`).
-const BASE_LEARNSET: usize = 20;
+use crate::tables::TECHNICAL_MACHINES;
 
 /// The flag `CanLearnTM` tests for `item`, or `None` if the item is not a machine at all.
 pub const fn tm_hm_flag(item: ItemId) -> Option<usize> {
@@ -23,14 +19,14 @@ pub const fn tm_hm_flag(item: ItemId) -> Option<usize> {
 /// Whether the game will let `species` learn the machine `item`.
 pub fn can_learn(species: PokemonSpecies, item: ItemId) -> bool {
     let Some(flag) = tm_hm_flag(item) else { return true };
-    // `FlagAction`: byte `c >> 3`, bit `c & 7`, least significant first.
-    base_stats_entry(species)[BASE_LEARNSET + flag / 8] & (1 << (flag % 8)) != 0
+    // No move has two machines, so the machine's move stands for its flag.
+    BaseStats::of(species).tm_hm.contains(&TECHNICAL_MACHINES[flag])
 }
 
 /// The move a TM or HM teaches, from the cartridge's own `TechnicalMachines` table.
 pub fn machine_move(item: ItemId) -> Option<PokemonMoveName> {
     let flag = tm_hm_flag(item)?;
-    PokemonMoveName::from_repr(rom_slice(pokered_symbols::TechnicalMachines)[flag])
+    PokemonMoveName::from_repr(TECHNICAL_MACHINES[flag])
 }
 
 #[cfg(test)]

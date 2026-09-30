@@ -18,6 +18,11 @@ pub struct PokemonTextReader {
     message_box_only: bool,
     /// Every read is a whole frame, so one that does not continue the page is a new page.
     untorn: bool,
+    /// The last read, and how many reads in a row have matched it.
+    last_screen: Option<String>,
+    still: u8,
+    /// Consecutive ticks the advancing button has been held on a page that was still changing.
+    held: u8,
 }
 
 impl Display for PokemonTextReader {
@@ -48,6 +53,9 @@ impl PokemonTextReader {
         self.page.clear();
         self.mismatches = 0;
         self.pending = None;
+        self.last_screen = None;
+        self.still = 0;
+        self.held = 0;
         out
     }
 
@@ -73,9 +81,24 @@ impl PokemonTextReader {
     }
 
     /// [`Self::update`], but advancing with `button` instead of A.
+    ///
+    /// A and B are held, not toggled, until the screen has read the same for [`STILL_READS`]: the
+    /// screen trails the game's own tile map by up to three frames, and a finished text closes on
+    /// A's release (`HoldTextDisplayOpen`) or a fresh press, so either one while the last letters
+    /// are still in flight takes the page down unread.
     pub fn update_with<A: PokemonApiTrait>(&mut self, api: &mut A, button: JoypadButton) {
-        api.toggle_button(button);
         self.accumulate(api);
+        let advancing = matches!(button, JoypadButton::A | JoypadButton::B);
+        if !advancing || self.still >= STILL_READS || self.held >= MAX_HELD_TICKS {
+            if self.still >= STILL_READS {
+                self.held = 0;
+            }
+            api.toggle_button(button);
+        } else {
+            self.held += 1;
+            api.release_all_buttons();
+            api.press_button(button);
+        }
     }
 
     /// [`Self::update_with`] without the button: read this tick's screen and press nothing.
@@ -85,6 +108,8 @@ impl PokemonTextReader {
 
     /// Fold in one read of the screen, `None` where there was nothing to read.
     pub fn read(&mut self, screen: Option<String>) {
+        self.still = if screen == self.last_screen { self.still.saturating_add(1) } else { 0 };
+        self.last_screen.clone_from(&screen);
         let Some(screen) = screen else { return };
 
         // A blank frame is not a page break and must not commit anything.
@@ -147,6 +172,13 @@ impl PokemonTextReader {
 
 /// How many consecutive reads must fail to continue the page before it is taken to have ended.
 const MISMATCHES_BEFORE_PAGE_BREAK: u8 = 2;
+
+/// Unchanged 20 ms reads after which a page is whole on screen: three span more than the three
+/// frames `AutoBgMapTransfer` takes to redraw the text box's third of the screen.
+const STILL_READS: u8 = 3;
+
+/// A screen that never stops changing is not a page being typed; past this the button toggles.
+const MAX_HELD_TICKS: u8 = 100;
 
 /// The length, in `char`s, of the longest suffix of `left` that is a prefix of `right`.
 fn longest_overlap(left: &str, right: &str) -> usize {
@@ -332,6 +364,41 @@ mod tests {
             reader.read(Some(frame.to_string()));
         }
         assert!(reader.take().ends_with("SODA POP popped out!"), "the drink is said to have come out");
+    }
+
+    /// The screen redraws the text box every third frame, so a page being typed reads the same
+    /// for a tick or two between its letters. A is held until it has read the same for longer:
+    /// letting go ends a finished text, and a fresh press a finished page, before it is drawn.
+    #[test]
+    fn a_page_still_being_drawn_is_neither_let_go_of_nor_pressed_again() {
+        let mut reader: PokemonTextReader = Default::default();
+        let mut api: StubPokemonApi = Default::default();
+        api.game_state.mode = GameMode::TextBox;
+        let typing = ["SODA POP popped", "SODA POP popped", "SODA POP popped ou", "SODA POP popped ou",
+                      "SODA POP popped out!", "SODA POP popped out!", "SODA POP popped out!"];
+        for frame in typing {
+            api.on_screen_text = Some(frame.to_string());
+            reader.update(&mut api);
+            assert!(api.joypad.is_button_pressed(JoypadButton::A), "A was let go of at {frame:?}");
+        }
+        reader.update(&mut api);
+        assert!(!api.joypad.is_button_pressed(JoypadButton::A), "A is let go of once the page is still");
+        reader.update(&mut api);
+        assert!(api.joypad.is_button_pressed(JoypadButton::A), "and pressed afresh after that");
+    }
+
+    /// A scrolled box shows the tail of the page it continues, which the page never matches again:
+    /// it is the screen standing still that lets A go, not the page.
+    #[test]
+    fn a_scrolled_page_is_still_once_its_screen_is() {
+        let mut reader: PokemonTextReader = Default::default();
+        let mut api: StubPokemonApi = Default::default();
+        api.game_state.mode = GameMode::TextBox;
+        for frame in ["I'm on guard duty. Gee, I'm thirsty,"; 5].into_iter().chain(["Gee, I'm thirsty,"; 4]) {
+            api.on_screen_text = Some(frame.to_string());
+            reader.update(&mut api);
+        }
+        assert!(!api.joypad.is_button_pressed(JoypadButton::A), "A is let go of on the scrolled page");
     }
 
     #[test]

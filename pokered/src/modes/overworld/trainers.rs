@@ -3,14 +3,14 @@
 
 use poke_core::map::Map;
 use poke_core::map_objects::{MapObjects, ObjectKind};
-use poke_core::symbols::DmgPointer;
-use poke_core::trainer_headers::{encounter_music, EncounterMusic, TrainerHeader, OPP_ID_OFFSET};
+use poke_core::tables::Trainer;
+use poke_core::trainer_headers::{encounter_music, EncounterMusic, TrainerRef, OPP_ID_OFFSET};
 use crate::audio::data::{sounds, SoundId};
 use crate::input::Joypad;
 use crate::mode::Ctx;
 use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_LEFT, SPRITE_FACING_RIGHT, SPRITE_FACING_UP};
 use poke_core::map_objects::STAY;
-use super::script::{text_at, Block, Flow, Routine, Then};
+use super::script::{text_named, Block, Flow, Routine, Then};
 use super::{Overworld, PAD_CTRL_PAD};
 
 /// The player's sprite on the screen, which never moves.
@@ -27,16 +27,16 @@ const EXCLAMATION_BUBBLE: u8 = 0;
 
 impl Overworld {
     /// The header `wTrainerHeaderPtr` holds.
-    fn trainer_header(&self) -> TrainerHeader {
-        TrainerHeader::read(self.rt.trainer_header.expect("a trainer routine runs with a header"))
+    fn trainer_header(&self) -> &'static Trainer {
+        self.rt.trainer_header.expect("a trainer routine runs with a header").header()
     }
 
     /// `CheckFightingMapTrainers`, with `CheckForEngagingTrainers` over the map's table.
     pub(super) fn check_fighting_map_trainers(&mut self, ctx: &mut Ctx) -> Flow {
         let first = self.rt.trainer_header.expect("the map's table");
         let mut engaging = None;
-        for header in TrainerHeader::table(first) {
-            self.rt.trainer_header = Some(header.at);
+        for (at, header) in first.and_after() {
+            self.rt.trainer_header = Some(at);
             self.rt.sprite_index = header.sprite;
             self.rt.trainer_header_flag_bit = header.sprite;
             if ctx.world.events.is_set(header.event) {
@@ -221,18 +221,18 @@ impl Overworld {
 
     /// `TalkToTrainer`: the after-battle words for a trainer already beaten, else the words before
     /// the battle and the battle's end text saved.
-    pub(super) fn talk_to_trainer(&mut self, ctx: &mut Ctx, at: DmgPointer) -> Flow {
-        let header = TrainerHeader::read(at);
+    pub(super) fn talk_to_trainer(&mut self, ctx: &mut Ctx, at: TrainerRef) -> Flow {
+        let header = at.header();
         if self.talk_to_trainer_header(ctx, at) {
-            return Then::block(Block::PrintText(text_at(header.after_battle))).ret();
+            return Then::block(Block::PrintText(text_named(header.after_battle))).ret();
         }
-        Then::block(Block::PrintText(text_at(header.before_battle))).then(Routine::TalkToTrainerNotYetFought)
+        Then::block(Block::PrintText(text_named(header.before_battle))).then(Routine::TalkToTrainerNotYetFought)
     }
 
     /// `TalkToTrainer` up to its choice of text: the header saved, and whether its trainer is beaten.
-    pub(super) fn talk_to_trainer_header(&mut self, ctx: &mut Ctx, at: DmgPointer) -> bool {
+    pub(super) fn talk_to_trainer_header(&mut self, ctx: &mut Ctx, at: TrainerRef) -> bool {
         self.rt.trainer_header = Some(at);
-        let header = TrainerHeader::read(at);
+        let header = at.header();
         self.rt.trainer_header_flag_bit = header.sprite;
         ctx.world.events.is_set(header.event)
     }

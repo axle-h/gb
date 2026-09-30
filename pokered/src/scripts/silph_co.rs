@@ -2,8 +2,7 @@
 //! workers greet the player with either side of Giovanni being beaten.
 
 use poke_core::symbols::pokered_events::EVENT_BEAT_SILPH_CO_GIOVANNI;
-use poke_core::symbols::DmgPointer;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `SilphCo2F_SetCardKeyDoorYScript`, which the upper floors have their own byte-identical copy of:
 /// `hUnlockedSilphCoDoors`, which is where in this floor's gate list the door a card key has just
@@ -44,10 +43,10 @@ fn redraw_shut_gates(rt: &mut Script, gates: &[(u8, u8)], events: &[u16], closed
 
 /// `SilphCo6FBeatGiovanniPrintDEOrPrintHLScript`: a worker's line while Team Rocket hold the
 /// building, and the one they have once the building is theirs again.
-pub(super) fn beat_giovanni_print_de_or_print_hl(rt: &mut Script, held: DmgPointer, freed: DmgPointer) -> Flow {
+pub(super) fn beat_giovanni_print_de_or_print_hl(rt: &mut Script, held: &'static str, freed: &'static str) -> Flow {
     let said = match rt.check_event(EVENT_BEAT_SILPH_CO_GIOVANNI) {
         true => freed,
         false => held,
     };
-    rt.print_text(text_at(said)).ret()
+    rt.print_text(text_named(said)).ret()
 }

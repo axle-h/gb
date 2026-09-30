@@ -4,11 +4,9 @@
 use poke_core::item::ItemId;
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_events::{EVENT_1B8, EVENT_1BF, EVENT_67F, EVENT_GOT_TM41};
-use poke_core::symbols::pokered_local_labels::CeladonCityGramps3Text as gramps;
 use poke_core::symbols::pokered_map_scripts::{TEXT_CELADONCITY_GRAMPS3, TEXT_CELADONCITY_POLIWRATH};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {}
@@ -35,11 +33,11 @@ pub fn script(rt: &mut Script) -> Flow {
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     match text_id {
         TEXT_CELADONCITY_GRAMPS3 => Some(match rt.check_event(EVENT_GOT_TM41) {
-            true => rt.print_text(text_at(gramps::TM41ExplanationText)).ret(),
-            false => rt.print_text(text_at(gramps::Text)).then(Label::Gramps3Offered),
+            true => rt.print_text(text_named("CeladonCityGramps3Text.TM41ExplanationText")).ret(),
+            false => rt.print_text(text_named("CeladonCityGramps3Text.Text")).then(Label::Gramps3Offered),
         }),
         TEXT_CELADONCITY_POLIWRATH => {
-            Some(rt.print_text(text_at(sym::CeladonCityPoliwrathText)).then(Label::PoliwrathCry))
+            Some(rt.print_text(text_named("CeladonCityPoliwrathText")).then(Label::PoliwrathCry))
         }
         _ => None,
     }
@@ -48,8 +46,8 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
         Label::Gramps3Offered => match rt.give_item(ItemId::Tm41Softboiled, 1) {
-            true => rt.print_text(text_at(gramps::ReceivedTM41Text)).then(Label::Gramps3Received),
-            false => rt.print_text(text_at(gramps::TM41NoRoomText)).ret(),
+            true => rt.print_text(text_named("CeladonCityGramps3Text.ReceivedTM41Text")).then(Label::Gramps3Received),
+            false => rt.print_text(text_named("CeladonCityGramps3Text.TM41NoRoomText")).ret(),
         },
         Label::Gramps3Received => {
             rt.set_event(EVENT_GOT_TM41);

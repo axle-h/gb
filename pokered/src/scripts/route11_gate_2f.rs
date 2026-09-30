@@ -3,14 +3,13 @@
 
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_ROUTE12_SNORLAX, EVENT_GOT_ITEMFINDER};
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::{TEXT_ROUTE11GATE2F_LEFT_BINOCULARS, TEXT_ROUTE11GATE2F_OAKS_AIDE,
     TEXT_ROUTE11GATE2F_RIGHT_BINOCULARS, TEXT_ROUTE11GATE2F_YOUNGSTER};
 use serde::{Deserialize, Serialize};
 use crate::systems::events::tables::OaksAideResult;
 use crate::systems::overworld::sprites::SPRITE_FACING_UP;
 use super::route12_gate_2f::print_if_facing_up;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `TRADE_FOR_TERRY`.
 const TRADE_FOR_TERRY: u8 = 0;
@@ -49,14 +48,14 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
                 return Some(Flow::Return);
             }
             let words = if rt.check_event(EVENT_BEAT_ROUTE12_SNORLAX) {
-                local::Route11Gate2FLeftBinocularsText::NoSnorlaxText
+                "Route11Gate2FLeftBinocularsText.NoSnorlaxText"
             } else {
-                local::Route11Gate2FLeftBinocularsText::SnorlaxText
+                "Route11Gate2FLeftBinocularsText.SnorlaxText"
             };
-            rt.print_text(text_at(words)).ret()
+            rt.print_text(text_named(words)).ret()
         }
         TEXT_ROUTE11GATE2F_RIGHT_BINOCULARS => {
-            print_if_facing_up(rt, local::Route11Gate2FRightBinocularsText::Text)
+            print_if_facing_up(rt, "Route11Gate2FRightBinocularsText.Text")
         }
         _ => return None,
     })
@@ -64,7 +63,7 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 
 /// `.got_item`.
 fn itemfinder_description(rt: &mut Script) -> Flow {
-    rt.print_text(text_at(local::Route11Gate2FOaksAideText::ItemfinderDescriptionText)).ret()
+    rt.print_text(text_named("Route11Gate2FOaksAideText.ItemfinderDescriptionText")).ret()
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {

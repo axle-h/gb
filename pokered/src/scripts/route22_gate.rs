@@ -4,11 +4,10 @@
 use poke_core::map::Map;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_ROUTE22GATE_DEFAULT, SCRIPT_ROUTE22GATE_NOOP,
     SCRIPT_ROUTE22GATE_PLAYER_MOVING, TEXT_ROUTE22GATE_GUARD};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use crate::input::Joypad;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `BIT_BOULDERBADGE`.
 const BIT_BOULDERBADGE: u8 = 0;
@@ -78,9 +77,9 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         return None;
     }
     if rt.badges() & (1 << BIT_BOULDERBADGE) != 0 {
-        return Some(rt.print_text(text_at(sym::Route22GateGuardGoRightAheadText)).then(Label::GoRightAhead));
+        return Some(rt.print_text(text_named("Route22GateGuardGoRightAheadText")).then(Label::GoRightAhead));
     }
-    Some(rt.print_text(text_at(sym::Route22GateGuardNoBoulderbadgeText)).then(Label::DeniedSound))
+    Some(rt.print_text(text_named("Route22GateGuardNoBoulderbadgeText")).then(Label::DeniedSound))
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -95,7 +94,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             rt.wait_for_sound_to_finish().then(Label::CantLetYouPass)
         }
         Label::CantLetYouPass => {
-            rt.print_text_from_asm(text_at(sym::Route22GateGuardICantLetYouPassText)).then(Label::GuardTextEnd)
+            rt.print_text_from_asm(text_named("Route22GateGuardICantLetYouPassText")).then(Label::GuardTextEnd)
         }
         Label::GoRightAhead => {
             rt.maps().route22_gate.cur_script = SCRIPT_ROUTE22GATE_NOOP;

@@ -2,9 +2,6 @@
 //! takes the ¥500, hands out the balls and the steps, and walks them back out again at the end.
 
 use poke_core::symbols::pokered_events::{EVENT_IN_SAFARI_ZONE, EVENT_SAFARI_GAME_OVER};
-use poke_core::symbols::pokered_local_labels::{SafariZoneGateSafariZoneWorker1LeavingEarlyText as early,
-    SafariZoneGateSafariZoneWorker1WouldYouLikeToJoinText as join,
-    SafariZoneGateSafariZoneWorker2Text as worker2};
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_SAFARIZONEGATE_DEFAULT, SCRIPT_SAFARIZONEGATE_LEAVING_SAFARI,
     SCRIPT_SAFARIZONEGATE_PLAYER_MOVING, SCRIPT_SAFARIZONEGATE_PLAYER_MOVING_DOWN,
     SCRIPT_SAFARIZONEGATE_PLAYER_MOVING_RIGHT, SCRIPT_SAFARIZONEGATE_SET_SCRIPT_AFTER_MOVE,
@@ -12,11 +9,10 @@ use poke_core::symbols::pokered_map_scripts::{SCRIPT_SAFARIZONEGATE_DEFAULT, SCR
     TEXT_SAFARIZONEGATE_SAFARI_ZONE_WORKER1_GOOD_HAUL_COME_AGAIN,
     TEXT_SAFARIZONEGATE_SAFARI_ZONE_WORKER1_LEAVING_EARLY,
     TEXT_SAFARIZONEGATE_SAFARI_ZONE_WORKER1_WOULD_YOU_LIKE_TO_JOIN, TEXT_SAFARIZONEGATE_SAFARI_ZONE_WORKER2};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_RIGHT, SPRITE_FACING_UP};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `PLAYER_DIR_DOWN`.
 const PLAYER_DIR_DOWN: u8 = 4;
@@ -152,15 +148,15 @@ fn set_script_after_move(rt: &mut Script) -> Flow {
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     Some(match text_id {
         TEXT_SAFARIZONEGATE_SAFARI_ZONE_WORKER1_WOULD_YOU_LIKE_TO_JOIN => {
-            rt.print_text(text_at(sym::SafariZoneGateSafariZoneWorker1WouldYouLikeToJoinText))
+            rt.print_text(text_named("SafariZoneGateSafariZoneWorker1WouldYouLikeToJoinText"))
                 .then(Label::JoinMoneyBox)
         }
         TEXT_SAFARIZONEGATE_SAFARI_ZONE_WORKER1_LEAVING_EARLY => {
-            rt.print_text(text_at(sym::SafariZoneGateSafariZoneWorker1LeavingEarlyText))
+            rt.print_text(text_named("SafariZoneGateSafariZoneWorker1LeavingEarlyText"))
                 .then(Label::LeavingEarlyAsked)
         }
         TEXT_SAFARIZONEGATE_SAFARI_ZONE_WORKER2 => {
-            rt.print_text(text_at(worker2::FirstTimeHereText)).then(Label::Worker2Asked)
+            rt.print_text(text_named("SafariZoneGateSafariZoneWorker2Text.FirstTimeHereText")).then(Label::Worker2Asked)
         }
         _ => return None,
     })
@@ -191,14 +187,14 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::JoinAnswered => {
             if !rt.chose_yes() {
-                return rt.print_text(text_at(join::PleaseComeAgainText)).then(Label::CantPayWalkDown);
+                return rt.print_text(text_named("SafariZoneGateSafariZoneWorker1WouldYouLikeToJoinText.PleaseComeAgainText")).then(Label::CantPayWalkDown);
             }
             if !rt.has_enough_money(FEE) {
-                return rt.print_text(text_at(join::NotEnoughMoneyText)).then(Label::CantPayWalkDown);
+                return rt.print_text(text_named("SafariZoneGateSafariZoneWorker1WouldYouLikeToJoinText.NotEnoughMoneyText")).then(Label::CantPayWalkDown);
             }
             rt.subtract_money(FEE);
             rt.money_box();
-            rt.print_text(text_at(join::MakePaymentText)).then(Label::Paid)
+            rt.print_text(text_named("SafariZoneGateSafariZoneWorker1WouldYouLikeToJoinText.MakePaymentText")).then(Label::Paid)
         }
         Label::Paid => {
             rt.set_safari_balls(SAFARI_BALLS);
@@ -224,8 +220,8 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::LeavingEarlyAsked => rt.yes_no_choice().then(Label::LeavingEarlyAnswered),
         Label::LeavingEarlyAnswered => match rt.chose_yes() {
-            true => rt.print_text(text_at(early::ReturnSafariBallsText)).then(Label::LeaveNow),
-            false => rt.print_text(text_at(early::GoodLuckText)).then(Label::StayOn),
+            true => rt.print_text(text_named("SafariZoneGateSafariZoneWorker1LeavingEarlyText.ReturnSafariBallsText")).then(Label::LeaveNow),
+            false => rt.print_text(text_named("SafariZoneGateSafariZoneWorker1LeavingEarlyText.GoodLuckText")).then(Label::StayOn),
         },
         Label::LeaveNow => {
             rt.set_player_facing(SPRITE_FACING_DOWN);
@@ -248,10 +244,10 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::Worker2Asked => rt.yes_no_choice().then(Label::Worker2Answered),
         Label::Worker2Answered => {
             let said = match rt.chose_yes() {
-                true => worker2::SafariZoneExplanationText,
-                false => worker2::YoureARegularHereText,
+                true => "SafariZoneGateSafariZoneWorker2Text.SafariZoneExplanationText",
+                false => "SafariZoneGateSafariZoneWorker2Text.YoureARegularHereText",
             };
-            rt.print_text(text_at(said)).ret()
+            rt.print_text(text_named(said)).ret()
         }
     }
 }

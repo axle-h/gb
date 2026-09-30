@@ -2,13 +2,12 @@
 //! console draws round the game.
 //!
 //! Input: the 160x144 RGBA the colour mode painted. Output: 256x224 RGBA with that picture in the
-//! middle of it. Exact: the tilemap, the tiles and the three palettes, all read from the ROM where
-//! `LoadSGB` would have transferred them.
+//! middle of it. Exact: the tilemap, the tiles and the three palettes `LoadSGB` transfers.
 //!
 //! The border is an image and not a palette, which is why it is an option of its own.
 
-use poke_core::rom_gfx::rom_slice;
-use poke_core::symbols::pokered_symbols;
+use poke_core::gfx::sgb::{RED_BORDER, RED_BORDER_TILEMAP};
+use poke_core::gfx::SGB_BORDER_PALETTES;
 use crate::gfx::colour::{rgb555, BYTES_PER_PIXEL};
 use crate::gfx::compose;
 use crate::gfx::tiles::pixel;
@@ -22,17 +21,13 @@ pub const HEIGHT: usize = TILEMAP_HEIGHT * 8;
 const INNER_X: usize = (WIDTH - compose::WIDTH) / 2;
 const INNER_Y: usize = (HEIGHT - compose::HEIGHT) / 2;
 
-/// `PCT_TRN` transfers four kilobytes: the tilemap first, the palettes at `$800`.
-const PALETTES: usize = 0x800;
 /// SNES palettes 4 to 6, sixteen colours each, of which the border uses the first four: the tiles
 /// are 2bpp converted by `CopySGBBorderTiles`, which zeroes the two high planes.
 const FIRST_PALETTE: usize = 4;
-const PALETTE_BYTES: usize = 32;
 
 /// The border round `inner`, which is `compose::WIDTH` by `compose::HEIGHT` RGBA.
 pub fn rgba(inner: &[u8]) -> Vec<u8> {
-    let data = rom_slice(pokered_symbols::BorderPalettes);
-    let tiles = rom_slice(pokered_symbols::SGBBorderGraphics);
+    let (data, tiles) = (RED_BORDER_TILEMAP, RED_BORDER);
     let mut out = vec![0u8; WIDTH * HEIGHT * BYTES_PER_PIXEL];
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
@@ -42,6 +37,7 @@ pub fn rgba(inner: &[u8]) -> Vec<u8> {
             let (mut tx, mut ty) = (x % 8, y % 8);
             if entry & 0x4000 != 0 { tx = 7 - tx; }
             if entry & 0x8000 != 0 { ty = 7 - ty; }
+            // Only the picture's 96 tiles, not the 128 `CopySGBBorderTiles` copies from the bank.
             let bytes: &[u8; 16] = tiles[tile * 16..tile * 16 + 16].try_into().unwrap();
             let colour = pixel(bytes, tx, ty);
             let inside = (INNER_X..INNER_X + compose::WIDTH).contains(&x)
@@ -55,29 +51,29 @@ pub fn rgba(inner: &[u8]) -> Vec<u8> {
                     let from = ((y - INNER_Y) * compose::WIDTH + x - INNER_X) * BYTES_PER_PIXEL;
                     out[span].copy_from_slice(&inner[from..from + BYTES_PER_PIXEL]);
                 }
-                _ => out[span].copy_from_slice(&rgb555(border_palette(data, palette)[colour as usize])),
+                _ => out[span].copy_from_slice(&rgb555(border_palette(palette)[colour as usize])),
             }
         }
     }
     out
 }
 
-/// One of the three palettes at the end of the `PCT_TRN` data, addressed as the tilemap addresses
-/// it: SNES palettes 4, 5 and 6.
-fn border_palette(data: &[u8], palette: usize) -> [u16; 4] {
-    let at = PALETTES + palette.saturating_sub(FIRST_PALETTE) * PALETTE_BYTES;
-    std::array::from_fn(|i| u16::from_le_bytes([data[at + i * 2], data[at + i * 2 + 1]]))
+/// One of the three palettes after the tilemap in the `PCT_TRN` data, addressed as the tilemap
+/// addresses it: SNES palettes 4, 5 and 6.
+fn border_palette(palette: usize) -> [u16; 4] {
+    SGB_BORDER_PALETTES[palette.saturating_sub(FIRST_PALETTE)]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `red_border.2bpp` is 96 tiles and `CopySGBBorderTiles` copies 128, so the last 32 are
-    /// whatever follows it in the bank. Nothing draws them.
+    /// `red_border.2bpp` is 96 tiles and `CopySGBBorderTiles` copies 128, so on the cartridge the
+    /// last 32 are whatever follows it in the bank. Nothing draws them.
     #[test]
     fn the_tilemap_only_names_tiles_the_border_graphics_have() {
-        let data = rom_slice(pokered_symbols::BorderPalettes);
+        let data = RED_BORDER_TILEMAP;
+        assert_eq!(RED_BORDER.len(), 96 * 16);
         let highest = (0..TILEMAP_WIDTH * TILEMAP_HEIGHT)
             .map(|cell| u16::from_le_bytes([data[cell * 2], data[cell * 2 + 1]]) & 0x3FF)
             .max()

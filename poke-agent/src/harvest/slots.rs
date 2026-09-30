@@ -1,8 +1,8 @@
 //! The slot machine on the cartridge: the flags it rolls before the wheels move, the symbols each
 //! wheel offset shows, a spinning frame with its objects, the match search and what a win pays.
 
-use poke_core::rom_gfx::rom_slice;
-use poke_core::symbols::pokered_local_labels::SlotMachine_CheckForMatches as search;
+use crate::pokemon::rom_gfx::rom_slice;
+use crate::pokemon::symbols::pokered_local_labels::SlotMachine_CheckForMatches as search;
 use pokered::gfx::layers::Object;
 use pokered::systems::slots::{Matches, Reward, Wheels};
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgBank, DmgPointer};

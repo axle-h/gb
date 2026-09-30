@@ -18,7 +18,7 @@ use pokered::rng::GameRng;
 use pokered::systems::hall_of_fame::{HallOfFameMon, HOF_TEAM_CAPACITY};
 use pokered::{Game, Input, Pacing};
 use gb::ram::ROM;
-use poke_core::symbols::pokered_local_labels as local;
+use crate::pokemon::symbols::pokered_local_labels as local;
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointerRead};
 use super::status_screen::{cartridge_until_polling, ours, screen};
 use super::{assert_late, breakpoint, joypad, ARROW, BOX, CURSOR};

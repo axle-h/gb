@@ -1,18 +1,17 @@
 //! `CeladonGym_Script`: Erika, the Rainbow Badge and TM21.
 
+use poke_core::tables::trainers;
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_CELADON_GYM_TRAINER_0, EVENT_BEAT_CELADON_GYM_TRAINER_6,
     EVENT_BEAT_ERIKA, EVENT_GOT_TM21};
-use poke_core::symbols::pokered_local_labels::CeladonGymErikaText;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_CELADONGYM_DEFAULT, SCRIPT_CELADONGYM_ERIKA_POST_BATTLE,
     TEXT_CELADONGYM_BEAUTY1, TEXT_CELADONGYM_BEAUTY2, TEXT_CELADONGYM_BEAUTY3, TEXT_CELADONGYM_COOLTRAINER_F1,
     TEXT_CELADONGYM_COOLTRAINER_F2, TEXT_CELADONGYM_COOLTRAINER_F3, TEXT_CELADONGYM_COOLTRAINER_F4,
     TEXT_CELADONGYM_ERIKA, TEXT_CELADONGYM_RAINBOWBADGE_INFO, TEXT_CELADONGYM_RECEIVED_TM21,
     TEXT_CELADONGYM_TM21_NO_ROOM};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `BIT_RAINBOWBADGE`.
 const BIT_RAINBOWBADGE: u8 = 3;
@@ -46,7 +45,7 @@ pub fn script(rt: &mut Script) -> Flow {
     }
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().celadon_gym.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::CeladonGymTrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::CeladonGymTrainerHeaders);
     if index == SCRIPT_CELADONGYM_ERIKA_POST_BATTLE {
         return erika_post_battle(rt);
     }
@@ -80,13 +79,13 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         return Some(erika_text(rt));
     }
     let header = match text_id {
-        TEXT_CELADONGYM_COOLTRAINER_F1 => sym::CeladonGymTrainerHeader0,
-        TEXT_CELADONGYM_BEAUTY1 => sym::CeladonGymTrainerHeader1,
-        TEXT_CELADONGYM_COOLTRAINER_F2 => sym::CeladonGymTrainerHeader2,
-        TEXT_CELADONGYM_BEAUTY2 => sym::CeladonGymTrainerHeader3,
-        TEXT_CELADONGYM_COOLTRAINER_F3 => sym::CeladonGymTrainerHeader4,
-        TEXT_CELADONGYM_BEAUTY3 => sym::CeladonGymTrainerHeader5,
-        TEXT_CELADONGYM_COOLTRAINER_F4 => sym::CeladonGymTrainerHeader6,
+        TEXT_CELADONGYM_COOLTRAINER_F1 => trainers::CeladonGymTrainerHeader0,
+        TEXT_CELADONGYM_BEAUTY1 => trainers::CeladonGymTrainerHeader1,
+        TEXT_CELADONGYM_COOLTRAINER_F2 => trainers::CeladonGymTrainerHeader2,
+        TEXT_CELADONGYM_BEAUTY2 => trainers::CeladonGymTrainerHeader3,
+        TEXT_CELADONGYM_COOLTRAINER_F3 => trainers::CeladonGymTrainerHeader4,
+        TEXT_CELADONGYM_BEAUTY3 => trainers::CeladonGymTrainerHeader5,
+        TEXT_CELADONGYM_COOLTRAINER_F4 => trainers::CeladonGymTrainerHeader6,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())
@@ -95,12 +94,12 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 /// `CeladonGymErikaText`.
 fn erika_text(rt: &mut Script) -> Flow {
     if !rt.check_event(EVENT_BEAT_ERIKA) {
-        return rt.print_text(text_at(CeladonGymErikaText::PreBattleText)).then(Label::PreBattle);
+        return rt.print_text(text_named("CeladonGymErikaText.PreBattleText")).then(Label::PreBattle);
     }
     if !rt.check_event(EVENT_GOT_TM21) {
         return Flow::Call(Label::ReceiveTm21.into(), Label::TextDone.into());
     }
-    rt.print_text(text_at(CeladonGymErikaText::PostBattleAdviceText)).ret()
+    rt.print_text(text_named("CeladonGymErikaText.PostBattleAdviceText")).ret()
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -134,7 +133,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             reset_scripts(rt)
         }
         Label::PreBattle => {
-            rt.save_end_battle_text(CeladonGymErikaText::ReceivedRainbowBadgeText);
+            rt.save_end_battle_text("CeladonGymErikaText.ReceivedRainbowBadgeText");
             rt.engage_map_trainer(rt.sprite_index(), ERIKA);
             rt.maps().celadon_gym.cur_script = SCRIPT_CELADONGYM_ERIKA_POST_BATTLE;
             rt.set_cur_map_script(SCRIPT_CELADONGYM_ERIKA_POST_BATTLE);

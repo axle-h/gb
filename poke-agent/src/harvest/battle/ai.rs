@@ -147,7 +147,7 @@ mod harvest {
         let mut oracle = super::super::oracle();
         let mut rng = seeded(0x7A1);
         let special: Vec<u8> = (1..=NUM_TRAINERS)
-            .filter(|&class| poke_core::trainers::ai_pointer(class).1 != sym::GenericAI.address)
+            .filter(|&class| poke_core::trainers::ai_pointer(class).1 != "GenericAI")
             .collect();
         let (mut cases, mut idle) = (vec![], 0);
         for index in 0.. {

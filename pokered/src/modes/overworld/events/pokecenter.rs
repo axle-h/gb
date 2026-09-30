@@ -7,8 +7,6 @@
 //! loading: the machine's tiles copied into VRAM.
 
 use poke_core::map_objects::map_song;
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
-use poke_core::symbols::pokered_symbols as sym;
 use crate::audio::data::{sounds, AudioBank, SoundId};
 use crate::gfx::layers::Object;
 use crate::gfx::tiles::V_CHARS0;
@@ -31,7 +29,7 @@ const AFTER_JINGLE_FRAMES: u8 = 32;
 
 pub(super) fn pokemon_center(s: &mut Script) -> Flow {
     s.ow.rt.saved_screen = Some(s.ctx.screen.ui.clone());
-    print(sym::PokemonCenterWelcomeText).then(Label::NurseWelcomed)
+    print("PokemonCenterWelcomeText").then(Label::NurseWelcomed)
 }
 
 /// `BIT_USED_POKECENTER` read and set together: the question is asked once in a game.
@@ -39,7 +37,7 @@ pub(super) fn welcomed(s: &mut Script) -> Flow {
     if std::mem::replace(&mut s.ctx.world.used_pokecenter, true) {
         return Flow::Jump(Label::NurseAsk.into());
     }
-    print(sym::ShallWeHealYourPokemonText).then(Label::NurseAsk)
+    print("ShallWeHealYourPokemonText").then(Label::NurseAsk)
 }
 
 /// `YesNoChoicePokeCenter`.
@@ -58,7 +56,7 @@ pub(super) fn answered(s: &mut Script) -> Flow {
     }
     let location = &mut s.ctx.world.location;
     location.last_blackout_map = set_last_blackout_map(location.map, location.last_map, location.last_blackout_map);
-    print(sym::NeedYourPokemonText).then(Label::NurseTurns)
+    print("NeedYourPokemonText").then(Label::NurseTurns)
 }
 
 pub(super) fn turns(s: &mut Script) -> Flow {
@@ -69,9 +67,8 @@ pub(super) fn turns(s: &mut Script) -> Flow {
 /// `HealParty`, then `AnimateHealingMachine` up to its wait for the music to fade.
 pub(super) fn music_stopped(s: &mut Script) -> Flow {
     heal_party(&mut s.ctx.world.party);
-    let tiles = rom_slice(sym::PokeCenterFlashingMonitorAndHealBall);
-    // Three tiles from a file of two, as the cartridge copies: nothing draws the third.
-    s.ctx.screen.tiles.load(V_CHARS0 + 0x7C, &tiles[..3 * TILE_BYTES]);
+    // The cartridge copies three tiles from this file of two; nothing draws the third.
+    s.ctx.screen.tiles.load(V_CHARS0 + 0x7C, poke_core::gfx::overworld::HEAL_MACHINE);
     s.ow.rt.sprites_frozen = true;
     s.ow.rt.events.saved_obp1 = s.ctx.screen.effects.obp1;
     s.ctx.screen.effects.obp1 = 0xE0;
@@ -82,7 +79,7 @@ pub(super) fn music_stopped(s: &mut Script) -> Flow {
 
 /// `CopyHealingMachineOAM`: object `n` of `PokeCenterOAMData`, the monitor first.
 fn copy_healing_machine_oam(s: &mut Script, n: usize) {
-    let data = rom_slice(sym::PokeCenterOAMData + 4 * n as u16);
+    let data = poke_core::gfx::POKE_CENTER_OAM[n];
     let objects = &mut s.ctx.screen.sprites;
     objects.resize(40, Object { y: 160, ..Object::default() });
     objects[MACHINE_OBJECT + n] = Object { y: data[0], x: data[1], tile: data[2], attributes: data[3] };
@@ -131,7 +128,7 @@ pub(super) fn machine_done(s: &mut Script) -> Flow {
     let (song, _) = map_song(s.ctx.world.location.map);
     audio.set_last_music_sound_id(SoundId(song));
     audio.play_new_sound(SoundId(song));
-    print(sym::PokemonFightingFitText).then(Label::NurseBows)
+    print("PokemonFightingFitText").then(Label::NurseBows)
 }
 
 pub(super) fn bows(s: &mut Script) -> Flow {
@@ -140,5 +137,5 @@ pub(super) fn bows(s: &mut Script) -> Flow {
 }
 
 pub(super) fn farewell(_s: &mut Script) -> Flow {
-    print(sym::PokemonCenterFarewellText).then(Label::NurseDone)
+    print("PokemonCenterFarewellText").then(Label::NurseDone)
 }

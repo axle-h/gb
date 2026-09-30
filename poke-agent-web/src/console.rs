@@ -190,18 +190,25 @@ impl Console {
 
     /// The winning run's final tally, for the ledger row.
     pub fn final_state(&mut self) -> FinalState {
-        let (state, maxed) = match self {
+        let (tally, maxed) = match self {
             Self::Emulated(e) => {
                 use poke_agent::pokemon::symbols::{DmgPointerRead, pokered_symbols};
                 let api = PokemonApi::with_cache(&mut e.gb, &mut e.map_cache);
                 let maxed = api.mmu().read_pointer(&pokered_symbols::wPlayTimeMaxed) != 0;
-                (api.game_state(), maxed)
+                let tally = api.game_state().map(|state| (
+                    state.badges,
+                    state.pokedex_owned.species().len(),
+                    state.pokedex_seen.species().len(),
+                    state.money,
+                    state.pokemon,
+                ));
+                (tally, maxed)
             }
-            Self::Native(n) => (n.agent.game_state(), n.agent.game().world().play_time.maxed),
+            // Not `game_state`: the ceremony has replaced the overworld it needs.
+            Self::Native(n) => (n.agent.native().final_tally(), n.agent.game().world().play_time.maxed),
         };
-        let Ok(state) = state else { return (0, 0, 0, 0, Vec::new(), maxed) };
-        let party = state
-            .pokemon
+        let Ok((badges, owned, seen, money, pokemon)) = tally else { return (0, 0, 0, 0, Vec::new(), maxed) };
+        let party = pokemon
             .iter()
             .map(|mon| PartyMember {
                 nickname: mon.nickname.to_default_string(),
@@ -209,14 +216,7 @@ impl Console {
                 level: mon.level,
             })
             .collect();
-        (
-            state.badges.bits().count_ones(),
-            state.pokedex_owned.species().len(),
-            state.pokedex_seen.species().len(),
-            state.money,
-            party,
-            maxed,
-        )
+        (badges.bits().count_ones(), owned, seen, money, party, maxed)
     }
 
     /// The heartbeat's view of the game; `None` mid-transition, when it cannot be read.

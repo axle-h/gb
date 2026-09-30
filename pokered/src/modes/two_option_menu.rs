@@ -140,6 +140,9 @@ impl ModeUpdate for TwoOptionMenu {
         let top = self.at.1 + 1 + blank_line as usize;
         ctx.screen.ui.place(self.at.0 + 2, top, &text(first));
         ctx.screen.ui.place(self.at.0 + 2, top + 2, &text(second));
+        // `DisplayTwoOptionMenu` sets `BIT_NO_TEXT_DELAY` for its own words and clears it after,
+        // whatever it was before: a caller's text after the menu prints a letter at a time.
+        ctx.world.no_text_delay = false;
         ctx.menu.last_item = 0;
         if self.id == TwoOptionMenuId::NoYes {
             // Its input runs silent, and only A, which is all it takes, plays the sound.
@@ -266,6 +269,15 @@ mod tests {
         assert_eq!(cursor_row(&game, 15), Some(10), "on NO");
         assert_eq!(TwoOptionMenu::from_byte(0x80), (TwoOptionMenuId::YesNo, true));
         assert_eq!(TwoOptionMenu::from_byte(6), (TwoOptionMenuId::HealCancel, false));
+    }
+
+    /// `DisplayTwoOptionMenu` leaves `BIT_NO_TEXT_DELAY` clear whatever it found, so a caller that
+    /// set it for its own texts prints a letter at a time after the menu.
+    #[test]
+    fn the_menu_leaves_text_printing_a_letter_at_a_time() {
+        let mut game = Game::new(World { no_text_delay: true, ..World::default() }, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::TwoOptionMenu(TwoOptionMenu::new(TwoOptionMenuId::YesNo, YES_NO_AT, false)));
+        assert!(!game.world().no_text_delay);
     }
 
     #[test]

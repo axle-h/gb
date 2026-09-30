@@ -14,9 +14,9 @@
 use poke_core::battle_anims::{attack_animation, base_coord, frame_block, move_sound, subanimation, tile_id_list,
                               tilemap, AnimCommand, SubanimEntry, FIRST_SE_ID, NO_SOUND};
 use poke_core::battle_anims::{frame_block_mode, subanim_type};
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
+use poke_core::rom_gfx::TILE_BYTES;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::pokered_symbols as sym;
+use poke_core::tables;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use crate::audio::data::{sounds, SoundId};
@@ -423,6 +423,21 @@ pub fn move_sound_of(index: u8, id: u8, turn: Side, player: PokemonSpecies, enem
     (cry.sound, cry.frequency_modifier.wrapping_add(row.pitch), cry.tempo_modifier.wrapping_add(row.tempo))
 }
 
+/// The code between `FallingObjects_DeltaXs` and `FallingObjects_InitialXCoords`:
+/// `FallingObjects_UpdateMovementByte` and `FallingObjects_InitXCoords`, assembled.
+pub const FALLING_OBJECTS_CODE: [u8; 40] = [
+    0xFA, 0x8A, 0xD0, 0x3C, 0x47, 0xE6, 0x7F, 0xFE, 0x09, 0x78, 0x20, 0x04, 0xE6, 0x80, 0xEE, 0x80, 0xEA, 0x8A, 0xD0, 0xC9,
+    0x21, 0x01, 0xC3, 0x11, 0x3E, 0x5D, 0xFA, 0x8B, 0xD0, 0x4F, 0x1A, 0x22, 0x23, 0x23, 0x23, 0x13, 0x0D, 0x20, 0xF7, 0xC9,
+];
+
+/// `FallingObjects_DeltaXs[index]`. Two initial movement bytes start at 9, past the nine deltas, and
+/// only a count of 9 wraps, so those petals read on through the code after the table and into
+/// `FallingObjects_InitialXCoords`.
+fn falling_object_delta_x(index: u8) -> u8 {
+    let mut run_on = tables::FALLING_OBJECTS_DELTA_XS.iter().chain(&FALLING_OBJECTS_CODE).chain(tables::FALLING_OBJECTS_INITIAL_X_COORDS);
+    *run_on.nth(index as usize).expect("a falling object reads no further than its 52 frames take it")
+}
+
 /// The top left of the side's picture and its first tile id.
 fn pic_at(side: Side) -> (usize, usize, u8) {
     match side {
@@ -787,14 +802,14 @@ impl Animation {
             }
             anim::TRADE_BALL_SHAKE_ANIM => {
                 if counter == 1 {
-                    for distance in rom_slice(sym::BallMoveDistances1).iter().copied().take_while(|&d| d != 0xFF) {
+                    for &distance in tables::BALL_MOVE_DISTANCES_1 {
                         self.ops.extend([Op::MoveBall(distance), Op::Wait(3)]);
                     }
                     self.ops.extend([Op::Wait(1), Op::ClearSprites, Op::Sound(sounds::SFX_TRADE_MACHINE)]);
                 }
             }
             anim::TRADE_BALL_TILT_ANIM => {
-                let distances: Vec<u8> = rom_slice(sym::BallMoveDistances2).iter().copied().take_while(|&d| d != 0xFF).collect();
+                let distances = tables::BALL_MOVE_DISTANCES_2;
                 for (i, &distance) in distances.iter().enumerate() {
                     self.op(Op::MoveBall(distance));
                     if matches!(distances.get(i + 1), Some(12) | None) {
@@ -1150,10 +1165,10 @@ impl Animation {
     /// `AnimationShootManyBallsUpward`.
     fn shoot_many_balls_upward(&mut self) {
         let (table, base_y) = match self.turn {
-            Side::Player => (sym::UpwardBallsAnimXCoordinatesPlayerTurn, 0x50),
-            Side::Enemy => (sym::UpwardBallsAnimXCoordinatesEnemyTurn, 0x28),
+            Side::Player => (tables::UPWARD_BALLS_ANIM_X_COORDINATES_PLAYER_TURN, 0x50),
+            Side::Enemy => (tables::UPWARD_BALLS_ANIM_X_COORDINATES_ENEMY_TURN, 0x28),
         };
-        for &base_x in rom_slice(table).iter().take_while(|&&x| x != 0xFF) {
+        for &base_x in table {
             self.shoot_balls(base_y, base_x, 4);
         }
         self.ops.extend([Op::Wait(1), Op::ClearSprites]);
@@ -1163,7 +1178,7 @@ impl Animation {
     fn minimize_mon(&mut self) {
         let mut pic = vec![0u8; PIC * PIC * TILE_BYTES];
         let at = (PIC * 3 + 4) * TILE_BYTES + TILE_BYTES / 4;
-        for (row, &byte) in rom_slice(sym::MinimizedMonSprite)[..5].iter().enumerate() {
+        for (row, &byte) in tables::MINIMIZED_MON_SPRITE.iter().enumerate() {
             pic[at + row * 2] = byte;
             pic[at + row * 2 + 1] = byte;
         }
@@ -1186,7 +1201,7 @@ impl Animation {
     /// `AnimationSubstitute`: the picture becomes the doll, and is shown.
     fn substitute(&mut self) {
         let mut pic = vec![0u8; PIC * PIC * TILE_BYTES];
-        let sprite = rom_slice(sym::MonsterSprite);
+        let sprite = poke_core::gfx::sprites::MONSTER;
         let placements: [(usize, usize); 4] = match self.turn {
             Side::Enemy => [(0, PIC * 2 + 4), (1, PIC * 3 + 4), (2, PIC * 2 + 5), (3, PIC * 3 + 5)],
             Side::Player => [(4, PIC * 3 + 4), (5, PIC * 4 + 4), (6, PIC * 3 + 5), (7, PIC * 4 + 5)],
@@ -1202,9 +1217,8 @@ impl Animation {
     /// reaches line 104.
     fn falling_objects(&mut self, tile: u8, count: usize) {
         self.op(Op::LoadAnimTiles(1));
-        let initial_x = rom_slice(sym::FallingObjects_InitialXCoords);
-        let delta_x = rom_slice(sym::FallingObjects_DeltaXs);
-        let mut movement: Vec<u8> = rom_slice(sym::FallingObjects_InitialMovementData)[..count].to_vec();
+        let initial_x = tables::FALLING_OBJECTS_INITIAL_X_COORDS;
+        let mut movement: Vec<u8> = tables::FALLING_OBJECTS_INITIAL_MOVEMENT_DATA[..count].to_vec();
         let mut objects: Vec<Object> = (0..count)
             .map(|i| Object { y: 8 * (i as u8 + 1), x: initial_x[i], tile, attributes: 0 })
             .collect();
@@ -1215,7 +1229,7 @@ impl Animation {
                 *byte = if next & 0x7F == 9 { (next & 0x80) ^ 0x80 } else { next };
                 let y = object.y.wrapping_add(2);
                 object.y = if y >= 112 { 160 } else { y };
-                let delta = delta_x[(*byte & 0x7F) as usize];
+                let delta = falling_object_delta_x(*byte & 0x7F);
                 if *byte & 0x80 == 0 {
                     object.x = object.x.wrapping_add(delta);
                     object.attributes = 0;
@@ -1237,22 +1251,18 @@ impl Animation {
         self.op(Op::LoadAnimTiles(0));
         let mut objects: Vec<Object> = (1..=3).map(|i| Object { y: 8 * i, x: 0, tile: 0x7A, attributes: 0 }).collect();
         self.op(Op::Objects { index: 0, objects: objects.clone() });
-        let coordinates = rom_slice(sym::SpiralBallAnimationCoordinates);
         let mut at = 0;
         'spiral: loop {
             for (i, object) in objects.iter_mut().enumerate() {
-                let pair = at + 2 * i;
                 // The coordinates run out part way through a round, and what that round wrote reaches
                 // OAM only in the frame `AnimationCleanOAM` delays, which the flash below blacks out
                 // as it is written: those last positions never show.
-                if coordinates[pair] == 0xFF {
-                    break 'spiral;
-                }
-                object.y = base_y.wrapping_add(coordinates[pair]);
-                object.x = base_x.wrapping_add(coordinates[pair + 1]);
+                let Some(&(y, x)) = tables::SPIRAL_BALL_ANIMATION_COORDINATES.get(at + i) else { break 'spiral };
+                object.y = base_y.wrapping_add(y);
+                object.x = base_x.wrapping_add(x);
             }
             self.ops.extend([Op::Objects { index: 0, objects: objects.clone() }, Op::Wait(5)]);
-            at += 2;
+            at += 1;
         }
         self.ops.extend([Op::Wait(1), Op::ClearSprites]);
         self.flash_screen();
@@ -1305,7 +1315,7 @@ impl Animation {
     /// The first writes land a few lines down, above which `hSCX` holds.
     fn wavy_screen(&mut self) {
         const FIRST_WRITTEN_LINE: usize = 3;
-        let offsets: Vec<u8> = rom_slice(sym::WavyScreenLineOffsets).iter().copied().take_while(|&b| b != 0x80).collect();
+        let offsets = tables::WAVY_SCREEN_LINE_OFFSETS;
         self.ops.extend([Op::Wait(1), Op::Split { wx: WX, wy: WY_HIDDEN, first_row: 0, background: Background::TileMap }]);
         for frame in 1..=127usize {
             let lines: Vec<u8> = (0..144).map(|line| match line {
@@ -1388,12 +1398,12 @@ impl Animation {
                 ctx.audio.play_sound(sound);
             }
             Op::LoadAnimTiles(tileset) => {
-                let (pointer, count) = match tileset {
-                    1 => (sym::MoveAnimationTiles1, 79),
-                    2 => (sym::MoveAnimationTiles0, 64),
-                    _ => (sym::MoveAnimationTiles0, 79),
+                let (tiles, count) = match tileset {
+                    1 => (poke_core::gfx::battle::MOVE_ANIM_1, 79),
+                    2 => (poke_core::gfx::battle::MOVE_ANIM_0, 64),
+                    _ => (poke_core::gfx::battle::MOVE_ANIM_0, 79),
                 };
-                screen.tiles.load(V_CHARS0 + ANIM_TILE as usize, &rom_slice(pointer)[..count * TILE_BYTES]);
+                screen.tiles.load(V_CHARS0 + ANIM_TILE as usize, &tiles[..count * TILE_BYTES]);
             }
             Op::MoveBall(distance) => {
                 for object in screen.sprites.iter_mut().take(4) {
@@ -1495,9 +1505,8 @@ impl Animation {
 
 /// `FlashScreenLongMonochrome` beside `FlashScreenLongSGB`, to their `db 1`.
 fn flash_screen_long_palettes() -> Vec<SgbPick> {
-    let table = |symbol| rom_slice(symbol).iter().copied().take_while(|&bgp| bgp != 1);
-    table(sym::FlashScreenLongMonochrome).zip(table(sym::FlashScreenLongSGB))
-        .map(|(dmg, sgb)| SgbPick { dmg, sgb })
+    tables::FLASH_SCREEN_LONG_MONOCHROME.iter().zip(tables::FLASH_SCREEN_LONG_SGB)
+        .map(|(&dmg, &sgb)| SgbPick { dmg, sgb })
         .collect()
 }
 
@@ -1541,13 +1550,25 @@ mod tests {
         assert_eq!(palettes[11], SgbPick::both(0xE4), "both end on the normal palette");
     }
 
-    fn set_animation_palette(id: u8) -> Op {
-        let battle = AnimBattle {
+    /// `PETALS_FALLING_ANIM`'s twenty petals include the two whose movement bytes count past the
+    /// deltas; they fall to the end rather than off the table.
+    #[test]
+    fn every_petal_falls_to_the_end() {
+        let mut animation = Animation::new(Routine::MoveAnimation { id: anim::POUND, kind: 0 }, Side::Player, battle());
+        animation.falling_objects(0x71, 20);
+        assert_eq!(animation.ops.iter().filter(|op| matches!(op, Op::Objects { .. })).count(), 52);
+    }
+
+    fn battle() -> AnimBattle {
+        AnimBattle {
             player_species: PokemonSpecies::Pikachu, enemy_species: PokemonSpecies::Pidgey, damage_multipliers: 0,
             trainer_battle: false, item: 0, ball_data: 0, animations_on: true, h_scx: 0,
             mons: Default::default(), hp_bar_colours: Default::default(),
-        };
-        let mut animation = Animation::new(Routine::MoveAnimation { id, kind: 0 }, Side::Player, battle);
+        }
+    }
+
+    fn set_animation_palette(id: u8) -> Op {
+        let mut animation = Animation::new(Routine::MoveAnimation { id, kind: 0 }, Side::Player, battle());
         animation.routine(Routine::MoveAnimation { id, kind: 0 });
         animation.ops.into_iter().find(|op| matches!(op, Op::PickObp0(_))).expect("SetAnimationPalette")
     }

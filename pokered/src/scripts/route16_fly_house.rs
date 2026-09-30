@@ -4,10 +4,9 @@
 use poke_core::item::ItemId;
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_events::EVENT_GOT_HM02;
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::{TEXT_ROUTE16FLYHOUSE_BRUNETTE_GIRL, TEXT_ROUTE16FLYHOUSE_FEAROW};
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {}
@@ -30,10 +29,10 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
             if rt.check_event(EVENT_GOT_HM02) {
                 return Some(fly_explanation(rt));
             }
-            rt.print_text(text_at(local::Route16FlyHouseBrunetteGirlText::Text)).then(Label::Offered)
+            rt.print_text(text_named("Route16FlyHouseBrunetteGirlText.Text")).then(Label::Offered)
         }
         TEXT_ROUTE16FLYHOUSE_FEAROW => {
-            rt.print_text(text_at(local::Route16FlyHouseFearowText::Text)).then(Label::FearowCry)
+            rt.print_text(text_named("Route16FlyHouseFearowText.Text")).then(Label::FearowCry)
         }
         _ => return None,
     })
@@ -41,17 +40,17 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 
 /// `.HM02ExplanationText`, which the girl says ever after.
 fn fly_explanation(rt: &mut Script) -> Flow {
-    rt.print_text(text_at(local::Route16FlyHouseBrunetteGirlText::HM02ExplanationText)).ret()
+    rt.print_text(text_named("Route16FlyHouseBrunetteGirlText.HM02ExplanationText")).ret()
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
         Label::Offered => {
             if !rt.give_item(ItemId::Hm02Fly, 1) {
-                return rt.print_text(text_at(local::Route16FlyHouseBrunetteGirlText::HM02NoRoomText)).ret();
+                return rt.print_text(text_named("Route16FlyHouseBrunetteGirlText.HM02NoRoomText")).ret();
             }
             rt.set_event(EVENT_GOT_HM02);
-            rt.print_text(text_at(local::Route16FlyHouseBrunetteGirlText::ReceivedHM02Text)).ret()
+            rt.print_text(text_named("Route16FlyHouseBrunetteGirlText.ReceivedHM02Text")).ret()
         }
         Label::FearowCry => {
             rt.play_cry(PokemonSpecies::Fearow);

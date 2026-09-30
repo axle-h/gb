@@ -1,7 +1,6 @@
 use crate::map::Map;
-use itertools::Itertools;
+use crate::tables;
 use bitflags::{bitflags, Flags};
-use crate::symbols::{DmgBank, DmgPointer};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, strum_macros::Display, strum_macros::FromRepr, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
@@ -38,31 +37,10 @@ impl TileSetId {
     const OVERWORLD_CUT_TREE: u8 = 0x3d;
     
     /// Raw tile IDs in this tileset that warp the player the moment they step onto them —
-    /// `pokered/data/tilesets/warp_tile_ids.asm`, read by `CheckWarpsNoCollision`.
+    /// `data/tilesets/warp_tile_ids.asm`, read by `CheckWarpsNoCollision`. A list runs on through
+    /// the labels after it, so Gate, Museum and ForestGate share RedsHouse's ids.
     pub fn warp_tile_ids(&self) -> &'static [u8] {
-        match self {
-            Self::Overworld => &[0x1B, 0x58],
-            // The `db` entries in that file fall through into the next label, so Gate/Museum/
-            // ForestGate pick up RedsHouse's two ids as well, Facility picks up Cemetery's and
-            // Underground's, and Cemetery picks up Underground's.
-            Self::ForestGate | Self::Museum | Self::Gate => &[0x3B, 0x1A, 0x1C],
-            Self::RedsHouse1 | Self::RedsHouse2 => &[0x1A, 0x1C],
-            Self::Mart | Self::Pokecenter => &[0x5E],
-            Self::Forest => &[0x5A, 0x5C, 0x3A],
-            Self::Dojo | Self::Gym => &[0x4A],
-            Self::House => &[0x54, 0x5C, 0x32],
-            Self::Ship => &[0x37, 0x39, 0x1E, 0x4A],
-            Self::Interior => &[0x15, 0x55, 0x04],
-            Self::Cavern => &[0x18, 0x1A, 0x22],
-            Self::Lobby => &[0x1A, 0x1C, 0x38],
-            Self::Mansion => &[0x1A, 0x1C, 0x53],
-            Self::Lab => &[0x34],
-            Self::Facility => &[0x43, 0x58, 0x20, 0x1B, 0x13],
-            Self::Cemetery => &[0x1B, 0x13],
-            Self::Underground => &[0x13],
-            Self::Plateau => &[0x1B, 0x3B],
-            Self::ShipPort | Self::Club => &[],
-        }
+        tables::WARP_TILE_IDS[*self as usize]
     }
 
     /// Tiles that warp the player the moment they step onto them by a second mechanism entirely —
@@ -80,12 +58,7 @@ impl TileSetId {
     /// The tiles that make `ExtraWarpCheck`'s "function 2" pass, per direction faced.
     pub fn warp_carpet_tile_ids(facing: crate::sprite::PlayerFacingDirection) -> &'static [u8] {
         use crate::sprite::PlayerFacingDirection as Facing;
-        match facing {
-            Facing::Down  => &[0x01, 0x12, 0x17, 0x3D, 0x04, 0x18, 0x33],
-            Facing::Up    => &[0x01, 0x5C],
-            Facing::Left  => &[0x1A, 0x4B],
-            Facing::Right => &[0x0F, 0x4E],
-        }
+        tables::WARP_CARPET_TILE_IDS[match facing { Facing::Down => 0, Facing::Up => 1, Facing::Left => 2, Facing::Right => 3 }]
     }
 
     /// Whether `ExtraWarpCheck` dispatches to `IsWarpTileInFrontOfPlayer` ("function 2") rather
@@ -105,14 +78,11 @@ impl TileSetId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapHeader {
-    pub header_bank: u8,
     pub tileset: TileSetId,
     pub height: u8,
     pub width: u8,
-    pub blocks_address: u16,
-    pub text_address: u16,
-    pub script_address: u16,
-    pub objects_address: u16,
+    /// Row-major, `width` to a row.
+    pub blocks: &'static [u8],
     pub north_connection: Option<MapConnection>,
     pub east_connection: Option<MapConnection>,
     pub south_connection: Option<MapConnection>,
@@ -121,27 +91,7 @@ pub struct MapHeader {
 
 impl MapHeader {
     pub fn connections(&self) -> Vec<MapConnection> {
-        let mut connections = vec![];
-        for connection in [self.north_connection, self.east_connection, self.south_connection, self.west_connection].into_iter() {
-            if let Some(connection) = connection {
-                connections.push(connection);
-            }
-        }
-        connections
-    }
-
-    pub fn blocks_pointer(&self) -> DmgPointer {
-        DmgPointer {
-            bank: DmgBank::ROM { bank: self.header_bank },
-            address: self.blocks_address,
-        }
-    }
-
-    pub fn objects_pointer(&self) -> DmgPointer {
-        DmgPointer {
-            bank: DmgBank::ROM { bank: self.header_bank },
-            address: self.objects_address,
-        }
+        [self.north_connection, self.east_connection, self.south_connection, self.west_connection].into_iter().flatten().collect()
     }
 }
 
@@ -185,6 +135,8 @@ impl TryFrom<MapConnectionDirectionFlags> for MapConnectionDirection {
     }
 }
 
+/// A `connection` as `LoadTileBlockMap` and `CheckMapConnections` use it. The three block offsets
+/// are the macro's, with the label each is added to in the cartridge left off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapConnection {
     /// Direction this connection faces, relative to the current map.
@@ -193,13 +145,11 @@ pub struct MapConnection {
     /// The ID of the adjacent map.
     pub map: Map,
 
-    /// Pointer into the connected map's block data indicating which row/column of blocks forms
-    /// the shared border (the 3-block-deep strip that is pre-loaded for seamless scrolling).
-    pub strip_src: u16,
+    /// The block of the connected map the 3-block-deep strip starts at.
+    pub strip_src_block: u16,
 
-    /// Pointer into the overworld map buffer (`wOverworldMap`) where the strip will be placed so
-    /// the game can render it when the player approaches the edge.
-    pub strip_dest: u16,
+    /// Where in `wOverworldMap` the strip goes.
+    pub strip_dest_block: u16,
 
     /// Number of blocks in the connection strip:
     pub strip_length: u8,
@@ -215,103 +165,82 @@ pub struct MapConnection {
     /// 1 block).
     pub x_alignment: i8,
 
-    /// Pointer into the overworld buffer representing where the game's camera window into the
-    /// connected map begins (used by the renderer when near the border).
-    pub view_pointer: u16,
+    /// `wCurrentTileBlockMapViewPointer` in the connected map's `wOverworldMap` on crossing.
+    pub view_block: u16,
+}
+
+impl MapConnection {
+    /// The `connection` macro's arithmetic over both maps' sizes and the offset written.
+    fn new(from: &tables::MapHeader, connection: &tables::Connection) -> Result<Self, String> {
+        let map = Map::from_repr(connection.map).ok_or("Unknown map in map connection")?;
+        let to = tables::MAP_HEADERS[connection.map as usize].ok_or_else(|| format!("{map} has no header"))?;
+        let flags = MapConnectionDirectionFlags::from_bits(connection.direction).ok_or("Unknown connection direction")?;
+        let direction = MapConnectionDirection::try_from(flags)?;
+        let (width, height) = (to.width as i32, to.height as i32);
+        let (current_width, current_height) = (from.width as i32, from.height as i32);
+        let offset = connection.offset as i32;
+        let (mut src, mut tgt) = (0, offset + 3);
+        if tgt < 2 {
+            src = -tgt;
+            tgt = 0;
+        }
+        let (block, dest, view, y, x, length) = match direction {
+            MapConnectionDirection::North => (width * (height - 3) + src, tgt, (width + 6) * height + 1, height * 2 - 1, offset * -2,
+                (current_width + 3 - offset).min(width)),
+            MapConnectionDirection::South => (src, (current_width + 6) * (current_height + 3) + tgt, width + 7, 0, offset * -2,
+                (current_width + 3 - offset).min(width)),
+            MapConnectionDirection::West => (width * src + width - 3, (current_width + 6) * tgt, (width + 6) * 2 - 6, offset * -2, width * 2 - 1,
+                (current_height + 3 - offset).min(height)),
+            MapConnectionDirection::East => (width * src, (current_width + 6) * tgt + current_width + 3, width + 7, offset * -2, 0,
+                (current_height + 3 - offset).min(height)),
+        };
+        Ok(MapConnection {
+            direction,
+            map,
+            strip_src_block: block as u16,
+            strip_dest_block: dest as u16,
+            strip_length: (length - src) as u8,
+            connected_map_width: to.width,
+            y_alignment: y as u8 as i8,
+            x_alignment: x as u8 as i8,
+            view_block: view as u16,
+        })
+    }
 }
 
 /// How far a map's tile-map coordinates sit from its raw warp-table ones: one column if the map
 /// has a western connection strip, one row if it has a northern one
-/// (`MapDimensions::{west,north}_extra`). Read straight out of the ROM, so it can be asked about
-/// a map the player is not on — which is what a menu row needs to say where a warp comes out in
-/// the coordinates the picture of that map uses.
+/// (`MapDimensions::{west,north}_extra`). It can be asked about a map the player is not on, which
+/// is what a menu row needs to say where a warp comes out in the coordinates the picture of that
+/// map uses.
 pub fn strip_offset(map: Map) -> (u8, u8) {
-    let Some(pointer) = map.header_pointer() else { return (0, 0) };
-    // Byte 9 of the header is the connection flags; see `MACRO map_header`.
-    let flags = crate::rom_gfx::rom_slice(pointer)[9];
-    let flags = MapConnectionDirectionFlags::from_bits_truncate(flags);
-    (flags.contains(MapConnectionDirectionFlags::West) as u8, flags.contains(MapConnectionDirectionFlags::North) as u8)
+    let Ok(header) = MapHeader::read(map) else { return (0, 0) };
+    (header.west_connection.is_some() as u8, header.north_connection.is_some() as u8)
 }
 
 impl MapHeader {
-    /// `MACRO map_header`, read out of the cartridge.
+    /// `map`'s own `map_header`, or an error for a map that borrows another's.
     pub fn read(map: Map) -> Result<MapHeader, String> {
-        let pointer = map.header_pointer()
-            .ok_or("Map header pointer was null".to_string())?;
-        let rom = crate::rom_gfx::rom_slice(pointer);
-        let byte = |offset: u16| rom[offset as usize];
-        let word = |offset: u16| u16::from_le_bytes([rom[offset as usize], rom[offset as usize + 1]]);
-
-        let connections_byte = byte(9);
-        let connections = MapConnectionDirectionFlags::from_bits(connections_byte)
-            .ok_or("Map connection flags contained unknown bits".to_string())?;
-        let connection_count = connections.iter().count();
-        let mut north_connection = None;
-        let mut east_connection = None;
-        let mut south_connection = None;
-        let mut west_connection = None;
-
-        const CONNECTION_LENGTH_BYTES: u16 = 11;
-        for (i, dir_flag) in connections.into_iter()
-            .sorted_by_key(|dir| dir.bits())
-            .rev() // Connections go in order: north, south, west, east
-            .enumerate() {
-
-            let map_connection_pointer = 10 + i as u16 * CONNECTION_LENGTH_BYTES;
-            // Byte 0: connected map ID
-            let map = Map::from_repr(byte(map_connection_pointer))
-                .ok_or("Unknown map in map connection".to_string())?;
-            // Bytes 1-2: pointer into connected map's block data (strip source)
-            let strip_src = word(map_connection_pointer + 1);
-            // Bytes 3-4: pointer into overworld buffer (strip destination)
-            let strip_dest = word(map_connection_pointer + 3);
-            // Byte 5: number of blocks in the connection strip
-            let strip_length = byte(map_connection_pointer + 5);
-            // Byte 6: width of the connected map in blocks
-            let connected_map_width = byte(map_connection_pointer + 6);
-            // Byte 7: signed Y tile-offset of the connected map relative to the current map
-            let y_alignment = byte(map_connection_pointer + 7) as i8;
-            // Byte 8: signed X tile-offset of the connected map relative to the current map
-            let x_alignment = byte(map_connection_pointer + 8) as i8;
-            // Bytes 9-10: camera window pointer into the overworld buffer
-            let view_pointer = word(map_connection_pointer + 9);
-
-            let connection = MapConnection {
-                map,
-                direction: dir_flag.try_into()?,
-                strip_src,
-                strip_dest,
-                strip_length,
-                connected_map_width,
-                y_alignment,
-                x_alignment,
-                view_pointer,
-            };
-            match connection.direction {
-                MapConnectionDirection::East => east_connection = Some(connection),
-                MapConnectionDirection::West => west_connection = Some(connection),
-                MapConnectionDirection::South => south_connection = Some(connection),
-                MapConnectionDirection::North => north_connection = Some(connection),
-            };
+        let source = tables::MAP_HEADERS[map as usize].ok_or_else(|| format!("{map} has no header of its own"))?;
+        let mut header = MapHeader {
+            tileset: TileSetId::from_repr(source.tileset).ok_or("Unknown tileset")?,
+            height: source.height,
+            width: source.width,
+            blocks: source.blocks,
+            north_connection: None,
+            east_connection: None,
+            south_connection: None,
+            west_connection: None,
+        };
+        for connection in source.connections {
+            let connection = MapConnection::new(&source, connection)?;
+            *match connection.direction {
+                MapConnectionDirection::East => &mut header.east_connection,
+                MapConnectionDirection::West => &mut header.west_connection,
+                MapConnectionDirection::South => &mut header.south_connection,
+                MapConnectionDirection::North => &mut header.north_connection,
+            } = Some(connection);
         }
-
-        let objects_address_pointer = 10 + connection_count as u16 * CONNECTION_LENGTH_BYTES;
-        Ok(
-            MapHeader {
-                header_bank: pointer.bank.id(),
-                tileset: TileSetId::from_repr(byte(0))
-                    .ok_or("Unknown map header bank".to_string())?,
-                height: byte(1),
-                width: byte(2),
-                blocks_address: word(3),
-                text_address: word(5),
-                script_address: word(7),
-                north_connection,
-                east_connection,
-                south_connection,
-                west_connection,
-                objects_address: word(objects_address_pointer),
-            }
-        )
+        Ok(header)
     }
 }

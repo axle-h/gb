@@ -1,24 +1,21 @@
 //! `FightingDojo_Script`: the Karate Master, who fights whoever walks up to him, and the two Poké
 //! Balls behind him, of which the winner may take exactly one.
 
+use poke_core::tables::trainers;
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_FIGHTING_DOJO_TRAINER_3, EVENT_BEAT_KARATE_MASTER,
     EVENT_DEFEATED_FIGHTING_DOJO, EVENT_GOT_HITMONCHAN, EVENT_GOT_HITMONLEE};
-use poke_core::symbols::pokered_local_labels::{FightingDojoHitmonchanPokeBallText as hitmonchan,
-    FightingDojoHitmonleePokeBallText as hitmonlee, FightingDojoKarateMasterText as master};
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_FIGHTINGDOJO_DEFAULT,
     SCRIPT_FIGHTINGDOJO_KARATE_MASTER_POST_BATTLE, TEXT_FIGHTINGDOJO_BLACKBELT1, TEXT_FIGHTINGDOJO_BLACKBELT2,
     TEXT_FIGHTINGDOJO_BLACKBELT3, TEXT_FIGHTINGDOJO_BLACKBELT4, TEXT_FIGHTINGDOJO_HITMONCHAN_POKE_BALL,
     TEXT_FIGHTINGDOJO_HITMONLEE_POKE_BALL, TEXT_FIGHTINGDOJO_KARATE_MASTER,
     TEXT_FIGHTINGDOJO_KARATE_MASTER_I_WILL_GIVE_YOU_A_POKEMON};
-use poke_core::symbols::pokered_symbols as sym;
-use poke_core::symbols::pokered_symbols::FIGHTINGDOJO_KARATE_MASTER;
+use poke_core::symbols::pokered_map_scripts::FIGHTINGDOJO_KARATE_MASTER;
 use poke_core::symbols::pokered_toggles::{TOGGLE_FIGHTING_DOJO_GIFT_1, TOGGLE_FIGHTING_DOJO_GIFT_2};
-use poke_core::symbols::DmgPointer;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use crate::systems::overworld::sprites::SPRITE_FACING_LEFT;
-use super::{text_at, Code, Flow, Script};
+use super::{text_named, Code, Flow, Script};
 
 /// `PLAYER_DIR_RIGHT`.
 const PLAYER_DIR_RIGHT: u8 = 1;
@@ -32,7 +29,7 @@ const GIFT_LEVEL: u8 = 30;
 /// event it sets and the toggle that takes it off the floor.
 struct Gift {
     text_id: u8,
-    question: DmgPointer,
+    question: &'static str,
     species: PokemonSpecies,
     event: u16,
     toggle: u16,
@@ -41,14 +38,14 @@ struct Gift {
 const BALLS: [Gift; 2] = [
     Gift {
         text_id: TEXT_FIGHTINGDOJO_HITMONLEE_POKE_BALL,
-        question: hitmonlee::Text,
+        question: "FightingDojoHitmonleePokeBallText.Text",
         species: PokemonSpecies::Hitmonlee,
         event: EVENT_GOT_HITMONLEE,
         toggle: TOGGLE_FIGHTING_DOJO_GIFT_1,
     },
     Gift {
         text_id: TEXT_FIGHTINGDOJO_HITMONCHAN_POKE_BALL,
-        question: hitmonchan::Text,
+        question: "FightingDojoHitmonchanPokeBallText.Text",
         species: PokemonSpecies::Hitmonchan,
         event: EVENT_GOT_HITMONCHAN,
         toggle: TOGGLE_FIGHTING_DOJO_GIFT_2,
@@ -91,7 +88,7 @@ pub enum Label {
 pub fn script(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().fighting_dojo.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::FightingDojoTrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::FightingDojoTrainerHeaders);
     let entry: Code = match index {
         SCRIPT_FIGHTINGDOJO_DEFAULT => Label::DefaultScript.into(),
         SCRIPT_FIGHTINGDOJO_KARATE_MASTER_POST_BATTLE => return karate_master_post_battle(rt),
@@ -147,10 +144,10 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         TEXT_FIGHTINGDOJO_HITMONLEE_POKE_BALL | TEXT_FIGHTINGDOJO_HITMONCHAN_POKE_BALL => {
             return Some(poke_ball_text(rt, text_id));
         }
-        TEXT_FIGHTINGDOJO_BLACKBELT1 => sym::FightingDojoTrainerHeader0,
-        TEXT_FIGHTINGDOJO_BLACKBELT2 => sym::FightingDojoTrainerHeader1,
-        TEXT_FIGHTINGDOJO_BLACKBELT3 => sym::FightingDojoTrainerHeader2,
-        TEXT_FIGHTINGDOJO_BLACKBELT4 => sym::FightingDojoTrainerHeader3,
+        TEXT_FIGHTINGDOJO_BLACKBELT1 => trainers::FightingDojoTrainerHeader0,
+        TEXT_FIGHTINGDOJO_BLACKBELT2 => trainers::FightingDojoTrainerHeader1,
+        TEXT_FIGHTINGDOJO_BLACKBELT3 => trainers::FightingDojoTrainerHeader2,
+        TEXT_FIGHTINGDOJO_BLACKBELT4 => trainers::FightingDojoTrainerHeader3,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())
@@ -159,19 +156,19 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 /// `FightingDojoKarateMasterText`.
 fn karate_master_text(rt: &mut Script) -> Flow {
     if rt.check_event(EVENT_DEFEATED_FIGHTING_DOJO) {
-        return rt.print_text(text_at(master::StayAndTrainWithUsText)).ret();
+        return rt.print_text(text_named("FightingDojoKarateMasterText.StayAndTrainWithUsText")).ret();
     }
     if rt.check_event(EVENT_BEAT_KARATE_MASTER) {
-        return rt.print_text(text_at(master::IWillGiveYouAPokemonText)).ret();
+        return rt.print_text(text_named("FightingDojoKarateMasterText.IWillGiveYouAPokemonText")).ret();
     }
-    rt.print_text(text_at(master::Text)).then(Label::MasterChallenged)
+    rt.print_text(text_named("FightingDojoKarateMasterText.Text")).then(Label::MasterChallenged)
 }
 
 /// `FightingDojoHitmonleePokeBallText` and `FightingDojoHitmonchanPokeBallText`, which differ only
 /// in the mon in the ball: taking either shuts both, since the event is checked for both.
 fn poke_ball_text(rt: &mut Script, text_id: u8) -> Flow {
     if rt.check_event(EVENT_GOT_HITMONLEE) || rt.check_event(EVENT_GOT_HITMONCHAN) {
-        return rt.print_text(text_at(sym::FightingDojoBetterNotGetGreedyText)).ret();
+        return rt.print_text(text_named("FightingDojoBetterNotGetGreedyText")).ret();
     }
     // The dex page is shown before the offer, and it is what puts the mon in `wCurPartySpecies`.
     rt.display_pokedex(ball(text_id).species).then(Label::BallDexShown(text_id))
@@ -202,14 +199,14 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::AlreadyFacing => already_facing(rt),
         Label::GiftOffered => reset_scripts(rt),
         Label::MasterChallenged => {
-            rt.save_end_battle_text(master::DefeatedText);
+            rt.save_end_battle_text("FightingDojoKarateMasterText.DefeatedText");
             rt.engage_map_trainer(rt.sprite_index(), 0);
             rt.maps().fighting_dojo.cur_script = SCRIPT_FIGHTINGDOJO_KARATE_MASTER_POST_BATTLE;
             rt.set_cur_map_script(SCRIPT_FIGHTINGDOJO_KARATE_MASTER_POST_BATTLE);
             Flow::Return
         }
         Label::BallDexShown(text_id) => {
-            rt.print_text(text_at(ball(text_id).question)).then(Label::BallAsked(text_id))
+            rt.print_text(text_named(ball(text_id).question)).then(Label::BallAsked(text_id))
         }
         Label::BallAsked(text_id) => rt.yes_no_choice().then(Label::BallAnswered(text_id)),
         Label::BallAnswered(text_id) => match rt.chose_yes() {

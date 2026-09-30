@@ -9,8 +9,7 @@
 use poke_core::map::Map;
 use poke_core::map_objects::WarpTo;
 use poke_core::map_header::TileSetId;
-use poke_core::rom_gfx::rom_slice;
-use poke_core::symbols::pokered_symbols;
+use poke_core::tables::{DUNGEON_WARP_LIST, ESCAPE_ROPE_TILESETS, WARP_PAD_AND_HOLE_DATA};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use crate::mode::Ctx;
@@ -57,8 +56,7 @@ pub(super) struct SpinAnim {
 /// `EscapeRopeTilesets` with `ItemUseEscapeRope`'s refusal of Agatha's room ahead of it.
 pub fn escape_rope_allowed(map: Map, tileset: TileSetId) -> bool {
     map != Map::AgathasRoom
-        && rom_slice(pokered_symbols::EscapeRopeTilesets).iter().take_while(|&&id| id != 0xFF)
-            .any(|&id| id == tileset as u8)
+        && ESCAPE_ROPE_TILESETS.contains(&(tileset as u8))
 }
 
 /// `ItemUseEscapeRope` where the map allows it: the escape warp armed, and the Safari Zone left
@@ -74,20 +72,15 @@ pub fn arm_escape_warp(ctx: &mut Ctx) {
 /// Each row of the list names a destination map and which of its holes, and the data beside it has
 /// the same shape as a fly warp's.
 pub fn dungeon_warp(map: Map, which: u8) -> Option<WarpTo> {
-    const ENTRY: u16 = 6;
-    let list = rom_slice(pokered_symbols::DungeonWarpList);
-    let at = list.chunks(2).take_while(|row| row[0] != 0xFF)
-        .position(|row| row[0] == map as u8 && row[1] == which)? as u16;
-    let data = rom_slice(pokered_symbols::DungeonWarpData + at * ENTRY);
-    Some(WarpTo { view: u16::from_le_bytes([data[0], data[1]]), y: data[2], x: data[3] })
+    let at = DUNGEON_WARP_LIST.iter().position(|&row| row == (map as u8, which))?;
+    Some(WarpTo::fly_warp(poke_core::tables::DUNGEON_WARP_DATA[at]))
 }
 
 /// `WarpPadAndHoleData`: what the player is standing on, by the tile at the middle of the screen.
 pub fn warp_pad_or_hole(tileset: TileSetId, tile: u8) -> u8 {
-    let table = rom_slice(pokered_symbols::WarpPadAndHoleData);
-    table.chunks(3).take_while(|row| row[0] != 0xFF)
-        .find(|row| row[0] == tileset as u8 && row[1] == tile)
-        .map_or(NEITHER, |row| row[2])
+    WARP_PAD_AND_HOLE_DATA.iter()
+        .find(|&&(id, tile_id, _)| id == tileset as u8 && tile_id == tile)
+        .map_or(NEITHER, |&(_, _, standing_on)| standing_on)
 }
 
 impl Overworld {

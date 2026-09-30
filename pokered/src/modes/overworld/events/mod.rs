@@ -14,14 +14,13 @@ mod poison;
 mod trades;
 mod vending;
 
-use poke_core::symbols::{pokered_symbols, DmgPointer};
 use serde::{Deserialize, Serialize};
 use crate::gfx::mon_icons::clear_sprites;
 use crate::mode::{Mode, Outcome};
 use crate::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
 use crate::systems::events::hidden_events::HiddenEvent;
 use crate::systems::overworld::sprites;
-use super::script::{text_at, Block, Flow, Script, Then};
+use super::script::{text_named, Block, Flow, Script, Then};
 
 pub use hidden::predef_text;
 pub(super) use poison::poison_step_takes_frames;
@@ -70,7 +69,8 @@ pub struct EventRuntime {
     /// `hOaksAideRequirement` and `hOaksAideRewardItem`.
     pub oaks_aide: (u8, u8),
     /// The Hall of Fame's rating.
-    pub dex_rating_text: Option<DmgPointer>,
+    #[serde(with = "poke_core::text_script::saved_text")]
+    pub dex_rating_text: Option<poke_core::text_script::TextLabel>,
     /// `wFilteredBagItems`.
     pub filtered_bag_items: Vec<poke_core::item::ItemId>,
     /// `wWhichPrize`.
@@ -165,13 +165,13 @@ pub enum Label {
     DayCarePurchaseSound,
     DayCareHeresYourMon,
     DayCareReturned,
-    DayCareDone(DmgPointer),
+    DayCareDone(poke_core::text_script::SavedText),
 
     // `api.rs`.
     MonPopup(api::Picture),
     MonPopupStage(u8),
     MonPopupDone,
-    PredefAfterPopup { id: u8, bank: u8 },
+    PredefAfterPopup { id: u8 },
     Binoculars,
     CellSeparator(u8),
     CellSeparatorSound(u8),
@@ -275,15 +275,15 @@ pub fn resume(s: &mut Script, label: Label) -> Flow {
             Flow::Return
         }
 
-        CableClubNpc => print(pokered_symbols::CableClubNPCWelcomeText).then(CableClubNpcWelcomed),
+        CableClubNpc => print("CableClubNPCWelcomeText").then(CableClubNpcWelcomed),
         CableClubNpcWelcomed => {
             let dex = s.ctx.world.events.is_set(poke_core::symbols::pokered_events::EVENT_GOT_POKEDEX);
             // `.establishConnectionLoop`: `wLinkTimeoutCounter` from 90, a frame each until it
             // reaches zero.
             s.delay_frames(if dex { 89 } else { 60 }).then(CableClubNpcGaveUp(dex))
         }
-        CableClubNpcGaveUp(true) => print(pokered_symbols::CableClubNPCAreaReservedFor2FriendsLinkedByCableText).ret(),
-        CableClubNpcGaveUp(false) => print(pokered_symbols::CableClubNPCMakingPreparationsText).ret(),
+        CableClubNpcGaveUp(true) => print("CableClubNPCAreaReservedFor2FriendsLinkedByCableText").ret(),
+        CableClubNpcGaveUp(false) => print("CableClubNPCMakingPreparationsText").ret(),
 
         VendingMachine => vending::vending_machine(s),
         VendingMachineMenu => vending::menu(s),
@@ -323,7 +323,7 @@ pub fn resume(s: &mut Script, label: Label) -> Flow {
         DayCarePurchaseSound => day_care::purchase_sound(s),
         DayCareHeresYourMon => day_care::heres_your_mon(s),
         DayCareReturned => day_care::returned(s),
-        DayCareDone(text) => print(text).ret(),
+        DayCareDone(text) => print(text.0).ret(),
 
         PrizeMenuMenu => api::prize_menu_menu(s),
         label => api::resume(s, label),
@@ -331,8 +331,8 @@ pub fn resume(s: &mut Script, label: Label) -> Flow {
 }
 
 /// `PrintText`.
-fn print(at: DmgPointer) -> Then {
-    Then::block(Block::PrintText(text_at(at)))
+fn print(label: &str) -> Then {
+    Then::block(Block::PrintText(text_named(label)))
 }
 
 /// `YesNoChoice`: `SaveScreenTilesToBuffer1`, the menu, and [`after_yes_no`] to put the screen back.
@@ -369,12 +369,17 @@ fn restore_screen_tiles_and_reload_tile_patterns(s: &mut Script) {
     s.ctx.screen.tiles.load_tileset(s.ow.view.tileset);
 }
 
-/// `PlaceString` for a string in ROM with nothing to delay it: `<NEXT>` two rows down to the column it
-/// started in, the ligatures spelled out.
-fn place_rom_string(ui: &mut crate::gfx::ui::UiSurface, x: usize, y: usize, at: DmgPointer) {
+/// `place_string` of the `db` string at `label`.
+fn place_rom_string(ui: &mut crate::gfx::ui::UiSurface, x: usize, y: usize, label: &str) {
+    place_string(ui, x, y, &poke_core::tables::db_string(label));
+}
+
+/// `PlaceString` with nothing to delay it, up to the terminator: `<NEXT>` two rows down to the
+/// column it started in, the ligatures spelled out.
+fn place_string(ui: &mut crate::gfx::ui::UiSurface, x: usize, y: usize, bytes: &[u8]) {
     use crate::modes::place_string::{ch, ligature};
     let (mut column, mut row) = (x, y);
-    for &byte in poke_core::rom_gfx::rom_slice(at).iter().take_while(|&&b| b != ch::TERMINATOR) {
+    for &byte in bytes.iter().take_while(|&&b| b != ch::TERMINATOR) {
         if byte == ch::NEXT {
             (column, row) = (x, row + 2);
             continue;

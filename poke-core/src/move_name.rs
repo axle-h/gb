@@ -189,14 +189,7 @@ pub enum PokemonMoveName {
 impl PokemonMoveName {
     /// `GetMoveName`: charmap bytes, unterminated.
     pub fn name(self) -> Vec<u8> {
-        use crate::rom_gfx::rom_slice;
-        use crate::symbols::pokered_symbols;
-        const TERMINATOR: u8 = 0x50;
-        rom_slice(pokered_symbols::MoveNames)
-            .split(|&b| b == TERMINATOR)
-            .nth(self as usize - 1)
-            .expect("every move has a name")
-            .to_vec()
+        crate::charmap::encode(crate::tables::MOVE_NAMES[self as usize - 1]).expect("a move name is in the charmap")
     }
 
     pub fn metadata(&self) -> &'static PokemonMoveMetadata {

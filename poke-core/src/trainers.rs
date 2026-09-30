@@ -1,85 +1,45 @@
-use crate::rom_gfx::rom_slice;
-use crate::symbols::{pokered_symbols, DmgBank, DmgPointer};
+use crate::tables::{
+    TrainerParty, LONE_MOVES, TEAM_MOVES, TRAINER_AI_POINTERS, TRAINER_BASE_MONEY, TRAINER_CLASS_MOVE_CHOICE_MODIFICATIONS,
+    TRAINER_PARTIES,
+};
 
 pub const NUM_TRAINERS: u8 = 47;
 
-fn in_bank(address: u16) -> &'static [u8] {
-    let DmgBank::ROM { bank } = pokered_symbols::TrainerDataPointers.bank else { unreachable!() };
-    rom_slice(DmgPointer { bank: DmgBank::ROM { bank }, address })
-}
-
-/// The parties of trainer class `class` (1-based, as `wTrainerClass`), in order, each as
-/// `(level, internal species id)`. A party is `level, species…, 0`, or `$FF, level, species…, 0`
-/// when levels differ.
-pub fn parties(class: u8) -> Vec<Vec<(u8, u8)>> {
-    party_data(class).into_iter().map(|(_, party)| party).collect()
-}
-
-/// `parties`, with whether each was written `$FF, level, species…`: only such a party can be given
-/// a special move.
-pub fn party_data(class: u8) -> Vec<(bool, Vec<(u8, u8)>)> {
+/// The parties of trainer class `class` (1-based, as `wTrainerClass`), in order.
+pub fn parties(class: u8) -> &'static [TrainerParty] {
     assert!((1..=NUM_TRAINERS).contains(&class), "trainer class {class}");
-    let pointers = rom_slice(pokered_symbols::TrainerDataPointers);
-    let at = |class: u8| u16::from_le_bytes([pointers[(class as usize - 1) * 2], pointers[(class as usize - 1) * 2 + 1]]);
-    let start = at(class);
-    let data = in_bank(start);
-    let end = if class < NUM_TRAINERS { (at(class + 1) - start) as usize } else { data.len() };
-    let mut parties = vec![];
-    let mut rest = &data[..end];
-    while let Some(&first) = rest.first() {
-        let body_end = rest.iter().skip(1).position(|&b| b == 0).map(|p| p + 1).unwrap_or(rest.len());
-        let body = &rest[1..body_end];
-        parties.push(if first == 0xFF {
-            (true, body.chunks_exact(2).map(|pair| (pair[0], pair[1])).collect())
-        } else {
-            (false, body.iter().map(|&species| (first, species)).collect())
-        });
-        rest = &rest[(body_end + 1).min(rest.len())..];
-        if class == NUM_TRAINERS && parties.len() == LAST_CLASS_PARTIES {
-            break;
-        }
-    }
-    parties
+    TRAINER_PARTIES[class as usize - 1]
 }
 
-/// `Lance`, the last class, has no class after it to bound its data.
-const LAST_CLASS_PARTIES: usize = 1;
+/// `TrainerPicAndMoneyPointers`' pic, as tiles.
+pub fn pic(class: u8) -> &'static [u8] {
+    crate::gfx::TRAINER_PICS[class as usize - 1]
+}
 
-/// `TrainerPicAndMoneyPointers`: the pic's address and the base reward, BCD.
-pub fn pic_and_money(class: u8) -> (u16, [u8; 3]) {
-    let row = &rom_slice(pokered_symbols::TrainerPicAndMoneyPointers)[(class as usize - 1) * 5..][..5];
-    (u16::from_le_bytes([row[0], row[1]]), [row[2], row[3], row[4]])
+/// The class's base reward, BCD.
+pub fn base_money(class: u8) -> [u8; 3] {
+    crate::item::bcd3(TRAINER_BASE_MONEY[class as usize - 1])
 }
 
 /// `TrainerClassMoveChoiceModifications`: the AI's move-choice layers for a class.
-pub fn move_choices(class: u8) -> Vec<u8> {
-    rom_slice(pokered_symbols::TrainerClassMoveChoiceModifications)
-        .split(|&b| b == 0)
-        .nth(class as usize - 1)
-        .expect("every class has an entry")
-        .to_vec()
+pub fn move_choices(class: u8) -> &'static [u8] {
+    TRAINER_CLASS_MOVE_CHOICE_MODIFICATIONS[class as usize - 1]
 }
 
 /// `LoneMoves`: for a gym leader, `(index of the party mon from 0, move)`, looked up by
 /// `wLoneAttackNo` from 1.
 pub fn lone_moves() -> [(u8, u8); 8] {
-    let bytes = rom_slice(pokered_symbols::LoneMoves);
-    std::array::from_fn(|i| (bytes[i * 2], bytes[i * 2 + 1]))
+    LONE_MOVES
 }
 
 /// `TeamMoves`: `(trainer class, move)` for the Elite Four.
-pub fn team_moves() -> Vec<(u8, u8)> {
-    rom_slice(pokered_symbols::TeamMoves).chunks(2)
-        .take_while(|row| row[0] != 0xFF)
-        .map(|row| (row[0], row[1]))
-        .collect()
+pub fn team_moves() -> &'static [(u8, u8)] {
+    TEAM_MOVES
 }
 
-/// `TrainerAIPointers`: how many times a class's AI may act for each mon, and the routine's
-/// address in the AI's bank.
-pub fn ai_pointer(class: u8) -> (u8, u16) {
-    let row = &rom_slice(pokered_symbols::TrainerAIPointers)[(class as usize - 1) * 3..][..3];
-    (row[0], u16::from_le_bytes([row[1], row[2]]))
+/// `TrainerAIPointers`: how many times a class's AI may act for each mon, and the routine's label.
+pub fn ai_pointer(class: u8) -> (u8, &'static str) {
+    TRAINER_AI_POINTERS[class as usize - 1]
 }
 
 #[cfg(test)]
@@ -90,17 +50,23 @@ mod tests {
     #[test]
     fn the_first_youngster_on_route_3_has_a_rattata_and_an_ekans() {
         let youngster = parties(1);
-        let [(l1, a), (l2, b)] = youngster[0][..] else { panic!("{:?}", youngster[0]) };
+        let [(l1, a), (l2, b)] = youngster[0].mons[..] else { panic!("{:?}", youngster[0]) };
         assert_eq!((l1, l2), (11, 11));
         assert_eq!([PokemonSpecies::from_repr(a), PokemonSpecies::from_repr(b)], [Some(PokemonSpecies::Rattata), Some(PokemonSpecies::Ekans)]);
+    }
+
+    /// The last class's parties end with its label's, not at whatever follows them in the ROM.
+    #[test]
+    fn lance_has_one_party() {
+        assert_eq!(parties(NUM_TRAINERS).len(), 1);
     }
 
     #[test]
     fn every_party_is_one_to_six_real_pokemon() {
         for class in 1..=NUM_TRAINERS {
             for (index, party) in parties(class).iter().enumerate() {
-                assert!((1..=6).contains(&party.len()), "class {class} party {index}: {party:?}");
-                for &(level, species) in party {
+                assert!((1..=6).contains(&party.mons.len()), "class {class} party {index}: {party:?}");
+                for &(level, species) in party.mons {
                     assert!((1..=100).contains(&level) && PokemonSpecies::from_repr(species).is_some(),
                         "class {class} party {index}: {party:?}");
                 }
@@ -113,12 +79,12 @@ mod tests {
         use crate::move_name::PokemonMoveName as M;
         assert_eq!(lone_moves()[0], (1, M::Bide as u8));
         assert_eq!(team_moves(), [(44, M::Blizzard as u8), (33, M::Fissure as u8), (46, M::Toxic as u8), (47, M::Barrier as u8)]);
-        assert_eq!(ai_pointer(34), (5, pokered_symbols::BrockAI.address));
+        assert_eq!(ai_pointer(34), (5, "BrockAI"));
     }
 
     #[test]
     fn a_youngster_pays_fifteen_hundred_a_level_and_a_sailor_chooses_with_layers_one_and_three() {
-        assert_eq!(pic_and_money(1).1, [0x00, 0x15, 0x00]);
+        assert_eq!(base_money(1), [0x00, 0x15, 0x00]);
         assert_eq!(move_choices(4), [1, 3]);
     }
 }

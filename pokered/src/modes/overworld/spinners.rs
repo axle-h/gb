@@ -4,13 +4,12 @@
 
 use poke_core::map_gfx::tileset_sheet;
 use poke_core::map_header::TileSetId;
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
-use poke_core::symbols::{pokered_symbols, DmgPointer};
+use poke_core::rom_gfx::TILE_BYTES;
 use crate::audio::data::sounds;
 use crate::gfx::tiles::V_CHARS2;
 use crate::input::Joypad;
 use crate::mode::Ctx;
-use crate::systems::overworld::spinners::spinner_facing;
+use crate::systems::overworld::spinners::{spinner_facing, ArrowTable};
 use super::script::{Routine, Script, Then};
 use super::Overworld;
 
@@ -29,7 +28,7 @@ impl Overworld {
         for (anim, tile) in arrows {
             let at = tile as usize * TILE_BYTES;
             let bytes = if turned {
-                &rom_slice(pokered_symbols::SpinnerArrowAnimTiles + anim as u16 * TILE_BYTES as u16)[..TILE_BYTES]
+                &poke_core::gfx::overworld::SPINNERS[anim as usize * TILE_BYTES..][..TILE_BYTES]
             } else {
                 &tileset_sheet(self.view.tileset)[at..at + TILE_BYTES]
             };
@@ -40,7 +39,7 @@ impl Overworld {
 
 /// A spinner map's `DefaultScript`: the arrow tile under the player, if there is one, started and
 /// the map's own `PlayerSpinningScript` left to run; otherwise the map's trainers, as usual.
-pub(crate) fn arrow_tile_default(rt: &mut Script, table: DmgPointer, spinning: u8) -> Option<Then> {
+pub(crate) fn arrow_tile_default(rt: &mut Script, table: ArrowTable, spinning: u8) -> Option<Then> {
     let Some(list) = rt.arrow_movement(table) else {
         return Some(Then::call(Routine::CheckFightingMapTrainers));
     };

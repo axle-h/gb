@@ -2,10 +2,10 @@
 //! Slot 0 is the player. Positions are screen pixels, as the cartridge keeps them, so a step of
 //! the player shifts every other sprite the other way.
 
+use poke_core::gfx;
 use poke_core::map::Map;
 use poke_core::map_objects::{sprite_set, sprite_set_id, sprite_sheet, FIRST_STILL_SPRITE, SPRITE_SET_LENGTH, STAY, WALK};
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
-use poke_core::symbols::{pokered_symbols, DmgPointer};
+use poke_core::rom_gfx::TILE_BYTES;
 use serde::{Deserialize, Serialize};
 use crate::gfx::layers::Object;
 use crate::gfx::tiles::{TileData, V_CHARS0, V_CHARS1};
@@ -259,6 +259,8 @@ pub struct SpriteEnv<'a> {
     /// What lies past the end of `wTileMap`, `wSurroundingTiles`, which a sprite below the screen
     /// reads its tiles from; without it such a read is `$ff`.
     pub beyond: Option<&'a [u8]>,
+    /// `World::cartridge_bugs`.
+    pub cartridge_bugs: bool,
 }
 
 impl SpriteEnv<'_> {
@@ -363,8 +365,8 @@ pub fn update_npc_sprite(sprites: &mut Sprites, slot: usize, env: &SpriteEnv, pa
         // `InitializeSpriteStatus`.
         sprite.movement_status = 1;
         sprite.image_index = 0xFF;
-        sprite.y_displacement = 8;
-        sprite.x_displacement = 8;
+        sprite.y_displacement = WANDER_HOME;
+        sprite.x_displacement = WANDER_HOME;
         return;
     }
     if !check_sprite_availability(sprite, slot, env) {
@@ -480,17 +482,22 @@ fn can_walk_onto_tile(sprites: &mut Sprites, slot: usize, env: &SpriteEnv, rng: 
         detect_collision_between_sprites(sprites, slot);
         let sprite = &mut sprites[slot];
         if sprite.collision_data & direction == 0 {
-            // Walking up is limited to four steps from home, and a sprite that has done it can no
-            // longer move sideways: the test against 5 is made for every step that is not up.
-            let y = if dy & 0x80 != 0 {
-                sprite.y_displacement.checked_sub(1)
+            let (y, x) = if env.cartridge_bugs {
+                // The cartridge tests every step that is not up against 5, which sticks a sprite
+                // that has walked up four, and bounds neither down nor right.
+                let y = if dy & 0x80 != 0 {
+                    sprite.y_displacement.checked_sub(1)
+                } else {
+                    Some(sprite.y_displacement.wrapping_add(dy)).filter(|&y| y >= 5)
+                };
+                let x = if dx & 0x80 != 0 {
+                    sprite.x_displacement.checked_sub(1)
+                } else {
+                    Some(sprite.x_displacement.wrapping_add(dx))
+                };
+                (y, x)
             } else {
-                Some(sprite.y_displacement.wrapping_add(dy)).filter(|&y| y >= 5)
-            };
-            let x = if dx & 0x80 != 0 {
-                sprite.x_displacement.checked_sub(1)
-            } else {
-                Some(sprite.x_displacement.wrapping_add(dx))
+                (wander(sprite.y_displacement, dy), wander(sprite.x_displacement, dx))
             };
             if let (Some(y), Some(x)) = (y, x) {
                 sprite.x_displacement = x;
@@ -506,6 +513,19 @@ fn can_walk_onto_tile(sprites: &mut Sprites, slot: usize, env: &SpriteEnv, rng: 
     sprite.movement_delay = rng.wander() & 0x7F;
     false
 }
+
+/// A wanderer's displacement after a step of `d` on its axis, or `None` past [`WANDER_HOME`] steps
+/// from home either way. The displacement starts at [`WANDER_HOME`].
+fn wander(displacement: u8, d: u8) -> Option<u8> {
+    match d {
+        0 => Some(displacement),
+        0x80.. => displacement.checked_sub(1),
+        _ => Some(displacement.saturating_add(1)).filter(|&v| v <= 2 * WANDER_HOME),
+    }
+}
+
+/// `SPRITESTATEDATA2_YDISPLACEMENT` and `_XDISPLACEMENT` as a map loads.
+const WANDER_HOME: u8 = 8;
 
 /// `DoScriptedNPCMovement`: two pixels a pass along `wNPCMovementDirections2`, in step with a player
 /// whose presses are simulated.
@@ -659,8 +679,6 @@ pub fn sprite_in_front_of_player(sprites: &mut Sprites, num_sprites: u8, range: 
 /// last four objects are the shadow and are left alone.
 pub fn prepare_oam(sprites: &mut Sprites, objects: &mut Vec<Object>, ledge: bool) {
     objects.resize(40, Object { y: OAM_HIDDEN_Y, ..Object::default() });
-    let table = pokered_symbols::SpriteFacingAndAnimationTable;
-    let at = |address: u16| rom_slice(DmgPointer { bank: table.bank, address });
     let mut next = 0;
     for sprite in sprites.iter_mut() {
         if sprite.picture_id == 0 {
@@ -674,13 +692,11 @@ pub fn prepare_oam(sprites: &mut Sprites, objects: &mut Vec<Object>, ledge: bool
             continue;
         }
         let entry = if image >= 0xA0 { (image & 0x0F) + 0x10 } else { image & 0x0F };
-        let row = rom_slice(table + entry as u16 * 4);
-        let tiles = at(u16::from_le_bytes([row[0], row[1]]));
-        let layout = at(u16::from_le_bytes([row[2], row[3]]));
+        let (tiles, layout) = poke_core::tables::SPRITE_FACING_AND_ANIMATION_TABLE[entry as usize];
         let slot = image >> 4;
         let first_tile = if slot == 0x0B { 0x0A * 12 + 4 } else { slot * 12 };
         for quadrant in 0..4 {
-            let (dy, dx, flags) = (layout[quadrant * 3], layout[quadrant * 3 + 1], layout[quadrant * 3 + 2]);
+            let [dy, dx, flags] = layout[quadrant];
             let attributes = if flags & UNDER_GRASS != 0 { sprite.grass_priority & OAM_PRIO | flags } else { flags };
             objects[next] = Object {
                 y: sprite.y_pixels.wrapping_add(0x10).wrapping_add(dy),
@@ -755,8 +771,7 @@ fn load_map_sprite_tile_patterns(sprites: &mut Sprites, count: u8, font_loaded: 
         let highest = (1..slot).map(|earlier| sprites[earlier].image_base_offset).filter(|&base| base < 11).fold(1, u8::max);
         let vram_slot = if picture >= FIRST_STILL_SPRITE { four_tile_sprites + 11 } else { highest + 1 };
         sprites[slot].image_base_offset = vram_slot;
-        let sheet = sprite_sheet(picture);
-        let bytes = rom_slice(sheet.pointer);
+        let sheet = sprite_sheet(picture).expect("a map's sprites are all in the table");
         let first = if vram_slot >= 11 {
             let first = if four_tile_sprites == 0 { 0x78 } else { 0x7C };
             four_tile_sprites = 1;
@@ -765,10 +780,13 @@ fn load_map_sprite_tile_patterns(sprites: &mut Sprites, count: u8, font_loaded: 
             (vram_slot as usize - 1) * 12
         };
         if !font_loaded {
-            tiles.load(V_CHARS0 + first, &bytes[..sheet.bytes]);
+            tiles.load(V_CHARS0 + first, &sheet.tiles[..sheet.bytes]);
         }
         if vram_slot < 11 {
-            tiles.load(V_CHARS1 + first, &bytes[0xC0..0xC0 + sheet.bytes]);
+            // A picture that never walks has no walking frames, and the cartridge copies the next
+            // sheet's standing ones; nothing draws them, and here they are blank.
+            let walking = sheet.tiles.get(0xC0..0xC0 + sheet.bytes).map_or_else(|| vec![0; sheet.bytes], <[u8]>::to_vec);
+            tiles.load(V_CHARS1 + first, &walking);
         }
     }
     for sprite in sprites.iter_mut() {
@@ -778,19 +796,18 @@ fn load_map_sprite_tile_patterns(sprites: &mut Sprites, count: u8, font_loaded: 
 
 /// `LoadWalkingPlayerSpriteGraphics`: Red's standing frames to slot 1, the walking ones above.
 pub fn load_walking_player_sprite_graphics(tiles: &mut TileData) {
-    load_player_sprite_graphics_common(tiles, pokered_symbols::RedSprite);
+    load_player_sprite_graphics_common(tiles, gfx::sprites::RED);
 }
 
 /// `LoadPlayerSpriteGraphicsCommon`.
-fn load_player_sprite_graphics_common(tiles: &mut TileData, sheet: DmgPointer) {
-    let bytes = rom_slice(sheet);
-    tiles.load(V_CHARS0, &bytes[..12 * TILE_BYTES]);
-    tiles.load(V_CHARS1, &bytes[0xC0..0xC0 + 12 * TILE_BYTES]);
+fn load_player_sprite_graphics_common(tiles: &mut TileData, sheet: &[u8]) {
+    tiles.load(V_CHARS0, &sheet[..12 * TILE_BYTES]);
+    tiles.load(V_CHARS1, &sheet[0xC0..0xC0 + 12 * TILE_BYTES]);
 }
 
 /// `LoadBirdSpriteGraphics`: the bird over the player's own sheet, for the flying animation.
 pub fn load_bird_sprite_graphics(tiles: &mut TileData) {
-    load_player_sprite_graphics_common(tiles, pokered_symbols::BirdSprite);
+    load_player_sprite_graphics_common(tiles, gfx::sprites::BIRD);
 }
 
 /// `LoadPlayerSpriteGraphics`: Red walking, on the bike or on the Seel. The bike where it cannot be
@@ -804,9 +821,9 @@ pub fn load_player_sprite_graphics(tiles: &mut TileData, location: &mut Location
         location.walk_bike_surf = WALKING;
     }
     let sheet = match location.walk_bike_surf {
-        BIKING => pokered_symbols::RedBikeSprite,
-        SURFING => pokered_symbols::SeelSprite,
-        _ => pokered_symbols::RedSprite,
+        BIKING => gfx::sprites::RED_BIKE,
+        SURFING => gfx::sprites::SEEL,
+        _ => gfx::sprites::RED,
     };
     load_player_sprite_graphics_common(tiles, sheet);
 }
@@ -849,7 +866,7 @@ mod tests {
             let env = SpriteEnv {
                 tiles: &tiles, x, y, walk_counter, font_loaded: false, collision: &collision, grass_tile: 0x52,
                 hidden: [false; NUM_SPRITES], no_face_player: false, player_direction, moving_direction: 0, spinning: false,
-                simulating: false, beyond: None,
+                simulating: false, beyond: None, cartridge_bugs: true,
             };
             let mut tape = GameRng::tape(rng.clone());
             update_npc_sprite(&mut sprites, 1, &env, &mut NpcPaths::default(), &mut tape);
@@ -873,6 +890,35 @@ mod tests {
             let mut set = SpriteSet::default();
             init_map_sprites(&mut sprites, &mut set, map, x, y, objects.objects.len() as u8, false, &mut TileData::default());
             assert_eq!((sprites.iter().map(|s| s.image_base_offset).collect::<Vec<_>>(), set.id), (bases, set_id), "{map}");
+        }
+    }
+
+    #[test]
+    fn a_wanderer_walks_up_to_eight_steps_from_home_every_way() {
+        let collision = poke_core::tilesets::collision_tiles(poke_core::map_header::TileSetId::Overworld);
+        let tiles: TileMap = std::array::from_fn(|_| 0);
+        let walks = |(y, x): (u8, u8), (dy, dx): (u8, u8), cartridge_bugs: bool| {
+            let env = SpriteEnv {
+                tiles: &tiles, x: 0, y: 0, walk_counter: 0, font_loaded: false, collision: &collision, grass_tile: 0x52,
+                hidden: [false; NUM_SPRITES], no_face_player: false, player_direction: 0, moving_direction: 0, spinning: false,
+                simulating: false, beyond: None, cartridge_bugs,
+            };
+            let mut sprites = [SpriteState::default(); NUM_SPRITES];
+            sprites[1] = SpriteState { movement1: WALK, y_displacement: y, x_displacement: x, ..walker(0x3C, 0x40, dy, dx) };
+            can_walk_onto_tile(&mut sprites, 1, &env, &mut GameRng::tape(vec![0]), collision[0], 0, dy, dx)
+        };
+        let (up, down, left, right) = ((0xFF, 0), (1, 0), (0, 0xFF), (0, 1));
+        for (home, step, fixed, cartridge) in [
+            ((4, 8), right, true, false),
+            ((3, 8), down, true, false),
+            ((16, 8), down, false, true),
+            ((8, 16), right, false, true),
+            ((0, 8), up, false, false),
+            ((8, 0), left, false, false),
+            ((15, 15), down, true, true),
+        ] {
+            assert_eq!(walks(home, step, false), fixed, "{home:?} {step:?}");
+            assert_eq!(walks(home, step, true), cartridge, "the cartridge, {home:?} {step:?}");
         }
     }
 

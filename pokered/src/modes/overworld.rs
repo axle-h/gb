@@ -39,9 +39,7 @@ use poke_core::map::Map;
 use poke_core::map_gfx::tileset_entry;
 use poke_core::map_header::MapHeader;
 use poke_core::map_objects::{map_song, toggleable_objects, MapObjects, Sign, Warp, FIRST_ROUTE_MAP, LAST_MAP};
-use poke_core::rom_gfx::rom_slice;
 use poke_core::sprite::SpriteFacing;
-use poke_core::symbols::pokered_symbols;
 use poke_core::tilesets::{collision_tiles, is_dungeon_tileset};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, AudioBank, Sound, SoundId};
@@ -431,6 +429,7 @@ impl Overworld {
             spinning: self.spinning,
             simulating: self.scripted,
             beyond: Some(&surrounding),
+            cartridge_bugs: ctx.world.cartridge_bugs,
         };
         sprites::update_sprites(&mut self.sprites, &env, &mut self.rt.paths, ctx.rng);
         if std::mem::take(&mut self.rt.paths.path_ended) {
@@ -634,7 +633,7 @@ impl Overworld {
                 }
             }
         }
-        self.rt.wild_mons.load(map);
+        self.rt.wild_mons.load(map, ctx.world.cartridge_bugs);
         self.rt.text_pointers = None;
         let entry = tileset_entry(header.tileset);
         ctx.screen.tiles.animation.kind = entry.animation;
@@ -642,7 +641,7 @@ impl Overworld {
         let warp = self.standing.destination_warp;
         if (is_dungeon_tileset(header.tileset) || header.tileset != previous_tileset) && warp != 0xFF {
             if let Some(to) = objects.warp_to.get(warp as usize) {
-                self.view.view = MapView::view_from_address(to.view);
+                self.view.view = to.view;
                 location.y = to.y;
                 location.x = to.x;
                 self.view.y_block = to.y & 1;
@@ -661,7 +660,7 @@ impl Overworld {
             let index = self.jump_index;
             if index + 1 < JUMP_PASSES {
                 self.jump_index = index + 1;
-                self.sprites[0].y_pixels = rom_slice(pokered_symbols::PlayerJumpingYScreenCoords)[index as usize];
+                self.sprites[0].y_pixels = poke_core::tables::PLAYER_JUMPING_Y_SCREEN_COORDS[index as usize];
             } else if self.walk_counter == 0 {
                 self.update_sprites(ctx);
                 self.phase = Phase::Landing(LANDING_FRAMES);
@@ -824,7 +823,7 @@ impl Overworld {
         }
         let tiles = self.tile_map(ctx);
         if facing == SpriteFacing::Up as u8 && let Some(text) = hidden_events::bookshelf_text(self.view.tileset, tiles[7 * 20 + 8]) {
-            self.rt.events.hidden = Some(events::Hidden::Bookshelf(text));
+            self.rt.events.hidden = Some(events::Hidden::Bookshelf(text as u8));
             return Some(Routine::OverworldLoop.into());
         }
         let front = collision::in_front(&tiles, location.x, location.y, SpriteFacing::from_repr(facing).unwrap_or_default());
@@ -1096,9 +1095,7 @@ impl Overworld {
         self.simulated = vec![held, held];
         self.simulated_index = 2;
         // `LoadHoppingShadowOAM`.
-        let start = pokered_symbols::LedgeHoppingShadow;
-        let len = (pokered_symbols::LedgeHoppingShadowEnd.address - start.address) as usize;
-        ctx.screen.tiles.load_1bpp(crate::gfx::tiles::V_CHARS1 + 0x7F, &rom_slice(start)[..len]);
+        ctx.screen.tiles.load_1bpp(crate::gfx::tiles::V_CHARS1 + 0x7F, poke_core::gfx::overworld::SHADOW);
         const OAM_PAL1: u8 = 0x10;
         let attributes = [OAM_PAL1, Object::X_FLIP, Object::Y_FLIP, Object::X_FLIP | Object::Y_FLIP];
         ctx.screen.sprites.resize(40, Object { y: 160, ..Object::default() });
@@ -1263,7 +1260,7 @@ impl Overworld {
         let Some(connection) = connection else { return self.overworld_loop() };
         let location = &mut ctx.world.location;
         location.map = connection.map;
-        let view = MapView::view_from_address(connection.view_pointer);
+        let view = connection.view_block;
         self.view.view = if horizontal {
             location.x = connection.x_alignment as u8;
             location.y = location.y.wrapping_add(connection.y_alignment as u8);
@@ -1585,8 +1582,8 @@ impl ModeUpdate for Overworld {
 
 /// `FadePal1` to `FadePal8`, as `rBGP`, `rOBP0` and `rOBP1`.
 fn fade_palette(n: u8) -> [u8; 3] {
-    let table = rom_slice(pokered_symbols::FadePal1 + (n as u16 - 1) * 3);
-    [table[0], table[1], table[2]]
+    let (bgp, obp0, obp1) = poke_core::tables::FADE_PALETTES[n as usize - 1];
+    [bgp, obp0, obp1]
 }
 
 /// `CollisionCheckOnLand`'s bump, which does not restart while one is already playing.

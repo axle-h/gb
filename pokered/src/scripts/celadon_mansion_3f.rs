@@ -1,9 +1,8 @@
 //! `CeladonMansion3F_Script`: the game designer, who hands out the diploma for a full Pokédex.
 
-use poke_core::symbols::pokered_local_labels::CeladonMansion3FGameDesignerText as designer;
 use poke_core::symbols::pokered_map_scripts::TEXT_CELADONMANSION3F_GAME_DESIGNER;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `NUM_POKEMON - 1`: Mew is not counted, since nothing in the game gives it out.
 const COMPLETE_DEX: u8 = 150;
@@ -27,8 +26,8 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         return None;
     }
     Some(match rt.pokedex_owned() >= COMPLETE_DEX {
-        true => rt.print_text(text_at(designer::CompletedDexText)).then(Label::DiplomaShown),
-        false => rt.print_text(text_at(designer::Text)).ret(),
+        true => rt.print_text(text_named("CeladonMansion3FGameDesignerText.CompletedDexText")).then(Label::DiplomaShown),
+        false => rt.print_text(text_named("CeladonMansion3FGameDesignerText.Text")).ret(),
     })
 }
 

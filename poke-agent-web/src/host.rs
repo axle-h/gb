@@ -1777,7 +1777,33 @@ mod tests {
         assert_eq!(host.console.native().agent.game().world().location.map, poke_agent::pokemon::map::Map::RedsHouse2F);
     }
 
-    /// A native win is filed as an emulated one is, with the whole game in place of the two files.
+    /// A champion walking into the Hall of Fame, whose script runs the ceremony in the overworld's
+    /// place.
+    fn native_champion() -> Vec<u8> {
+        use poke_agent::pokemon::{map::Map, species::PokemonSpecies};
+        use pokered::rng::GameRng;
+        use pokered::systems::add_mon::{Origin, new_party_mon};
+        let start = pokered::Game::load(&crate::console::native_start_of_game().expect("a new native game"),
+                                        pokered::Pacing::Faithful).expect("it loads");
+        let mut world = start.world().clone();
+        world.party = [(PokemonSpecies::Blastoise, 85), (PokemonSpecies::Pidgey, 9)].into_iter()
+            .map(|(species, level)| pokered::party::Named {
+                mon: new_party_mon(species, level, world.player_id, &Origin::Given, &mut GameRng::seeded(2)),
+                ot: world.player_name.clone(),
+                nick: species.name().to_vec(),
+            })
+            .collect();
+        world.badges = 0xFF;
+        world.location.map = Map::HallOfFame;
+        world.location.last_map = Map::HallOfFame;
+        (world.location.x, world.location.y) = (5, 7);
+        let mut game = pokered::Game::new(world, GameRng::seeded(3), pokered::Pacing::Faithful);
+        game.push(pokered::mode::Mode::Overworld(pokered::modes::overworld::Overworld::new()));
+        game.save()
+    }
+
+    /// A native win is filed as an emulated one is, with the whole game in place of the two files,
+    /// and the party the ceremony shows.
     #[test]
     fn a_finished_native_run_is_filed_with_its_game_and_the_next_one_starts() {
         use poke_agent::run::{RunDir, files, hall_of_fame};
@@ -1793,22 +1819,14 @@ mod tests {
         let transcript =
             poke_agent::run::transcript::spawn(Arc::clone(&current), Arc::clone(&published), Arc::clone(&stop))
                 .expect("a transcript writer");
-        let mut host = native_host(Arc::clone(&published), |config| {
+        let mut host = host_from(&native_champion(), Arc::clone(&published), |config| {
+            config.game = GameKind::Native;
             config.run = Some(Arc::clone(&current));
             config.checkpoint_interval = Duration::from_secs(3_600);
         });
-        // The first tick seeds the count, as a resume's would.
-        let warmup = Instant::now() + Duration::from_millis(100);
-        while Instant::now() < warmup {
-            host.tick();
-        }
         host.console.restore_game_save(b"PKRDsaved".to_vec());
-        // What the ceremony's first frame does.
-        let world = host.console.native().agent.game_mut().world_mut();
-        world.hall_of_fame_teams += 1;
-        world.badges = 0xFF;
 
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(60);
         while current.get().run_id() == finished_id && Instant::now() < deadline {
             host.tick();
         }
@@ -1821,6 +1839,8 @@ mod tests {
         assert_eq!(rows[0].run_id, finished_id);
         assert_eq!(rows[0].teams, 1);
         assert_eq!(rows[0].badges, 8);
+        let party = rows[0].party.iter().map(|mon| (mon.nickname.as_str(), mon.species.as_str(), mon.level)).collect::<Vec<_>>();
+        assert_eq!(party, [("BLASTOISE", "Blastoise", 85), ("PIDGEY", "Pidgey", 9)]);
         let archive = scratch.0.join(files::HALL_OF_FAME).join(&rows[0].archive);
         assert!(archive.join(files::GAME).is_file(), "the game at the moment of victory");
         assert_eq!(std::fs::read(archive.join(files::GAME_SAVE)).ok().as_deref(), Some(&b"PKRDsaved"[..]), "the game's own save");

@@ -1,19 +1,17 @@
 //! `MtMoonB2F_Script`: the four Rockets, the Super Nerd guarding the two fossils, and the one he
 //! walks over to take once the player has chosen.
 
+use poke_core::tables::trainers;
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_MT_MOON_EXIT_SUPER_NERD, EVENT_GOT_DOME_FOSSIL,
     EVENT_GOT_HELIX_FOSSIL};
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::*;
-use poke_core::symbols::pokered_symbols as sym;
-use poke_core::symbols::pokered_symbols::{MtMoon3TrainerHeader0, MtMoon3TrainerHeader1, MtMoon3TrainerHeader2,
-    MtMoon3TrainerHeader3, MtMoon3TrainerHeaders, MTMOONB2F_SUPER_NERD};
+use poke_core::symbols::pokered_map_scripts::MTMOONB2F_SUPER_NERD;
 use poke_core::symbols::pokered_toggles::{TOGGLE_MT_MOON_B2F_FOSSIL_1, TOGGLE_MT_MOON_B2F_FOSSIL_2};
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use crate::modes::overworld::movement::{NPC_MOVEMENT_RIGHT, NPC_MOVEMENT_UP};
-use super::{text_at, Code, Flow, Script};
+use super::{text_named, Code, Flow, Script};
 
 const END: u8 = 0xFF;
 const PAD_CTRL_PAD: Joypad = Joypad::UP.union(Joypad::DOWN).union(Joypad::LEFT).union(Joypad::RIGHT);
@@ -53,7 +51,7 @@ pub enum Label {
 pub fn script(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().mt_moon_b2f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, MtMoon3TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::MtMoon3TrainerHeaders);
     let entry: Code = match index {
         SCRIPT_MTMOONB2F_DEFEATED_SUPER_NERD => Label::DefeatedSuperNerd.into(),
         SCRIPT_MTMOONB2F_MOVE_SUPER_NERD => Label::MoveSuperNerd.into(),
@@ -114,10 +112,10 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         TEXT_MTMOONB2F_SUPER_NERD => return Some(super_nerd_text(rt)),
         TEXT_MTMOONB2F_DOME_FOSSIL => return Some(fossil_text(rt, true)),
         TEXT_MTMOONB2F_HELIX_FOSSIL => return Some(fossil_text(rt, false)),
-        TEXT_MTMOONB2F_ROCKET1 => MtMoon3TrainerHeader0,
-        TEXT_MTMOONB2F_ROCKET2 => MtMoon3TrainerHeader1,
-        TEXT_MTMOONB2F_ROCKET3 => MtMoon3TrainerHeader2,
-        TEXT_MTMOONB2F_ROCKET4 => MtMoon3TrainerHeader3,
+        TEXT_MTMOONB2F_ROCKET1 => trainers::MtMoon3TrainerHeader0,
+        TEXT_MTMOONB2F_ROCKET2 => trainers::MtMoon3TrainerHeader1,
+        TEXT_MTMOONB2F_ROCKET3 => trainers::MtMoon3TrainerHeader2,
+        TEXT_MTMOONB2F_ROCKET4 => trainers::MtMoon3TrainerHeader3,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())
@@ -126,23 +124,23 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 /// `MtMoonB2FSuperNerdText`: he fights for both fossils, and only once he has lost does he offer one.
 fn super_nerd_text(rt: &mut Script) -> Flow {
     if !rt.check_event(EVENT_BEAT_MT_MOON_EXIT_SUPER_NERD) {
-        return rt.print_text(text_at(sym::MtMoonB2FSuperNerdTheyreBothMineText)).then(Label::SuperNerdBattleText);
+        return rt.print_text(text_named("MtMoonB2FSuperNerdTheyreBothMineText")).then(Label::SuperNerdBattleText);
     }
     let words = match got_a_fossil(rt) {
-        true => sym::MtMoonB2FSuperNerdTheresAPokemonLabText,
-        false => sym::MtMoonB2fSuperNerdEachTakeOneText,
+        true => "MtMoonB2FSuperNerdTheresAPokemonLabText",
+        false => "MtMoonB2fSuperNerdEachTakeOneText",
     };
-    rt.print_text(text_at(words)).ret()
+    rt.print_text(text_named(words)).ret()
 }
 
 /// `MtMoonB2FDomeFossilText` and `MtMoonB2FHelixFossilText`, which differ only in what they hand over.
 fn fossil_text(rt: &mut Script, dome: bool) -> Flow {
     rt.set_do_not_wait_for_button_press(true);
     let words = match dome {
-        true => local::MtMoonB2FDomeFossilText::YouWantText,
-        false => local::MtMoonB2FHelixFossilText::YouWantText,
+        true => "MtMoonB2FDomeFossilText.YouWantText",
+        false => "MtMoonB2FHelixFossilText.YouWantText",
     };
-    rt.print_text(text_at(words)).then(Label::FossilYesNo(dome))
+    rt.print_text(text_named(words)).then(Label::FossilYesNo(dome))
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -185,7 +183,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             Flow::Return
         }
         Label::SuperNerdBattleText => {
-            rt.save_end_battle_text(sym::MtMoonB2FSuperNerdOkIllShareText);
+            rt.save_end_battle_text("MtMoonB2FSuperNerdOkIllShareText");
             rt.engage_map_trainer(rt.sprite_index(), 0);
             set_script(rt, SCRIPT_MTMOONB2F_DEFEATED_SUPER_NERD);
             Flow::Return
@@ -197,9 +195,9 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             }
             let item = if dome { ItemId::DomeFossil } else { ItemId::HelixFossil };
             if !rt.give_item(item, 1) {
-                return rt.print_text(text_at(local::MtMoonB2FYouHaveNoRoomText::Text)).ret();
+                return rt.print_text(text_named("MtMoonB2FYouHaveNoRoomText.Text")).ret();
             }
-            rt.print_text(text_at(local::MtMoonB2FReceivedFossilText::Text)).then(Label::FossilGiven(dome))
+            rt.print_text(text_named("MtMoonB2FReceivedFossilText.Text")).then(Label::FossilGiven(dome))
         }
         Label::FossilGiven(dome) => {
             let (toggle, event) = match dome {

@@ -2,7 +2,6 @@
 //! another trainer's name on it. The trade animation (`InternalClockTradeAnim`) is the movie's to
 //! recreate, and the trade goes through without it.
 
-use poke_core::symbols::pokered_symbols as sym;
 use poke_core::text_script::TextBuffer;
 use crate::mode::{Mode, Outcome};
 use crate::modes::party_menu::{PartyMenu, PartyMenuType};
@@ -67,7 +66,7 @@ pub(super) fn chose_mon(s: &mut Script) -> Flow {
     }
     let which = s.ow.rt.events.trade.expect("a trade");
     s.ctx.world.in_game_trades |= 1 << which;
-    print(sym::ConnectCableText).then(Label::InGameTradeConnected(slot))
+    print("ConnectCableText").then(Label::InGameTradeConnected(slot))
 }
 
 /// `InGameTrade_PrepareTradeData`'s OT ID, then the mons exchanged: the one given goes, and the one
@@ -83,7 +82,7 @@ pub(super) fn connected(s: &mut Script, slot: u8) -> Flow {
     add_party_mon(&mut world.party, Named { mon, ot: vec![TRAINER], nick: trade.nick.clone() }, Some(&mut world.pokedex));
     restore_screen(s);
     s.ow.rt.events.trade_text = Some(TradeText::Thanks);
-    print(sym::TradedForText).then(Label::InGameTradeText)
+    print("TradedForText").then(Label::InGameTradeText)
 }
 
 /// `.printText`: whichever of the dialogue set's texts the trade got to.

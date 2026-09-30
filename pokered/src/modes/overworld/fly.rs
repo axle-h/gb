@@ -12,13 +12,11 @@
 use poke_core::map::Map;
 use poke_core::map_header::TileSetId;
 use poke_core::map_objects::fly_warp;
-use poke_core::rom_gfx::rom_slice;
-use poke_core::symbols::{pokered_symbols, DmgPointer};
+use poke_core::tables;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use crate::input::Joypad;
 use crate::mode::{Ctx, Transition};
-use crate::systems::overworld::map_view::MapView;
 use crate::systems::overworld::sprites::{load_bird_sprite_graphics, load_player_sprite_graphics, SpriteState};
 use super::battles::SPECIAL_ENTER_MAP_FRAMES;
 use super::script::{Block, Flow, Routine, SpecialEnter, Then};
@@ -55,7 +53,40 @@ pub(super) struct FlyAnim {
     /// `wFlyAnimBirdSpriteImageIndex`.
     image: u8,
     /// `wFlyAnimUsingCoordList`: where in a table of `y, x` pairs, or `None` to flap in place.
-    coords: Option<(DmgPointer, u8)>,
+    coords: Option<(FlyPath, u8)>,
+}
+
+/// The tables of `y, x` pairs `DoFlyAnimation` is handed, saved by their labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlyPath {
+    Up,
+    Away,
+    Enter,
+}
+
+impl FlyPath {
+    const ALL: [Self; 3] = [Self::Up, Self::Away, Self::Enter];
+    const LABELS: [&str; 3] = ["FlyAnimationScreenCoords1", "FlyAnimationScreenCoords2", "FlyAnimationEnterScreenCoords"];
+
+    fn coords(self) -> &'static [(u8, u8)] {
+        match self {
+            Self::Up => tables::FLY_ANIMATION_SCREEN_COORDS_1,
+            Self::Away => tables::FLY_ANIMATION_SCREEN_COORDS_2,
+            Self::Enter => tables::FLY_ANIMATION_ENTER_SCREEN_COORDS,
+        }
+    }
+}
+
+impl Serialize for FlyPath {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(Self::LABELS[*self as usize])
+    }
+}
+
+impl<'de> Deserialize<'de> for FlyPath {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        poke_core::symbols::SavedLabel::resolve(deserializer, |name| Self::LABELS.iter().position(|&label| label == name).map(|at| Self::ALL[at]))
+    }
 }
 
 /// `InitFacingDirectionList` and `RestoreFacingDirectionAndYScreenPos`: what the animation borrows
@@ -120,7 +151,7 @@ impl Overworld {
         self.rt.fly_anim = FlyAnim {
             counter: FLAPS_UP,
             image: FACING_LEFT,
-            coords: Some((pokered_symbols::FlyAnimationScreenCoords1, 0)),
+            coords: Some((FlyPath::Up, 0)),
         };
         Then::call(Routine::FlyAnimStep).then(Routine::LeaveMapAnimWait)
     }
@@ -134,7 +165,7 @@ impl Overworld {
         self.rt.fly_anim = FlyAnim {
             counter: FLAPS_AWAY,
             image: FACING_RIGHT,
-            coords: Some((pokered_symbols::FlyAnimationScreenCoords2, 0)),
+            coords: Some((FlyPath::Away, 0)),
         };
         Then::call(Routine::FlyAnimStep).then(Routine::FadeOutToWhite(WHITE - 2))
     }
@@ -169,7 +200,7 @@ impl Overworld {
             Some((map, which)) => super::escape::dungeon_warp(map, which).expect("a hole drops onto a dungeon warp"),
             None => fly_warp(destination).expect("a fly lands on a town with a fly warp"),
         };
-        self.view.view = MapView::view_from_address(warp.view);
+        self.view.view = warp.view;
         location.y = warp.y;
         location.x = warp.x;
         self.view.y_block = warp.y & 1;
@@ -190,7 +221,6 @@ impl Overworld {
         self.rt.saved_player = SavedPlayer { facing: self.sprites[0].image_index, y: self.sprites[0].y_pixels };
         self.init_facing_direction_list();
         self.sprites[0].y_pixels = OFF_SCREEN_Y;
-        self.update_sprites(ctx);
         self.fade_in_from_white(ctx, WHITE - 1)
     }
 
@@ -215,7 +245,7 @@ impl Overworld {
         self.rt.fly_anim = FlyAnim {
             counter: FLAPS_IN,
             image: FACING_RIGHT,
-            coords: Some((pokered_symbols::FlyAnimationEnterScreenCoords, 0)),
+            coords: Some((FlyPath::Enter, 0)),
         };
         Then::call(Routine::FlyAnimStep).then(Routine::EnterMapAnimLanded)
     }
@@ -244,11 +274,9 @@ impl Overworld {
     /// The rest of the iteration: the next pair of screen coordinates, and back for another flap.
     pub(super) fn fly_anim_coords(&mut self) -> Flow {
         let anim = &mut self.rt.fly_anim;
-        if let Some((table, at)) = anim.coords {
-            let pair = rom_slice(table + at as u16 * 2);
-            self.sprites[0].y_pixels = pair[0];
-            self.sprites[0].x_pixels = pair[1];
-            anim.coords = Some((table, at + 1));
+        if let Some((path, at)) = anim.coords {
+            (self.sprites[0].y_pixels, self.sprites[0].x_pixels) = path.coords()[at as usize];
+            anim.coords = Some((path, at + 1));
         }
         self.rt.fly_anim.counter -= 1;
         if self.rt.fly_anim.counter == 0 { Flow::Return } else { Flow::Jump(Routine::FlyAnimStep.into()) }
@@ -330,6 +358,22 @@ mod tests {
             "{frames} frames is less than the animation alone");
     }
 
+    /// `EnterMapAnim` leaves the people as the load left them: only `EnterMap`'s `UpdateSprites`
+    /// after it sets them going, on the third frame before the loop's first poll, so a wanderer's
+    /// first draw and its delay fall where the cartridge's do.
+    #[test]
+    fn the_people_are_not_set_going_until_the_arrival_animation_is_over() {
+        let mut game = flying(Map::ViridianCity);
+        let mut going = 0;
+        while game.status() != Status::Waiting(Decision::Overworld) {
+            game.frame(Input::None);
+            let Some(Mode::Overworld(overworld)) = game.modes().last() else { continue };
+            let set = overworld.sprites().iter().skip(1).any(|person| person.movement_status != 0);
+            going = if set { going + 1 } else { 0 };
+        }
+        assert_eq!(going, 3, "the people were set going {going} frames before the first poll");
+    }
+
     #[test]
     fn a_save_mid_flight_resumes_identically() {
         let mut whole = flying(Map::CeruleanCity);
@@ -342,5 +386,15 @@ mod tests {
             assert_eq!((whole.ui(), a.events, a.status), (restored.ui(), b.events, b.status), "frame {frame}");
         }
         assert_eq!(restored.world().location.map, Map::CeruleanCity);
+    }
+
+    /// A path saves as its label, and a save that held the table's address still loads.
+    #[test]
+    fn a_fly_path_saves_by_label_and_loads_from_its_old_address() {
+        use poke_core::pointer::{DmgBank, DmgPointer};
+        let saved = rmp_serde::to_vec_named(&FlyPath::Away).unwrap();
+        assert_eq!(rmp_serde::from_slice::<FlyPath>(&saved).unwrap(), FlyPath::Away);
+        let old = rmp_serde::to_vec_named(&DmgPointer { bank: DmgBank::ROM { bank: 0x1C }, address: 0x4667 }).unwrap();
+        assert_eq!(rmp_serde::from_slice::<FlyPath>(&old).unwrap(), FlyPath::Away);
     }
 }

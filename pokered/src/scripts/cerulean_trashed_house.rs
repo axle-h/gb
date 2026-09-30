@@ -2,10 +2,9 @@
 //! the player holds one.
 
 use poke_core::item::ItemId;
-use poke_core::symbols::pokered_local_labels::CeruleanTrashedHouseFishingGuruText as guru;
 use poke_core::symbols::pokered_map_scripts::TEXT_CERULEANTRASHEDHOUSE_FISHING_GURU;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// The ROM bank `CeruleanTrashedHouseFishingGuruText` runs in, which `predef` hands back in `a`.
 const BANK: u8 = 0x07;
@@ -28,10 +27,10 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     // `and b` tests the quantity against the bank number `predef` restores into `a`, not against
     // itself, so a count that is a multiple of eight reads as none.
     let words = match rt.get_quantity_of_item_in_bag(ItemId::Tm28Dig) & BANK {
-        0 => guru::TheyStoleATMText,
-        _ => guru::WhatsLostIsLostText,
+        0 => "CeruleanTrashedHouseFishingGuruText.TheyStoleATMText",
+        _ => "CeruleanTrashedHouseFishingGuruText.WhatsLostIsLostText",
     };
-    Some(rt.print_text(text_at(words)).ret())
+    Some(rt.print_text(text_named(words)).ret())
 }
 
 pub fn resume(_rt: &mut Script, label: Label) -> Flow {

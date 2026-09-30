@@ -1,12 +1,12 @@
 //! `Route20_Script`: the ten swimmers along the water past the Seafoam Islands, and the boulder
 //! objects the islands leave behind, which this road puts back where they started.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_events::{EVENT_IN_SEAFOAM_ISLANDS, EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE,
     EVENT_SEAFOAM3_BOULDER2_DOWN_HOLE, EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE, EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE};
 use poke_core::symbols::pokered_map_scripts::{TEXT_ROUTE20_COOLTRAINER_M, TEXT_ROUTE20_SWIMMER1,
     TEXT_ROUTE20_SWIMMER2, TEXT_ROUTE20_SWIMMER3, TEXT_ROUTE20_SWIMMER4, TEXT_ROUTE20_SWIMMER5,
     TEXT_ROUTE20_SWIMMER6, TEXT_ROUTE20_SWIMMER7, TEXT_ROUTE20_SWIMMER8, TEXT_ROUTE20_SWIMMER9};
-use poke_core::symbols::pokered_symbols as sym;
 use poke_core::symbols::pokered_toggles::{TOGGLE_SEAFOAM_ISLANDS_1F_BOULDER_1, TOGGLE_SEAFOAM_ISLANDS_1F_BOULDER_2,
     TOGGLE_SEAFOAM_ISLANDS_B1F_BOULDER_1, TOGGLE_SEAFOAM_ISLANDS_B1F_BOULDER_2, TOGGLE_SEAFOAM_ISLANDS_B2F_BOULDER_1,
     TOGGLE_SEAFOAM_ISLANDS_B2F_BOULDER_2, TOGGLE_SEAFOAM_ISLANDS_B3F_BOULDER_1, TOGGLE_SEAFOAM_ISLANDS_B3F_BOULDER_2,
@@ -44,7 +44,7 @@ pub fn script(rt: &mut Script) -> Flow {
     }
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().route20.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::Route20TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::Route20TrainerHeaders);
     rt.trainer_script(index).then(Label::StoreCurScript)
 }
 
@@ -69,16 +69,16 @@ fn boulder_script(rt: &mut Script) {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
-        TEXT_ROUTE20_SWIMMER1 => sym::Route20TrainerHeader0,
-        TEXT_ROUTE20_SWIMMER2 => sym::Route20TrainerHeader1,
-        TEXT_ROUTE20_SWIMMER3 => sym::Route20TrainerHeader2,
-        TEXT_ROUTE20_SWIMMER4 => sym::Route20TrainerHeader3,
-        TEXT_ROUTE20_SWIMMER5 => sym::Route20TrainerHeader4,
-        TEXT_ROUTE20_SWIMMER6 => sym::Route20TrainerHeader5,
-        TEXT_ROUTE20_COOLTRAINER_M => sym::Route20TrainerHeader6,
-        TEXT_ROUTE20_SWIMMER7 => sym::Route20TrainerHeader7,
-        TEXT_ROUTE20_SWIMMER8 => sym::Route20TrainerHeader8,
-        TEXT_ROUTE20_SWIMMER9 => sym::Route20TrainerHeader9,
+        TEXT_ROUTE20_SWIMMER1 => trainers::Route20TrainerHeader0,
+        TEXT_ROUTE20_SWIMMER2 => trainers::Route20TrainerHeader1,
+        TEXT_ROUTE20_SWIMMER3 => trainers::Route20TrainerHeader2,
+        TEXT_ROUTE20_SWIMMER4 => trainers::Route20TrainerHeader3,
+        TEXT_ROUTE20_SWIMMER5 => trainers::Route20TrainerHeader4,
+        TEXT_ROUTE20_SWIMMER6 => trainers::Route20TrainerHeader5,
+        TEXT_ROUTE20_COOLTRAINER_M => trainers::Route20TrainerHeader6,
+        TEXT_ROUTE20_SWIMMER7 => trainers::Route20TrainerHeader7,
+        TEXT_ROUTE20_SWIMMER8 => trainers::Route20TrainerHeader8,
+        TEXT_ROUTE20_SWIMMER9 => trainers::Route20TrainerHeader9,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())

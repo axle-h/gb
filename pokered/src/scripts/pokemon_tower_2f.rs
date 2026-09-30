@@ -3,10 +3,9 @@
 
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_POKEMON_TOWER_RIVAL, EVENT_POKEMON_TOWER_RIVAL_ON_LEFT};
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_POKEMONTOWER2F_DEFAULT, SCRIPT_POKEMONTOWER2F_DEFEATED_RIVAL,
     SCRIPT_POKEMONTOWER2F_RIVAL_EXITS, TEXT_POKEMONTOWER2F_RIVAL};
-use poke_core::symbols::pokered_symbols::POKEMONTOWER2F_RIVAL;
+use poke_core::symbols::pokered_map_scripts::POKEMONTOWER2F_RIVAL;
 use poke_core::symbols::pokered_toggles::TOGGLE_POKEMON_TOWER_2F_RIVAL;
 use poke_core::trainer_headers::OPP_ID_OFFSET;
 use serde::{Deserialize, Serialize};
@@ -14,7 +13,7 @@ use crate::audio::data::{sounds, SoundId};
 use crate::input::Joypad;
 use crate::modes::overworld::movement::{NPC_MOVEMENT_DOWN, NPC_MOVEMENT_RIGHT};
 use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_RIGHT};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `PLAYER_DIR_UP` and `PLAYER_DIR_LEFT`.
 const PLAYER_DIR_UP: u8 = 8;
@@ -108,18 +107,18 @@ fn rival_exits(rt: &mut Script) -> Flow {
 }
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
-    use local::PokemonTower2FRivalText as words;
+    
     match text_id {
         TEXT_POKEMONTOWER2F_RIVAL => Some(match rt.check_event(EVENT_BEAT_POKEMON_TOWER_RIVAL) {
-            true => rt.print_text(text_at(words::HowsYourDexText)).ret(),
-            false => rt.print_text(text_at(words::WhatBringsYouHereText)).then(Label::RivalGreeted),
+            true => rt.print_text(text_named("PokemonTower2FRivalText.HowsYourDexText")).ret(),
+            false => rt.print_text(text_named("PokemonTower2FRivalText.WhatBringsYouHereText")).then(Label::RivalGreeted),
         }),
         _ => None,
     }
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
-    use local::PokemonTower2FRivalText as words;
+    
     match label {
         Label::RivalFaced => rt.display_text_id(TEXT_POKEMONTOWER2F_RIVAL).then(Label::RivalSpokeTo),
         Label::RivalSpokeTo => {
@@ -132,7 +131,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
                 Some(PokemonSpecies::Bulbasaur) => 5,
                 _ => 6,
             };
-            rt.start_trainer_battle(OPP_RIVAL2, set, words::DefeatedText);
+            rt.start_trainer_battle(OPP_RIVAL2, set, "PokemonTower2FRivalText.DefeatedText");
             rt.maps().pokemon_tower_2f.cur_script = SCRIPT_POKEMONTOWER2F_DEFEATED_RIVAL;
             Flow::Return
         }

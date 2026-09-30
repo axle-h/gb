@@ -2,10 +2,9 @@
 //! player who likes to fish.
 
 use poke_core::item::ItemId;
-use poke_core::symbols::pokered_local_labels::FuchsiaGoodRodHouseFishingGuruText as guru;
 use poke_core::symbols::pokered_map_scripts::TEXT_FUCHSIAGOODRODHOUSE_FISHING_GURU;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {}
@@ -27,9 +26,9 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         return None;
     }
     if rt.got_good_rod() {
-        return Some(rt.print_text(text_at(guru::HowAreTheFishText)).ret());
+        return Some(rt.print_text(text_named("FuchsiaGoodRodHouseFishingGuruText.HowAreTheFishText")).ret());
     }
-    Some(rt.print_text(text_at(guru::Text)).then(Label::AskedToFish))
+    Some(rt.print_text(text_named("FuchsiaGoodRodHouseFishingGuruText.Text")).then(Label::AskedToFish))
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -37,14 +36,14 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::AskedToFish => rt.yes_no_choice().then(Label::Answered),
         Label::Answered => {
             let words = if !rt.chose_yes() {
-                guru::ThatsSoDisappointingText
+                "FuchsiaGoodRodHouseFishingGuruText.ThatsSoDisappointingText"
             } else if rt.give_item(ItemId::GoodRod, 1) {
                 rt.set_got_good_rod();
-                guru::ReceivedGoodRodText
+                "FuchsiaGoodRodHouseFishingGuruText.ReceivedGoodRodText"
             } else {
-                guru::NoRoomText
+                "FuchsiaGoodRodHouseFishingGuruText.NoRoomText"
             };
-            rt.print_text(text_at(words)).ret()
+            rt.print_text(text_named(words)).ret()
         }
     }
 }

@@ -2,13 +2,12 @@
 //! again with its own coordinates and its own two lines from the guard.
 
 use poke_core::item::ItemId;
-use poke_core::symbols::pokered_local_labels::Route18Gate1FGuardText;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_ROUTE18GATE1F_DEFAULT, SCRIPT_ROUTE18GATE1F_GUARD,
     SCRIPT_ROUTE18GATE1F_PLAYER_MOVING_RIGHT, SCRIPT_ROUTE18GATE1F_PLAYER_MOVING_UP, TEXT_ROUTE18GATE1F_GUARD,
     TEXT_ROUTE18GATE1F_GUARD_EXCUSE_ME};
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 const PAD_CTRL_PAD: Joypad = Joypad::UP.union(Joypad::DOWN).union(Joypad::LEFT).union(Joypad::RIGHT);
 /// `.StopsPlayerCoords`, as (x, y). The row the player is on says how many steps up to the counter.
@@ -79,11 +78,11 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         return None;
     }
     let words = if rt.is_item_in_bag(ItemId::Bicycle) {
-        Route18Gate1FGuardText::CyclingRoadUphillText
+        "Route18Gate1FGuardText.CyclingRoadUphillText"
     } else {
-        Route18Gate1FGuardText::YouNeedABicycleText
+        "Route18Gate1FGuardText.YouNeedABicycleText"
     };
-    Some(rt.print_text(text_at(words)).ret())
+    Some(rt.print_text(text_named(words)).ret())
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {

@@ -55,18 +55,20 @@ COPY Cargo.toml Cargo.lock ./
 COPY gb/Cargo.toml ./gb/
 COPY gb/src/ ./gb/src/
 COPY poke-core/Cargo.toml poke-core/build.rs ./poke-core/
+COPY poke-core/build/ ./poke-core/build/
 COPY poke-core/src/ ./poke-core/src/
 COPY pokered/Cargo.toml ./pokered/
 COPY pokered/src/ ./pokered/src/
-COPY poke-agent/Cargo.toml ./poke-agent/
+COPY poke-agent/Cargo.toml poke-agent/build.rs ./poke-agent/
 COPY poke-agent/src/ ./poke-agent/src/
 COPY poke-agent-web/Cargo.toml ./poke-agent-web/
 COPY poke-agent-web/src/ ./poke-agent-web/src/
 COPY poke-agent-sdl/Cargo.toml ./poke-agent-sdl/
 COPY pokered-sdl/Cargo.toml ./pokered-sdl/
 RUN for crate in poke-agent-sdl pokered-sdl; do mkdir -p $crate/src && echo 'fn main() {}' > $crate/src/main.rs; done
+# `poke-core/build.rs` reads the submodule's source, and `poke-agent` the two files stage 1 assembles.
+COPY vendor/pokered/ ./vendor/pokered/
 COPY --from=rom /pokered/pokered.gbc /pokered/pokered.sym ./vendor/pokered/
-COPY --from=rom /pokered/constants/ ./vendor/pokered/constants/
 COPY --from=web /web/dist ./poke-agent-web/web/dist
 
 # The binary is copied out inside this RUN because `target/` is a cache mount, absent from the image.

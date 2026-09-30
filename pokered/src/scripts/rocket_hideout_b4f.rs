@@ -1,20 +1,18 @@
 //! `RocketHideoutB4F_Script`: the door its two guards unlock, and Giovanni, who leaves the Silph
 //! Scope behind him.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_ROCKET_HIDEOUT_4_TRAINER_0, EVENT_BEAT_ROCKET_HIDEOUT_4_TRAINER_1,
     EVENT_BEAT_ROCKET_HIDEOUT_GIOVANNI, EVENT_ROCKET_DROPPED_LIFT_KEY, EVENT_ROCKET_HIDEOUT_4_DOOR_UNLOCKED};
-use poke_core::symbols::pokered_local_labels::RocketHideoutB4FGiovanniText as giovanni;
-use poke_core::symbols::pokered_local_labels::RocketHideoutB4FRocket3AfterBattleText as rocket3;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_ROCKETHIDEOUTB4F_BEAT_GIOVANNI, SCRIPT_ROCKETHIDEOUTB4F_DEFAULT,
     TEXT_ROCKETHIDEOUTB4F_GIOVANNI, TEXT_ROCKETHIDEOUTB4F_GIOVANNI_HOPE_WE_MEET_AGAIN, TEXT_ROCKETHIDEOUTB4F_ROCKET1,
     TEXT_ROCKETHIDEOUTB4F_ROCKET2, TEXT_ROCKETHIDEOUTB4F_ROCKET3};
-use poke_core::symbols::pokered_symbols as sym;
 use poke_core::symbols::pokered_toggles::{TOGGLE_ROCKET_HIDEOUT_B4F_GIOVANNI, TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_4,
     TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_5};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use crate::input::Joypad;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 const PAD_CTRL_PAD: Joypad = Joypad::UP.union(Joypad::DOWN).union(Joypad::LEFT).union(Joypad::RIGHT);
 
@@ -48,7 +46,7 @@ pub fn script(rt: &mut Script) -> Flow {
     door_callback(rt);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().rocket_hideout_b4f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::RocketHideout4TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::RocketHideout4TrainerHeaders);
     if index == SCRIPT_ROCKETHIDEOUTB4F_BEAT_GIOVANNI {
         return beat_giovanni(rt);
     }
@@ -96,16 +94,16 @@ fn beat_giovanni(rt: &mut Script) -> Flow {
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     if text_id == TEXT_ROCKETHIDEOUTB4F_GIOVANNI {
         return Some(match rt.check_event(EVENT_BEAT_ROCKET_HIDEOUT_GIOVANNI) {
-            true => rt.print_text(text_at(sym::RocketHideoutB4FGiovanniHopeWeMeetAgainText)).ret(),
-            false => rt.print_text(text_at(giovanni::ImpressedYouGotHereText)).then(Label::PreBattle),
+            true => rt.print_text(text_named("RocketHideoutB4FGiovanniHopeWeMeetAgainText")).ret(),
+            false => rt.print_text(text_named("RocketHideoutB4FGiovanniText.ImpressedYouGotHereText")).then(Label::PreBattle),
         });
     }
     let header = match text_id {
-        TEXT_ROCKETHIDEOUTB4F_ROCKET1 => sym::RocketHideout4TrainerHeader0,
-        TEXT_ROCKETHIDEOUTB4F_ROCKET2 => sym::RocketHideout4TrainerHeader1,
+        TEXT_ROCKETHIDEOUTB4F_ROCKET1 => trainers::RocketHideout4TrainerHeader0,
+        TEXT_ROCKETHIDEOUTB4F_ROCKET2 => trainers::RocketHideout4TrainerHeader1,
         TEXT_ROCKETHIDEOUTB4F_ROCKET3 => {
             let after = Some(Label::Rocket3AfterBattle.into());
-            return Some(rt.talk_to_trainer_asm(sym::RocketHideout4TrainerHeader2, None, after).ret());
+            return Some(rt.talk_to_trainer_asm(trainers::RocketHideout4TrainerHeader2, None, after).ret());
         }
         _ => return None,
     };
@@ -131,7 +129,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             rt.set_cur_map_loaded(1);
             set_default_script(rt)
         }
-        Label::Rocket3AfterBattle => rt.print_text(text_at(rocket3::Text)).then(Label::Rocket3DroppedLiftKey),
+        Label::Rocket3AfterBattle => rt.print_text(text_named("RocketHideoutB4FRocket3AfterBattleText.Text")).then(Label::Rocket3DroppedLiftKey),
         Label::Rocket3DroppedLiftKey => {
             if !rt.check_and_set_event(EVENT_ROCKET_DROPPED_LIFT_KEY) {
                 rt.show_object(TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_5);
@@ -139,7 +137,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             Flow::Return
         }
         Label::PreBattle => {
-            rt.save_end_battle_text(giovanni::WhatCannotBeText);
+            rt.save_end_battle_text("RocketHideoutB4FGiovanniText.WhatCannotBeText");
             rt.engage_map_trainer(rt.sprite_index(), 0);
             rt.clear_joy_held();
             rt.maps().rocket_hideout_b4f.cur_script = SCRIPT_ROCKETHIDEOUTB4F_BEAT_GIOVANNI;

@@ -7,27 +7,42 @@ use crate::pokemon::tile::MetaTile;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OverworldAction {
     pub map: Map,
-    pub origin: Point8,
+    /// The square the id names where the tile carries none: a door's or a map edge opening's first
+    /// square in reading order, which holds still while `destination`, the nearest, moves.
+    pub key: Point8,
     pub destination: Point8,
     pub tile: MetaTile,
     pub route: Vec<JoypadButton>,
 }
 
+/// The kinds a map offers one row of, keyed `map:kind`: the square such a row walks to is only the
+/// nearest of many, and moves with every step.
+pub const ONE_PER_MAP: [&str; 4] = ["Grass", "Pace", "PaceOnWater", "Fish"];
+
 impl OverworldAction {
     /// Stable across a re-sort, unique within a map, and plainly the right row when quoted back.
     pub fn id(&self) -> String {
         // A sprite's id has no coordinate, because it has none that holds still.
-        if matches!(self.tile, MetaTile::Sprite(_)) {
-            return format!("{}:{}", self.map, self.tile.id_kind());
+        let kind = self.tile.id_kind();
+        if matches!(self.tile, MetaTile::Sprite(_)) || ONE_PER_MAP.contains(&kind.as_ref()) {
+            return format!("{}:{kind}", self.map);
         }
-        // A boulder goal is keyed on its target, not on where the walk starts.
+        // Every other row is keyed on the thing, never on the square it is approached from, which
+        // `actions()` re-picks whenever anyone moves: the id has to outlive the turn.
         let at = match self.tile {
             MetaTile::BoulderGoal { at, .. } => at,
-            // A one-shove row is keyed on the boulder, which is the half of it that holds still.
             MetaTile::BoulderPush { boulder, .. } => boulder,
-            _ => self.destination,
+            MetaTile::Cut { at } => at,
+            MetaTile::Switch { ordinal, .. } => crate::pokemon::tile_map::hidden_objects_for(self.map)
+                .get(ordinal as usize - 1).map_or(self.key, |site| site.at),
+            _ => self.key,
         };
-        format!("{}:{},{}:{}", self.map, at.x, at.y, self.tile.id_kind())
+        format!("{}:{},{}:{kind}", self.map, at.x, at.y)
+    }
+
+    /// Whether `id` names a person or an object: the only `map:name` id that is not [`ONE_PER_MAP`].
+    pub fn names_a_sprite(id: &str) -> bool {
+        id.matches(':').count() == 1 && id.rsplit(':').next().is_some_and(|kind| !ONE_PER_MAP.contains(&kind))
     }
 }
 
@@ -67,8 +82,7 @@ mod tests {
     use strum::IntoEnumIterator;
 
     fn row(tile: MetaTile, destination: Point8) -> OverworldAction {
-        OverworldAction { map: Map::ViridianCity, origin: Point8 { x: 0, y: 0 },
-                          destination, tile, route: vec![] }
+        OverworldAction { map: Map::ViridianCity, key: destination, destination, tile, route: vec![] }
     }
 
     /// The fact [`OverworldAction::id`] keys a sprite on `map + name` rests on.
@@ -96,6 +110,16 @@ mod tests {
             .collect();
         assert_eq!(ids, vec!["ViridianCity:OldMan".to_string(); 5],
                    "the four squares an NPC can be faced from are one decision, not four");
+    }
+
+    /// A switch is pressed from whichever side is nearest and free, and keyed on the object.
+    #[test]
+    fn a_switch_row_is_one_id_whichever_side_it_is_pressed_from() {
+        let machine = MetaTile::Switch { object: crate::pokemon::tile::HiddenObject::VendingMachine, ordinal: 1 };
+        let ids: Vec<String> = [(10, 2), (9, 1)].into_iter()
+            .map(|(x, y)| OverworldAction { map: Map::CeladonMartRoof, ..row(machine, Point8 { x, y }) }.id())
+            .collect();
+        assert_eq!(ids, vec!["CeladonMartRoof:10,1:VendingMachine1".to_string(); 2]);
     }
 
     /// Every other row keeps its square: two warps on one map are two decisions.

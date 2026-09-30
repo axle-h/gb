@@ -1,8 +1,8 @@
 use poke_core::font::FONT_BYTES;
-use poke_core::map_gfx::tileset_sheet;
+use poke_core::gfx;
+use poke_core::map_gfx::{tileset_sheet, TILESET_TILES};
 use poke_core::map_header::TileSetId;
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
-use poke_core::symbols::pokered_symbols;
+use poke_core::rom_gfx::TILE_BYTES;
 use serde::{Deserialize, Serialize};
 
 /// Tile indices of `vChars0`, `vChars1` (`vFont`) and `vChars2` (`vTileset`).
@@ -63,29 +63,27 @@ impl TileData {
 
     /// `LoadTextBoxTilePatterns`.
     pub fn load_text_box_tiles(&mut self) {
-        let start = pokered_symbols::TextBoxGraphics;
-        let len = (pokered_symbols::TextBoxGraphicsEnd.address - start.address) as usize;
-        self.load(V_CHARS2 + 0x60, &rom_slice(start)[..len]);
+        self.load(V_CHARS2 + 0x60, gfx::font::FONT_EXTRA);
     }
 
     /// `LoadHpBarAndStatusTilePatterns`, which lands where the text box tiles do not overlap it.
     pub fn load_hp_bar_and_status_tiles(&mut self) {
-        let start = pokered_symbols::HpBarAndStatusGraphics;
-        let len = (pokered_symbols::HpBarAndStatusGraphicsEnd.address - start.address) as usize;
-        self.load(V_CHARS2 + 0x62, &rom_slice(start)[..len]);
+        self.load(V_CHARS2 + 0x62, gfx::font::FONT_BATTLE_EXTRA);
     }
 
     /// `LoadEDTile`. It lands on the tile `¥` is drawn from, so the naming screen is the one place
     /// a yen sign would come out reading `ED`.
     pub fn load_ed_tile(&mut self) {
-        let start = pokered_symbols::ED_Tile;
-        let len = (pokered_symbols::ED_TileEnd.address - start.address) as usize;
-        self.load_1bpp(V_CHARS1 + 0x70, &rom_slice(start)[..len]);
+        self.load_1bpp(V_CHARS1 + 0x70, gfx::font::ED);
     }
 
-    /// `LoadTilesetTilePatternData`.
+    /// `LoadTilesetTilePatternData`. The cartridge copies `TILESET_TILES` whatever the sheet's
+    /// length, so past a short one it copies its blockset and what follows; no block draws those tiles,
+    /// and here they are blank.
     pub fn load_tileset(&mut self, tileset: TileSetId) {
-        self.load(V_CHARS2, tileset_sheet(tileset));
+        let sheet = tileset_sheet(tileset);
+        self.load(V_CHARS2, sheet);
+        self.tiles[V_CHARS2 + sheet.len() / TILE_BYTES..V_CHARS2 + TILESET_TILES].fill([0; TILE_BYTES]);
     }
 
     /// `UpdateMovingBgTiles`, from VBlank: the water tile shifts every 20 frames and, with
@@ -102,11 +100,11 @@ impl TileData {
         if animation.counter1 == 21 {
             animation.counter1 = 0;
             let frame = match animation.counter2 & 3 {
-                0 | 1 => pokered_symbols::FlowerTile1,
-                2 => pokered_symbols::FlowerTile2,
-                _ => pokered_symbols::FlowerTile3,
+                0 | 1 => gfx::tilesets::flower::FLOWER1,
+                2 => gfx::tilesets::flower::FLOWER2,
+                _ => gfx::tilesets::flower::FLOWER3,
             };
-            self.tiles[V_CHARS2 + 0x03].copy_from_slice(&rom_slice(frame)[..TILE_BYTES]);
+            self.tiles[V_CHARS2 + 0x03] = *frame;
             return;
         }
         animation.counter2 = (animation.counter2 + 1) & 7;

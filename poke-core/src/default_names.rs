@@ -1,31 +1,25 @@
 //! `data/player/names_list.asm`: the names Oak offers for the player and the rival, as
 //! `GetDefaultName` reads them, with `NEW NAME` at index 0.
 
-use crate::rom_gfx::rom_slice;
-use crate::symbols::{pokered_symbols, DmgPointer};
-
-/// `NUM_PLAYER_NAMES`, and the `NEW NAME` row before them.
-const ENTRIES: usize = 3 + 1;
-const TERMINATOR: u8 = 0x50;
+use crate::charmap::encode;
+use crate::tables::{DEFAULT_NAMES_PLAYER_LIST, DEFAULT_NAMES_RIVAL_LIST};
 
 /// `DefaultNamesPlayerList`: `NEW NAME` and the three names, charmap bytes, unterminated.
 pub fn player_names() -> Vec<Vec<u8>> {
-    names(pokered_symbols::DefaultNamesPlayerList)
+    names(&DEFAULT_NAMES_PLAYER_LIST)
 }
 
 /// `DefaultNamesRivalList`.
 pub fn rival_names() -> Vec<Vec<u8>> {
-    names(pokered_symbols::DefaultNamesRivalList)
+    names(&DEFAULT_NAMES_RIVAL_LIST)
 }
 
-/// `GetDefaultName`'s walk: each entry runs to its `@`.
-fn names(list: DmgPointer) -> Vec<Vec<u8>> {
-    rom_slice(list).split(|&byte| byte == TERMINATOR).take(ENTRIES).map(<[u8]>::to_vec).collect()
+fn names(list: &[&str]) -> Vec<Vec<u8>> {
+    list.iter().map(|name| encode(name).expect("a default name is in the charmap")).collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::charmap::encode;
     use super::*;
 
     fn words(names: &[&str]) -> Vec<Vec<u8>> {

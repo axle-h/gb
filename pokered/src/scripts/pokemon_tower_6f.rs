@@ -2,12 +2,12 @@
 //! Marowak the Silph Scope makes visible. Losing to it or running from it shoves the player back off
 //! its square rather than ending the encounter.
 
+use poke_core::tables::trainers;
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_events::EVENT_BEAT_GHOST_MAROWAK;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_POKEMONTOWER6F_DEFAULT, SCRIPT_POKEMONTOWER6F_MAROWAK_BATTLE,
     SCRIPT_POKEMONTOWER6F_PLAYER_MOVING, TEXT_POKEMONTOWER6F_BEGONE, TEXT_POKEMONTOWER6F_CHANNELER1,
     TEXT_POKEMONTOWER6F_CHANNELER2, TEXT_POKEMONTOWER6F_CHANNELER3, TEXT_POKEMONTOWER6F_MAROWAK_DEPARTED};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use super::{Flow, Script};
@@ -38,7 +38,7 @@ pub enum Label {
 pub fn script(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().pokemon_tower_6f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::PokemonTower6TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::PokemonTower6TrainerHeaders);
     match index {
         SCRIPT_POKEMONTOWER6F_DEFAULT => default_script(rt),
         SCRIPT_POKEMONTOWER6F_PLAYER_MOVING => player_moving(rt),
@@ -93,9 +93,9 @@ fn player_moving(rt: &mut Script) -> Flow {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
-        TEXT_POKEMONTOWER6F_CHANNELER1 => sym::PokemonTower6TrainerHeader0,
-        TEXT_POKEMONTOWER6F_CHANNELER2 => sym::PokemonTower6TrainerHeader1,
-        TEXT_POKEMONTOWER6F_CHANNELER3 => sym::PokemonTower6TrainerHeader2,
+        TEXT_POKEMONTOWER6F_CHANNELER1 => trainers::PokemonTower6TrainerHeader0,
+        TEXT_POKEMONTOWER6F_CHANNELER2 => trainers::PokemonTower6TrainerHeader1,
+        TEXT_POKEMONTOWER6F_CHANNELER3 => trainers::PokemonTower6TrainerHeader2,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())

@@ -6,7 +6,7 @@ use poke_core::map_gfx::tileset_entry;
 #[cfg(feature = "slow-tests")]
 use poke_core::map_header::MapHeader;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::pokered_local_labels::TryDoWildEncounter;
+use crate::pokemon::symbols::pokered_local_labels::TryDoWildEncounter;
 use pokered::systems::overworld::encounters::{Encounter, EncounterInput, WildMons};
 use crate::pokemon::symbols::pokered_symbols as sym;
 use super::Oracle;
@@ -65,12 +65,12 @@ fn inputs() -> Vec<(EncounterInput, u8, u8)> {
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
     let mut rng = StdRng::seed_from_u64(0xE7C0);
-    let maps: Vec<Map> = Map::all().filter(|map| map.header_pointer().is_some()).collect();
+    let maps: Vec<Map> = Map::all().filter(|map| map.has_header()).collect();
     let wild: Vec<Map> = maps.iter().copied().filter(|&map| poke_core::wild::encounters(map).is_some()).collect();
     // The tables as a walk through the maps leaves them, stale halves and all.
     let mut tables = WildMons::default();
-    tables.load(Map::Route1);
-    tables.load(Map::Route21);
+    tables.load(Map::Route1, true);
+    tables.load(Map::Route21, true);
     (0..2000).map(|_| {
         let from = if rng.random_bool(0.8) { &wild } else { &maps };
         let map = from[rng.random_range(0..from.len())];
@@ -95,7 +95,7 @@ fn inputs() -> Vec<(EncounterInput, u8, u8)> {
             // Not 1: the last step of a repel prints its text, which waits for frames.
             repel_steps: [0, 0, 0, 0, 0, 2, 50][rng.random_range(0..7)],
             lead_level: rng.random_range(1..=60),
-            wild: { tables.load(map); tables },
+            wild: { tables.load(map, true); tables },
         };
         // Half the time low enough to beat a map's rate.
         let add = if rng.random_bool(0.7) { rng.random_range(0..16) } else { rng.random() };
@@ -109,7 +109,7 @@ fn a_repel_holds_off_a_mon_below_the_lead_s_level() {
     let grass = tileset_entry(poke_core::map_header::TileSetId::Overworld).grass_tile;
     let input = EncounterInput {
         map: Map::Route1, tileset: poke_core::map_header::TileSetId::Overworld, bottom_left: grass, bottom_right: grass,
-        x: 10, y: 10, width: 10, height: 18, repel_steps: 5, lead_level: 50, wild: { let mut wild = WildMons::default(); wild.load(Map::Route1); wild },
+        x: 10, y: 10, width: 10, height: 18, repel_steps: 5, lead_level: 50, wild: { let mut wild = WildMons::default(); wild.load(Map::Route1, true); wild },
     };
     let (encounter, rng) = try_do_wild_encounter(&mut oracle, &input, 0, 0);
     assert_eq!((encounter.mon, encounter.repel_steps, rng.len()), (None, 4, 2));

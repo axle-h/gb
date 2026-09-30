@@ -157,15 +157,9 @@ pub enum PokemonSpecies {
 }
 
 impl PokemonSpecies {
-    /// `GetMonName`: charmap bytes, unterminated. A name is ten bytes padded with `@`, so a
-    /// ten-letter one has no terminator of its own.
+    /// `GetMonName`: charmap bytes, unterminated.
     pub fn name(self) -> Vec<u8> {
-        use crate::rom_gfx::rom_slice;
-        use crate::symbols::pokered_symbols;
-        const LENGTH: usize = 10;
-        const TERMINATOR: u8 = 0x50;
-        let entry = &rom_slice(pokered_symbols::MonsterNames)[(self as usize - 1) * LENGTH..][..LENGTH];
-        entry.iter().copied().take_while(|&b| b != TERMINATOR).collect()
+        crate::charmap::encode(crate::tables::MONSTER_NAMES[self as usize - 1]).expect("a species name is in the charmap")
     }
 
     pub fn metadata(&self) -> &'static PokemonMetadata {

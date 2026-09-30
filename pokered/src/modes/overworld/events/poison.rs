@@ -2,7 +2,6 @@
 
 use poke_core::symbols::pokered_events::EVENT_SAFARI_GAME_OVER;
 use poke_core::symbols::pokered_map_scripts::SCRIPT_SAFARIZONEGATE_LEAVING_SAFARI;
-use poke_core::symbols::{pokered_symbols as sym, DmgBank};
 use poke_core::text_script::TextBuffer;
 use crate::audio::data::{sounds, AudioBank, Sound, SoundId};
 use crate::input::Joypad;
@@ -73,8 +72,7 @@ pub(super) fn safari_zone_game_over(s: &mut Script) -> Flow {
     s.enable_auto_text_box_drawing();
     s.ctx.audio.fade_out(0);
     s.play_sound(SoundId::STOP_ALL_MUSIC);
-    let DmgBank::ROM { bank } = sym::SFX_Safari_Zone_PA.bank else { unreachable!("a sound is in ROM") };
-    let bank = AudioBank::from_rom_bank(bank).expect("an audio bank");
+    let bank = AudioBank::holding("SFX_Safari_Zone_PA");
     s.play_music(Sound { bank, id: sounds::SFX_SAFARI_ZONE_PA });
     Then::call(Routine::DisplayTextId(TEXT_SAFARI_GAME_OVER)).then(Label::SafariGameOverDone)
 }
@@ -90,11 +88,11 @@ pub(super) fn safari_game_over_done(s: &mut Script) -> Flow {
 /// `SafariGameOverText`.
 pub(super) fn safari_game_over_text(s: &mut Script) -> Flow {
     if s.ctx.world.safari_balls == 0 {
-        return print(sym::GameOverText).ret();
+        return print("GameOverText").ret();
     }
-    print(sym::TimesUpText).then(Label::SafariGameOverTextDone)
+    print("TimesUpText").then(Label::SafariGameOverTextDone)
 }
 
 pub(super) fn safari_game_over_text_done(_s: &mut Script) -> Flow {
-    print(sym::GameOverText).ret()
+    print("GameOverText").ret()
 }

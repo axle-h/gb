@@ -4,7 +4,6 @@
 use poke_core::item::ItemId;
 use poke_core::move_name::PokemonMoveName;
 use poke_core::moves::MoveData;
-use poke_core::symbols::pokered_symbols as sym;
 use poke_core::trainers::{ai_pointer, move_choices};
 use serde::{Deserialize, Serialize};
 use crate::party::NUM_MOVES;
@@ -42,7 +41,7 @@ pub fn ai_enemy_trainer_choose_moves(battle: &mut Battle) -> [u8; NUM_MOVES] {
     if layers.is_empty() {
         return moves;
     }
-    for layer in layers {
+    for &layer in layers {
         match layer {
             1 => ai_move_choice_modification_1(battle, &moves, &mut scores),
             2 => ai_move_choice_modification_2(battle, &moves, &mut scores),
@@ -197,17 +196,17 @@ enum AiRoutine {
 }
 
 impl AiRoutine {
-    fn of(address: u16) -> AiRoutine {
-        [
-            (sym::GenericAI, AiRoutine::Generic), (sym::JugglerAI, AiRoutine::Juggler),
-            (sym::BlackbeltAI, AiRoutine::Blackbelt), (sym::GiovanniAI, AiRoutine::Giovanni),
-            (sym::CooltrainerMAI, AiRoutine::CooltrainerM), (sym::CooltrainerFAI, AiRoutine::CooltrainerF),
-            (sym::BrockAI, AiRoutine::Brock), (sym::MistyAI, AiRoutine::Misty), (sym::LtSurgeAI, AiRoutine::LtSurge),
-            (sym::ErikaAI, AiRoutine::Erika), (sym::KogaAI, AiRoutine::Koga), (sym::BlaineAI, AiRoutine::Blaine),
-            (sym::SabrinaAI, AiRoutine::Sabrina), (sym::Rival2AI, AiRoutine::Rival2), (sym::Rival3AI, AiRoutine::Rival3),
-            (sym::LoreleiAI, AiRoutine::Lorelei), (sym::BrunoAI, AiRoutine::Bruno), (sym::AgathaAI, AiRoutine::Agatha),
-            (sym::LanceAI, AiRoutine::Lance),
-        ].into_iter().find(|(label, _)| label.address == address).expect("a trainer AI routine").1
+    fn of(label: &str) -> AiRoutine {
+        match label {
+            "GenericAI" => AiRoutine::Generic, "JugglerAI" => AiRoutine::Juggler, "BlackbeltAI" => AiRoutine::Blackbelt,
+            "GiovanniAI" => AiRoutine::Giovanni, "CooltrainerMAI" => AiRoutine::CooltrainerM,
+            "CooltrainerFAI" => AiRoutine::CooltrainerF, "BrockAI" => AiRoutine::Brock, "MistyAI" => AiRoutine::Misty,
+            "LtSurgeAI" => AiRoutine::LtSurge, "ErikaAI" => AiRoutine::Erika, "KogaAI" => AiRoutine::Koga,
+            "BlaineAI" => AiRoutine::Blaine, "SabrinaAI" => AiRoutine::Sabrina, "Rival2AI" => AiRoutine::Rival2,
+            "Rival3AI" => AiRoutine::Rival3, "LoreleiAI" => AiRoutine::Lorelei, "BrunoAI" => AiRoutine::Bruno,
+            "AgathaAI" => AiRoutine::Agatha, "LanceAI" => AiRoutine::Lance,
+            _ => panic!("trainer AI routine {label}"),
+        }
     }
 }
 
@@ -225,7 +224,7 @@ pub fn trainer_ai(battle: &mut Battle, badges: u8, rng: &mut impl Rng) -> (Optio
     if battle.kind == BattleKind::Wild {
         return (None, vec![]);
     }
-    let (count, address) = ai_pointer(battle.trainer_class);
+    let (count, routine) = ai_pointer(battle.trainer_class);
     if battle.ai_count == 0 {
         return (None, vec![]);
     }
@@ -236,7 +235,7 @@ pub fn trainer_ai(battle: &mut Battle, badges: u8, rng: &mut impl Rng) -> (Optio
     let below = |fraction: u8, battle: &Battle| ai_check_if_hp_below_fraction(battle, fraction);
     use AiRoutine::*;
     let item = |item| Some(Use::Item(item));
-    let choice = match AiRoutine::of(address) {
+    let choice = match AiRoutine::of(routine) {
         Generic => None,
         Juggler => (random < PERCENT_25_PLUS_1).then_some(Use::Switch),
         Blackbelt => (random < PERCENT_13_LESS_1).then_some(Use::Item(ItemId::XAttack)),
@@ -250,7 +249,9 @@ pub fn trainer_ai(battle: &mut Battle, badges: u8, rng: &mut impl Rng) -> (Optio
         Misty | Bruno => (random < PERCENT_25_PLUS_1).then_some(Use::Item(ItemId::XDefend)),
         LtSurge => (random < PERCENT_25_PLUS_1).then_some(Use::Item(ItemId::XSpeed)),
         Erika => (random < PERCENT_50_PLUS_1 && below(10, battle)).then_some(Use::Item(ItemId::SuperPotion)),
-        Blaine => (random < PERCENT_25_PLUS_1).then_some(Use::Item(ItemId::SuperPotion)),
+        // The cartridge's Blaine never tests his HP, so he heals a mon at full health.
+        Blaine => (random < PERCENT_25_PLUS_1 && (battle.cartridge_bugs || below(10, battle)))
+            .then_some(Use::Item(ItemId::SuperPotion)),
         Sabrina => (random < PERCENT_25_PLUS_1 && below(10, battle)).then_some(Use::Item(ItemId::HyperPotion)),
         Rival2 => (random < PERCENT_13_LESS_1 && below(5, battle)).then_some(Use::Item(ItemId::Potion)),
         Rival3 => (random < PERCENT_13_LESS_1 && below(5, battle)).then_some(Use::Item(ItemId::FullRestore)),
@@ -398,6 +399,17 @@ mod tests {
             let mut arena = against(AiRoutine::CooltrainerF);
             arena.battle.enemy.mon.hp = 1;
             assert_eq!(trainer_ai(&mut arena.battle, 0, &mut GameRng::tape(vec![random])).0, action, "{random}");
+        }
+    }
+
+    #[test]
+    fn blaine_heals_only_a_mon_below_a_tenth_of_its_hp() {
+        for (cartridge_bugs, hp, action) in [(false, 999, None), (false, 1, Some(AiAction::UseItem(ItemId::SuperPotion))),
+                                             (true, 999, Some(AiAction::UseItem(ItemId::SuperPotion)))] {
+            let mut arena = against(AiRoutine::Blaine);
+            arena.battle.cartridge_bugs = cartridge_bugs;
+            arena.battle.enemy.mon.hp = hp.min(arena.battle.enemy.mon.stats[0]);
+            assert_eq!(trainer_ai(&mut arena.battle, 0, &mut GameRng::tape(vec![0])).0, action, "{cartridge_bugs} {hp}");
         }
     }
 

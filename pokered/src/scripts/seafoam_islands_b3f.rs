@@ -4,10 +4,9 @@
 use poke_core::map::Map;
 use poke_core::symbols::pokered_events::{EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE, EVENT_SEAFOAM3_BOULDER2_DOWN_HOLE,
     EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE, EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE};
-use poke_core::symbols::pokered_local_labels::SeafoamIslandsB3FMoveObjectScript;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_SEAFOAMISLANDSB3F_DEFAULT, SCRIPT_SEAFOAMISLANDSB3F_MOVE_OBJECT,
     SCRIPT_SEAFOAMISLANDSB3F_OBJECT_MOVING1, SCRIPT_SEAFOAMISLANDSB3F_OBJECT_MOVING2};
-use poke_core::symbols::pokered_symbols::RLEList_ForcedSurfingStrongCurrentNearSteps;
+use poke_core::tables::rle_lists;
 use poke_core::symbols::pokered_toggles::{TOGGLE_SEAFOAM_ISLANDS_B3F_BOULDER_1, TOGGLE_SEAFOAM_ISLANDS_B3F_BOULDER_2,
     TOGGLE_SEAFOAM_ISLANDS_B4F_BOULDER_1, TOGGLE_SEAFOAM_ISLANDS_B4F_BOULDER_2};
 use serde::{Deserialize, Serialize};
@@ -62,7 +61,7 @@ fn default_script(rt: &mut Script) -> Flow {
     if boulders_down(rt) || (rt.x(), rt.y()) != NEAR_STEPS {
         return Flow::Return;
     }
-    rt.simulate_joypad_rle(RLEList_ForcedSurfingStrongCurrentNearSteps);
+    rt.simulate_joypad_rle(rle_lists::SEAFOAM_ISLANDS_B3F_NEAR_STEPS);
     rt.set_forced_warp(true);
     rt.maps().seafoam_islands_b3f.cur_script = SCRIPT_SEAFOAMISLANDSB3F_OBJECT_MOVING1;
     Flow::Return
@@ -76,8 +75,8 @@ fn move_object_script(rt: &mut Script) -> Flow {
         return Flow::Return;
     }
     let list = match rt.x() {
-        18 => SeafoamIslandsB3FMoveObjectScript::RLEList_StrongCurrentNearLeftBoulder,
-        19 => SeafoamIslandsB3FMoveObjectScript::RLEList_StrongCurrentNearRightBoulder,
+        18 => rle_lists::SEAFOAM_ISLANDS_B3F_NEAR_LEFT_BOULDER,
+        19 => rle_lists::SEAFOAM_ISLANDS_B3F_NEAR_RIGHT_BOULDER,
         _ => {
             rt.maps().seafoam_islands_b3f.cur_script = SCRIPT_SEAFOAMISLANDSB3F_DEFAULT;
             return Flow::Return;

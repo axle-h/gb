@@ -1873,7 +1873,9 @@ pub fn overworld_menu(state: &GameState, arrival: Option<crate::pokemon::world_g
     let way_back = |action: &OverworldAction| -> bool {
         let Some(arrival) = arrival else { return false };
         match action.tile {
-            MetaTile::Warp { .. } => action.destination == arrival.at,
+            // Either half of a two-square door: the row is the door, whichever half is nearer.
+            MetaTile::Warp { .. } => action.destination == arrival.at
+                || state.map.tile_at_checked(arrival.at) == Some(action.tile),
             MetaTile::Connection { to_map, .. } | MetaTile::ConnectionWater(to_map) => Some(to_map) == arrival.from,
             _ => false,
         }
@@ -2191,7 +2193,7 @@ mod tests {
         let (dx, dy) = crate::pokemon::map_header::strip_offset(Map::Route13);
         for crossing in reachable {
             let id = overworld_id(&state, &OverworldAction {
-                map: state.map.map, origin: state.map.player_position, destination: crossing.at,
+                map: state.map.map, key: crossing.key, destination: crossing.at,
                 tile: MetaTile::Connection { to_map: Map::Route13, to_position: crossing.to_position },
                 route: vec![],
             });
@@ -2209,7 +2211,7 @@ mod tests {
         let pocket = state.map.crossings(Map::Route13).into_iter()
             .find(|crossing| !crossing.reachable).expect("the pocket rows are not reachable from the road");
         let id = overworld_id(&state, &OverworldAction {
-            map: state.map.map, origin: state.map.player_position, destination: pocket.at,
+            map: state.map.map, key: pocket.key, destination: pocket.at,
             tile: MetaTile::Connection { to_map: Map::Route13, to_position: pocket.to_position },
             route: vec![],
         });
@@ -2326,12 +2328,15 @@ mod tests {
         let door = poke_core::geometry::Point8 { x: 5, y: 11 };
         let marked = overworld_menu(&state, Some(Arrival { map: state.map.map, at: door, from: Some(Map::PalletTown) }));
         let row = |menu: &[MenuItem], id: &str| menu.iter().find(|m| m.id == id).expect(id).description.clone();
-        assert_eq!(row(&marked, "OaksLab:5,11:Warp"), "take the warp to PalletTown, arriving at (12, 12); the way you came in");
+        assert_eq!(row(&marked, "OaksLab:4,11:Warp"), "take the warp to PalletTown, arriving at (12, 12); the way you came in");
         assert_eq!(marked.iter().filter(|m| m.description.contains("came in")).count(), 1, "{marked:#?}");
+        // Through the other half of the same door.
+        let other = overworld_menu(&state, Some(Arrival { map: state.map.map, at: poke_core::geometry::Point8 { x: 4, y: 11 }, from: Some(Map::PalletTown) }));
+        assert_eq!(row(&other, "OaksLab:4,11:Warp"), row(&marked, "OaksLab:4,11:Warp"));
 
         // An arrival on some other map says nothing about this one.
         let elsewhere = overworld_menu(&state, Some(Arrival { map: Map::PalletTown, at: door, from: None }));
-        assert_eq!(row(&elsewhere, "OaksLab:5,11:Warp"), "take the warp to PalletTown, arriving at (12, 12)");
+        assert_eq!(row(&elsewhere, "OaksLab:4,11:Warp"), "take the warp to PalletTown, arriving at (12, 12)");
     }
 
     /// A row says what choosing it does, as a verb phrase; the id is a key, not a description.
@@ -2342,7 +2347,7 @@ mod tests {
         let rows: Vec<String> =
             menu.iter().map(|item| format!("- `{}` — {}", item.id, item.description)).collect();
 
-        assert!(rows.contains(&"- `OaksLab:5,11:Warp` — take the warp to PalletTown, arriving at (12, 12)".to_string()), "{rows:#?}");
+        assert!(rows.contains(&"- `OaksLab:4,11:Warp` — take the warp to PalletTown, arriving at (12, 12)".to_string()), "{rows:#?}");
         // A person is named by the id and by the row: the name is what the verb needs.
         assert!(rows.contains(&"- `OaksLab:Pokedex1` — read the Pokedex 1".to_string()), "{rows:#?}");
         assert!(!rows.iter().any(|row| row.contains("Sprite")),
@@ -2364,7 +2369,7 @@ mod tests {
         let lab_door = crate::pokemon::observe::map_view(&pallet).warps.into_iter()
             .find(|w| w.to_map == format!("{}", Map::OaksLab)).expect("Pallet Town has a door into the lab");
         let menu = overworld_menu(&fixture_state(), None);
-        let out = menu.iter().find(|m| m.id == "OaksLab:5,11:Warp").expect("the lab's door").description.clone();
+        let out = menu.iter().find(|m| m.id == "OaksLab:4,11:Warp").expect("the lab's door").description.clone();
         assert_eq!(out, format!("take the warp to PalletTown, arriving at ({}, {})", lab_door.at.x, lab_door.at.y));
         assert_eq!(crate::pokemon::map_header::strip_offset(Map::MtMoon1F), (0, 0));
     }
@@ -2939,11 +2944,11 @@ mod tests {
 
         // Each id is checked, not merely the count: a stale id is not let through by being second.
         let CallKind::Rejected(complaint) = chain(
-            r#"{"id":"PalletTown:5,6:Warp","then":["OaksLab:5,11:Warp"],"summary":"a stale id"}"#,
+            r#"{"id":"PalletTown:5,6:Warp","then":["OaksLab:4,11:Warp"],"summary":"a stale id"}"#,
         ) else {
             panic!("a chained id that was never offered is refused");
         };
-        assert!(complaint.contains("OaksLab:5,11:Warp"), "it names the one that failed: {complaint}");
+        assert!(complaint.contains("OaksLab:4,11:Warp"), "it names the one that failed: {complaint}");
 
         let CallKind::Rejected(complaint) = chain(&format!(
             r#"{{"id":"PalletTown:5,6:Warp","then":[{}],"summary":"far too many"}}"#,
@@ -3559,8 +3564,8 @@ mod tests {
         // `/` is `$F3` and a space `$7F`, so the check asks the charmap, not "is it alphanumeric".
         assert!(matches!(named("MT/MOON"), CallKind::Terminal(Terminal::SetNickname { name: Some(_) })));
         assert!(
-            matches!(named("Poké"), CallKind::Rejected(_)),
-            "an accented letter has no byte in this charmap and must not reach the buffer",
+            matches!(named("Pokè"), CallKind::Rejected(_)),
+            "a letter with no byte in the charmap must not reach the buffer",
         );
         assert!(matches!(named("🔥"), CallKind::Rejected(_)));
         // An omitted or blank name is the decline, as the naming screen reads an empty buffer.

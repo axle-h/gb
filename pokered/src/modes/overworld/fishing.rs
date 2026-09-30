@@ -10,10 +10,10 @@
 use poke_core::item::ItemId;
 use poke_core::map::Map;
 use poke_core::map_header::MapHeader;
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
+use poke_core::rom_gfx::TILE_BYTES;
 use poke_core::species::PokemonSpecies;
 use poke_core::sprite::SpriteFacing;
-use poke_core::symbols::{pokered_symbols, DmgBank, DmgPointer};
+use poke_core::tables::{GOOD_ROD_MONS, SUPER_ROD_DATA};
 use crate::audio::data::sounds;
 use crate::gfx::layers::Object;
 use crate::gfx::tiles::V_CHARS0;
@@ -22,7 +22,7 @@ use crate::mode::{Ctx, Outcome};
 use crate::rng::Rng;
 use crate::systems::overworld::bike_surf::is_next_tile_shore_or_water;
 use crate::systems::overworld::location::SURFING;
-use super::script::{text_at, Block, Flow, Routine, Then};
+use super::script::{text_named, Block, Flow, Routine, Then};
 use super::Overworld;
 
 /// `wRodResponse`.
@@ -58,9 +58,9 @@ pub(super) fn rod_chosen(outcome: Option<Outcome>) -> Option<ItemId> {
     ItemId::from_repr(id).filter(|rod| matches!(rod, ItemId::OldRod | ItemId::GoodRod | ItemId::SuperRod))
 }
 
-fn mon(entry: &[u8]) -> RodResponse {
-    let species = PokemonSpecies::from_repr(entry[1]).expect("a fishing entry names a species");
-    RodResponse::Bite { species, level: entry[0] }
+fn mon((level, species): (u8, u8)) -> RodResponse {
+    let species = PokemonSpecies::from_repr(species).expect("a fishing entry names a species");
+    RodResponse::Bite { species, level }
 }
 
 /// The rod's own half: a Magikarp every time, `GoodRodMons`, or `ReadSuperRodData`, with the
@@ -82,8 +82,8 @@ fn good_rod(rng: &mut impl Rng) -> RodResponse {
             return RodResponse::NoBite;
         }
         let pick = (a >> 1) & 0b11;
-        if pick < 2 {
-            return mon(&rom_slice(pokered_symbols::GoodRodMons + 2 * pick as u16)[..2]);
+        if let Some(&entry) = GOOD_ROD_MONS.get(pick as usize) {
+            return mon(entry);
         }
     }
 }
@@ -91,21 +91,17 @@ fn good_rod(rng: &mut impl Rng) -> RodResponse {
 /// `ReadSuperRodData`: the map's group from `SuperRodData`, then half the time no bite and otherwise
 /// a mon, drawing again when the two bits pass the group's end.
 fn read_super_rod_data(map: Map, rng: &mut impl Rng) -> RodResponse {
-    let index = rom_slice(pokered_symbols::SuperRodData);
-    let Some(row) = index.chunks(3).take_while(|row| row[0] != 0xFF).find(|row| row[0] == map as u8) else {
+    let Some(&(_, group)) = SUPER_ROD_DATA.iter().find(|&&(at, _)| at == map as u8) else {
         return RodResponse::NoFish;
     };
-    let group = rom_slice(DmgPointer { bank: pokered_symbols::SuperRodData.bank, address: u16::from_le_bytes([row[1], row[2]]) });
-    let count = group[0];
     loop {
         let a = rng.random();
         if a & 1 != 0 {
             return RodResponse::NoBite;
         }
         let pick = (a >> 1) & 0b11;
-        if pick < count {
-            let at = 1 + 2 * pick as usize;
-            return mon(&group[at..at + 2]);
+        if let Some(&entry) = group.get(pick as usize) {
+            return mon(entry);
         }
     }
 }
@@ -124,8 +120,6 @@ const OAM_HIDDEN_Y: u8 = 160;
 const ROD_UP_Y: u8 = 0x44;
 /// `EXCLAMATION_BUBBLE`.
 const EXCLAMATION_BUBBLE: u8 = 0;
-/// `vNPCSprites`, which `FishingAnim` loads the player's standing frames and the rod into.
-const V_NPC_SPRITES: u16 = 0x8000;
 
 impl Overworld {
     /// `FishingInit` once the refusals have passed: `ItemUseReloadOverworldData`, then the rod's
@@ -133,7 +127,7 @@ impl Overworld {
     pub(super) fn fishing_init(&mut self, ctx: &mut Ctx, rod: ItemId) -> Flow {
         ctx.screen.ui.uncover(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y);
         self.update_sprites(ctx);
-        Then::block(Block::PrintText(text_at(pokered_symbols::ItemUseText00))).then(Routine::FishingInitSound(rod))
+        Then::block(Block::PrintText(text_named("ItemUseText00"))).then(Routine::FishingInitSound(rod))
     }
 
     /// `FishingInit`'s sound and its wait, then `RodResponse`.
@@ -157,20 +151,17 @@ impl Overworld {
     pub(super) fn fishing_cast(&mut self, ctx: &mut Ctx, response: u8) -> Flow {
         // `BIT_LEDGE_OR_FISHING`, which is what `jumping` is.
         self.jumping = true;
-        let vram = |address: u16| V_CHARS0 + (address - V_NPC_SPRITES) as usize / TILE_BYTES;
-        ctx.screen.tiles.load(V_CHARS0, &rom_slice(pokered_symbols::RedSprite)[..12 * TILE_BYTES]);
-        // `LoadAnimSpriteGfx` over `RedFishingTiles`: the tiles, their count, their bank and where.
-        for entry in rom_slice(pokered_symbols::RedFishingTiles)[..4 * 6].chunks(6) {
-            let source = DmgPointer { bank: DmgBank::ROM { bank: entry[3] }, address: u16::from_le_bytes([entry[0], entry[1]]) };
-            let count = entry[2] as usize;
-            ctx.screen.tiles.load(vram(u16::from_le_bytes([entry[4], entry[5]])), &rom_slice(source)[..count * TILE_BYTES]);
+        ctx.screen.tiles.load(V_CHARS0, &poke_core::gfx::sprites::RED[..12 * TILE_BYTES]);
+        // `LoadAnimSpriteGfx` over `RedFishingTiles`, each to its tile past `vNPCSprites`.
+        for &(tiles, tile) in poke_core::gfx::RED_FISHING_TILES {
+            ctx.screen.tiles.load(V_CHARS0 + tile as usize, tiles);
         }
-        let oam = rom_slice(pokered_symbols::FishingRodOAM + self.player().image_index as u16);
+        let oam = poke_core::gfx::FISHING_ROD_OAM[self.player().image_index as usize / 4];
         ctx.screen.sprites.resize(40, Object { y: OAM_HIDDEN_Y, ..Object::default() });
         ctx.screen.sprites[ROD] = Object { y: oam[0], x: oam[1], tile: oam[2], attributes: oam[3] };
         let next = match response {
-            0 => Routine::FishingText(pokered_symbols::NoNibbleText),
-            2 => Routine::FishingText(pokered_symbols::NothingHereText),
+            0 => Routine::FishingText(poke_core::text_script::SavedText("NoNibbleText")),
+            2 => Routine::FishingText(poke_core::text_script::SavedText("NothingHereText")),
             _ => Routine::FishingShake(SHAKES),
         };
         Then::block(Block::Frames(CAST_FRAMES)).then(next)
@@ -201,11 +192,11 @@ impl Overworld {
         if self.facing_up() {
             ctx.screen.sprites[ROD].y = ROD_UP_Y;
         }
-        self.fishing_text(pokered_symbols::ItsABiteText)
+        self.fishing_text("ItsABiteText")
     }
 
-    pub(super) fn fishing_text(&mut self, text: DmgPointer) -> Flow {
-        Then::block(Block::PrintText(text_at(text))).then(Routine::FishingEnd)
+    pub(super) fn fishing_text(&mut self, text: &'static str) -> Flow {
+        Then::block(Block::PrintText(text_named(text))).then(Routine::FishingEnd)
     }
 
     /// `FishingAnim.done` after its text, and the start menu's close that follows `UseItem`.

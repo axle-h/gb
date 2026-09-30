@@ -1,12 +1,11 @@
 //! `PokemonMansion3F_Script`: the top floor's switch, the three holes in its south wall and the two
 //! trainers.
 
+use poke_core::tables::trainers;
 use poke_core::map::Map;
 use poke_core::symbols::pokered_events::EVENT_MANSION_SWITCH_ON;
-use poke_core::symbols::pokered_local_labels::PokemonMansion2FSwitchText as switch;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_POKEMONMANSION3F_DEFAULT, TEXT_POKEMONMANSION3F_SCIENTIST,
     TEXT_POKEMONMANSION3F_SUPER_NERD, TEXT_POKEMONMANSION3F_SWITCH};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use super::pokemon_mansion_1f::{switch_answered, switch_done, switch_text};
 use super::{Code, Flow, Script};
@@ -40,7 +39,7 @@ pub fn script(rt: &mut Script) -> Flow {
     check_replace_switch_door_blocks(rt);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().pokemon_mansion_3f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::Mansion3TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::Mansion3TrainerHeaders);
     let entry: Code = match index {
         SCRIPT_POKEMONMANSION3F_DEFAULT => Label::DefaultScript.into(),
         _ => return rt.trainer_script(index).then(Label::StoreCurScript),
@@ -73,10 +72,10 @@ fn default_script(rt: &mut Script) -> Flow {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
-        TEXT_POKEMONMANSION3F_SUPER_NERD => sym::Mansion3TrainerHeader0,
-        TEXT_POKEMONMANSION3F_SCIENTIST => sym::Mansion3TrainerHeader1,
+        TEXT_POKEMONMANSION3F_SUPER_NERD => trainers::Mansion3TrainerHeader0,
+        TEXT_POKEMONMANSION3F_SCIENTIST => trainers::Mansion3TrainerHeader1,
         // This floor's switch prints the second floor's words, not its own.
-        TEXT_POKEMONMANSION3F_SWITCH => return Some(switch_text(rt, switch::Text, Label::SwitchAsk)),
+        TEXT_POKEMONMANSION3F_SWITCH => return Some(switch_text(rt, "PokemonMansion2FSwitchText.Text", Label::SwitchAsk)),
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())
@@ -90,7 +89,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             Flow::Return
         }
         Label::SwitchAsk => rt.yes_no_choice().then(Label::SwitchAnswered),
-        Label::SwitchAnswered => switch_answered(rt, switch::PressedText, switch::NotPressed, Label::SwitchDone),
+        Label::SwitchAnswered => switch_answered(rt, "PokemonMansion2FSwitchText.PressedText", "PokemonMansion2FSwitchText.NotPressed", Label::SwitchDone),
         Label::SwitchDone => switch_done(rt),
     }
 }

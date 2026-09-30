@@ -2,7 +2,7 @@
 
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_HALLOFFAME_DEFAULT,
     SCRIPT_HALLOFFAME_OAK_CONGRATULATIONS, SCRIPT_HALLOFFAME_RESET_EVENTS_AND_SAVE, TEXT_HALLOFFAME_OAK};
-use poke_core::symbols::pokered_symbols::HALLOFFAME_OAK;
+use poke_core::symbols::pokered_map_scripts::HALLOFFAME_OAK;
 use poke_core::symbols::pokered_toggles::TOGGLE_CERULEAN_CAVE_GUY;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;

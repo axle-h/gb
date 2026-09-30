@@ -1,9 +1,8 @@
 //! `SSAnneKitchen_Script`: the head cook, who announces one of three main courses.
 
-use poke_core::symbols::pokered_local_labels::SSAnneKitchenCook7Text as cook;
 use poke_core::symbols::pokered_map_scripts::TEXT_SSANNEKITCHEN_COOK7;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {}
@@ -20,7 +19,7 @@ pub fn script(rt: &mut Script) -> Flow {
 }
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
-    (text_id == TEXT_SSANNEKITCHEN_COOK7).then(|| rt.print_text(text_at(cook::MainCourseIsText)).then(Label::MainCourse))
+    (text_id == TEXT_SSANNEKITCHEN_COOK7).then(|| rt.print_text(text_named("SSAnneKitchenCook7Text.MainCourseIsText")).then(Label::MainCourse))
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -29,11 +28,11 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::MainCourse => {
             let roll = rt.random();
             let dish = match roll {
-                _ if roll & 0x80 != 0 => cook::SalmonDuSaladText,
-                _ if roll & 0x10 != 0 => cook::EelsAuBarbecueText,
-                _ => cook::PrimeBeefSteakText,
+                _ if roll & 0x80 != 0 => "SSAnneKitchenCook7Text.SalmonDuSaladText",
+                _ if roll & 0x10 != 0 => "SSAnneKitchenCook7Text.EelsAuBarbecueText",
+                _ => "SSAnneKitchenCook7Text.PrimeBeefSteakText",
             };
-            rt.print_text(text_at(dish)).ret()
+            rt.print_text(text_named(dish)).ret()
         }
     }
 }

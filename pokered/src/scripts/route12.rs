@@ -1,12 +1,12 @@
 //! `Route12_Script`: seven fishermen and trainers along the water, and the Snorlax asleep across the
 //! road south of Lavender.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_ROUTE12_SNORLAX, EVENT_FIGHT_ROUTE12_SNORLAX};
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_ROUTE12_DEFAULT, SCRIPT_ROUTE12_SNORLAX_POST_BATTLE,
     TEXT_ROUTE12_COOLTRAINER_M, TEXT_ROUTE12_FISHER1, TEXT_ROUTE12_FISHER2, TEXT_ROUTE12_FISHER3,
     TEXT_ROUTE12_FISHER4, TEXT_ROUTE12_FISHER5, TEXT_ROUTE12_SNORLAX_CALMED_DOWN, TEXT_ROUTE12_SNORLAX_WOKE_UP,
     TEXT_ROUTE12_SUPER_NERD};
-use poke_core::symbols::pokered_symbols as sym;
 use poke_core::symbols::pokered_toggles::TOGGLE_ROUTE_12_SNORLAX;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
@@ -40,7 +40,7 @@ pub enum Label {
 pub fn script(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().route12.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::Route12TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::Route12TrainerHeaders);
     match index {
         SCRIPT_ROUTE12_DEFAULT => default_script(rt),
         SCRIPT_ROUTE12_SNORLAX_POST_BATTLE => post_battle(rt),
@@ -79,13 +79,13 @@ fn set_script(rt: &mut Script, index: u8) {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
-        TEXT_ROUTE12_FISHER1 => sym::Route12TrainerHeader0,
-        TEXT_ROUTE12_FISHER2 => sym::Route12TrainerHeader1,
-        TEXT_ROUTE12_COOLTRAINER_M => sym::Route12TrainerHeader2,
-        TEXT_ROUTE12_SUPER_NERD => sym::Route12TrainerHeader3,
-        TEXT_ROUTE12_FISHER3 => sym::Route12TrainerHeader4,
-        TEXT_ROUTE12_FISHER4 => sym::Route12TrainerHeader5,
-        TEXT_ROUTE12_FISHER5 => sym::Route12TrainerHeader6,
+        TEXT_ROUTE12_FISHER1 => trainers::Route12TrainerHeader0,
+        TEXT_ROUTE12_FISHER2 => trainers::Route12TrainerHeader1,
+        TEXT_ROUTE12_COOLTRAINER_M => trainers::Route12TrainerHeader2,
+        TEXT_ROUTE12_SUPER_NERD => trainers::Route12TrainerHeader3,
+        TEXT_ROUTE12_FISHER3 => trainers::Route12TrainerHeader4,
+        TEXT_ROUTE12_FISHER4 => trainers::Route12TrainerHeader5,
+        TEXT_ROUTE12_FISHER5 => trainers::Route12TrainerHeader6,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())

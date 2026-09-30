@@ -1,11 +1,10 @@
 //! `SilphCo8F_Script`: two Rockets and a scientist, one card key door, and the Silph worker whose
 //! line turns once Giovanni has been beaten.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_events::EVENT_SILPH_CO_8_UNLOCKED_DOOR;
-use poke_core::symbols::pokered_local_labels::SilphCo8FSilphWorkerMText as worker;
 use poke_core::symbols::pokered_map_scripts::{TEXT_SILPHCO8F_ROCKET1, TEXT_SILPHCO8F_ROCKET2,
     TEXT_SILPHCO8F_SCIENTIST, TEXT_SILPHCO8F_SILPH_WORKER_M};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use super::silph_co::beat_giovanni_print_de_or_print_hl as print_held_or_freed;
 use super::{Flow, Script};
@@ -33,18 +32,18 @@ pub fn script(rt: &mut Script) -> Flow {
     super::silph_co::gate_callback(rt, &GATES, &DOORS, CLOSED_DOOR);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().silph_co_8f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::SilphCo8TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::SilphCo8TrainerHeaders);
     rt.trainer_script(index).then(Label::StoreCurScript)
 }
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
         TEXT_SILPHCO8F_SILPH_WORKER_M => {
-            return Some(print_held_or_freed(rt, worker::SilphIsFinishedText, worker::ThanksForSavingUsText));
+            return Some(print_held_or_freed(rt, "SilphCo8FSilphWorkerMText.SilphIsFinishedText", "SilphCo8FSilphWorkerMText.ThanksForSavingUsText"));
         }
-        TEXT_SILPHCO8F_ROCKET1 => sym::SilphCo8TrainerHeader0,
-        TEXT_SILPHCO8F_SCIENTIST => sym::SilphCo8TrainerHeader1,
-        TEXT_SILPHCO8F_ROCKET2 => sym::SilphCo8TrainerHeader2,
+        TEXT_SILPHCO8F_ROCKET1 => trainers::SilphCo8TrainerHeader0,
+        TEXT_SILPHCO8F_SCIENTIST => trainers::SilphCo8TrainerHeader1,
+        TEXT_SILPHCO8F_ROCKET2 => trainers::SilphCo8TrainerHeader2,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())

@@ -1,12 +1,12 @@
 //! `VictoryRoad3F_Script`: the switch that opens this floor's gate, the hole a boulder is dropped
 //! down to land beside the switch on the floor below, and the four trainers.
 
+use poke_core::tables::trainers;
 use poke_core::map::Map;
 use poke_core::symbols::pokered_events::{EVENT_VICTORY_ROAD_3_BOULDER_ON_SWITCH1,
     EVENT_VICTORY_ROAD_3_BOULDER_ON_SWITCH2};
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_VICTORYROAD3F_DEFAULT, TEXT_VICTORYROAD3F_COOLTRAINER_F1,
     TEXT_VICTORYROAD3F_COOLTRAINER_F2, TEXT_VICTORYROAD3F_COOLTRAINER_M1, TEXT_VICTORYROAD3F_COOLTRAINER_M2};
-use poke_core::symbols::pokered_symbols as sym;
 use poke_core::symbols::pokered_toggles::{TOGGLE_VICTORY_ROAD_2F_BOULDER, TOGGLE_VICTORY_ROAD_3F_BOULDER};
 use serde::{Deserialize, Serialize};
 use super::{Code, Flow, Script};
@@ -41,7 +41,7 @@ pub fn script(rt: &mut Script) -> Flow {
     }
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().victory_road_3f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::VictoryRoad3TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::VictoryRoad3TrainerHeaders);
     let entry: Code = match index {
         SCRIPT_VICTORYROAD3F_DEFAULT => Label::DefaultScript.into(),
         _ => return rt.trainer_script(index).then(Label::StoreCurScript),
@@ -81,10 +81,10 @@ fn default_script(rt: &mut Script) -> Flow {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
-        TEXT_VICTORYROAD3F_COOLTRAINER_M1 => sym::VictoryRoad3TrainerHeader0,
-        TEXT_VICTORYROAD3F_COOLTRAINER_F1 => sym::VictoryRoad3TrainerHeader1,
-        TEXT_VICTORYROAD3F_COOLTRAINER_M2 => sym::VictoryRoad3TrainerHeader2,
-        TEXT_VICTORYROAD3F_COOLTRAINER_F2 => sym::VictoryRoad3TrainerHeader3,
+        TEXT_VICTORYROAD3F_COOLTRAINER_M1 => trainers::VictoryRoad3TrainerHeader0,
+        TEXT_VICTORYROAD3F_COOLTRAINER_F1 => trainers::VictoryRoad3TrainerHeader1,
+        TEXT_VICTORYROAD3F_COOLTRAINER_M2 => trainers::VictoryRoad3TrainerHeader2,
+        TEXT_VICTORYROAD3F_COOLTRAINER_F2 => trainers::VictoryRoad3TrainerHeader3,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())

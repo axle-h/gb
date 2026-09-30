@@ -1,8 +1,7 @@
 //! `HealParty` and `SetLastBlackoutMap`.
 
 use poke_core::map::Map;
-use poke_core::rom_gfx::rom_slice;
-use poke_core::symbols::pokered_symbols;
+use poke_core::tables::SAFARI_ZONE_REST_HOUSES;
 use crate::party::{Named, PartyMon};
 use poke_core::moves::MoveData;
 use crate::systems::pp::{add_bonus_pp, max_pp, PP_UP_MASK};
@@ -31,8 +30,7 @@ pub fn heal_party(party: &mut [Named<PartyMon>]) {
 /// `SetLastBlackoutMap`: the map the nurse's building was entered from, unless the building is one
 /// of the Safari Zone's rest houses, which leave `wLastBlackoutMap` alone.
 pub fn set_last_blackout_map(map: Map, last_map: Map, last_blackout_map: Map) -> Map {
-    let rest_houses = rom_slice(pokered_symbols::SafariZoneRestHouses);
-    if rest_houses.iter().take_while(|&&m| m != 0xFF).any(|&m| m == map as u8) {
+    if SAFARI_ZONE_REST_HOUSES.contains(&(map as u8)) {
         return last_blackout_map;
     }
     last_map

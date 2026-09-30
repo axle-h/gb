@@ -1,14 +1,14 @@
 //! What the Pokédex screens compute rather than draw: the two flag arrays' counts, the order table
-//! both number conversions read, and one dex entry decoded out of the cartridge.
+//! both number conversions read, and one dex entry.
 //!
 //! A *dex number* is what the player sees, 1 to 151; an *index* is the cartridge's own species id,
 //! 1 to 190, with 39 of them belonging to no species. `PokedexOrder` maps index to dex number and
 //! is searched backwards for the other direction.
 
 use poke_core::mon_gfx::{front_pic_shades, PIC_PX, PIC_TILES};
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
+use poke_core::rom_gfx::TILE_BYTES;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::{pokered_symbols, DmgBank, DmgPointer};
+use poke_core::tables::POKEDEX_ORDER;
 
 /// `NUM_POKEMON`.
 pub const NUM_POKEMON: u8 = 151;
@@ -25,7 +25,7 @@ pub fn count_set_bits(flags: &[u8]) -> u8 {
 
 /// `PokedexOrder`: the dex number of every index, from index 1.
 fn pokedex_order() -> &'static [u8] {
-    &rom_slice(pokered_symbols::PokedexOrder)[..NUM_POKEMON_INDEXES]
+    &POKEDEX_ORDER
 }
 
 /// `PokedexToIndex`. The cartridge walks the table until it matches and has no exit if nothing
@@ -71,11 +71,6 @@ pub fn max_seen_mon(seen: &[u8]) -> u8 {
     0
 }
 
-/// `TX_FAR`, the command a dex entry ends in.
-const TX_FAR: u8 = 0x17;
-/// `@`, which ends the species line — and which a description does not carry.
-const TERMINATOR: u8 = 0x50;
-
 /// One row of `PokedexEntryPointers`: what the data screen prints besides the picture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DexEntry {
@@ -92,34 +87,22 @@ pub struct DexEntry {
 impl DexEntry {
     /// The entry for an index, which is what `PokedexEntryPointers` is indexed by.
     pub fn of(index: u8) -> Self {
-        let table = rom_slice(pokered_symbols::PokedexEntryPointers);
-        let row = (index as usize - 1) * 2;
-        let address = u16::from_le_bytes([table[row], table[row + 1]]);
-        let at = DmgPointer { bank: pokered_symbols::PokedexEntryPointers.bank, address };
-        let bytes = rom_slice(at);
-        let end = bytes.iter().position(|&byte| byte == TERMINATOR).expect("a dex entry's species line ends");
-        let far = end + 5;
-        assert_eq!(bytes[far], TX_FAR, "a dex entry ends in a text_far");
-        let script = DmgPointer {
-            bank: DmgBank::ROM { bank: bytes[far + 3] },
-            address: u16::from_le_bytes([bytes[far + 1], bytes[far + 2]]),
-        };
+        let entry = poke_core::tables::DEX_ENTRIES[index as usize - 1].expect("MissingNo has no entry to show");
         Self {
-            species: bytes[..end].to_vec(),
-            feet: bytes[end + 1],
-            inches: bytes[end + 2],
-            weight: u16::from_le_bytes([bytes[end + 3], bytes[end + 4]]),
-            description: description(script),
+            species: poke_core::charmap::encode(entry.species).expect("a species line is in the charmap"),
+            feet: entry.feet,
+            inches: entry.inches,
+            weight: entry.weight,
+            description: description(entry.text),
         }
     }
 }
 
 /// The description's printable run. A dex description is the one text in the cartridge with no
 /// `text_end`: `PlaceDexEnd` ends the whole script from inside the printed run, so the bytes past
-/// its `<DEXEND>` are the next entry's. `text_script` stops there for that reason.
-fn description(script: DmgPointer) -> Vec<u8> {
-    let commands = poke_core::text_script::decode_slice(rom_slice(script), script)
-        .expect("a dex description is a text script");
+/// its `<DEXEND>` are the next entry's.
+fn description(label: &str) -> Vec<u8> {
+    let commands = poke_core::text_script::far_text(label).expect("a dex description is a text script");
     commands.into_iter().fold(Vec::new(), |mut run, command| {
         if let poke_core::text_script::TextCommand::Text(text) = command {
             run.extend(text);

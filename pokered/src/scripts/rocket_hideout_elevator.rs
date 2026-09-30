@@ -2,10 +2,9 @@
 
 use poke_core::item::ItemId;
 use poke_core::map::Map;
-use poke_core::symbols::pokered_local_labels::RocketHideoutElevatorText as elevator;
 use poke_core::symbols::pokered_map_scripts::TEXT_ROCKETHIDEOUTELEVATOR;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `RocketHideoutElevatorFloors`, the buttons on the panel. B3F is not one of them, so the floor
 /// Giovanni's lift key is guarded on has to be walked down to.
@@ -55,7 +54,7 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     }
     // Without the key the panel says so and stays shut; the key is never taken.
     if !rt.is_item_in_bag(ItemId::LiftKey) {
-        return Some(rt.print_text(text_at(elevator::AppearsToNeedKeyText)).ret());
+        return Some(rt.print_text(text_named("RocketHideoutElevatorText.AppearsToNeedKeyText")).ret());
     }
     Some(rt.display_elevator_floor_menu(FLOORS.to_vec(), WARP_MAPS.to_vec()).ret())
 }

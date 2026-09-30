@@ -1,6 +1,7 @@
 //! Pokémon Red as data: the cartridge's tables, pictures and symbols, decoded into the domain types
 //! the agent and the native game share. Nothing here knows about the Game Boy that runs it.
 
+pub mod audio;
 pub mod badge;
 pub mod badge_gfx;
 pub mod bag;
@@ -14,6 +15,7 @@ pub mod default_names;
 pub mod evos_moves;
 pub mod font;
 pub mod geometry;
+pub mod gfx;
 pub mod item;
 pub mod learnset;
 pub mod map;
@@ -27,12 +29,13 @@ pub mod party;
 pub mod pointer;
 pub mod pokemon;
 pub mod rom_gfx;
-pub mod roms;
+pub mod saved_addresses;
 pub mod species;
 pub mod sprite;
 pub mod status;
 pub mod strings;
 pub mod symbols;
+pub mod tables;
 pub mod text_script;
 pub mod tilesets;
 pub mod trainer_headers;

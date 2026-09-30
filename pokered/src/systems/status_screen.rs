@@ -6,9 +6,7 @@
 //! with one type has its `TYPE2/` label rubbed out rather than a second name printed.
 
 use poke_core::base_stats::BaseStats;
-use poke_core::rom_gfx::rom_slice;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::{pokered_symbols, DmgPointer};
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
 use crate::modes::place_string::ligature;
 use crate::party::NUM_STATS;
@@ -105,10 +103,7 @@ pub fn draw_line_box(ui: &mut UiSurface, at: usize, height: usize, width: usize)
 /// `TypeNames`, indexed by the type byte: the unused ids between `GHOST` and `FIRE` point at
 /// `NORMAL`.
 pub fn type_name(id: u8) -> Vec<u8> {
-    let table = rom_slice(pokered_symbols::TypeNames);
-    let address = u16::from_le_bytes([table[id as usize * 2], table[id as usize * 2 + 1]]);
-    let name = rom_slice(DmgPointer { bank: pokered_symbols::TypeNames.bank, address });
-    name.iter().copied().take_while(|&byte| byte != TERMINATOR).collect()
+    poke_core::charmap::encode(poke_core::tables::TYPE_NAMES[id as usize]).expect("a type name is in the charmap")
 }
 
 /// `PrintMonType` at `at`: the species' first type, then its second two rows down, or with only

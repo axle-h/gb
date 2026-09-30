@@ -8,8 +8,6 @@
 //! Loading, and not modelled: `GBPalWhiteOutWithDelay3` before each screen and on the way out, and
 //! the picture's decompression.
 
-use poke_core::rom_gfx::rom_slice;
-use poke_core::symbols::pokered_symbols as sym;
 use poke_core::text_script::TextCommand;
 use serde::{Deserialize, Serialize};
 use crate::gfx::sgb::{determine_palette_id_out_of_battle, PaletteCommand};
@@ -50,7 +48,7 @@ impl LeaguePc {
     /// `PKMNLeaguePC` up to its first text.
     pub fn start(ctx: &mut Ctx) -> (Self, Transition) {
         let pc = Self { team: 0, mon: 0, dropped: 0, tile_animations: 0, phase: Phase::Accessed };
-        (pc, print_at(sym::AccessedHoFPCText, ctx))
+        (pc, print_at("AccessedHoFPCText", ctx))
     }
 
     pub fn update(&mut self, ctx: &mut Ctx) -> Transition {
@@ -113,12 +111,12 @@ impl LeaguePc {
             }
         }
         ui.text_box_border(0, 13, 18, 2);
-        place_lines(ui, 15 * SCREEN_TILES_X + 1, rom_slice(sym::HallOfFameNoText), false);
+        place_lines(ui, 15 * SCREEN_TILES_X + 1, &poke_core::tables::db_string("HallOfFameNoText"), false);
         let number = NumberFormat { digits: 3, leading_zeroes: false, left_align: false };
         print_number(ui, 15 * SCREEN_TILES_X + 16, self.dropped as u32 + self.team as u32 + 1, number);
         // `HoFDisplayMonInfo`.
         ui.text_box_border(0, 2, 10, 9);
-        place_lines(ui, 6 * SCREEN_TILES_X + 2, rom_slice(sym::HoFMonInfoText), false);
+        place_lines(ui, 6 * SCREEN_TILES_X + 2, &poke_core::tables::db_string("HoFMonInfoText"), false);
         ui.place(1, 4, &entry.nick);
         let level = NumberFormat { digits: 3, leading_zeroes: false, left_align: true };
         print_number(ui, 7 * SCREEN_TILES_X + 8, entry.level as u32, level);

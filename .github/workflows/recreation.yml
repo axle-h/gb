@@ -1,0 +1,50 @@
+# Builds the recreation from a bare checkout: no rgbds, so no `pokered.gbc` and no `pokered.sym`.
+# `pokered` and `pokered-sdl` read `vendor/pokered`'s source alone, and this is what proves it.
+name: recreation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: recreation-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out, with the pokered submodule
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      # Nothing may have assembled the cartridge: its outputs are gitignored and rgbds is not here.
+      - name: The cartridge is not there
+        run: |
+          set -euo pipefail
+          if command -v rgbasm; then exit 1; fi
+          test ! -e vendor/pokered/pokered.gbc
+          test ! -e vendor/pokered/pokered.sym
+
+      # The runner's rustup, brought to the stable the container's `rust:1` tracks.
+      - name: Rust and SDL2
+        run: |
+          set -euo pipefail
+          rustup update stable --no-self-update
+          rustup default stable
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsdl2-dev
+
+      - name: Build pokered-sdl
+        run: cargo build --release --locked -p pokered-sdl
+
+      - name: Test pokered
+        run: cargo test --release --locked -p pokered

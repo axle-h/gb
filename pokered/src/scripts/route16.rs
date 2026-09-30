@@ -1,11 +1,11 @@
 //! `Route16_Script`: the six bikers at the top of the Cycling Road, and the Snorlax asleep across
 //! the road out of Celadon.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_ROUTE16_SNORLAX, EVENT_FIGHT_ROUTE16_SNORLAX};
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_ROUTE16_DEFAULT, SCRIPT_ROUTE16_SNORLAX_POST_BATTLE,
     TEXT_ROUTE16_BIKER1, TEXT_ROUTE16_BIKER2, TEXT_ROUTE16_BIKER3, TEXT_ROUTE16_BIKER4, TEXT_ROUTE16_BIKER5,
     TEXT_ROUTE16_BIKER6, TEXT_ROUTE16_SNORLAX_RETURNED_TO_MOUNTAINS, TEXT_ROUTE16_SNORLAX_WOKE_UP};
-use poke_core::symbols::pokered_symbols as sym;
 use poke_core::symbols::pokered_toggles::TOGGLE_ROUTE_16_SNORLAX;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
@@ -39,7 +39,7 @@ pub enum Label {
 pub fn script(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().route16.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::Route16TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::Route16TrainerHeaders);
     match index {
         SCRIPT_ROUTE16_DEFAULT => default_script(rt),
         SCRIPT_ROUTE16_SNORLAX_POST_BATTLE => post_battle(rt),
@@ -78,12 +78,12 @@ fn set_script(rt: &mut Script, index: u8) {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
-        TEXT_ROUTE16_BIKER1 => sym::Route16TrainerHeader0,
-        TEXT_ROUTE16_BIKER2 => sym::Route16TrainerHeader1,
-        TEXT_ROUTE16_BIKER3 => sym::Route16TrainerHeader2,
-        TEXT_ROUTE16_BIKER4 => sym::Route16TrainerHeader3,
-        TEXT_ROUTE16_BIKER5 => sym::Route16TrainerHeader4,
-        TEXT_ROUTE16_BIKER6 => sym::Route16TrainerHeader5,
+        TEXT_ROUTE16_BIKER1 => trainers::Route16TrainerHeader0,
+        TEXT_ROUTE16_BIKER2 => trainers::Route16TrainerHeader1,
+        TEXT_ROUTE16_BIKER3 => trainers::Route16TrainerHeader2,
+        TEXT_ROUTE16_BIKER4 => trainers::Route16TrainerHeader3,
+        TEXT_ROUTE16_BIKER5 => trainers::Route16TrainerHeader4,
+        TEXT_ROUTE16_BIKER6 => trainers::Route16TrainerHeader5,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())

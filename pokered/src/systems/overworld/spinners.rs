@@ -1,26 +1,24 @@
 //! The arrow tiles of the Rocket Hideout and the Viridian Gym: which way the one under the player
 //! sends them, and which facing the spin turns to next.
 
-use poke_core::rom_gfx::rom_slice;
-use poke_core::symbols::{pokered_symbols, DmgPointer};
+/// A map's `ArrowTilePlayerMovement`: an arrow's square and the `(press, count)` runs it makes.
+pub type ArrowTable = &'static [((u8, u8), &'static [(u8, u8)])];
 
 /// `SpinnerPlayerFacingDirections`, which holds the facing that comes *next* rather than the facings
 /// in their own order.
 pub fn spinner_facing(image_index: u8) -> u8 {
-    rom_slice(pokered_symbols::SpinnerPlayerFacingDirections)[(image_index >> 2) as usize & 3]
+    poke_core::tables::SPINNER_PLAYER_FACING_DIRECTIONS[(image_index >> 2) as usize & 3]
 }
 
 /// `DecodeArrowMovementRLE`'s search of a map's `ArrowTilePlayerMovement`: the RLE list of presses
-/// the arrow at (`x`, `y`) makes. A row is a coordinate and an address in the table's own bank.
-pub fn arrow_movement(table: DmgPointer, x: u8, y: u8) -> Option<DmgPointer> {
-    rom_slice(table).chunks(4).take_while(|row| row[0] != 0xFF)
-        .find(|row| row[0] == y && row[1] == x)
-        .map(|row| DmgPointer { bank: table.bank, address: u16::from_le_bytes([row[2], row[3]]) })
+/// the arrow at (`x`, `y`) makes.
+pub fn arrow_movement(table: ArrowTable, x: u8, y: u8) -> Option<&'static [(u8, u8)]> {
+    table.iter().find(|&&(at, _)| at == (x, y)).map(|&(_, list)| list)
 }
 
 #[cfg(test)]
 mod tests {
-    use poke_core::symbols::pokered_symbols::{RocketHideout2ArrowTilePlayerMovement, ViridianGymArrowTilePlayerMovement};
+    use poke_core::tables::{ROCKET_HIDEOUT_B2F_ARROWS, VIRIDIAN_GYM_ARROWS};
     use super::*;
     use crate::input::Joypad;
     use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_LEFT, SPRITE_FACING_RIGHT, SPRITE_FACING_UP};
@@ -41,12 +39,12 @@ mod tests {
 
     #[test]
     fn only_a_square_with_an_arrow_on_it_has_a_movement_list() {
-        let table = RocketHideout2ArrowTilePlayerMovement;
+        let table = ROCKET_HIDEOUT_B2F_ARROWS;
         // `RocketHideout2ArrowMovement1`, `db PAD_LEFT, 2`, which (4, 9) and (4, 19) share.
         let first = arrow_movement(table, 4, 9).expect("the first arrow is in the table");
-        assert_eq!(rom_slice(first)[..3], [Joypad::LEFT.bits(), 2, 0xFF]);
+        assert_eq!(first, [(Joypad::LEFT.bits(), 2)]);
         assert_eq!(arrow_movement(table, 4, 19), Some(first), "and two squares may share a list");
         assert_eq!(arrow_movement(table, 3, 9), None);
-        assert_eq!(arrow_movement(ViridianGymArrowTilePlayerMovement, 4, 9), None, "the gym's arrows are its own");
+        assert_eq!(arrow_movement(VIRIDIAN_GYM_ARROWS, 4, 9), None, "the gym's arrows are its own");
     }
 }

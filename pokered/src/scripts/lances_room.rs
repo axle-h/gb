@@ -1,14 +1,14 @@
 //! `LancesRoom_Script`: the last of the Elite Four, the hallway that walks itself and the doorway
 //! that bricks itself up behind the player.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_LANCE, EVENT_LANCES_ROOM_LOCK_DOOR};
 use crate::audio::data::sounds;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_LANCESROOM_DEFAULT, SCRIPT_LANCESROOM_LANCE_END_BATTLE,
     SCRIPT_LANCESROOM_NOOP, SCRIPT_LANCESROOM_PLAYER_IS_MOVING, TEXT_LANCESROOM_LANCE};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
-use super::{text_at, Code, Flow, Script};
+use super::{text_named, Code, Flow, Script};
 
 /// `LanceTriggerMovementCoords`, as (x, y). The first two stand beside Lance, the next two are the
 /// doorway the room bricks up, and the last is the staircase the walk down the hallway starts on.
@@ -21,9 +21,6 @@ const STAIRCASE: u8 = 5;
 const ENTRANCE_AT: [(u8, u8); 2] = [(2, 6), (3, 6)];
 const ENTRANCE_OPEN: [u8; 2] = [0x31, 0x32];
 const ENTRANCE_SHUT: [u8; 2] = [0x72, 0x73];
-/// `WalkToLance_RLEList`.
-const WALK_TO_LANCE: [(Joypad, usize); 4] =
-    [(Joypad::UP, 12), (Joypad::LEFT, 12), (Joypad::DOWN, 7), (Joypad::LEFT, 6)];
 const PAD_BUTTONS: Joypad = Joypad::A.union(Joypad::B).union(Joypad::SELECT).union(Joypad::START);
 const PAD_CTRL_PAD: Joypad = Joypad::UP.union(Joypad::DOWN).union(Joypad::LEFT).union(Joypad::RIGHT);
 
@@ -51,7 +48,7 @@ pub fn script(rt: &mut Script) -> Flow {
     show_or_hide_entrance_blocks(rt);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().lances_room.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::LancesRoomTrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::LancesRoomTrainerHeaders);
     let entry: Code = match index {
         SCRIPT_LANCESROOM_DEFAULT => Label::DefaultScript.into(),
         SCRIPT_LANCESROOM_LANCE_END_BATTLE => Label::EndBattle.into(),
@@ -112,7 +109,8 @@ fn default_script(rt: &mut Script) -> Flow {
 /// `WalkToLance`: the hallway is walked for the player, who has no say until it runs out.
 fn walk_to_lance(rt: &mut Script) -> Flow {
     rt.joy_ignore(PAD_BUTTONS.union(PAD_CTRL_PAD));
-    let presses = WALK_TO_LANCE.iter().flat_map(|&(pad, count)| vec![pad; count]).collect();
+    let presses = poke_core::tables::rle_lists::WALK_TO_LANCE.iter()
+        .flat_map(|&(pad, count)| vec![Joypad::from_bits_truncate(pad); count as usize]).collect();
     rt.simulate_joypad_presses(presses);
     set_script(rt, SCRIPT_LANCESROOM_PLAYER_IS_MOVING);
     Flow::Return
@@ -135,7 +133,7 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     match text_id {
         TEXT_LANCESROOM_LANCE => {
             let after = Some(Label::LanceAfterBattle.into());
-            Some(rt.talk_to_trainer_asm(sym::LancesRoomTrainerHeader0, None, after).ret())
+            Some(rt.talk_to_trainer_asm(trainers::LancesRoomTrainerHeader0, None, after).ret())
         }
         _ => None,
     }
@@ -163,7 +161,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             }
             rt.display_text_id(TEXT_LANCESROOM_LANCE).ret()
         }
-        Label::LanceAfterBattle => rt.print_text(text_at(sym::LancesRoomLanceAfterBattleText)).then(Label::LanceSpoke),
+        Label::LanceAfterBattle => rt.print_text(text_named("LancesRoomLanceAfterBattleText")).then(Label::LanceSpoke),
         Label::LanceSpoke => {
             rt.set_event(EVENT_BEAT_LANCE);
             Flow::Return

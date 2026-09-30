@@ -26,10 +26,9 @@
 //! `viridian_forest.rs` is the one to copy. A cutscene is `pallet_town.rs`, a gift `route1.rs`.
 //!
 //! A map that is not registered below runs `EnableAutoTextBoxDrawing` as its script, which is how
-//! nearly every map script in the cartridge begins, and prints only its plain texts. `TEXT_*` and
-//! `SCRIPT_*` constants come from `poke_core::symbols::pokered_map_scripts`, local labels from
-//! `pokered_local_labels` (`Route1Youngster1Text.GotPotionText` is
-//! `pokered_local_labels::Route1Youngster1Text::GotPotionText`).
+//! nearly every map script in the cartridge begins, and prints only its plain texts. `TEXT_*`,
+//! `SCRIPT_*` and the objects' ids come from `poke_core::symbols::pokered_map_scripts`, and a text
+//! is printed by its label, a local one as `"Route1Youngster1Text.GotPotionText"`.
 //!
 //! To add a map: write `scripts/<map>.rs`, add its `mod` line and one line to `maps!`.
 
@@ -206,7 +205,7 @@ mod tests;
 
 use poke_core::map::Map;
 use serde::{Deserialize, Serialize};
-pub use crate::modes::overworld::script::{far, text_at, Flow, Routine, Script, Then};
+pub use crate::modes::overworld::script::{far, text_named, Flow, Routine, Script, Then};
 
 macro_rules! maps {
     ($($map:ident => $module:ident),* $(,)?) => {

@@ -1,15 +1,15 @@
 //! `VictoryRoad2F_Script`: two switches, each with a gate of its own, Moltres, and the five
 //! trainers between them.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_events::{EVENT_VICTORY_ROAD_1_BOULDER_ON_SWITCH,
     EVENT_VICTORY_ROAD_2_BOULDER_ON_SWITCH1, EVENT_VICTORY_ROAD_2_BOULDER_ON_SWITCH2};
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_VICTORYROAD2F_DEFAULT, TEXT_VICTORYROAD2F_COOLTRAINER_M,
     TEXT_VICTORYROAD2F_HIKER, TEXT_VICTORYROAD2F_MOLTRES, TEXT_VICTORYROAD2F_SUPER_NERD1,
     TEXT_VICTORYROAD2F_SUPER_NERD2, TEXT_VICTORYROAD2F_SUPER_NERD3};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use poke_core::species::PokemonSpecies;
-use super::{text_at, Code, Flow, Routine, Script};
+use super::{text_named, Code, Flow, Routine, Script};
 
 /// `.SwitchCoords`, as (x, y), and the block and place of the gate each one opens.
 const SWITCHES: [(u8, u8); 2] = [(1, 16), (9, 16)];
@@ -43,7 +43,7 @@ pub fn script(rt: &mut Script) -> Flow {
     }
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().victory_road_2f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::VictoryRoad2TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::VictoryRoad2TrainerHeaders);
     let entry: Code = match index {
         SCRIPT_VICTORYROAD2F_DEFAULT => Label::DefaultScript.into(),
         _ => return rt.trainer_script(index).then(Label::StoreCurScript),
@@ -81,16 +81,16 @@ fn default_script(rt: &mut Script) -> Flow {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
-        TEXT_VICTORYROAD2F_HIKER => sym::VictoryRoad2TrainerHeader0,
-        TEXT_VICTORYROAD2F_SUPER_NERD1 => sym::VictoryRoad2TrainerHeader1,
-        TEXT_VICTORYROAD2F_COOLTRAINER_M => sym::VictoryRoad2TrainerHeader2,
-        TEXT_VICTORYROAD2F_SUPER_NERD2 => sym::VictoryRoad2TrainerHeader3,
-        TEXT_VICTORYROAD2F_SUPER_NERD3 => sym::VictoryRoad2TrainerHeader4,
+        TEXT_VICTORYROAD2F_HIKER => trainers::VictoryRoad2TrainerHeader0,
+        TEXT_VICTORYROAD2F_SUPER_NERD1 => trainers::VictoryRoad2TrainerHeader1,
+        TEXT_VICTORYROAD2F_COOLTRAINER_M => trainers::VictoryRoad2TrainerHeader2,
+        TEXT_VICTORYROAD2F_SUPER_NERD2 => trainers::VictoryRoad2TrainerHeader3,
+        TEXT_VICTORYROAD2F_SUPER_NERD3 => trainers::VictoryRoad2TrainerHeader4,
         // Moltres' object carries a species and a level rather than a trainer, so its header's zero
         // opponent starts a wild battle where a trainer's would start a trainer one.
         TEXT_VICTORYROAD2F_MOLTRES => {
             let before = Some(Label::MoltresBattleText.into());
-            return Some(rt.talk_to_trainer_asm(sym::MoltresTrainerHeader, before, None).ret());
+            return Some(rt.talk_to_trainer_asm(trainers::MoltresTrainerHeader, before, None).ret());
         }
         _ => return None,
     };
@@ -104,7 +104,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             rt.maps().victory_road_2f.cur_script = rt.cur_map_script();
             Flow::Return
         }
-        Label::MoltresBattleText => rt.print_text(text_at(sym::VictoryRoad2FMoltresBattleText)).then(Label::MoltresCry),
+        Label::MoltresBattleText => rt.print_text(text_named("VictoryRoad2FMoltresBattleText")).then(Label::MoltresCry),
         Label::MoltresCry => {
             rt.play_cry(PokemonSpecies::Moltres);
             rt.wait_for_sound_to_finish().then(Routine::TalkToTrainerNotYetFought)

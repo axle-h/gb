@@ -30,6 +30,20 @@ mod tests {
         assert_eq!(encode("'").unwrap(), [0xE0]);
     }
 
+    /// Each byte's text encodes back to it, which is what makes the pick one text per byte.
+    #[test]
+    fn every_byte_s_text_encodes_to_it() {
+        for (byte, text) in TEXT_OF.iter().enumerate().filter_map(|(byte, text)| Some((byte, (*text)?))) {
+            assert_eq!(encode(text), Ok(vec![byte as u8]), "{text:?}");
+        }
+    }
+
+    /// Where the charmap names a byte twice, the English font's glyph is its text.
+    #[test]
+    fn a_byte_with_two_keys_reads_as_the_font_draws_it() {
+        assert_eq!([0x80, 0xE0, 0xE6, 0xED, 0xF0].map(|byte| TEXT_OF[byte]), [Some("A"), Some("'"), Some("?"), Some("▶"), Some("¥")]);
+    }
+
     #[test]
     fn an_unknown_character_is_an_error() {
         assert!(encode("~").is_err());

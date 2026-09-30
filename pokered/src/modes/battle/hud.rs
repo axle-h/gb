@@ -1,9 +1,7 @@
 //! What the battle draws besides its texts: `DrawPlayerHUDAndHPBar`, `DrawEnemyHUDAndHPBar`, the
 //! pictures, and `UpdateHPBar2` as the battle uses it.
 
-use poke_core::rom_gfx::rom_slice;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::pokered_symbols;
 use serde::{Deserialize, Serialize};
 use crate::gfx::tiles::V_CHARS2;
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
@@ -44,20 +42,9 @@ pub fn load_front_pic(tiles: &mut crate::gfx::tiles::TileData, species: PokemonS
 }
 
 /// `ScaleSpriteByTwo` over a 4x4-tile back pic, then `InterlaceMergeSpriteBuffers` into
-/// `vBackPic`: the top left 28 pixels square of the uncompressed pic, each pixel doubled, fills the
-/// 7x7 tiles. `LoadMonBackPic` copies it to `vSprites` as well, which `LoadPlayerBackPic` does not.
-fn load_scaled_back_pic(tiles: &mut crate::gfx::tiles::TileData, data: &'static [u8], to_sprites: bool) {
-    use poke_core::mon_gfx::{pic_shades, PIC_PX};
-    assert_eq!(data[0], 0x44, "a back pic is 4x4 tiles");
-    // `pic_shades` centres the pic, two tiles in and three down.
-    let centred = pic_shades(data);
-    let mut scaled = [0u8; PIC_PX * PIC_PX];
-    for y in 0..PIC_PX {
-        for x in 0..PIC_PX {
-            scaled[y * PIC_PX + x] = centred[(24 + y / 2) * PIC_PX + 16 + x / 2];
-        }
-    }
-    let bytes = crate::systems::pokedex::pic_tiles(&scaled, false).concat();
+/// `vBackPic`. `LoadMonBackPic` copies it to `vSprites` as well, which `LoadPlayerBackPic` does not.
+fn load_scaled_back_pic(tiles: &mut crate::gfx::tiles::TileData, pic: &[u8], to_sprites: bool) {
+    let bytes = crate::systems::pokedex::pic_tiles(&poke_core::mon_gfx::scaled_back_pic_shades(pic), false).concat();
     tiles.load(V_CHARS2 + BACK_PIC_TILE as usize, &bytes);
     if to_sprites {
         tiles.load(crate::gfx::tiles::V_CHARS0, &bytes);
@@ -66,30 +53,13 @@ fn load_scaled_back_pic(tiles: &mut crate::gfx::tiles::TileData, data: &'static 
 
 /// `LoadMonBackPic`'s picture.
 pub fn load_back_pic(tiles: &mut crate::gfx::tiles::TileData, species: PokemonSpecies) {
-    const BASE_BACKPIC: usize = 13;
-    let entry = poke_core::mon_gfx::base_stats_entry(species);
-    let address = u16::from_le_bytes([entry[BASE_BACKPIC], entry[BASE_BACKPIC + 1]]);
-    let data = rom_slice(poke_core::symbols::DmgPointer { bank: pic_bank(species), address });
-    load_scaled_back_pic(tiles, data, true);
+    load_scaled_back_pic(tiles, poke_core::mon_gfx::back_pic(species), true);
 }
 
 /// `LoadPlayerBackPic`'s picture: the player's, or the old man's in his catching demo.
 pub fn load_player_back_pic(tiles: &mut crate::gfx::tiles::TileData, old_man: bool) {
-    let pic = if old_man { pokered_symbols::OldManPicBack } else { pokered_symbols::RedPicBack };
-    load_scaled_back_pic(tiles, rom_slice(pic), false);
-}
-
-/// `UncompressMonSprite`'s bank ladder, on the internal index.
-fn pic_bank(species: PokemonSpecies) -> poke_core::symbols::DmgBank {
-    let bank = match species as u8 {
-        _ if species == PokemonSpecies::Mew => 0x01,
-        0x00..=0x1E => 0x09,
-        0x1F..=0x49 => 0x0A,
-        0x4A..=0x73 => 0x0B,
-        0x74..=0x98 => 0x0C,
-        _ => 0x0D,
-    };
-    poke_core::symbols::DmgBank::ROM { bank }
+    let pic = if old_man { poke_core::gfx::battle::OLDMANB } else { poke_core::gfx::player::REDB };
+    load_scaled_back_pic(tiles, pic, false);
 }
 
 /// `SetupOwnPartyPokeballs` and `SetupEnemyPartyPokeballs`: the HUD's tiles, and a ball a mon
@@ -114,22 +84,18 @@ pub fn place_pokeballs(sprites: &mut Vec<crate::gfx::layers::Object>, first: usi
 
 /// `LoadPartyPokeballGfx`, at `vSprites` tile `$31`.
 pub fn load_pokeball_gfx(tiles: &mut crate::gfx::tiles::TileData) {
-    let start = pokered_symbols::PokeballTileGraphics;
-    let len = (pokered_symbols::PokeballTileGraphicsEnd.address - start.address) as usize;
-    tiles.load(crate::gfx::tiles::V_CHARS0 + 0x31, &rom_slice(start)[..len]);
+    tiles.load(crate::gfx::tiles::V_CHARS0 + 0x31, poke_core::gfx::battle::BALLS);
 }
 
 /// `_LoadTrainerPic` into `vFrontPic`.
 pub fn load_trainer_pic(tiles: &mut crate::gfx::tiles::TileData, class: u8) {
-    let (address, _) = poke_core::trainers::pic_and_money(class);
-    let data = rom_slice(poke_core::symbols::DmgPointer { bank: pokered_symbols::YoungsterPic.bank, address });
-    let shades = poke_core::mon_gfx::pic_shades(data);
+    let shades = poke_core::mon_gfx::pic_shades(poke_core::trainers::pic(class));
     tiles.load(V_CHARS2 + FRONT_PIC_TILE as usize, &crate::systems::pokedex::pic_tiles(&shades, false).concat());
 }
 
 /// `LoadMonFrontSprite` for `MON_GHOST`, whose pic is `GhostPic`.
 pub fn load_ghost_pic(tiles: &mut crate::gfx::tiles::TileData) {
-    let shades = poke_core::mon_gfx::pic_shades(rom_slice(pokered_symbols::GhostPic));
+    let shades = poke_core::mon_gfx::pic_shades(poke_core::gfx::battle::GHOST);
     tiles.load(V_CHARS2 + FRONT_PIC_TILE as usize, &crate::systems::pokedex::pic_tiles(&shades, false).concat());
 }
 
@@ -140,19 +106,16 @@ pub fn place_enemy_hud_tiles(ui: &mut UiSurface) {
 
 /// `GetTrainerName` outside the rival's classes: the class's name from `TrainerNames`.
 pub fn trainer_class_name(class: u8) -> Vec<u8> {
-    rom_slice(pokered_symbols::TrainerNames).split(|&byte| byte == TERMINATOR)
-        .nth(class as usize - 1).expect("every class has a name").to_vec()
+    poke_core::charmap::encode(poke_core::tables::TRAINER_NAMES[class as usize - 1]).expect("a class name is in the charmap")
 }
 
 /// `LoadHudTilePatterns`: the HUD's corners and lines, 1bpp, `BattleHudTiles1` at `$6D` and the
 /// other two at `$73`.
 pub fn load_hud_tiles(tiles: &mut crate::gfx::tiles::TileData) {
-    let first = pokered_symbols::BattleHudTiles1;
-    let len = (pokered_symbols::BattleHudTiles1End.address - first.address) as usize;
-    tiles.load_1bpp(V_CHARS2 + 0x6D, &rom_slice(first)[..len]);
-    let rest = pokered_symbols::BattleHudTiles2;
-    let len = (pokered_symbols::BattleHudTiles3End.address - rest.address) as usize;
-    tiles.load_1bpp(V_CHARS2 + 0x73, &rom_slice(rest)[..len]);
+    use poke_core::gfx::battle::{BATTLE_HUD_1, BATTLE_HUD_2, BATTLE_HUD_3};
+    tiles.load_1bpp(V_CHARS2 + 0x6D, BATTLE_HUD_1);
+    tiles.load_1bpp(V_CHARS2 + 0x73, BATTLE_HUD_2);
+    tiles.load_1bpp(V_CHARS2 + 0x73 + BATTLE_HUD_2.len() / 8, BATTLE_HUD_3);
 }
 
 /// `CenterMonName`: a name of one or two letters two tiles right, three or four one tile right.

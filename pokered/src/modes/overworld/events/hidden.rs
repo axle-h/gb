@@ -5,7 +5,7 @@ use poke_core::item::{self, ItemId};
 use poke_core::map_header::TileSetId;
 use poke_core::sprite::SpriteFacing;
 use poke_core::symbols::pokered_events::EVENT_BEAT_SILPH_CO_GIOVANNI;
-use poke_core::symbols::{pokered_symbols as sym, DmgBank, DmgPointer};
+use poke_core::tables::{HiddenRoutine, TextPredef};
 use poke_core::text_script::{TextBuffer, TextMoney};
 use crate::audio::data::sounds;
 use crate::mode::Mode;
@@ -13,18 +13,22 @@ use crate::modes::text_box::TextBox;
 use crate::systems::events::hidden_events::{self, HiddenEvent};
 use crate::systems::math::{add_bcd, flag_action, FlagAction};
 use crate::systems::pokedex::count_set_bits;
-use super::super::script::{text_at, Block, Flow, Routine, Script, Then};
+use super::super::script::{text_named, Block, Flow, Routine, Script, Then};
 use super::{print, Hidden, Label};
 
-/// `PrintPredefTextID` from a routine in `bank`, then return.
-pub(super) fn predef_in(bank: DmgPointer, id: u8) -> Then {
-    let DmgBank::ROM { bank } = bank.bank else { unreachable!("a routine is in ROM") };
-    Then::call(Routine::PrintPredefTextId { id, bank })
+/// `PrintPredefTextID`.
+pub(super) fn predef(text: TextPredef) -> Then {
+    predef_id(text as u8)
+}
+
+/// `PrintPredefTextID` with an id a table holds.
+pub(super) fn predef_id(id: u8) -> Then {
+    Then::call(Routine::PrintPredefTextId { id })
 }
 
 /// The text a `text_asm` text prints before its code, over the box `DisplayTextID` drew.
-pub(super) fn print_without_box(at: DmgPointer) -> Then {
-    Then::block(Block::Mode(Box::new(Mode::TextBox(TextBox::without_box(text_at(at))))))
+pub(super) fn print_without_box(label: &str) -> Then {
+    Then::block(Block::Mode(Box::new(Mode::TextBox(TextBox::without_box(text_named(label))))))
 }
 
 fn facing(s: &Script) -> u8 {
@@ -36,71 +40,72 @@ pub(super) fn check(s: &mut Script) -> Flow {
         Hidden::Event(event) => hidden_event(s, event),
         Hidden::Bookshelf(text) => {
             s.enable_auto_text_box_drawing();
-            predef_in(sym::PrintBookshelfText, text).ret()
+            predef_id(text).ret()
         }
         Hidden::CardKeyDoor => card_key(s),
     }
 }
 
-/// The hidden event's function, by its label. Whatever it does or declines to do, the press is used.
+/// The hidden event's function. Whatever it does or declines to do, the press is used.
 fn hidden_event(s: &mut Script, event: HiddenEvent) -> Flow {
+    use HiddenRoutine as R;
+    use TextPredef as T;
     let up = facing(s) == SpriteFacing::Up as u8;
     let f = event.function;
     let simple = [
-        (sym::OpenRedsPC, 0x03), (sym::PrintRedSNESText, 0x04), (sym::PrintBookcaseText, 0x0E),
-        (sym::DisplayOakLabLeftPoster, 0x05), (sym::PrintMagazinesText, 0x30), (sym::PrintNewBikeText, 0x39),
-        (sym::PrintFightingDojoText, 0x36), (sym::PrintFightingDojoText2, 0x37), (sym::PrintFightingDojoText3, 0x38),
-        (sym::PrintTrashText, 0x26),
+        (R::OpenRedsPC, T::RedBedroomPCText), (R::PrintRedSNESText, T::RedBedroomSNESText), (R::PrintBookcaseText, T::BookcaseText),
+        (R::DisplayOakLabLeftPoster, T::PushStartText), (R::PrintMagazinesText, T::MagazinesText),
+        (R::PrintNewBikeText, T::NewBicycleText), (R::PrintFightingDojoText, T::FightingDojoText),
+        (R::PrintFightingDojoText2, T::EnemiesOnEverySideText), (R::PrintFightingDojoText3, T::WhatGoesAroundComesAroundText),
+        (R::PrintTrashText, T::VermilionGymTrashText),
     ];
-    if let Some(&(_, id)) = simple.iter().find(|&&(label, _)| label == f) {
+    if let Some(&(_, text)) = simple.iter().find(|&&(routine, _)| routine == f) {
         s.enable_auto_text_box_drawing();
-        return predef_in(f, id).ret();
+        return predef(text).ret();
     }
-    if f == sym::HiddenItems {
-        return hidden_items(s, event);
-    }
-    if f == sym::HiddenCoins {
-        return hidden_coins(s, event);
-    }
-    if f == sym::OpenPokemonCenterPC {
-        if !up {
-            return Flow::Return;
+    match f {
+        R::HiddenItems => hidden_items(s, event),
+        R::HiddenCoins => hidden_coins(s, event),
+        R::OpenPokemonCenterPC => {
+            if !up {
+                return Flow::Return;
+            }
+            s.enable_auto_text_box_drawing();
+            s.ow.rt.no_auto_text_box = true;
+            predef(T::PokemonCenterPCText).ret()
         }
-        s.enable_auto_text_box_drawing();
-        s.ow.rt.no_auto_text_box = true;
-        return predef_in(f, 0x1F).ret();
-    }
-    if f == sym::DisplayOakLabRightPoster {
-        s.enable_auto_text_box_drawing();
-        let owned = count_set_bits(&s.ctx.world.pokedex.owned);
-        return predef_in(f, if owned < 2 { 0x06 } else { 0x07 }).ret();
-    }
-    if f == sym::DisplayOakLabEmailText || f == sym::PrintIndigoPlateauHQText {
-        if !up {
-            return Flow::Return;
+        R::DisplayOakLabRightPoster => {
+            s.enable_auto_text_box_drawing();
+            let owned = count_set_bits(&s.ctx.world.pokedex.owned);
+            predef(if owned < 2 { T::SaveOptionText } else { T::StrengthsAndWeaknessesText }).ret()
         }
-        s.enable_auto_text_box_drawing();
-        return predef_in(f, if f == sym::DisplayOakLabEmailText { 0x08 } else { 0x27 }).ret();
+        R::DisplayOakLabEmailText | R::PrintIndigoPlateauHQText => {
+            if !up {
+                return Flow::Return;
+            }
+            s.enable_auto_text_box_drawing();
+            predef(if f == R::DisplayOakLabEmailText { T::OakLabEmailText } else { T::IndigoPlateauHQText }).ret()
+        }
+        R::PrintBenchGuyText => {
+            s.enable_auto_text_box_drawing();
+            match hidden_events::bench_guy_text(s.ctx.world.location.map, facing(s), s.ctx.world.cartridge_bugs) {
+                Some(text) => predef(text).ret(),
+                None => Flow::Return,
+            }
+        }
+        R::GymStatues => {
+            s.enable_auto_text_box_drawing();
+            let Some(badge) = hidden_events::gym_badge(s.ctx.world.location.map).filter(|_| up) else { return Flow::Return };
+            // `wBeatGymFlags`, which the cartridge keeps apart from the badges and always equal to them.
+            predef(if s.ctx.world.badges & badge == badge { T::GymStatueText2 } else { T::GymStatueText1 }).ret()
+        }
+        R::PrintNotebookText | R::PrintBlackboardLinkCableText => {
+            s.enable_auto_text_box_drawing();
+            s.set_do_not_wait_for_button_press(true);
+            predef_id(event.argument).ret()
+        }
+        _ => super::api::hidden_event(s, event),
     }
-    if f == sym::PrintBenchGuyText {
-        s.enable_auto_text_box_drawing();
-        return match hidden_events::bench_guy_text(s.ctx.world.location.map, facing(s)) {
-            Some(id) => predef_in(f, id).ret(),
-            None => Flow::Return,
-        };
-    }
-    if f == sym::GymStatues {
-        s.enable_auto_text_box_drawing();
-        let Some(badge) = hidden_events::gym_badge(s.ctx.world.location.map).filter(|_| up) else { return Flow::Return };
-        // `wBeatGymFlags`, which the cartridge keeps apart from the badges and always equal to them.
-        return predef_in(f, if s.ctx.world.badges & badge == badge { 0x0D } else { 0x0C }).ret();
-    }
-    if f == sym::PrintNotebookText || f == sym::PrintBlackboardLinkCableText {
-        s.enable_auto_text_box_drawing();
-        s.set_do_not_wait_for_button_press(true);
-        return predef_in(f, event.argument).ret();
-    }
-    super::api::hidden_event(s, event)
 }
 
 /// `HiddenItems`.
@@ -114,7 +119,7 @@ fn hidden_items(s: &mut Script, event: HiddenEvent) -> Flow {
     s.set_do_not_wait_for_button_press(true);
     let name = ItemId::from_repr(event.argument).map(item::name).unwrap_or_default();
     s.ctx.world.text.strings.insert(TextBuffer::NameBuffer, name);
-    predef_in(event.function, 0x24).ret()
+    predef(TextPredef::FoundHiddenItemText).ret()
 }
 
 /// `FoundHiddenItemText`'s code.
@@ -140,7 +145,7 @@ pub(super) fn hidden_item_sound(s: &mut Script) -> Flow {
 
 pub(super) fn hidden_item_bag_full(s: &mut Script) -> Flow {
     s.set_do_not_wait_for_button_press(false);
-    print(sym::HiddenItemBagFullText).ret()
+    print("HiddenItemBagFullText").ret()
 }
 
 /// `HiddenCoins`: nothing without the Coin Case, and nothing twice. A purse topped up to 9999 says the
@@ -161,7 +166,7 @@ fn hidden_coins(s: &mut Script, event: HiddenEvent) -> Flow {
     flag_action(&mut world.hidden_coins, index, FlagAction::Set);
     let full = world.coins == [0x99, 0x99];
     s.enable_auto_text_box_drawing();
-    predef_in(event.function, if full { 0x2C } else { 0x2B }).ret()
+    predef(if full { TextPredef::DroppedHiddenCoinsText } else { TextPredef::FoundHiddenCoinsText }).ret()
 }
 
 /// `GetCoordsInFrontOfPlayer`.
@@ -173,11 +178,11 @@ fn coords_in_front(s: &Script) -> (u8, u8) {
 /// `PrintCardKeyText` at a card key door.
 fn card_key(s: &mut Script) -> Flow {
     if s.ctx.world.bag.quantity_of(ItemId::CardKey) == 0 {
-        return predef_in(sym::PrintCardKeyText, 0x02).ret();
+        return predef(TextPredef::CardKeyFailText).ret();
     }
     let (x, y) = coords_in_front(s);
     s.ow.rt.events.card_key_door = (x >> 1, y >> 1);
-    predef_in(sym::PrintCardKeyText, 0x01).then(Label::CardKeyOpened { x: x >> 1, y: y >> 1 })
+    predef(TextPredef::CardKeySuccessText).then(Label::CardKeyOpened { x: x >> 1, y: y >> 1 })
 }
 
 pub(super) fn card_key_opened(s: &mut Script, x: u8, y: u8) -> Flow {
@@ -189,30 +194,30 @@ pub(super) fn card_key_opened(s: &mut Script, x: u8, y: u8) -> Flow {
 }
 
 /// A text predef that runs code, entered after `DisplayTextID` has drawn its box.
-pub fn predef_text(s: &mut Script, at: DmgPointer) -> Option<Flow> {
-    Some(if at == sym::FoundHiddenItemText {
-        print_without_box(at).then(Label::HiddenItemFound)
-    } else if at == sym::SaffronCityPokecenterBenchGuyText {
-        let text = if s.check_event(EVENT_BEAT_SILPH_CO_GIOVANNI) {
-            sym::SaffronCityPokecenterBenchGuyText2
-        } else {
-            sym::SaffronCityPokecenterBenchGuyText1
-        };
-        print(text).ret()
-    } else if at == sym::BookOrSculptureText {
-        let diglett = s.ow.view.tileset == TileSetId::Mansion && s.ow.tile_map(s.ctx)[6 * 20 + 8] == 0x38;
-        print(if diglett { sym::DiglettSculptureText } else { sym::PokemonBooksText }).ret()
-    } else if at == sym::IndigoPlateauStatues {
-        print(sym::IndigoPlateauStatuesText1).then(Label::IndigoPlateauStatues)
-    } else if at == sym::TownMapText {
-        print_without_box(at).then(Label::TownMap)
-    } else {
-        return super::api::predef_text(s, at);
+pub fn predef_text(s: &mut Script, text: TextPredef) -> Option<Flow> {
+    use TextPredef as T;
+    Some(match text {
+        T::FoundHiddenItemText => print_without_box(text.label()).then(Label::HiddenItemFound),
+        T::SaffronCityPokecenterBenchGuyText => {
+            let text = if s.check_event(EVENT_BEAT_SILPH_CO_GIOVANNI) {
+                "SaffronCityPokecenterBenchGuyText2"
+            } else {
+                "SaffronCityPokecenterBenchGuyText1"
+            };
+            print(text).ret()
+        }
+        T::BookOrSculptureText => {
+            let diglett = s.ow.view.tileset == TileSetId::Mansion && s.ow.tile_map(s.ctx)[6 * 20 + 8] == 0x38;
+            print(if diglett { "DiglettSculptureText" } else { "PokemonBooksText" }).ret()
+        }
+        T::IndigoPlateauStatues => print("IndigoPlateauStatuesText1").then(Label::IndigoPlateauStatues),
+        T::TownMapText => print_without_box(text.label()).then(Label::TownMap),
+        _ => return super::api::predef_text(s, text),
     })
 }
 
 pub(super) fn indigo_plateau_statues(s: &mut Script) -> Flow {
-    let text = if s.x() & 1 != 0 { sym::IndigoPlateauStatuesText2 } else { sym::IndigoPlateauStatuesText3 };
+    let text = if s.x() & 1 != 0 { "IndigoPlateauStatuesText2" } else { "IndigoPlateauStatuesText3" };
     print(text).ret()
 }
 

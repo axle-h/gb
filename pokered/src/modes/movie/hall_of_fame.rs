@@ -10,10 +10,11 @@
 //! Loading, and not modelled: `ClearScreen`'s `Delay3`, the LCD-off loads and the pictures'
 //! decompression, and each `CreditsCopyTileMapToVRAM`'s `Delay3`.
 
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
+use poke_core::rom_gfx::TILE_BYTES;
+use poke_core::tables::{CREDITS_MONS, CREDITS_ORDER, CREDITS_TEXTS};
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::{pokered_events::EVENT_HALL_OF_FAME_DEX_RATING, pokered_symbols as sym, DmgPointer};
-use poke_core::text_script::{decode, TextNumber};
+use poke_core::symbols::pokered_events::EVENT_HALL_OF_FAME_DEX_RATING;
+use poke_core::text_script::{far_text, TextNumber};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, SoundId};
 use crate::gfx::layers::TileMap;
@@ -28,7 +29,7 @@ use crate::systems::pokedex::count_set_bits;
 use crate::systems::print_num::{print_bcd, print_number, BcdFormat, NumberFormat};
 use crate::systems::status_screen::print_mon_type;
 use super::intro::{fade_out_to_white, load_copyright_tiles, place_string_lines, FADE_STEP, FADE_STEPS};
-use super::screen::{between, clear_screen, copy_pic_to_tile_map, copy_tile_ids, load_mon_pic, load_pic, Dest, MovieScreen};
+use super::screen::{clear_screen, copy_pic_to_tile_map, copy_tile_ids, load_mon_pic, load_pic, Dest, MovieScreen};
 use super::wait::{Tick, Wait};
 
 /// `TILEMAP_MON_PIC`.
@@ -254,7 +255,7 @@ impl HallOfFame {
             Phase::Credits { order } => self.credits(ctx, order),
             Phase::Fading { order, step, then } => {
                 if step < 4 {
-                    ctx.screen.effects.bgp = rom_slice(sym::HoFGBPalettes)[step as usize];
+                    ctx.screen.effects.bgp = poke_core::tables::HOF_GB_PALETTES[step as usize];
                     self.phase = Phase::Fading { order, step: step + 1, then };
                     self.wait = Wait::frames(5);
                 } else {
@@ -312,7 +313,7 @@ impl HallOfFame {
                 load_back_pic(&mut ctx.screen.tiles, species);
             }
             None => {
-                load_pic(ctx, sym::RedPicFront);
+                load_pic(ctx, poke_core::gfx::player::RED);
                 load_player_back_pic(&mut ctx.screen.tiles, false);
             }
         }
@@ -330,7 +331,7 @@ impl HallOfFame {
         let species = named.mon.mon.species;
         let ui = &mut ctx.screen.ui;
         ui.text_box_border(0, 2, 10, 9);
-        place_string_lines(ui, 2, 6, rom_slice(sym::HoFMonInfoText));
+        place_string_lines(ui, 2, 6, &poke_core::tables::db_string("HoFMonInfoText"));
         ui.place(1, 4, &named.nick);
         print_number(ui, 7 * SCREEN_TILES_X + 8, named.mon.level as u32, NumberFormat { digits: 3, leading_zeroes: false, left_align: true });
         print_mon_type(ui, 9 * SCREEN_TILES_X + 3, species);
@@ -375,9 +376,9 @@ impl HallOfFame {
     /// `HoFPrintTextAndDelay` for the seen and owned counts, the rating's label and the rating.
     fn player_text(&mut self, ctx: &mut Ctx, text: u8) -> Option<Transition> {
         let script = match text {
-            0 => sym::DexSeenOwnedText,
-            1 => sym::DexRatingText,
-            2 => rating_text(count_set_bits(&ctx.world.pokedex.owned)),
+            0 => "DexSeenOwnedText",
+            1 => "DexRatingText",
+            2 => crate::systems::events::tables::dex_rating_text(count_set_bits(&ctx.world.pokedex.owned)),
             _ => {
                 self.phase = Phase::LastFade(0);
                 return None;
@@ -386,7 +387,7 @@ impl HallOfFame {
         self.phase = Phase::PlayerText { text, held: false };
         self.child = true;
         MovieScreen::release(ctx);
-        Some(Transition::Push(Mode::TextBox(TextBox::script(decode(script).expect("the rating texts decode")))))
+        Some(Transition::Push(Mode::TextBox(TextBox::script(far_text(script).expect("the rating texts decode")))))
     }
 
     /// `HallOfFamePC`'s screen for the credits: the font shifted a shade so the text can fade in,
@@ -409,11 +410,10 @@ impl HallOfFame {
 
     /// `Credits`' `.nextCreditsScreen` and the commands after it, to the next hold.
     fn credits(&mut self, ctx: &mut Ctx, mut order: usize) {
-        let orders = rom_slice(sym::CreditsOrder);
         fill_middle_with_white(&mut ctx.screen.ui);
         let mut at = 6 * SCREEN_TILES_X + 9;
         loop {
-            let command = orders[order];
+            let command = CREDITS_ORDER[order];
             order += 1;
             match command {
                 CRED_TEXT_FADE_MON => return self.phase = Phase::Fading { order, step: 0, then: After::Hold(90, true) },
@@ -423,11 +423,10 @@ impl HallOfFame {
                 CRED_COPYRIGHT => load_copyright_tiles(ctx),
                 CRED_THE_END => return self.hold(order, 16, After::TheEnd),
                 string => {
-                    let pointers = rom_slice(sym::CreditsTextPointers);
-                    let address = u16::from_le_bytes([pointers[string as usize * 2], pointers[string as usize * 2 + 1]]);
-                    let text = rom_slice(DmgPointer { address, ..sym::CreditsTextPointers });
-                    let from = (at as isize + text[0] as i8 as isize) as usize;
-                    place_string_lines(&mut ctx.screen.ui, from % SCREEN_TILES_X, from / SCREEN_TILES_X, &text[1..]);
+                    let (offset, text) = CREDITS_TEXTS[string as usize];
+                    let from = (at as isize + offset as isize) as usize;
+                    let text = poke_core::charmap::encode(text).expect("a credit is in the charmap");
+                    place_string_lines(&mut ctx.screen.ui, from % SCREEN_TILES_X, from / SCREEN_TILES_X, &text);
                     at += 2 * SCREEN_TILES_X;
                 }
             }
@@ -458,7 +457,7 @@ impl HallOfFame {
         self.screen.transfer = None;
         let text = ctx.screen.ui.clone();
         fill_middle_with_white(&mut ctx.screen.ui);
-        let species = PokemonSpecies::from_repr(rom_slice(sym::CreditsMons)[self.credits_mons as usize]).expect("a credits mon");
+        let species = PokemonSpecies::from_repr(CREDITS_MONS[self.credits_mons as usize]).expect("a credits mon");
         self.credits_mons += 1;
         load_mon_pic(ctx, species, false);
         copy_pic_to_tile_map(&mut ctx.screen.ui, 8, 6, 0, false);
@@ -496,8 +495,8 @@ impl HallOfFame {
     /// `.showTheEnd`, then `FadeInCredits`, and the credits are over.
     fn the_end(&mut self, ctx: &mut Ctx) {
         fill_middle_with_white(&mut ctx.screen.ui);
-        ctx.screen.tiles.load(V_CHARS2 + 0x60, between(sym::TheEndGfx, sym::TheEndGfxEnd));
-        let text = rom_slice(sym::TheEndTextString);
+        ctx.screen.tiles.load(V_CHARS2 + 0x60, poke_core::gfx::credits::THE_END);
+        let text = &poke_core::tables::db_string("TheEndTextString");
         let split = text.iter().position(|&b| b == 0x50).expect("two strings");
         place_string_lines(&mut ctx.screen.ui, 4, 8, &text[..split]);
         place_string_lines(&mut ctx.screen.ui, 4, 9, &text[split + 1..]);
@@ -514,9 +513,3 @@ fn fill_middle_with_white(ui: &mut UiSurface) {
     ui.fill(0, 4, SCREEN_TILES_X, 10, UiSurface::BLANK);
 }
 
-/// `DexRatingsTable`: the text for how many are owned.
-fn rating_text(owned: u8) -> DmgPointer {
-    let table = rom_slice(sym::DexRatingsTable);
-    let row = table.chunks_exact(3).find(|row| owned < row[0]).expect("the table ends past 151");
-    DmgPointer { address: u16::from_le_bytes([row[1], row[2]]), ..sym::DexRatingsTable }
-}

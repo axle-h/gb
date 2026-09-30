@@ -4,19 +4,17 @@
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_ERIKA, EVENT_FOUND_ROCKET_HIDEOUT, EVENT_GOT_10_COINS,
     EVENT_GOT_20_COINS, EVENT_GOT_20_COINS_2};
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_GAMECORNER_DEFAULT, SCRIPT_GAMECORNER_ROCKET_BATTLE,
     SCRIPT_GAMECORNER_ROCKET_EXIT, TEXT_GAMECORNER_CLERK1, TEXT_GAMECORNER_CLERK2, TEXT_GAMECORNER_FISHING_GURU,
     TEXT_GAMECORNER_GENTLEMAN, TEXT_GAMECORNER_GYM_GUIDE, TEXT_GAMECORNER_POSTER, TEXT_GAMECORNER_ROCKET,
     TEXT_GAMECORNER_ROCKET_AFTER_BATTLE};
-use poke_core::symbols::pokered_symbols as sym;
-use poke_core::symbols::pokered_symbols::GAMECORNER_ROCKET;
+use poke_core::symbols::pokered_map_scripts::GAMECORNER_ROCKET;
 use poke_core::symbols::pokered_toggles::TOGGLE_GAME_CORNER_ROCKET;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use crate::input::Joypad;
 use crate::modes::overworld::movement::{NPC_MOVEMENT_DOWN, NPC_MOVEMENT_RIGHT, NPC_MOVEMENT_UP};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 const END: u8 = 0xFF;
 const PAD_CTRL_PAD: Joypad = Joypad::UP.union(Joypad::DOWN).union(Joypad::LEFT).union(Joypad::RIGHT);
@@ -115,35 +113,35 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     Some(match text_id {
         TEXT_GAMECORNER_CLERK1 => {
             rt.game_corner_draw_coin_box();
-            rt.print_text(text_at(local::GameCornerClerk1Text::DoYouNeedSomeGameCoins)).then(Label::Clerk1Asked)
+            rt.print_text(text_named("GameCornerClerk1Text.DoYouNeedSomeGameCoins")).then(Label::Clerk1Asked)
         }
         TEXT_GAMECORNER_FISHING_GURU => match rt.check_event(EVENT_GOT_10_COINS) {
-            true => rt.print_text(text_at(local::GameCornerFishingGuruText::WinsComeAndGoText)).ret(),
-            false => rt.print_text(text_at(local::GameCornerFishingGuruText::WantToPlayText))
+            true => rt.print_text(text_named("GameCornerFishingGuruText.WinsComeAndGoText")).ret(),
+            false => rt.print_text(text_named("GameCornerFishingGuruText.WantToPlayText"))
                 .then(Label::FishingGuruAsked),
         },
         TEXT_GAMECORNER_CLERK2 => match rt.check_event(EVENT_GOT_20_COINS_2) {
-            true => rt.print_text(text_at(local::GameCornerClerk2Text::INeedMoreCoinsText)).ret(),
-            false => rt.print_text(text_at(local::GameCornerClerk2Text::WantSomeCoinsText)).then(Label::Clerk2Asked),
+            true => rt.print_text(text_named("GameCornerClerk2Text.INeedMoreCoinsText")).ret(),
+            false => rt.print_text(text_named("GameCornerClerk2Text.WantSomeCoinsText")).then(Label::Clerk2Asked),
         },
         TEXT_GAMECORNER_GENTLEMAN => match rt.check_event(EVENT_GOT_20_COINS) {
-            true => rt.print_text(text_at(local::GameCornerGentlemanText::CloselyWatchTheReelsText)).ret(),
-            false => rt.print_text(text_at(local::GameCornerGentlemanText::ThrowingMeOffText))
+            true => rt.print_text(text_named("GameCornerGentlemanText.CloselyWatchTheReelsText")).ret(),
+            false => rt.print_text(text_named("GameCornerGentlemanText.ThrowingMeOffText"))
                 .then(Label::GentlemanAsked),
         },
         TEXT_GAMECORNER_GYM_GUIDE => {
             let words = match rt.check_event(EVENT_BEAT_ERIKA) {
-                true => sym::GameCornerGymGuideTheyOfferRarePokemonText,
-                false => sym::GameCornerGymGuideChampInMakingText,
+                true => "GameCornerGymGuideTheyOfferRarePokemonText",
+                false => "GameCornerGymGuideChampInMakingText",
             };
-            rt.print_text(text_at(words)).ret()
+            rt.print_text(text_named(words)).ret()
         }
         TEXT_GAMECORNER_ROCKET => {
-            rt.print_text(text_at(local::GameCornerRocketText::ImGuardingThisPosterText)).then(Label::RocketEngaged)
+            rt.print_text(text_named("GameCornerRocketText.ImGuardingThisPosterText")).then(Label::RocketEngaged)
         }
         TEXT_GAMECORNER_POSTER => {
             rt.set_do_not_wait_for_button_press(true);
-            rt.print_text(text_at(local::GameCornerPosterText::SwitchBehindPosterText)).then(Label::PosterSwitch)
+            rt.print_text(text_named("GameCornerPosterText.SwitchBehindPosterText")).then(Label::PosterSwitch)
         }
         _ => return None,
     })
@@ -151,13 +149,13 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 
 /// `GameCornerOopsForgotCoinCaseText`, which every coin handout falls back to.
 fn forgot_coin_case(rt: &mut Script) -> Flow {
-    rt.print_text(text_at(sym::GameCornerOopsForgotCoinCaseText)).ret()
+    rt.print_text(text_named("GameCornerOopsForgotCoinCaseText")).ret()
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
         Label::RocketEngaged => {
-            rt.save_end_battle_text(local::GameCornerRocketText::BattleEndText);
+            rt.save_end_battle_text("GameCornerRocketText.BattleEndText");
             rt.engage_map_trainer(rt.sprite_index(), 0);
             rt.clear_joy_held();
             rt.maps().game_corner.cur_script = SCRIPT_GAMECORNER_ROCKET_BATTLE;
@@ -174,62 +172,62 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::Clerk1Asked => rt.yes_no_choice().then(Label::Clerk1Answered),
         Label::Clerk1Answered => {
-            use local::GameCornerClerk1Text as words;
+            
             if !rt.chose_yes() {
-                return rt.print_text(text_at(words::PleaseComePlaySometime)).ret();
+                return rt.print_text(text_named("GameCornerClerk1Text.PleaseComePlaySometime")).ret();
             }
             if !rt.is_item_in_bag(ItemId::CoinCase) {
-                return rt.print_text(text_at(words::DontHaveCoinCase)).ret();
+                return rt.print_text(text_named("GameCornerClerk1Text.DontHaveCoinCase")).ret();
             }
             if rt.has_9990_coins() {
-                return rt.print_text(text_at(words::CoinCaseIsFull)).ret();
+                return rt.print_text(text_named("GameCornerClerk1Text.CoinCaseIsFull")).ret();
             }
             if !rt.has_enough_money(COIN_PRICE) {
-                return rt.print_text(text_at(words::CantAffordTheCoins)).ret();
+                return rt.print_text(text_named("GameCornerClerk1Text.CantAffordTheCoins")).ret();
             }
             rt.subtract_money(COIN_PRICE);
             rt.add_coins(0x50);
             rt.game_corner_draw_coin_box();
-            rt.print_text(text_at(words::ThanksHereAre50Coins)).ret()
+            rt.print_text(text_named("GameCornerClerk1Text.ThanksHereAre50Coins")).ret()
         }
         Label::FishingGuruAsked => {
-            use local::GameCornerFishingGuruText as words;
+            
             if !rt.is_item_in_bag(ItemId::CoinCase) {
                 return forgot_coin_case(rt);
             }
             if rt.has_9990_coins() {
-                return rt.print_text(text_at(words::DontNeedMyCoinsText)).ret();
+                return rt.print_text(text_named("GameCornerFishingGuruText.DontNeedMyCoinsText")).ret();
             }
             rt.add_coins(0x10);
             rt.set_event(EVENT_GOT_10_COINS);
             rt.set_do_not_wait_for_button_press(true);
-            rt.print_text(text_at(words::Received10CoinsText)).ret()
+            rt.print_text(text_named("GameCornerFishingGuruText.Received10CoinsText")).ret()
         }
         Label::Clerk2Asked => {
-            use local::GameCornerClerk2Text as words;
+            
             if !rt.is_item_in_bag(ItemId::CoinCase) {
                 return forgot_coin_case(rt);
             }
             if rt.has_9990_coins() {
-                return rt.print_text(text_at(words::YouHaveLotsOfCoinsText)).ret();
+                return rt.print_text(text_named("GameCornerClerk2Text.YouHaveLotsOfCoinsText")).ret();
             }
             rt.add_coins(0x20);
             rt.set_event(EVENT_GOT_20_COINS_2);
-            rt.print_text(text_at(words::Received20CoinsText)).ret()
+            rt.print_text(text_named("GameCornerClerk2Text.Received20CoinsText")).ret()
         }
         // He tests for equality rather than for enough room, so he pays out until the case holds
         // exactly 9990 coins and `AddBCD` saturates the rest.
         Label::GentlemanAsked => {
-            use local::GameCornerGentlemanText as words;
+            
             if !rt.is_item_in_bag(ItemId::CoinCase) {
                 return forgot_coin_case(rt);
             }
             if rt.coins() == [0x99, 0x90] {
-                return rt.print_text(text_at(words::YouGotYourOwnCoinsText)).ret();
+                return rt.print_text(text_named("GameCornerGentlemanText.YouGotYourOwnCoinsText")).ret();
             }
             rt.add_coins(0x20);
             rt.set_event(EVENT_GOT_20_COINS);
-            rt.print_text(text_at(words::Received20CoinsText)).ret()
+            rt.print_text(text_named("GameCornerGentlemanText.Received20CoinsText")).ret()
         }
         Label::PosterSwitch => {
             rt.play_sound(sounds::SFX_SWITCH);

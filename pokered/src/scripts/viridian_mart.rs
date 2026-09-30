@@ -1,11 +1,10 @@
 //! `ViridianMart_Script`: the clerk stops a player who has not yet taken Oak his parcel and hands it
 //! over, and once it is delivered the map reads its second text pointer table.
 
+use poke_core::tables::text_pointers;
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_GOT_OAKS_PARCEL, EVENT_OAK_GOT_PARCEL};
-use poke_core::symbols::pokered_local_labels::ViridianMartDefaultScript;
 use poke_core::symbols::pokered_map_scripts::*;
-use poke_core::symbols::pokered_symbols::{ViridianMart_TextPointers, ViridianMart_TextPointers2};
 use serde::{Deserialize, Serialize};
 use super::{Flow, Script};
 
@@ -26,7 +25,11 @@ pub enum Label {
 
 pub fn script(rt: &mut Script) -> Flow {
     // `ViridianMartCheckParcelDeliveredScript`.
-    let table = if rt.check_event(EVENT_OAK_GOT_PARCEL) { ViridianMart_TextPointers2 } else { ViridianMart_TextPointers };
+    let table = if rt.check_event(EVENT_OAK_GOT_PARCEL) {
+        text_pointers::ViridianMart_TextPointers2
+    } else {
+        text_pointers::ViridianMart_TextPointers
+    };
     rt.set_text_pointers(table);
     rt.enable_auto_text_box_drawing();
     match rt.maps().viridian_mart.cur_script {
@@ -51,7 +54,7 @@ pub fn text(_rt: &mut Script, _text_id: u8) -> Option<Flow> {
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
         Label::DefaultScriptWalk => {
-            rt.simulate_joypad_rle(ViridianMartDefaultScript::PlayerMovement);
+            rt.simulate_joypad_rle(poke_core::tables::rle_lists::VIRIDIAN_MART_PLAYER);
             rt.maps().viridian_mart.cur_script = SCRIPT_VIRIDIANMART_OAKS_PARCEL;
             Flow::Return
         }

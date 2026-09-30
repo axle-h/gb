@@ -391,8 +391,7 @@ impl ModeUpdate for TextBox {
 mod tests {
     use std::collections::BTreeMap;
     use poke_core::charmap::encode;
-    use poke_core::symbols::pokered_symbols;
-    use poke_core::text_script::{decode, TextBuffer, TextNumber};
+    use poke_core::text_script::{far_text, TextBuffer, TextNumber};
     use crate::world::TextVars;
     use crate::command::{Command, Refusal, Reply};
     use crate::input::Joypad;
@@ -569,7 +568,7 @@ mod tests {
             numbers: BTreeMap::from([(TextNumber::ExpAmountGained, 1337)]),
             ..TextVars::default()
         };
-        let commands = decode(pokered_symbols::_ExpPointsText).unwrap();
+        let commands = far_text("_ExpPointsText").unwrap();
         let mut game = scripted(commands, text, Pacing::Instant);
         game.frame(Input::None);
         assert_eq!(row(&game, 14), "1337 EXP. Points!");
@@ -583,7 +582,7 @@ mod tests {
             strings: BTreeMap::from([(TextBuffer::NameBuffer, encode("NIDORAN@").unwrap())]),
             ..TextVars::default()
         };
-        let commands = decode(pokered_symbols::_GrewLevelText).unwrap();
+        let commands = far_text("_GrewLevelText").unwrap();
         let mut game = scripted(commands, text, Pacing::Instant);
         game.frame(Input::None);
         assert_eq!(row(&game, 14), "NIDORAN grew");
@@ -789,7 +788,7 @@ mod tests {
     fn an_asm_sound_plays_and_the_text_runs_on_where_it_stopped() {
         let commands = vec![
             TextCommand::Text(encode("A@").unwrap()),
-            TextCommand::Asm(pokered_symbols::OneTwoAndText),
+            TextCommand::Asm("OneTwoAndText"),
             TextCommand::Text(encode("B@").unwrap()),
         ];
         let world = World { player_name: encode("RED").unwrap(), ..World::default() };

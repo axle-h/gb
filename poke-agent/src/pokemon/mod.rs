@@ -27,7 +27,7 @@ use crate::pokemon::map_metadata::{MapMetadataCache, MapMetadataReader};
 use crate::pokemon::strings::PokemonString;
 
 pub use poke_core::badge;
-pub use poke_core::rom_gfx;
+pub mod rom_gfx;
 pub use poke_core::badge_gfx;
 pub use poke_core::mon_gfx;
 pub mod learnset;
@@ -53,7 +53,7 @@ pub mod encoding;
 pub use poke_core::strings;
 pub mod symbols;
 pub mod font;
-pub use poke_core::roms;
+pub mod roms;
 mod text;
 pub mod map_header;
 pub use poke_core::item;
@@ -137,6 +137,9 @@ pub trait PokemonApiTrait {
     fn read_game_options(&self) -> Result<GameOptions, String>;
 }
 
+/// The screen in tiles, as `wTileMap` lays it out.
+const SCREEN_TILES: (u8, u8) = (20, 18);
+
 #[derive(Debug)]
 pub struct PokemonApi<'a> {
     game_boy: &'a mut GameBoy,
@@ -158,6 +161,24 @@ impl<'a> PokemonApi<'a> {
 
     fn mmu_mut(&mut self) -> &mut MMU {
         self.game_boy.core_mut().mmu_mut()
+    }
+
+    /// [`PokemonApiTrait::on_screen_text`], read from `wTileMap` rather than the screen: what the
+    /// game has printed, up to three frames before `AutoBgMapTransfer` has drawn it.
+    pub fn tile_map_text(&self, only_message_box: bool) -> Option<String> {
+        let mmu = self.mmu();
+        if mmu.read_game_mode() == GameMode::Overworld || !mmu.pokemon_font_loaded() {
+            return None;
+        }
+        const FIRST_FONT_TILE: u8 = 0x80;
+        let coordinates = (0..SCREEN_TILES.1).flat_map(|y| (0..SCREEN_TILES.0).map(move |x| (x, y)))
+            .filter_map(|(x, y)| {
+                let tile = mmu.read(pokered_symbols::wTileMap.address + y as u16 * SCREEN_TILES.0 as u16 + x as u16);
+                (tile >= FIRST_FONT_TILE)
+                    .then(|| ((tile - FIRST_FONT_TILE) as usize, gb::geometry::Point8 { x, y }))
+            })
+            .collect();
+        Some(text_of_tiles(coordinates, only_message_box))
     }
 
     pub fn pimp_out_pokemon(&mut self) -> Result<(), String> {
@@ -282,6 +303,46 @@ impl<'a> PokemonApi<'a> {
         party.move_to_front(slot);
         self.mmu_mut().write_player_pokemon_party(&party)
     }
+}
+
+/// Font tiles at their screen coordinates, as the text they spell: a line per row, a space where
+/// tiles are not adjacent.
+fn text_of_tiles(mut coordinates: Vec<(usize, gb::geometry::Point8)>, only_message_box: bool) -> String {
+    coordinates.sort_by_key(|(_, p)| *p);
+
+    const MESSAGE_BOX_MIN_Y: u8 = 13;
+
+    let mut lines = Vec::new();
+    let mut current_line = Vec::new();
+    let mut prev_pos: Option<gb::geometry::Point8> = None;
+    for (char_id, pos) in coordinates {
+        if only_message_box && pos.y < MESSAGE_BOX_MIN_Y {
+            continue;
+        }
+
+        if let Some(prev) = prev_pos {
+            if pos.y != prev.y {
+                lines.push(current_line);
+                current_line = Vec::new();
+            } else {
+                let is_space = pos.x.saturating_sub(prev.x) > 1;
+                // 64 is the space glyph; never two in a row.
+                if is_space && current_line.last() != Some(&64) {
+                    current_line.push(64);
+                }
+            }
+        }
+
+        current_line.push(char_id);
+        prev_pos = Some(pos);
+    }
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+
+    lines.into_iter()
+        .map(|line| render_font_string(&line, false).trim().to_string())
+        .join(" ")
 }
 
 impl<'a> PokemonApiTrait for PokemonApi<'a> {
@@ -409,44 +470,8 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         if font_tiles.is_empty() {
             return None;
         }
-        let mut coordinates = ppu.tile_coordinates(&font_tiles);
-        coordinates.sort_by_key(|(_, p)| *p);
-
-        const MESSAGE_BOX_MIN_Y: u8 = 13;
-
-        let mut lines = Vec::new();
-        let mut current_line = Vec::new();
-        let mut prev_pos: Option<gb::geometry::Point8> = None;
-        for (char_id, pos) in coordinates {
-            if only_message_box && pos.y < MESSAGE_BOX_MIN_Y {
-                continue;
-            }
-
-            if let Some(prev) = prev_pos {
-                if pos.y != prev.y {
-                    lines.push(current_line);
-                    current_line = Vec::new();
-                } else {
-                    let is_space = pos.x.saturating_sub(prev.x) > 1;
-                    // 64 is the space glyph; never two in a row.
-                    if is_space && current_line.last() != Some(&64) {
-                        current_line.push(64);
-                    }
-                }
-            }
-
-            current_line.push(char_id);
-            prev_pos = Some(pos);
-        }
-        if !current_line.is_empty() {
-            lines.push(current_line);
-        }
-
-        Some(
-            lines.into_iter()
-                .map(|line| render_font_string(&line, false).trim().to_string())
-                .join(" ")
-        )
+        let coordinates = ppu.tile_coordinates(&font_tiles);
+        Some(text_of_tiles(coordinates, only_message_box))
     }
 
     fn game_mode(&self) -> Option<GameMode> {

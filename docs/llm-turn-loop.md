@@ -45,9 +45,8 @@ argument lives in the code.
 - A refused battle id carries the cartridge's rule, read off the menu rather than the game, and says
   nothing where the menu cannot settle which rule it is. The turn's own `### On screen` line names
   the row, so a bare "not one of this turn's actions" is a contradiction with no way out.
-- A row that leads to a coordinate being asked for names both squares: an id's coordinate is where
-  the player stands, `use_field_move`'s `target` is where the thing is. A sprite id now carries no
-  coordinate at all, so only boulder and field-move rows carry two.
+- A row that leads to a coordinate being asked for says both squares in its prose, where the player
+  stands and where the thing is (`use_field_move`'s `target`). Its id names only the thing.
 - `use_item`'s `target` is optional: the Bicycle, a Repel and the Itemfinder have no tile to aim at,
   and requiring one had shut off half of `ItemUsePtrTable` with a driver and tests behind it.
   `items::blocked` is asked up front, because `ItemUseNotTime` consumes nothing and prints a box that

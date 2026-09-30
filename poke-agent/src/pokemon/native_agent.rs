@@ -67,9 +67,14 @@ pub fn new_game(rng: impl Fn() -> pokered::rng::GameRng, options: pokered::world
     Err(format!("the intro never reached Red's room: {:?}", game.status()))
 }
 
-/// Decision points a row may go without a route before the walk is given up: a person standing in
-/// the only doorway moves on in a few of their own steps.
-const MAX_ROUTE_LOST_POLLS: u32 = 120;
+/// The emulated agent's bounds on a row gone missing, in frames, each of which is a decision point:
+/// one for any row, and a longer one once `row_blocked_by_people` says someone stands on the route.
+const MAX_ROUTE_LOST_POLLS: u32 = ticks_to_frames(crate::pokemon::agent::MAX_ROUTE_LOST_TICKS);
+const MAX_ROUTE_BLOCKED_POLLS: u32 = ticks_to_frames(crate::pokemon::agent::MAX_ROUTE_BLOCKED_TICKS);
+
+const fn ticks_to_frames(ticks: u16) -> u32 {
+    (ticks as u64 * crate::pokemon::agent::AGENT_RESOLUTION.m_cycles() / MachineCycles::PER_FRAME.m_cycles()) as u32
+}
 
 /// Talks whose menu the emulated agent's A answers with its first row: the drinks the roof's girl
 /// is shown, and the fossils the lab's scientist is.
@@ -94,6 +99,8 @@ struct Walk {
     /// The last command was A at the row's end, so a text box is the row succeeding.
     pressed_a: bool,
     route_lost: u32,
+    /// Asked once [`MAX_ROUTE_LOST_POLLS`] runs out: whether people are what stands on the route.
+    route_lost_to_people: bool,
     /// The square the player last left: a step pressed on a poll offered early may never be taken.
     came_from: Option<Point8>,
     /// The shortest the row's route has been, and the steps since it last got shorter: a current
@@ -508,8 +515,9 @@ impl NativeAgent {
             _ => return,
         }
         use crate::pokemon::observe::{playtime, playtime_seconds};
-        let party = self.native.game_state()
-            .map(|state| state.pokemon.iter().map(|mon| mon.nickname.to_default_string()).collect())
+        // Not `game_state`: the ceremony has replaced the overworld it needs.
+        let party = self.native.party()
+            .map(|party| party.iter().map(|mon| mon.nickname.to_default_string()).collect())
             .unwrap_or_default();
         self.event(AgentEvent::HallOfFame {
             teams,
@@ -727,6 +735,8 @@ impl NativeAgent {
             Status::Waiting(Decision::TwoOption | Decision::ForgetMove) if self.learning().is_some() => self.learn_answer(&status)?,
             Status::Waiting(Decision::TwoOption) => Some(Command::ChooseOption(std::mem::take(&mut self.answer_no) as u8)),
             Status::Waiting(Decision::NamingScreen) => self.name_answer()?,
+            Status::Waiting(Decision::CursorMenu) if let Some(row) = self.slot_bet() => Some(Command::ChooseOption(row)),
+            Status::Waiting(Decision::SlotWheels) => Some(Command::StopWheel),
             Status::Waiting(Decision::CursorMenu) => Some(match self.menu_pick.take() {
                 Some(row) => Command::ChooseOption(row),
                 None => Command::CancelOption,
@@ -757,6 +767,16 @@ impl NativeAgent {
             Status::Waiting(decision) => return Err(format!("no native answer yet for {decision:?}")),
         };
         self.issue_or_wait(command)
+    }
+
+    /// The slot machine's bet row, when its bet menu is up. The emulated agent reads the machine as
+    /// text and its A takes the row the cursor starts on, three coins, and every "One more go?";
+    /// with fewer coins than that the cartridge refuses it for ever, so this bets what is left.
+    fn slot_bet(&self) -> Option<u8> {
+        let modes = self.native.game().modes();
+        let under = modes.len().checked_sub(2).map(|below| &modes[below]);
+        let coins = bcd(&self.native.game().world().coins);
+        matches!(under, Some(Mode::SlotMachine(_))).then(|| 3 - coins.min(3) as u8)
     }
 
     /// What a frame with nothing to press holds. `JoypadOverworld` coasts a rider on Route 17 south
@@ -793,6 +813,7 @@ impl NativeAgent {
                 if let Some(walk) = self.walk.as_mut() {
                     walk.pressed_a = command == Command::Interact;
                     walk.route_lost = 0;
+                    walk.route_lost_to_people = false;
                 }
                 self.running = Some(command);
                 self.finish(&frame.events);
@@ -945,7 +966,7 @@ impl NativeAgent {
         };
         self.event(AgentEvent::StartedOverworldAction { destination: action.tile, id: action.id() });
         let walk = Walk {
-            destination: action.tile, map: action.map, pressed_a: false, route_lost: 0, came_from: None,
+            destination: action.tile, map: action.map, pressed_a: false, route_lost: 0, route_lost_to_people: false, came_from: None,
             closest: usize::MAX, stale: 0, last_at: None,
         };
         self.walk = Some(walk);
@@ -1139,12 +1160,16 @@ impl NativeAgent {
 
     /// Wait out a route that has gone, up to a bound, then give the walk up.
     fn lose_route(&mut self, _why: &str) -> Result<(), String> {
-        let Some(walk) = self.walk.as_mut() else { return Ok(()) };
+        let Some(mut walk) = self.walk else { return Ok(()) };
         walk.route_lost += 1;
-        if walk.route_lost > MAX_ROUTE_LOST_POLLS {
-            let destination = walk.destination;
+        if walk.route_lost == MAX_ROUTE_LOST_POLLS + 1 {
+            walk.route_lost_to_people = self.native.game_state()?.map.row_blocked_by_people(walk.destination);
+        }
+        self.walk = Some(walk);
+        let bound = if walk.route_lost_to_people { MAX_ROUTE_BLOCKED_POLLS } else { MAX_ROUTE_LOST_POLLS };
+        if walk.route_lost > bound {
             let at = self.player_at();
-            self.abort(OverworldActionAbortedReason::NoRoute(destination), at);
+            self.abort(OverworldActionAbortedReason::NoRoute(walk.destination), at);
         }
         self.play(Input::None);
         Ok(())
@@ -2478,6 +2503,27 @@ mod tests {
         game_at(Map::PalletTown, 5, 6, |_| {})
     }
 
+    /// A slot machine the player was put in front of is played as the emulated agent's A plays it:
+    /// three coins a spin, every wheel stopped, every win taken and "One more go?" answered YES, and
+    /// with fewer than three coins left what is left, until the machine says the coins are gone.
+    #[test]
+    fn a_slot_machine_is_played_until_the_coins_run_out() {
+        let mut game = game_at(Map::GameCorner, 17, 12, |world| {
+            world.location.facing = poke_core::sprite::SpriteFacing::Right;
+            world.coins = [0x00, 0x10];
+            world.bag.add(ItemId::CoinCase, 1);
+        });
+        while game.status() != Status::Waiting(Decision::Overworld) {
+            game.frame(Input::None);
+        }
+        assert_eq!(game.frame(Input::Command(Command::Interact)).reply, Some(Reply::Accepted));
+        let playing = |agent: &NativeAgent| agent.game().modes().iter().any(|mode| matches!(mode, Mode::SlotMachine(_)));
+        let (mut agent, log) = agent(game, vec![]);
+        run(&mut agent, &log, |agent, _| playing(agent));
+        run(&mut agent, &log, |agent, _| !playing(agent) && agent.game().status() == Status::Waiting(Decision::Overworld));
+        assert_eq!(agent.game().world().coins, [0, 0]);
+    }
+
     /// The ceremony's count going up is the win, said once, whoever is driving the frame; a game
     /// that was already a champion when it was loaded says nothing.
     #[test]
@@ -2500,6 +2546,34 @@ mod tests {
         assert_eq!(wins(&mut agent), vec![(2, vec!["MEWTWO".to_string()])]);
         agent.tick().unwrap();
         assert_eq!(wins(&mut agent), vec![], "the same win twice");
+    }
+
+    /// The League's own script counts the team with the ceremony already in the overworld's place,
+    /// and the party it names is still the one being shown.
+    #[test]
+    fn the_hall_of_fame_names_the_party_the_ceremony_shows() {
+        let game = game_at(Map::HallOfFame, 5, 7, |_| {});
+        let mut agent = NativeAgent::new(game, Box::new(crate::pokemon::policy::RandomPolicy::seeded(1)))
+            .unwrap()
+            .hosted();
+        let mut won = None;
+        for _ in 0..20_000 {
+            let input = match agent.game().status() {
+                Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
+                _ => Input::None,
+            };
+            agent.frame(input);
+            won = agent.drain_events().into_iter().find_map(|event| match event {
+                AgentEvent::HallOfFame { teams, party, .. } => Some((teams, party)),
+                _ => None,
+            });
+            if won.is_some() {
+                break;
+            }
+        }
+        assert!(!agent.game().modes().iter().any(|mode| matches!(mode, Mode::Overworld(_))),
+                "the ceremony was counted under the overworld, not in its place");
+        assert_eq!(won, Some((1, vec!["MEWTWO".to_string()])));
     }
 
     /// Wakes up after a second, and answers the first wake-up with B.
@@ -3189,6 +3263,23 @@ mod tests {
             MetaTile::Switch { object: HiddenObject::VendingMachine, ordinal: 2 }))]);
         run(&mut agent, &log, settled);
         assert_eq!(quantity(&agent, ItemId::SodaPop), 1, "{:#?}", log.borrow().events);
+    }
+
+    /// The roof girl wanders onto the square a machine is pressed from while a turn is being
+    /// decided: the row moves to another side, and the id the turn was rendered with still names it.
+    #[test]
+    fn a_person_in_front_of_a_vending_machine_leaves_its_row_id_alone() {
+        let state = NativeGame::new(game_at(Map::CeladonMartRoof, 10, 4, |_| {})).unwrap().game_state().unwrap();
+        let mut blocked = state.map.clone();
+        let machine = |map: &crate::pokemon::tile_map::MetaTileMap| map.actions().into_iter()
+            .find(|row| row.tile == MetaTile::Switch { object: HiddenObject::VendingMachine, ordinal: 1 })
+            .map(|row| (row.destination, row.id()))
+            .expect("a row for the first machine");
+        let (free, id) = machine(&state.map);
+        blocked.meta_tiles[free.x as usize + free.y as usize * blocked.width] = MetaTile::Sprite("Little Girl");
+        let (moved, moved_id) = machine(&blocked);
+        assert_ne!(free, moved, "the row is pressed from another side");
+        assert_eq!(id, moved_id);
     }
 
     #[test]

@@ -745,7 +745,8 @@ mod tests {
             }
             let expected = (frames.len() as u64 * SUBS_PER_FRAME / SUBS_PER_SAMPLE) as usize * 2;
             assert!(samples.len().abs_diff(expected) <= 2, "{input:?}: {} samples, not {expected}", samples.len());
-            assert!(samples.iter().all(|s| s.is_finite() && s.abs() <= 1.0), "{input:?} left the scale");
+            // The output filters ring past ±1 by design; the scale is what a sink plays, after `HEADROOM`.
+            assert!(samples.iter().all(|s| s.is_finite() && (s * HEADROOM).abs() <= 1.0), "{input:?} left the scale");
             assert!(samples.iter().any(|s| s.abs() > 0.001), "{input:?} was silent for two seconds");
         }
     }

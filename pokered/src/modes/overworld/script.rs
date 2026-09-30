@@ -4,9 +4,10 @@
 
 use poke_core::item::ItemId;
 use poke_core::species::PokemonSpecies;
-use poke_core::map_objects::{MapObjects, ObjectKind};
-use poke_core::symbols::{pokered_symbols, DmgPointer};
-use poke_core::text_script::{decode, far_text, TextBuffer, TextCommand};
+use poke_core::map_objects::{MapObjects, ObjectKind, TextPointers};
+use poke_core::tables::{TextDispatch, TextPredef};
+use poke_core::trainer_headers::TrainerRef;
+use poke_core::text_script::{far_text, TextBuffer, TextCommand};
 use serde::{Deserialize, Serialize};
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
@@ -21,9 +22,7 @@ use crate::modes::text_box::TextBox;
 use crate::modes::town_map::TownMap;
 use crate::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
 use crate::scripts::{self, Code, MapStates};
-use crate::systems::overworld::map_text::{map_text, map_text_in, text_predef, MapText, TX_SCRIPT_BILLS_PC, TX_SCRIPT_MART,
-    TX_SCRIPT_PLAYERS_PC, TX_SCRIPT_POKECENTER_NURSE, TX_SCRIPT_POKECENTER_PC, TX_SCRIPT_PRIZE_VENDOR,
-    TX_SCRIPT_VENDING_MACHINE, TX_SCRIPT_CABLE_CLUB_RECEPTIONIST};
+use crate::systems::overworld::map_text::{map_text, map_text_in, text_predef, MapText};
 use crate::systems::math::{add_bcd, sub_bcd};
 use crate::systems::print_num::{print_bcd, BcdFormat};
 use crate::systems::overworld::sprites::{NpcPaths, SpriteState, NUM_SPRITES};
@@ -136,7 +135,7 @@ pub enum Routine {
     StartTrainerBattle,
     EndTrainerBattle,
     /// `TalkToTrainer` with `hl` the trainer's header.
-    TalkToTrainer(DmgPointer),
+    TalkToTrainer(TrainerRef),
     TalkToTrainerNotYetFought,
     /// `.battleOccurred`'s `DelayFrames 10`, then `EnterMap`.
     EnterMapAfterBattle,
@@ -156,9 +155,8 @@ pub enum Routine {
     GivePokemonYesNo(PokemonSpecies, u8),
     GivePokemonAnswered(PokemonSpecies, u8),
     GivePokemonNamed(PokemonSpecies, u8),
-    /// `PrintPredefTextID`: `DisplayTextID` over `TextPredefs` rather than the map's texts, each text
-    /// in the ROM bank of the routine that asked, which stays loaded.
-    PrintPredefTextId { id: u8, bank: u8 },
+    /// `PrintPredefTextID`: `DisplayTextID` over `TextPredefs` rather than the map's texts.
+    PrintPredefTextId { id: u8 },
     /// `jp OverworldLoop` from inside a routine: a hidden event has been dealt with.
     OverworldLoop,
     /// `CheckForHiddenEventOrBookshelfOrCardKeyDoor` has returned without finding a hidden event or a
@@ -236,7 +234,7 @@ pub enum Routine {
     FishingCast(u8),
     FishingShake(u8),
     FishingBite,
-    FishingText(DmgPointer),
+    FishingText(poke_core::text_script::SavedText),
     FishingEnd,
     /// `UsedCut` once `UsedCutText` has printed: the tree out of the map, then `AnimCut`.
     UsedCutAnimation,
@@ -298,10 +296,11 @@ pub(super) struct Runtime {
     pub engaged_class: u8,
     pub engaged_set: u8,
     /// `wTrainerHeaderPtr` and `wTrainerHeaderFlagBit`.
-    pub trainer_header: Option<DmgPointer>,
+    pub trainer_header: Option<TrainerRef>,
     pub trainer_header_flag_bit: u8,
-    /// `wEndBattleWinTextPointer`.
-    pub end_battle_text: Option<DmgPointer>,
+    /// `wEndBattleWinTextPointer`, by its label.
+    #[serde(with = "poke_core::text_script::saved_text")]
+    pub end_battle_text: Option<poke_core::text_script::TextLabel>,
     /// `wGymLeaderNo`, the same byte as `wLoneAttackNo`: the leader's music and its last mon's lone
     /// move both come from it.
     pub gym_leader_no: u8,
@@ -350,7 +349,7 @@ pub(super) struct Runtime {
     pub box_mon: Option<crate::systems::battle::BattleMon>,
     /// `wCurMapTextPtr` where a script has put another table in the header's place, until the next
     /// map load.
-    pub text_pointers: Option<DmgPointer>,
+    pub text_pointers: Option<TextPointers>,
     pub wild_mons: crate::systems::overworld::encounters::WildMons,
     /// `wCurrentMapScriptFlags`' `BIT_CUR_MAP_LOADED_1` and `_2`: set whenever the map is loaded
     /// afresh, for a script that changes its blocks to change them again.
@@ -361,8 +360,8 @@ pub(super) struct Runtime {
     #[serde(default)]
     pub saved_screen2: Option<UiSurface>,
     /// `wTextPredefFlag`'s `BIT_TEXT_PREDEF`: the next `DisplayTextID` reads `TextPredefs`.
-    #[serde(default)]
-    pub text_predef: Option<u8>,
+    #[serde(default, rename = "text_predef_flag")]
+    pub text_predef: bool,
     /// `wOutOfBattleBlackout`.
     #[serde(default)]
     pub out_of_battle_blackout: bool,
@@ -430,9 +429,9 @@ pub fn far(label: &str) -> Vec<TextCommand> {
     far_text(label).unwrap_or_else(|e| panic!("{e}"))
 }
 
-/// The text at a label, `TX_FAR`s followed, up to a `text_asm` if it has one.
-pub fn text_at(at: DmgPointer) -> Vec<TextCommand> {
-    decode(at).unwrap_or_else(|e| panic!("{e}"))
+/// The text a label names, `text_far`s followed.
+pub fn text_named(label: &str) -> Vec<TextCommand> {
+    far_text(label).unwrap_or_else(|e| panic!("{e}"))
 }
 
 impl Script<'_, '_> {
@@ -475,7 +474,7 @@ impl Script<'_, '_> {
             Routine::FishingCast(response) => ow.fishing_cast(ctx, response),
             Routine::FishingShake(left) => ow.fishing_shake(ctx, left),
             Routine::FishingBite => ow.fishing_bite(ctx),
-            Routine::FishingText(text) => ow.fishing_text(text),
+            Routine::FishingText(text) => ow.fishing_text(text.0),
             Routine::FishingEnd => ow.fishing_end(ctx),
             Routine::UsedCutAnimation => ow.used_cut_animation(ctx),
             Routine::AnimCut(left) => ow.anim_cut_frame(ctx, left),
@@ -501,7 +500,7 @@ impl Script<'_, '_> {
             Routine::BlackOutFaded => ow.black_out_faded(ctx),
             Routine::Cities1AlternateTempo => {
                 ctx.audio.play_music(sounds::MUSIC_CITIES1);
-                ctx.audio.overwrite_channel_pointer(0, pokered_symbols::Music_Cities1_Ch1_AlternateTempo.address);
+                ctx.audio.overwrite_channel_pointer(0, "Music_Cities1_Ch1_AlternateTempo");
                 Flow::Return
             }
             Routine::StopAllSounds => {
@@ -514,8 +513,8 @@ impl Script<'_, '_> {
             Routine::GivePokemonAnswered(species, level) => ow.give_pokemon_answered(ctx, species, level),
             Routine::GivePokemonNamed(species, level) => ow.give_pokemon_named(ctx, species, level),
 
-            Routine::PrintPredefTextId { id, bank } => {
-                ow.rt.text_predef = Some(bank);
+            Routine::PrintPredefTextId { id } => {
+                ow.rt.text_predef = true;
                 Flow::Jump(Routine::DisplayTextId(id).into())
             }
             Routine::ScriptFadeOutToBlack(palette) => {
@@ -668,7 +667,7 @@ impl Script<'_, '_> {
 
     /// `ld [wCurMapTextPtr], hl`: the map's texts from `table` instead of its header's, until the map
     /// is loaded again.
-    pub fn set_text_pointers(&mut self, table: DmgPointer) {
+    pub fn set_text_pointers(&mut self, table: TextPointers) {
         self.ow.rt.text_pointers = Some(table);
     }
 
@@ -678,9 +677,9 @@ impl Script<'_, '_> {
     }
 
     /// `StartSimulatingJoypadStates` over `wSimulatedJoypadStatesEnd` as `DecodeRLEList` fills it from
-    /// the list at `at`; the last press is made first.
-    pub fn simulate_joypad_rle(&mut self, at: DmgPointer) {
-        let mut presses = super::movement::decode_rle_list(at);
+    /// `list`, `(press, count)` runs; the last press is made first.
+    pub fn simulate_joypad_rle(&mut self, list: &[(u8, u8)]) {
+        let mut presses = super::movement::decode_rle_list(list);
         presses.pop();
         let presses: Vec<Joypad> = presses.into_iter().map(Joypad::from_bits_truncate).collect();
         self.ow.start_simulating_joypad_states(presses);
@@ -716,7 +715,7 @@ impl Script<'_, '_> {
 
     /// `DecodeArrowMovementRLE`'s search of `table`, without the decoding: the RLE list the arrow
     /// tile the player stands on presses, for `simulate_joypad_rle`.
-    pub fn arrow_movement(&self, table: DmgPointer) -> Option<DmgPointer> {
+    pub fn arrow_movement(&self, table: crate::systems::overworld::spinners::ArrowTable) -> Option<&'static [(u8, u8)]> {
         crate::systems::overworld::spinners::arrow_movement(table, self.x(), self.y())
     }
 
@@ -762,7 +761,7 @@ impl Script<'_, '_> {
     /// `ExecuteCurMapScriptInTable`: `index`, unless a trainer routine asked for `wCurMapScript`
     /// instead, which is where the table's routines leave the next index. `headers` is the map's
     /// `TrainerHeaders`.
-    pub fn execute_cur_map_script_in_table(&mut self, index: u8, headers: DmgPointer) -> u8 {
+    pub fn execute_cur_map_script_in_table(&mut self, index: u8, headers: TrainerRef) -> u8 {
         self.ow.rt.trainer_header = Some(headers);
         let index = if std::mem::take(&mut self.ow.rt.use_cur_map_script) { self.cur_map_script() } else { index };
         self.ctx.world.scripts.cur_map_script = index;
@@ -848,23 +847,22 @@ impl Script<'_, '_> {
     /// `Music_RivalAlternateStart`: the rival's theme from a different first measure.
     pub fn music_rival_alternate_start(&mut self) {
         self.ctx.audio.play_music(sounds::MUSIC_MEET_RIVAL);
-        let starts = [pokered_symbols::Music_MeetRival_Ch1_AlternateStart, pokered_symbols::Music_MeetRival_Ch2_AlternateStart,
-            pokered_symbols::Music_MeetRival_Ch3_AlternateStart];
+        let starts = ["Music_MeetRival_Ch1_AlternateStart", "Music_MeetRival_Ch2_AlternateStart", "Music_MeetRival_Ch3_AlternateStart"];
         for (channel, start) in starts.into_iter().enumerate() {
-            self.ctx.audio.overwrite_channel_pointer(channel, start.address);
+            self.ctx.audio.overwrite_channel_pointer(channel, start);
         }
     }
 
     /// `Music_RivalAlternateTempo`: the rival's theme a little slower.
     pub fn music_rival_alternate_tempo(&mut self) {
         self.ctx.audio.play_music(sounds::MUSIC_MEET_RIVAL);
-        self.ctx.audio.overwrite_channel_pointer(0, pokered_symbols::Music_MeetRival_Ch1_AlternateTempo.address);
+        self.ctx.audio.overwrite_channel_pointer(0, "Music_MeetRival_Ch1_AlternateTempo");
     }
 
     /// `Music_RivalAlternateStartAndTempo`.
     pub fn music_rival_alternate_start_and_tempo(&mut self) {
         self.music_rival_alternate_start();
-        self.ctx.audio.overwrite_channel_pointer(0, pokered_symbols::Music_MeetRival_Ch1_AlternateStartAndTempo.address);
+        self.ctx.audio.overwrite_channel_pointer(0, "Music_MeetRival_Ch1_AlternateStartAndTempo");
     }
 
     /// `Music_Cities1AlternateTempo`, the Hall of Fame's: the music fades to silence over
@@ -955,7 +953,7 @@ impl Script<'_, '_> {
     }
 
     /// `TalkToTrainer`.
-    pub fn talk_to_trainer(&mut self, header: DmgPointer) -> Then {
+    pub fn talk_to_trainer(&mut self, header: TrainerRef) -> Then {
         Then::call(Routine::TalkToTrainer(header))
     }
 
@@ -1155,7 +1153,7 @@ impl Script<'_, '_> {
 
     /// `wCurOpponent` and `wTrainerNo` with `SaveEndBattleTextPointers`' win text, and the
     /// `wStatusFlags3` bits a scripted battle sets. The overworld's next pass starts the battle.
-    pub fn start_trainer_battle(&mut self, opponent: u8, trainer_no: u8, win_text: DmgPointer) {
+    pub fn start_trainer_battle(&mut self, opponent: u8, trainer_no: u8, win_text: &'static str) {
         self.ow.rt.cur_opponent = opponent;
         self.ow.rt.enemy_mon_or_trainer_class = opponent;
         self.ow.rt.trainer_no = trainer_no;
@@ -1163,7 +1161,7 @@ impl Script<'_, '_> {
     }
 
     /// `SaveEndBattleTextPointers` and the two `wStatusFlags3` bits beside it.
-    pub fn save_end_battle_text(&mut self, win_text: DmgPointer) {
+    pub fn save_end_battle_text(&mut self, win_text: &'static str) {
         self.ow.rt.end_battle_text = Some(win_text);
         self.ow.rt.talked_to_trainer = true;
         self.ow.rt.print_end_battle_text = true;
@@ -1830,15 +1828,15 @@ impl Overworld {
             return Then::block(Block::Mode(Box::new(Mode::StartMenu(StartMenu::new())))).then(Routine::AfterStartMenu);
         }
         match text_id {
-            TEXT_MON_FAINTED => return Then::block(Block::PrintText(text_at(pokered_symbols::PokemonFaintedText)))
+            TEXT_MON_FAINTED => return Then::block(Block::PrintText(text_named("PokemonFaintedText")))
                 .then(Routine::AfterDisplayingTextId),
             // `DisplayPlayerBlackedOutText` holds the box open without waiting for a press.
             TEXT_BLACKED_OUT => {
                 ctx.world.location.always_on_bike = false;
-                return Then::block(Block::PrintText(text_at(pokered_symbols::PlayerBlackedOutText)))
+                return Then::block(Block::PrintText(text_named("PlayerBlackedOutText")))
                     .then(Routine::HoldTextDisplayOpen);
             }
-            TEXT_REPEL_WORE_OFF => return Then::block(Block::PrintText(text_at(pokered_symbols::RepelWoreOffText)))
+            TEXT_REPEL_WORE_OFF => return Then::block(Block::PrintText(text_named("RepelWoreOffText")))
                 .then(Routine::AfterDisplayingTextId),
             TEXT_SAFARI_GAME_OVER => {
                 ctx.pad.ignore = Joypad::empty();
@@ -1861,26 +1859,25 @@ impl Overworld {
         };
         let map = ctx.world.location.map;
         let text = match (predef, self.rt.text_pointers) {
-            (Some(bank), _) => text_predef(text_id, bank),
-            (None, Some(table)) => map_text_in(table, text_id),
-            (None, None) => map_text(map, text_id),
+            (true, _) => text_predef(text_id),
+            (false, Some(table)) => map_text_in(table, text_id),
+            (false, None) => map_text(map, text_id),
         };
         match text {
             // `PrintText_NoCreatingTextBox`: `DisplayTextIDInit` drew the box, or was told not to.
             Ok(MapText::Plain(commands)) =>
                 Then::block(Block::Mode(Box::new(Mode::TextBox(TextBox::without_box(commands))))).then(Routine::AfterTextCode),
-            Ok(MapText::Dispatch(TX_SCRIPT_MART, at)) => {
-                let list = poke_core::rom_gfx::rom_slice(at + 1);
-                let items = list[1..=list[0] as usize].iter()
+            Ok(MapText::Dispatch(TextDispatch::Mart(stock))) => {
+                let items = stock.iter()
                     .map(|&id| ItemId::from_repr(id).expect("a mart sells items"))
                     .collect();
                 Then::block(Block::Mode(Box::new(Mode::Pokemart(Pokemart::new(items))))).then(Routine::AfterDisplayingTextId)
             }
-            Ok(MapText::Script(at)) if at == pokered_symbols::PickUpItemText => Then::call(Routine::PickUpItem).then(Routine::AfterTextCode),
-            Ok(MapText::Script(at)) => {
+            Ok(MapText::Script("PickUpItemText")) => Then::call(Routine::PickUpItem).then(Routine::AfterTextCode),
+            Ok(MapText::Script(_)) => {
                 self.rt.stack.push(Routine::AfterTextCode.into());
                 let rt = &mut Script { ow: self, ctx };
-                let flow = if predef.is_some() { super::events::predef_text(rt, at) } else { scripts::text(map, rt, text_id) };
+                let flow = if predef { super::events::predef_text(rt, TextPredef::from_id(text_id).expect("a predef that classified")) } else { scripts::text(map, rt, text_id) };
                 match flow {
                     Some(flow) => flow,
                     None => {
@@ -1890,23 +1887,23 @@ impl Overworld {
                     }
                 }
             }
-            Ok(MapText::Dispatch(TX_SCRIPT_POKECENTER_NURSE, _)) =>
+            Ok(MapText::Dispatch(TextDispatch::PokecenterNurse)) =>
                 Then::call(super::events::Label::PokemonCenter).then(Routine::AfterDisplayingTextId),
-            Ok(MapText::Dispatch(TX_SCRIPT_VENDING_MACHINE, _)) =>
+            Ok(MapText::Dispatch(TextDispatch::VendingMachine)) =>
                 Then::call(super::events::Label::VendingMachine).then(Routine::AfterDisplayingTextId),
-            Ok(MapText::Dispatch(TX_SCRIPT_CABLE_CLUB_RECEPTIONIST, _)) =>
+            Ok(MapText::Dispatch(TextDispatch::CableClubReceptionist)) =>
                 Then::call(super::events::Label::CableClubNpc).then(Routine::AfterDisplayingTextId),
-            Ok(MapText::Dispatch(TX_SCRIPT_PRIZE_VENDOR, _)) =>
+            Ok(MapText::Dispatch(TextDispatch::PrizeVendor)) =>
                 Then::call(super::events::Label::PrizeMenu).then(Routine::HoldTextDisplayOpen),
-            Ok(MapText::Dispatch(TX_SCRIPT_PLAYERS_PC, _)) => {
+            Ok(MapText::Dispatch(TextDispatch::PlayersPc)) => {
                 self.rt.saved_screen2 = Some(ctx.screen.ui.clone());
                 Then::call(Routine::PlayerPc).then(Routine::HoldTextDisplayOpen)
             }
-            Ok(MapText::Dispatch(TX_SCRIPT_BILLS_PC, _)) => {
+            Ok(MapText::Dispatch(TextDispatch::BillsPc)) => {
                 self.rt.saved_screen2 = Some(ctx.screen.ui.clone());
                 Then::call(Routine::BillsPc).then(Routine::HoldTextDisplayOpen)
             }
-            Ok(MapText::Dispatch(TX_SCRIPT_POKECENTER_PC, _)) => Then::call(Routine::ActivatePc).then(Routine::HoldTextDisplayOpen),
+            Ok(MapText::Dispatch(TextDispatch::PokecenterPc)) => Then::call(Routine::ActivatePc).then(Routine::HoldTextDisplayOpen),
             _ => Flow::Jump(Routine::CloseTextDisplay.into()),
         }
     }
@@ -1943,11 +1940,11 @@ impl Overworld {
         let found = if self.give_item(ctx, item, 1) {
             self.toggle_object(ctx, toggle as u16, true);
             self.rt.do_not_wait = true;
-            pokered_symbols::FoundItemText
+            "FoundItemText"
         } else {
-            pokered_symbols::NoMoreRoomForItemText
+            "NoMoreRoomForItemText"
         };
-        Then::block(Block::PrintText(text_at(found))).ret()
+        Then::block(Block::PrintText(text_named(found))).ret()
     }
 
     /// `GiveItem`.

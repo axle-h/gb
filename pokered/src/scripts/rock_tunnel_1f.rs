@@ -1,7 +1,7 @@
 //! `RockTunnel1F_Script`: seven trainers in the dark, and nothing else.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_map_scripts::*;
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use super::{Flow, Script};
 
@@ -20,19 +20,19 @@ pub enum Label {
 pub fn script(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().rock_tunnel_1f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::RockTunnel1TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::RockTunnel1TrainerHeaders);
     rt.trainer_script(index).then(Label::StoreCurScript)
 }
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
-        TEXT_ROCKTUNNEL1F_HIKER1 => sym::RockTunnel1TrainerHeader0,
-        TEXT_ROCKTUNNEL1F_HIKER2 => sym::RockTunnel1TrainerHeader1,
-        TEXT_ROCKTUNNEL1F_HIKER3 => sym::RockTunnel1TrainerHeader2,
-        TEXT_ROCKTUNNEL1F_SUPER_NERD => sym::RockTunnel1TrainerHeader3,
-        TEXT_ROCKTUNNEL1F_COOLTRAINER_F1 => sym::RockTunnel1TrainerHeader4,
-        TEXT_ROCKTUNNEL1F_COOLTRAINER_F2 => sym::RockTunnel1TrainerHeader5,
-        TEXT_ROCKTUNNEL1F_COOLTRAINER_F3 => sym::RockTunnel1TrainerHeader6,
+        TEXT_ROCKTUNNEL1F_HIKER1 => trainers::RockTunnel1TrainerHeader0,
+        TEXT_ROCKTUNNEL1F_HIKER2 => trainers::RockTunnel1TrainerHeader1,
+        TEXT_ROCKTUNNEL1F_HIKER3 => trainers::RockTunnel1TrainerHeader2,
+        TEXT_ROCKTUNNEL1F_SUPER_NERD => trainers::RockTunnel1TrainerHeader3,
+        TEXT_ROCKTUNNEL1F_COOLTRAINER_F1 => trainers::RockTunnel1TrainerHeader4,
+        TEXT_ROCKTUNNEL1F_COOLTRAINER_F2 => trainers::RockTunnel1TrainerHeader5,
+        TEXT_ROCKTUNNEL1F_COOLTRAINER_F3 => trainers::RockTunnel1TrainerHeader6,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())

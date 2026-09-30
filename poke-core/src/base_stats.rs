@@ -1,11 +1,9 @@
-use serde::{Deserialize, Serialize};
-use crate::mon_gfx::base_stats_entry;
 use crate::move_name::PokemonMoveName;
 use crate::pokemon::PokemonType;
 use crate::species::PokemonSpecies;
 
 /// One `BaseStats` entry, as `GetMonHeader` copies it to `wMonHeader`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BaseStats {
     pub dex: u8,
     /// HP, attack, defense, speed, special: `CalcStat`'s order.
@@ -16,22 +14,22 @@ pub struct BaseStats {
     /// The first four moves known, `NO_MOVE` as 0.
     pub level_1_moves: [u8; 4],
     pub growth_rate: u8,
-    /// `tmhm` flags, least significant bit first.
-    pub tm_hm: [u8; 7],
+    /// The moves its machines can teach it.
+    pub tm_hm: &'static [u8],
 }
 
 impl BaseStats {
     pub fn of(species: PokemonSpecies) -> Self {
-        let e = base_stats_entry(species);
+        let e = crate::tables::BASE_STATS[species.metadata().pokedex_number as usize - 1];
         Self {
-            dex: e[0],
-            stats: [e[1], e[2], e[3], e[4], e[5]],
-            types: [e[6], e[7]],
-            catch_rate: e[8],
-            base_exp: e[9],
-            level_1_moves: [e[15], e[16], e[17], e[18]],
-            growth_rate: e[19],
-            tm_hm: e[20..27].try_into().unwrap(),
+            dex: e.dex,
+            stats: e.stats,
+            types: e.types,
+            catch_rate: e.catch_rate,
+            base_exp: e.base_exp,
+            level_1_moves: e.level_1_moves,
+            growth_rate: e.growth_rate,
+            tm_hm: e.tm_hm,
         }
     }
 

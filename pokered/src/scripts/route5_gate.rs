@@ -3,10 +3,9 @@
 
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_ROUTE5GATE_DEFAULT, SCRIPT_ROUTE5GATE_PLAYER_MOVING,
     TEXT_ROUTE5GATE_GUARD, TEXT_ROUTE5GATE_GUARD_GEE_IM_THIRSTY, TEXT_ROUTE5GATE_GUARD_GIVE_DRINK};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
-use super::{text_at, Code, Flow, Script};
+use super::{text_named, Code, Flow, Script};
 
 /// `PLAYER_DIR_LEFT`.
 const PLAYER_DIR_LEFT: u8 = 2;
@@ -73,12 +72,12 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 /// turned back by `thirsty`, the gate's own push and script.
 pub fn guard_text(rt: &mut Script, thirsty: impl Into<Code>) -> Flow {
     if rt.gave_saffron_guards_drink() {
-        return rt.print_text(text_at(sym::SaffronGateGuardThanksForTheDrinkText)).ret();
+        return rt.print_text(text_named("SaffronGateGuardThanksForTheDrinkText")).ret();
     }
     match rt.remove_guard_drink() {
-        Some(_) => rt.print_text(text_at(sym::SaffronGateGuardGiveDrinkText)).then(Label::GaveDrink),
+        Some(_) => rt.print_text(text_named("SaffronGateGuardGiveDrinkText")).then(Label::GaveDrink),
         None => {
-            let flow = rt.print_text(text_at(sym::SaffronGateGuardGeeImThirstyText));
+            let flow = rt.print_text(text_named("SaffronGateGuardGeeImThirstyText"));
             // The cartridge walks the player up and arms Route 5's gate script from every gate.
             if rt.cartridge_bugs() { flow.then(Label::SharedThirsty) } else { flow.then(thirsty) }
         }

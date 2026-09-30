@@ -2458,7 +2458,7 @@ impl Policy for DeterministicPolicy {
                                 }
                                 _ => self.gym_engage = Some((pos, cur, 0)),
                             }
-                            chosen = Some(OverworldAction { map: state.map.map, origin: state.map.player_position,
+                            chosen = Some(OverworldAction { map: state.map.map, key: Point8 { x: pos.x, y: pos.y + 1 },
                                 destination: Point8 { x: pos.x, y: pos.y + 1 }, tile: MetaTile::Sprite(name), route });
                             break;
                         }
@@ -2497,7 +2497,7 @@ impl Policy for DeterministicPolicy {
                                     }
                                     _ => self.gym_engage = Some((pos, cur, 0)),
                                 }
-                                Some(OverworldAction { map: state.map.map, origin: cur,
+                                Some(OverworldAction { map: state.map.map, key: Point8 { x: pos.x, y: pos.y + 1 },
                                     destination: Point8 { x: pos.x, y: pos.y + 1 },
                                     tile: MetaTile::Sprite(trainer.name), route })
                             }
@@ -3993,7 +3993,7 @@ mod random_policy_tests {
     fn warp(map: Map, to: Map, x: u8, y: u8) -> OverworldAction {
         OverworldAction {
             map,
-            origin: Point8 { x: 0, y: 0 },
+            key: Point8 { x, y },
             destination: Point8 { x, y },
             tile: MetaTile::Warp { to_map: to, to_position: Point8 { x: 0, y: 0 } },
             route: vec![],

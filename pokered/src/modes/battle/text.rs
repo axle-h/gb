@@ -2,7 +2,7 @@
 //! `PlaceMoveUsersName` would print them: the player's mon's name, or `Enemy ` and the enemy's.
 //! Texts the cartridge continues with a `text_asm` are put together here from their far halves.
 
-use poke_core::text_script::{decode, far_text, TextCommand};
+use poke_core::text_script::{far_text, TextCommand};
 use crate::systems::battle::Side;
 
 const USER: u8 = 0x5A;
@@ -12,20 +12,15 @@ const ENEMY: [u8; 6] = [0x84, 0xAD, 0xA4, 0xAC, 0xB8, 0x7F];
 
 /// A far text's commands, up to any `text_asm`, which the caller follows with what it chooses.
 pub fn far(label: &str) -> Vec<TextCommand> {
-    // The one far text whose label does not say `Text`, which the label table leaves out.
-    let found = match label {
-        "_StartedSleepingEffect" => decode(poke_core::symbols::pokered_symbols::_StartedSleepingEffect),
-        _ => far_text(label),
-    };
-    found.unwrap_or_else(|error| panic!("{label}: {error}"))
+    far_text(label).unwrap_or_else(|error| panic!("{label}: {error}"))
         .into_iter()
         .take_while(|command| !matches!(command, TextCommand::Asm(_)))
         .collect()
 }
 
 /// A text at a local label, far halves followed, up to any `text_asm`.
-pub fn local(at: poke_core::symbols::DmgPointer) -> Vec<TextCommand> {
-    decode(at).unwrap_or_else(|error| panic!("{at}: {error}"))
+pub fn local(at: &'static str) -> Vec<TextCommand> {
+    far_text(at).unwrap_or_else(|error| panic!("{at}: {error}"))
         .into_iter()
         .take_while(|command| !matches!(command, TextCommand::Asm(_)))
         .collect()

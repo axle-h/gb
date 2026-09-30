@@ -2,18 +2,14 @@
 //! Volcano Badge and TM38.
 
 use poke_core::item::ItemId;
-use poke_core::symbols::DmgPointer;
 use poke_core::symbols::pokered_events::{EVENT_2A7, EVENT_BEAT_BLAINE, EVENT_BEAT_CINNABAR_GYM_TRAINER_0,
     EVENT_BEAT_CINNABAR_GYM_TRAINER_6, EVENT_CINNABAR_GYM_GATE0_UNLOCKED, EVENT_GOT_TM38};
-use poke_core::symbols::pokered_local_labels::{CinnabarGymBlaineText as blaine, CinnabarGymGymGuideText as guide,
-    CinnabarGymSuperNerd1, CinnabarGymSuperNerd2, CinnabarGymSuperNerd3, CinnabarGymSuperNerd4,
-    CinnabarGymSuperNerd5, CinnabarGymSuperNerd6, CinnabarGymSuperNerd7};
 use poke_core::symbols::pokered_map_scripts::*;
-use poke_core::symbols::pokered_symbols::{CINNABARGYM_BLAINE, CINNABARGYM_SUPER_NERD3};
+use poke_core::symbols::pokered_map_scripts::{CINNABARGYM_BLAINE, CINNABARGYM_SUPER_NERD3};
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use crate::modes::overworld::movement::{NPC_MOVEMENT_LEFT, NPC_MOVEMENT_UP};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `BIT_VOLCANOBADGE`.
 const BIT_VOLCANOBADGE: u8 = 6;
@@ -30,14 +26,14 @@ const TO_LEFT: [u8; 2] = [NPC_MOVEMENT_LEFT, END];
 
 /// A Super Nerd's three texts, indexed by his gate. His text id, his sprite slot and his
 /// `EVENT_BEAT_CINNABAR_GYM_TRAINER_*` all run together two apart from each other.
-const NERDS: [(DmgPointer, DmgPointer, DmgPointer); 7] = [
-    (CinnabarGymSuperNerd1::BattleText, CinnabarGymSuperNerd1::EndBattleText, CinnabarGymSuperNerd1::AfterBattleText),
-    (CinnabarGymSuperNerd2::BattleText, CinnabarGymSuperNerd2::EndBattleText, CinnabarGymSuperNerd2::AfterBattleText),
-    (CinnabarGymSuperNerd3::BattleText, CinnabarGymSuperNerd3::EndBattleText, CinnabarGymSuperNerd3::AfterBattleText),
-    (CinnabarGymSuperNerd4::BattleText, CinnabarGymSuperNerd4::EndBattleText, CinnabarGymSuperNerd4::AfterBattleText),
-    (CinnabarGymSuperNerd5::BattleText, CinnabarGymSuperNerd5::EndBattleText, CinnabarGymSuperNerd5::AfterBattleText),
-    (CinnabarGymSuperNerd6::BattleText, CinnabarGymSuperNerd6::EndBattleText, CinnabarGymSuperNerd6::AfterBattleText),
-    (CinnabarGymSuperNerd7::BattleText, CinnabarGymSuperNerd7::EndBattleText, CinnabarGymSuperNerd7::AfterBattleText),
+const NERDS: [(&'static str, &'static str, &'static str); 7] = [
+    ("CinnabarGymSuperNerd1.BattleText", "CinnabarGymSuperNerd1.EndBattleText", "CinnabarGymSuperNerd1.AfterBattleText"),
+    ("CinnabarGymSuperNerd2.BattleText", "CinnabarGymSuperNerd2.EndBattleText", "CinnabarGymSuperNerd2.AfterBattleText"),
+    ("CinnabarGymSuperNerd3.BattleText", "CinnabarGymSuperNerd3.EndBattleText", "CinnabarGymSuperNerd3.AfterBattleText"),
+    ("CinnabarGymSuperNerd4.BattleText", "CinnabarGymSuperNerd4.EndBattleText", "CinnabarGymSuperNerd4.AfterBattleText"),
+    ("CinnabarGymSuperNerd5.BattleText", "CinnabarGymSuperNerd5.EndBattleText", "CinnabarGymSuperNerd5.AfterBattleText"),
+    ("CinnabarGymSuperNerd6.BattleText", "CinnabarGymSuperNerd6.EndBattleText", "CinnabarGymSuperNerd6.AfterBattleText"),
+    ("CinnabarGymSuperNerd7.BattleText", "CinnabarGymSuperNerd7.EndBattleText", "CinnabarGymSuperNerd7.AfterBattleText"),
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,10 +184,10 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         TEXT_CINNABARGYM_BLAINE => blaine_text(rt),
         TEXT_CINNABARGYM_GYM_GUIDE => {
             let said = match rt.check_event(EVENT_BEAT_BLAINE) {
-                true => guide::BeatBlaineText,
-                false => guide::ChampInMakingText,
+                true => "CinnabarGymGymGuideText.BeatBlaineText",
+                false => "CinnabarGymGymGuideText.ChampInMakingText",
             };
-            rt.print_text(text_at(said)).ret()
+            rt.print_text(text_named(said)).ret()
         }
         TEXT_CINNABARGYM_SUPER_NERD1..=TEXT_CINNABARGYM_SUPER_NERD7 => super_nerd(rt, text_id),
         _ => return None,
@@ -201,12 +197,12 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 /// `CinnabarGymBlaineText`: he hands the badge over himself if a full bag stopped the TM.
 fn blaine_text(rt: &mut Script) -> Flow {
     if !rt.check_event(EVENT_BEAT_BLAINE) {
-        return rt.print_text(text_at(blaine::PreBattleText)).then(Label::BlainePreBattle);
+        return rt.print_text(text_named("CinnabarGymBlaineText.PreBattleText")).then(Label::BlainePreBattle);
     }
     if !rt.check_event(EVENT_GOT_TM38) {
         return Flow::Call(Label::ReceiveTm38.into(), Label::TextDone.into());
     }
-    rt.print_text(text_at(blaine::PostBattleAdviceText)).ret()
+    rt.print_text(text_named("CinnabarGymBlaineText.PostBattleAdviceText")).ret()
 }
 
 /// `CinnabarGymSetTrainerHeader` and the Super Nerd's own text either side of it.
@@ -215,9 +211,9 @@ fn super_nerd(rt: &mut Script, text_id: u8) -> Flow {
     let gate = gate(rt);
     let (battle, _, after) = NERDS[gate as usize];
     if rt.check_event(EVENT_BEAT_CINNABAR_GYM_TRAINER_0 + gate) {
-        return rt.print_text(text_at(after)).ret();
+        return rt.print_text(text_named(after)).ret();
     }
-    rt.print_text(text_at(battle)).then(Label::NerdChallenged)
+    rt.print_text(text_named(battle)).then(Label::NerdChallenged)
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -254,7 +250,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             reset_scripts(rt)
         }
         Label::BlainePreBattle => {
-            rt.save_end_battle_text(blaine::ReceivedVolcanoBadgeText);
+            rt.save_end_battle_text("CinnabarGymBlaineText.ReceivedVolcanoBadgeText");
             start_battle_script(rt, BLAINE)
         }
         Label::NerdChallenged => {

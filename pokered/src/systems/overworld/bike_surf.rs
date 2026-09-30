@@ -3,9 +3,8 @@
 
 use poke_core::map::Map;
 use poke_core::map_header::TileSetId;
-use poke_core::rom_gfx::rom_slice;
 use poke_core::symbols::pokered_events::{EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE, EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE};
-use poke_core::symbols::{pokered_symbols, DmgPointer};
+use poke_core::tables::{BIKE_RIDING_TILESETS, FORCED_BIKE_OR_SURF_MAPS, WATER_TILESETS};
 use crate::world::EventFlags;
 use super::collision::{tile_pair_collision, tile_passable};
 use super::location::{Ahead, Location, BIKING, SURFING};
@@ -18,25 +17,20 @@ const WATER_TILE: u8 = 0x14;
 const SHORE_TILE: u8 = 0x32;
 const SAFARI_SHORE_TILE: u8 = 0x48;
 
-fn table(at: DmgPointer) -> impl Iterator<Item = u8> {
-    rom_slice(at).iter().copied().take_while(|&byte| byte != 0xFF)
-}
-
 /// `IsBikeRidingAllowed`: Route 23, Indigo Plateau, or a tileset in `BikeRidingTilesets`.
 pub fn is_bike_riding_allowed(map: Map, tileset: TileSetId) -> bool {
-    matches!(map, Map::Route23 | Map::IndigoPlateau) || table(pokered_symbols::BikeRidingTilesets).any(|t| t == tileset as u8)
+    matches!(map, Map::Route23 | Map::IndigoPlateau) || BIKE_RIDING_TILESETS.contains(&(tileset as u8))
 }
 
 /// `CheckForceBikeOrSurf`'s search of `ForcedBikeOrSurfMaps`: the state a square puts the player in.
 pub fn forced_bike_or_surf(map: Map, x: u8, y: u8) -> Option<u8> {
-    let bytes = rom_slice(pokered_symbols::ForcedBikeOrSurfMaps);
-    bytes.chunks(3).take_while(|row| row[0] != 0xFF).find(|row| row[0] == map as u8 && row[1] == y && row[2] == x)
+    FORCED_BIKE_OR_SURF_MAPS.iter().find(|&&row| row == (map as u8, x, y))
         .map(|_| if matches!(map, Map::SeafoamIslandsB3F | Map::SeafoamIslandsB4F) { SURFING } else { BIKING })
 }
 
 /// `IsNextTileShoreOrWater`, on the tilesets in `WaterTilesets`.
 pub fn is_next_tile_shore_or_water(tileset: TileSetId, tile: u8) -> bool {
-    if !table(pokered_symbols::WaterTilesets).any(|t| t == tileset as u8) {
+    if !WATER_TILESETS.contains(&(tileset as u8)) {
         return false;
     }
     tile == WATER_TILE || tileset != TileSetId::ShipPort && (tile == SAFARI_SHORE_TILE || tile == SHORE_TILE)
@@ -44,14 +38,14 @@ pub fn is_next_tile_shore_or_water(tileset: TileSetId, tile: u8) -> bool {
 
 /// `IsSurfingAllowed`: the text that refuses, on Cycling Road or at the foot of Seafoam's stairs
 /// before both boulders have gone down to slow the current.
-pub fn surfing_refusal(location: &Location, events: &EventFlags) -> Option<DmgPointer> {
+pub fn surfing_refusal(location: &Location, events: &EventFlags) -> Option<&'static str> {
     if location.always_on_bike {
-        return Some(pokered_symbols::CyclingIsFunText);
+        return Some("CyclingIsFunText");
     }
     let boulders = events.is_set(EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE) && events.is_set(EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE);
     // `SeafoamIslandsB4FStairsCoords`.
     let at_the_stairs = (location.x, location.y) == (7, 11);
-    (location.map == Map::SeafoamIslandsB4F && !boulders && at_the_stairs).then_some(pokered_symbols::CurrentTooFastText)
+    (location.map == Map::SeafoamIslandsB4F && !boulders && at_the_stairs).then_some("CurrentTooFastText")
 }
 
 /// What a step off the square the player surfs on does.

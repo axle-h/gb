@@ -50,7 +50,7 @@ pnpm for the browser UI, and SDL2 if you want the desktop window.
 git clone --recursive https://github.com/axle-h/gb.git && cd gb
 
 # 1. The cartridge. `pokered.gbc` is embedded into the binary at compile time and `pokered.sym` is
-#    parsed by build.rs, and neither is in git.
+#    parsed by build.rs, and neither is in git. `pokered` and `pokered-sdl` need neither.
 make -C vendor/pokered pokered.gbc
 
 # 2. The browser UI. `web/dist` is baked into the binary, so this comes before cargo.
@@ -182,7 +182,7 @@ not:
 | `/api/history?since=` | the transcript backlog, so a page that just loaded is not empty |
 | `/api/leaderboard?limit=` | the runs that have finished the game, fastest first |
 | `/api/badges.png` | the eight gym badges, decoded from the cartridge's trainer-card graphics |
-| `/api/pokemon/{dex}/front.png` | one Pokémon's battle sprite, decompressed from the cartridge |
+| `/api/pokemon/{dex}/front.png` | one Pokémon's battle sprite, from the disassembly's picture |
 | `/api/tool-image/{seq}/image.png` | the picture a tool answered with, while it is still held |
 | `/favicon.png` | the overworld Poké Ball, ditto |
 | `/api/healthz` | liveness |
@@ -196,9 +196,8 @@ what was asked and what came back. Under the plan is the battle script, because 
 fact and a scripted battle is otherwise invisible from outside.
 
 **No graphics are committed to this repo.** The badges, the sprites, the favicon and every tile,
-person and letter in the map pictures are read out of the ROM at run time; Gen 1 pics are compressed,
-so `poke-core/src/mon_gfx.rs` is a port of pokered's `UncompressSpriteData`, checked byte-for-byte against
-upstream's own build output.
+person and letter in the map pictures come from the disassembly: its `.png` sources, converted at
+build time as its Makefile would, or the ROM assembled from them.
 
 The screen is 8×8 block deltas deflated once across the connection, about 21 kbit/s against the 565
 the first SSE version cost; the sound is Opus at 48 kHz, off until you press the speaker, and not
@@ -265,7 +264,7 @@ an `env!()` would put it in the cargo layer's inputs. `k8s/` has manifests for k
 
 ```
 gb/               the emulator, as a library: CPU, PPU, APU, MBCs, save states, the test ROMs
-poke-core/        Pokémon Red as data: species, moves, items, maps, pictures and symbols, from the ROM
+poke-core/        Pokémon Red as data: species, moves, items, maps, pictures and text, from its source
 pokered/          Pokémon Red recreated natively, on `poke-core` alone; in progress
 poke-agent/       the Pokémon layer — agent, policies, LLM turn loop, the run directory
 poke-agent-web/   the axum server, the video and audio codecs, and the SPA
@@ -282,7 +281,7 @@ the lockstep tests and harvesters that run the two side by side. Each crate has 
 |---|---|---|
 | Audio resampling | `gb/src/audio/blip/`, no dependency | A port of blargg's Blip_Buffer. Band-limited *step* synthesis rather than sinc resampling: the APU reports amplitude transitions and they go straight into a buffer already at the output rate. 8 output samples of latency, no FFT, no crates |
 | Save state format | labelled sections | `"GBST" \| version \| lz4 { [label][len][payload] }`. Unknown sections are skipped and missing ones are not errors, so adding one is free — CGB support doubled VRAM and quadrupled WRAM at the cost of zero fixture regeneration |
-| Symbol codegen | `poke-core/build.rs` + `pokered.sym` | Every RAM/ROM symbol becomes a typed pointer constant, so an address that moves upstream is a compile error |
+| Symbol codegen | `poke-agent/build.rs` + `pokered.sym` | Every RAM/ROM symbol becomes a typed pointer constant, so an address that moves upstream is a compile error |
 | Audio transport | raw Opus over chunked binary framing | No container and no muxer: WebCodecs takes bare packets, and an `OpusHead` would put the decoder into Ogg mode. Not deflated either, at +16.6% measured |
 | Video transport | chunked binary + `flate2` | Not a WebSocket: nothing is bidirectional, and a plain response needs no upgrade, no ping/pong and no second reconnection story. The compression is the protocol rather than a `Content-Encoding`, so no proxy can buffer and re-encode it |
 

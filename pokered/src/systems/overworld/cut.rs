@@ -1,9 +1,8 @@
 //! `UsedCut`'s two pure parts: what CUT can take down, and the block a cut one leaves behind.
 
 use poke_core::map_header::TileSetId;
-use poke_core::rom_gfx::rom_slice;
 use poke_core::sprite::SpriteFacing;
-use poke_core::symbols::pokered_symbols;
+use poke_core::tables::CUT_TREE_BLOCK_SWAPS;
 use crate::systems::map_data::MAP_BORDER;
 use super::map_view::MapView;
 
@@ -22,11 +21,7 @@ pub fn cut_tile(tileset: TileSetId, in_front: u8) -> Option<u8> {
 /// `CutTreeBlockSwaps`: the block a block holding a cut tree becomes. A block that is not in the
 /// table is left as it is, which is how the gym's tree and the grass keep theirs.
 pub fn cut_tree_block_swap(block: u8) -> Option<u8> {
-    rom_slice(pokered_symbols::CutTreeBlockSwaps)
-        .chunks_exact(2)
-        .take_while(|row| row[0] != 0xFF)
-        .find(|row| row[0] == block)
-        .map(|row| row[1])
+    CUT_TREE_BLOCK_SWAPS.iter().find(|&&(tree, _)| tree == block).map(|&(_, cut)| cut)
 }
 
 /// `ReplaceTreeTileBlock`: the block holding the tile in front of the player, as an index into the

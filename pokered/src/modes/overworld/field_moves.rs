@@ -7,9 +7,8 @@
 //! cut grass drifts its four leaves at the two speeds `AnimCutGrass_UpdateOAMEntries` gives them but
 //! neither swaps the pairs over nor creeps them down the screen.
 
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
+use poke_core::rom_gfx::TILE_BYTES;
 use poke_core::sprite::SpriteFacing;
-use poke_core::symbols::{pokered_symbols, DmgPointer};
 use crate::audio::data::sounds;
 use crate::gfx::layers::Object;
 use crate::gfx::tiles::V_CHARS1;
@@ -20,7 +19,7 @@ use crate::systems::overworld::boulder::{boulder_blocked, BOULDER_MOVEMENT_BYTE_
 use crate::systems::overworld::cut::{replace_tree_tile_block, CUT_GRASS};
 use crate::systems::overworld::sprites::{load_player_sprite_graphics, sprite_in_front_of_player, FACE_PLAYER};
 use crate::systems::overworld::location::UsedFieldMove;
-use super::script::{text_at, Block, Flow, Routine, Then};
+use super::script::{text_named, Block, Flow, Routine, Then};
 use super::Overworld;
 
 /// The first of the four objects `WriteOAMBlock` writes for an animation, and the tile ids they
@@ -60,7 +59,7 @@ impl Overworld {
         self.cut_tile = tile;
         // `BIT_NO_TEXT_DELAY` around the text, which prints whole.
         ctx.world.no_text_delay = true;
-        Then::block(Block::PrintText(text_at(pokered_symbols::UsedCutText))).then(Routine::UsedCutAnimation)
+        Then::block(Block::PrintText(text_named("UsedCutText"))).then(Routine::UsedCutAnimation)
     }
 
     /// `UsedCut` after its text: the tree taken out of the map and the animation over where it was.
@@ -83,16 +82,16 @@ impl Overworld {
     fn init_cut_anim_oam(&mut self, ctx: &mut Ctx) {
         ctx.screen.effects.obp1 = OBP1_NORMAL;
         if self.cut_tile == CUT_GRASS {
-            let leaf = rom_slice(pokered_symbols::MoveAnimationTiles1 + 6 * TILE_BYTES as u16);
+            let leaf = &poke_core::gfx::battle::MOVE_ANIM_1[6 * TILE_BYTES..];
             for i in 0..4 {
                 ctx.screen.tiles.load(FIRST_PATTERN + i, &leaf[..TILE_BYTES]);
             }
         } else {
-            let tree = |tile: u16| rom_slice(pokered_symbols::Overworld_GFX + tile * TILE_BYTES as u16);
+            let tree = |tile: usize| &poke_core::gfx::tilesets::OVERWORLD[tile * TILE_BYTES..];
             ctx.screen.tiles.load(FIRST_PATTERN, &tree(0x2D)[..2 * TILE_BYTES]);
             ctx.screen.tiles.load(FIRST_PATTERN + 2, &tree(0x3D)[..2 * TILE_BYTES]);
         }
-        self.write_animation_oam_block(ctx, pokered_symbols::CutAnimationOffsets);
+        self.write_animation_oam_block(ctx, poke_core::tables::CUT_ANIMATION_OFFSETS);
         if self.cut_tile == CUT_GRASS {
             // The four leaves are one tile flipped two ways.
             for (i, flip) in [Object::X_FLIP, Object::Y_FLIP, Object::X_FLIP, Object::Y_FLIP].into_iter().enumerate() {
@@ -103,9 +102,9 @@ impl Overworld {
 
     /// `WriteCutOrBoulderDustAnimationOAMBlock` over `GetCutOrBoulderDustAnimationOffsets`: a two by
     /// two block of objects, offset from the player by the table's entry for the way they face.
-    fn write_animation_oam_block(&mut self, ctx: &mut Ctx, offsets: DmgPointer) {
-        let entry = rom_slice(offsets + (self.player().facing >> 1) as u16);
-        let (y, x) = (self.player().y_pixels.wrapping_add(entry[1]), self.player().x_pixels.wrapping_add(entry[0]));
+    fn write_animation_oam_block(&mut self, ctx: &mut Ctx, offsets: &[(u8, u8)]) {
+        let (dx, dy) = offsets[(self.player().facing >> 2) as usize];
+        let (y, x) = (self.player().y_pixels.wrapping_add(dy), self.player().x_pixels.wrapping_add(dx));
         ctx.screen.sprites.resize(40, Object { y: 160, ..Object::default() });
         for (i, (dy, dx)) in [(0, 0), (0, 8), (8, 0), (8, 8)].into_iter().enumerate() {
             ctx.screen.sprites[BLOCK + i] = Object {
@@ -193,11 +192,10 @@ impl Overworld {
     pub(super) fn do_boulder_dust_animation(&mut self, ctx: &mut Ctx) -> Flow {
         ctx.screen.effects.obp1 = OBP1_NORMAL;
         self.rt.sprites_frozen = true;
-        let smoke = rom_slice(pokered_symbols::SSAnneSmokePuffTile);
         for i in 0..4 {
-            ctx.screen.tiles.load(FIRST_PATTERN + i, &smoke[..TILE_BYTES]);
+            ctx.screen.tiles.load(FIRST_PATTERN + i, poke_core::gfx::overworld::SMOKE);
         }
-        self.write_animation_oam_block(ctx, pokered_symbols::BoulderDustAnimationOffsets);
+        self.write_animation_oam_block(ctx, poke_core::tables::BOULDER_DUST_ANIMATION_OFFSETS);
         Flow::Jump(Routine::AnimateBoulderDust(DUST_STEPS).into())
     }
 

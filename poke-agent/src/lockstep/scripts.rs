@@ -19,22 +19,20 @@ use gb::ram::{RAM, ROM};
 use poke_core::map::Map;
 use poke_core::species::PokemonSpecies;
 use poke_core::sprite::SpriteFacing;
-use poke_core::symbols::pokered_local_labels as local;
+use crate::pokemon::symbols::pokered_local_labels as local;
 use pokered::command::Decision;
 use pokered::gfx::compose::WIDTH;
 use pokered::gfx::tiles::V_CHARS2;
 use pokered::input::Joypad;
 use pokered::mode::{Mode, ModeUpdate, Status};
-use pokered::modes::overworld::{Overworld, Standing};
-use pokered::rng::GameRng;
 use pokered::systems::overworld::sprites::{SpriteState, Sprites, MAP_TILESET_SIZE};
-use pokered::{Game, Input, Pacing};
+use pokered::{Game, Input};
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointer, DmgPointerRead};
 use super::{breakpoint, joypad};
+use super::harness::{clear_badge, clear_events, make_room, overworld, recreated_screen, recreation_talk, Start,
+    BIT_NO_BATTLES};
 
 const PARTY_STRUCT: u16 = 44;
-/// `wStatusFlags4`'s.
-const BIT_NO_BATTLES: u8 = 4;
 /// The routines both sides skip: the trade's animation is the movie's to recreate.
 const SEAMS: [DmgPointer; 3] = [sym::BattleTransition, sym::MoveAnimation, sym::InternalClockTradeAnim];
 /// Callers of `Random` that read `hRandomSub` as well, which the recreation takes as a second byte.
@@ -491,10 +489,6 @@ impl Cartridge {
         super::bridge::sprites(&self.gb)
     }
 
-    fn standing(&self) -> Standing {
-        super::bridge::standing(&self.gb)
-    }
-
     /// The party and what the events move, unless `party_unsettled`.
     fn held(&self) -> Option<Held> {
         if party_unsettled(&self.gb) {
@@ -556,25 +550,6 @@ impl Cartridge {
     pub fn world(&self) -> pokered::world::World {
         super::bridge::world(&self.gb)
     }
-
-    /// What the recreation starts from, taken where the cartridge has just polled in the overworld.
-    fn start(&self) -> (pokered::world::World, Overworld) {
-        let overworld = Overworld::standing(self.sprites(), self.read(sym::wNumSprites.address), self.standing())
-            .with_battle_flags(
-                self.read(sym::wStatusFlags4.address) & 1 << 4 != 0,
-                self.read(sym::wStatusFlags2.address) & 1 != 0,
-                self.read(sym::wNumberOfNoRandomBattleStepsLeft.address),
-            )
-            .with_step_counter(self.read(sym::wStepCounter.address));
-        (self.world(), overworld)
-    }
-}
-
-fn overworld(game: &Game) -> Option<&Overworld> {
-    game.modes().iter().rev().find_map(|mode| match mode {
-        Mode::Overworld(overworld) => Some(overworld),
-        _ => None,
-    })
 }
 
 fn recreation_frame(game: &mut Game, input: Input) {
@@ -645,26 +620,10 @@ fn recreation_act(game: &mut Game, action: Action) -> (Kind, u32) {
                 return (kind, frames + more - 1);
             }
         }
-        Action::Talk => loop {
-            assert!(frames < BUDGET, "the recreation never talked");
-            recreation_frame(game, Input::Buttons(Joypad::A));
-            frames += 1;
-            if game.modes().len() > 1 {
-                break;
-            }
-        },
+        Action::Talk => frames += recreation_talk(game, BUDGET),
     }
     let (kind, more) = recreation_to_poll(game);
     (kind, frames + more)
-}
-
-/// The recreation's screen: what the UI covers, and the map through the view where it does not.
-fn recreated_screen(game: &Game) -> Vec<Vec<u8>> {
-    let in_battle = game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_)));
-    let map = overworld(game).filter(|_| !in_battle).map(|overworld| overworld.view().tile_map());
-    (0..18).map(|y| (0..20).map(|x| {
-        game.ui().cover(x, y).or_else(|| map.map(|tiles| tiles[y * 20 + x])).unwrap_or(game.ui().get(x, y))
-    }).collect()).collect()
 }
 
 fn recreation_seen(game: &mut Game, kind: Kind, frames: u32) -> (Seen, Option<pokered::gfx::Screen>) {
@@ -723,12 +682,7 @@ fn lockstep_from(state: &[u8], prepare: impl FnOnce(&mut Cartridge), from_poll: 
     while from_poll && cartridge.frame() != Some(Kind::Overworld) {}
     // Edits are made where both start, so the recreation's world has them too.
     prepare(&mut cartridge);
-    let (world, overworld) = cartridge.start();
-    // Where the start menu, the party menu and the bag reopen.
-    let mmu = cartridge.gb.core().mmu();
-    let saved_menu_items = [&sym::wBattleAndStartSavedMenuItem, &sym::wPartyAndBillsPCSavedMenuItem, &sym::wBagSavedMenuItem,
-        &sym::wListScrollOffset].map(|at| mmu.read_pointer(at));
-    let sfx_note_delays = SFX_CHANNELS.map(|c| cartridge.read(sym::wChannelNoteDelayCounters.address + c as u16));
+    let start = Start::take(&cartridge.gb);
     cartridge.tape.clear();
     cartridge.entered.clear();
     let mut polls = vec![cartridge.seen(Kind::Overworld, 0)];
@@ -744,11 +698,7 @@ fn lockstep_from(state: &[u8], prepare: impl FnOnce(&mut Cartridge), from_poll: 
         polls.push(cartridge.seen(kind, frames));
         assert!(script.len() < 2000, "the scenario never ended");
     }
-    let mut game = Game::new(world, GameRng::tape(cartridge.tape.clone()), Pacing::Faithful);
-    let menu = game.menu_mut();
-    [menu.battle_and_start, menu.party_and_bills, menu.bag_saved, menu.list_scroll] = saved_menu_items;
-    seed_sfx_note_delays(&mut game, sfx_note_delays);
-    game.push(Mode::Overworld(overworld));
+    let mut game = start.game(cartridge.tape.clone());
     let (seen, screen) = recreation_seen(&mut game, Kind::Overworld, 0);
     if from_poll {
         compare(&polls[0], &seen, screen, "the start");
@@ -767,23 +717,6 @@ fn lockstep_from(state: &[u8], prepare: impl FnOnce(&mut Cartridge), from_poll: 
             time(&polls[i], &polls[i + 1], frames, action, &game, &format!("{i}: {what}"));
         }
     }
-}
-
-/// The four sound effect channels.
-const SFX_CHANNELS: [usize; 4] = [4, 5, 6, 7];
-
-/// The idle sound effect channels' note delay counters, which a new engine starts at zero where the
-/// cartridge's are wherever its last sound left them. A cry parks channel 7 on a `sound_ret` that a
-/// zero counter reaches only 255 frames on, and a sound effect wanting the channel before then is
-/// dropped.
-fn seed_sfx_note_delays(game: &mut Game, counters: [u8; 4]) {
-    let mut engine = serde_json::to_value(game.audio()).expect("the engine serialises");
-    for (c, counter) in SFX_CHANNELS.into_iter().zip(counters) {
-        if game.audio().channel_sound_id(c) == 0 {
-            engine["channels"][c]["note_delay_counter"] = counter.into();
-        }
-    }
-    *game.audio_mut() = serde_json::from_value(engine).expect("the engine deserialises");
 }
 
 /// The tile `UpdatePlayerSprite` reads to decide the player is behind drawn text, which a page
@@ -979,11 +912,7 @@ fn a_bug_catcher_sees_the_player_walks_up_battles_and_after_only_talks() {
 fn the_route_1_clerk_gives_a_potion_as_the_cartridge_does() {
     let event = poke_core::symbols::pokered_events::EVENT_GOT_POTION_SAMPLE;
     let got = move |seen: &Seen| seen.events[event as usize / 8] & 1 << (event % 8) != 0;
-    let clear = move |cartridge: &mut Cartridge| {
-        let at = sym::wEventFlags.address + event / 8;
-        let flags = cartridge.read(at);
-        cartridge.write(at, flags & !(1 << (event % 8)));
-    };
+    let clear = move |cartridge: &mut Cartridge| clear_events(&mut cartridge.gb, &[event]);
     let mut asked = false;
     lockstep(include_bytes!("../pokemon/data/route1-state.bin"), clear, move |_, seen| match seen.kind {
         Kind::Prompt => {
@@ -1111,11 +1040,7 @@ fn a_wild_mon_appears_in_the_grass_and_the_walk_goes_on_as_the_cartridge_does() 
 fn the_viridian_clerk_hands_over_oak_s_parcel_as_the_cartridge_does() {
     use poke_core::symbols::pokered_events::{EVENT_GOT_OAKS_PARCEL, EVENT_OAK_GOT_PARCEL};
     let forget = |cartridge: &mut Cartridge| {
-        for event in [EVENT_GOT_OAKS_PARCEL, EVENT_OAK_GOT_PARCEL] {
-            let at = sym::wEventFlags.address + event / 8;
-            let flags = cartridge.read(at);
-            cartridge.write(at, flags & !(1 << (event % 8)));
-        }
+        clear_events(&mut cartridge.gb, &[EVENT_GOT_OAKS_PARCEL, EVENT_OAK_GOT_PARCEL]);
         cartridge.write(sym::wViridianMartCurScript.address, 0);
     };
     let got = |seen: &Seen| seen.events[EVENT_GOT_OAKS_PARCEL as usize / 8] & 1 << (EVENT_GOT_OAKS_PARCEL % 8) != 0;
@@ -1329,13 +1254,8 @@ fn lt_surge_hands_over_the_thunder_badge_and_tm24_as_the_cartridge_does() {
     use poke_core::symbols::pokered_events::{EVENT_BEAT_LT_SURGE, EVENT_GOT_TM24};
     const BIT_THUNDERBADGE: u8 = 2;
     let forget = |cartridge: &mut Cartridge| {
-        for event in [EVENT_BEAT_LT_SURGE, EVENT_GOT_TM24] {
-            let at = sym::wEventFlags.address + event / 8;
-            let flags = cartridge.read(at);
-            cartridge.write(at, flags & !(1 << (event % 8)));
-        }
-        let badges = cartridge.read(sym::wObtainedBadges.address);
-        cartridge.write(sym::wObtainedBadges.address, badges & !(1 << BIT_THUNDERBADGE));
+        clear_events(&mut cartridge.gb, &[EVENT_BEAT_LT_SURGE, EVENT_GOT_TM24]);
+        clear_badge(&mut cartridge.gb, BIT_THUNDERBADGE);
     };
     lockstep(include_bytes!("../pokemon/data/post-thunder-badge.bin"), forget, |_, seen| match seen.kind {
         Kind::Prompt => Some((PROMPT, "a prompt")),
@@ -1345,48 +1265,9 @@ fn lt_surge_hands_over_the_thunder_badge_and_tm24_as_the_cartridge_does() {
     });
 }
 
-/// The party back to full HP and no status, since a fixture saved after a gym leader's battle is in
-/// no state to fight it again.
-fn heal(cartridge: &mut Cartridge) {
-    for i in 0..cartridge.read(sym::wPartyCount.address) as u16 {
-        let mon = PARTY_STRUCT * i;
-        let max = [0, 1].map(|byte| cartridge.read(sym::wPartyMon1MaxHP.address + mon + byte));
-        for byte in 0..2 {
-            cartridge.write(sym::wPartyMon1HP.address + mon + byte, max[byte as usize]);
-        }
-        cartridge.write(sym::wPartyMon1Status.address + mon, 0);
-    }
-}
-
-/// The last thing in a full bag thrown away, since a gym leader's TM needs a slot to go in.
-fn make_room(cartridge: &mut Cartridge) {
-    /// `MAX_ITEMS`.
-    const BAG_SIZE: u8 = 20;
-    let count = cartridge.read(sym::wNumBagItems.address);
-    if count == BAG_SIZE {
-        cartridge.write(sym::wNumBagItems.address, count - 1);
-        cartridge.write(sym::wBagItems.address + 2 * (count as u16 - 1), 0xFF);
-    }
-}
-
-fn clear_events(cartridge: &mut Cartridge, events: &[u16]) {
-    for &event in events {
-        let at = sym::wEventFlags.address + event / 8;
-        let flags = cartridge.read(at);
-        cartridge.write(at, flags & !(1 << (event % 8)));
-    }
-}
-
-/// Clears `events` and the badge of `bit`, so a fixture standing in front of a beaten gym leader has
-/// him to beat again, and heals the party it beat him with.
+/// `harness::forget_badge`, as a lockstep's `prepare`.
 fn forget_badge(events: &'static [u16], bit: u8) -> impl FnOnce(&mut Cartridge) {
-    move |cartridge| {
-        heal(cartridge);
-        make_room(cartridge);
-        clear_events(cartridge, events);
-        let badges = cartridge.read(sym::wObtainedBadges.address);
-        cartridge.write(sym::wObtainedBadges.address, badges & !(1 << bit));
-    }
+    move |cartridge| super::harness::forget_badge(&mut cartridge.gb, events, bit)
 }
 
 /// Talks to whoever is in front until `got` is set, pressing A at every prompt, which in a battle
@@ -1418,8 +1299,8 @@ fn giovanni_hands_over_the_earth_badge_and_tm27_as_the_cartridge_does() {
 fn mr_fuji_hands_over_the_poke_flute_as_the_cartridge_does() {
     use poke_core::symbols::pokered_events::EVENT_GOT_POKE_FLUTE;
     lockstep(include_bytes!("../pokemon/data/post-poke-flute.bin"), |cartridge| {
-        clear_events(cartridge, &[EVENT_GOT_POKE_FLUTE]);
-        make_room(cartridge);
+        clear_events(&mut cartridge.gb, &[EVENT_GOT_POKE_FLUTE]);
+        make_room(&mut cartridge.gb);
     }, talk_until(EVENT_GOT_POKE_FLUTE, "talk to MR.FUJI"));
 }
 

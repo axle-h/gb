@@ -1,7 +1,5 @@
-use poke_core::map_gfx::tileset_entry;
+use poke_core::map_gfx::blockset;
 use poke_core::map_header::TileSetId;
-use poke_core::rom_gfx::rom_slice;
-use poke_core::symbols::{DmgBank, DmgPointer};
 use serde::{Deserialize, Serialize};
 
 pub const BLOCK_PX: i32 = 32;
@@ -37,10 +35,8 @@ impl MapLayer {
             return None;
         }
         let block = *self.blocks.get(by * self.blocks_wide + bx)?;
-        let entry = tileset_entry(tileset);
-        let blockset = rom_slice(DmgPointer { bank: DmgBank::ROM { bank: entry.bank }, address: entry.blocks });
         let (tx, ty) = (((x % BLOCK_PX) / 8) as usize, ((y % BLOCK_PX) / 8) as usize);
-        Some(blockset[block as usize * 16 + ty * 4 + tx])
+        blockset(tileset).get(block as usize * 16 + ty * 4 + tx).copied()
     }
 }
 

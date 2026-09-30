@@ -2,10 +2,9 @@
 
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::EVENT_GOT_TM18;
-use poke_core::symbols::pokered_local_labels::CeladonMart3FClerkText as clerk;
 use poke_core::symbols::pokered_map_scripts::TEXT_CELADONMART3F_CLERK;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {}
@@ -25,8 +24,8 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         return None;
     }
     Some(match rt.check_event(EVENT_GOT_TM18) {
-        true => rt.print_text(text_at(clerk::TM18ExplanationText)).ret(),
-        false => rt.print_text(text_at(clerk::TM18PreReceiveText)).then(Label::Tm18Offered),
+        true => rt.print_text(text_named("CeladonMart3FClerkText.TM18ExplanationText")).ret(),
+        false => rt.print_text(text_named("CeladonMart3FClerkText.TM18PreReceiveText")).then(Label::Tm18Offered),
     })
 }
 
@@ -34,10 +33,10 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
         Label::Tm18Offered => {
             if !rt.give_item(ItemId::Tm18Counter, 1) {
-                return rt.print_text(text_at(clerk::TM18NoRoomText)).ret();
+                return rt.print_text(text_named("CeladonMart3FClerkText.TM18NoRoomText")).ret();
             }
             rt.set_event(EVENT_GOT_TM18);
-            rt.print_text(text_at(clerk::ReceivedTM18Text)).ret()
+            rt.print_text(text_named("CeladonMart3FClerkText.ReceivedTM18Text")).ret()
         }
     }
 }

@@ -1,44 +1,32 @@
 pub use crate::pointer::{DmgBank, DmgPointer};
 
-include!(concat!(env!("OUT_DIR"), "/pokered_symbols.rs"));
+include!(concat!(env!("OUT_DIR"), "/constants.rs"));
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// A label as a save holds it: by name, or by the address a save written before the runtime held
+/// names has in its place.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+pub enum SavedLabel {
+    Name(String),
+    Address(DmgPointer),
+}
 
-    #[test]
-    fn test_parse_sym_file() {
-        // Test ROM entry
-        let calc_checksum = pokered_symbols::CalcCheckSum;
-        assert_eq!(calc_checksum.bank, DmgBank::ROM { bank: 0x1c });
-        assert_eq!(calc_checksum.address, 0x7856);
+impl SavedLabel {
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Name(name) => Some(name),
+            Self::Address(at) => crate::saved_addresses::SAVED_ADDRESSES.iter()
+                .find(|(address, _)| address == at)
+                .map(|(_, name)| *name),
+        }
+    }
 
-        // Test WRAM entry
-        let enemy_mon = pokered_symbols::wEnemyMonUnmodifiedSpecial;
-        assert_eq!(enemy_mon.bank, DmgBank::WRAM);
-        assert_eq!(enemy_mon.address, 0xcd2c);
-
-        // Test SRAM entry
-        let cur_box = pokered_symbols::sCurBoxData;
-        assert_eq!(cur_box.bank, DmgBank::SRAM { bank: 0x01 });
-        assert_eq!(cur_box.address, 0xb0c0);
-
-        // Test VRAM entry
-        let tileset = pokered_symbols::vTileset;
-        assert_eq!(tileset.bank, DmgBank::VRAM);
-        assert_eq!(tileset.address, 0x9000);
-
-        // Test HRAM entry
-        let slide_amount = pokered_symbols::hSlideAmount;
-        assert_eq!(slide_amount.bank, DmgBank::HRAM);
-        assert_eq!(slide_amount.address, 0xff8b);
-
-        // Test constants
-        assert_eq!(pokered_symbols::ROUTE6GATE_GUARD, 0x01);
-        assert_eq!(pokered_symbols::ROUTE6_COOLTRAINER_M1, 0x01);
-        assert_eq!(pokered_symbols::ROUTE7GATE_GUARD, 0x01);
-        assert_eq!(pokered_symbols::PEWTERPOKECENTER_GENTLEMAN, 0x02);
-        assert_eq!(pokered_symbols::FUCHSIAPOKECENTER_ROCKER, 0x02);
-        assert_eq!(pokered_symbols::GAMECORNERPRIZEROOM_GAMBLER, 0x02);
+    /// The value `named` finds for the label, or an error naming what was saved.
+    pub fn resolve<'de, T, D: serde::Deserializer<'de>>(deserializer: D, named: impl Fn(&str) -> Option<T>) -> Result<T, D::Error> {
+        let saved = <Self as serde::Deserialize>::deserialize(deserializer)?;
+        saved.name().and_then(named).ok_or_else(|| serde::de::Error::custom(match saved {
+            Self::Name(name) => format!("nothing is labelled {name}"),
+            Self::Address(at) => format!("no label here is at {at}"),
+        }))
     }
 }

@@ -2,8 +2,7 @@
 //! total of experience makes. Experience is 24 bits, as `hExperience` holds it, and every wrap the
 //! cartridge's arithmetic makes is kept: Medium Slow needs 16,777,162 at level 1.
 
-use poke_core::rom_gfx::rom_slice;
-use poke_core::symbols::pokered_symbols;
+use poke_core::tables::GROWTH_RATE_TABLE;
 use super::math::{divide, multiply};
 
 const EXPERIENCE_MASK: u32 = 0xFF_FFFF;
@@ -11,17 +10,15 @@ const EXPERIENCE_MASK: u32 = 0xFF_FFFF;
 /// `CalcExperience`: `a/b·n³ + c·n² + e·n − f` for `GrowthRateTable` row `growth_rate`, where the
 /// cube is divided before anything is added and each term is cut to the three bytes it is kept in.
 pub fn calc_experience(growth_rate: u8, level: u8) -> u32 {
-    let row = &rom_slice(pokered_symbols::GrowthRateTable)[growth_rate as usize * 4..][..4];
-    let (numerator, denominator) = (row[0] >> 4, row[0] & 0xF);
-    let (squared, linear, constant) = (row[1], row[2], row[3]);
+    let row = GROWTH_RATE_TABLE[growth_rate as usize];
     let d_squared = || multiply(level as u32, level);
 
-    let cubed = multiply(multiply(d_squared(), level), numerator);
-    let (quotient, _) = divide(cubed.to_be_bytes(), denominator, 4);
+    let cubed = multiply(multiply(d_squared(), level), row.numerator);
+    let (quotient, _) = divide(cubed.to_be_bytes(), row.denominator, 4);
     let cubed_term = u32::from_be_bytes(quotient) & EXPERIENCE_MASK;
-    let squared_term = multiply(d_squared(), squared & 0x7F) & EXPERIENCE_MASK;
-    let mut experience = multiply(level as u32, linear).wrapping_sub(constant as u32) & EXPERIENCE_MASK;
-    experience = if squared & 0x80 != 0 {
+    let squared_term = multiply(d_squared(), row.squared.unsigned_abs()) & EXPERIENCE_MASK;
+    let mut experience = multiply(level as u32, row.linear).wrapping_sub(row.constant as u32) & EXPERIENCE_MASK;
+    experience = if row.squared < 0 {
         experience.wrapping_sub(squared_term)
     } else {
         experience.wrapping_add(squared_term)

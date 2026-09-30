@@ -7,13 +7,12 @@ use poke_core::symbols::pokered_events::{EVENT_PASSED_CASCADEBADGE_CHECK, EVENT_
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_ROUTE23_DEFAULT, SCRIPT_ROUTE23_PLAYER_MOVING,
     SCRIPT_ROUTE23_RESET_TO_DEFAULT, TEXT_ROUTE23_GUARD1, TEXT_ROUTE23_GUARD2, TEXT_ROUTE23_GUARD3,
     TEXT_ROUTE23_GUARD4, TEXT_ROUTE23_GUARD5, TEXT_ROUTE23_SWIMMER1, TEXT_ROUTE23_SWIMMER2};
-use poke_core::symbols::pokered_symbols as sym;
 use poke_core::symbols::pokered_toggles::{TOGGLE_VICTORY_ROAD_2F_BOULDER, TOGGLE_VICTORY_ROAD_3F_BOULDER};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use crate::input::Joypad;
 use crate::systems::overworld::sprites::SPRITE_FACING_DOWN;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `Route23GuardsYCoords`: the row each gate's guard stands on, the League end first.
 const GUARDS_Y: [u8; 7] = [35, 56, 85, 96, 105, 119, 136];
@@ -124,9 +123,9 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 fn check_for_badge(rt: &mut Script, which: u8) -> Flow {
     rt.set_name_buffer(BADGES[which as usize]);
     if rt.badges() & (1 << (which + 1)) == 0 {
-        return rt.print_text(text_at(sym::Route23YouDontHaveTheBadgeYetText)).then(Label::DeniedSound);
+        return rt.print_text(text_named("Route23YouDontHaveTheBadgeYetText")).then(Label::DeniedSound);
     }
-    rt.print_text(text_at(sym::Route23OhThatIsTheBadgeText)).then(Label::HaveBadge(which))
+    rt.print_text(text_named("Route23OhThatIsTheBadgeText")).then(Label::HaveBadge(which))
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {

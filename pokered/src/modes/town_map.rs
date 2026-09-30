@@ -14,11 +14,12 @@
 //! Loading, and not modelled: `LoadTownMap`'s `DisableLCD` and its tile copies, and the
 //! `GBPalWhiteOutWithDelay3` each way out.
 
+use poke_core::gfx;
 use poke_core::map::Map;
 use poke_core::map_objects::FIRST_INDOOR_MAP;
 use poke_core::species::PokemonSpecies;
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
-use poke_core::symbols::{pokered_symbols, DmgPointer};
+use poke_core::rom_gfx::TILE_BYTES;
+use poke_core::tables::WILD_DATA;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use crate::command::Decision;
@@ -54,12 +55,8 @@ const ARROW_BEAT: u8 = 15;
 /// tile, which is why the screen loads `TownMapUpArrow` over it.
 const UP_ARROW: (usize, u8) = (18, 0xED);
 const DOWN_ARROW: (usize, u8) = (19, 0xEE);
-/// `NUM_WILDMONS`, the slots in a grass or a water block.
-const NUM_WILDMONS: usize = 10;
 /// Cerulean Cave's square, which `DisplayWildLocations` never marks.
 const CERULEAN_CAVE: u8 = 0x19;
-/// `'@'`, which ends a name in the cartridge's tables.
-const TERMINATOR: u8 = 0x50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TownMap {
@@ -121,11 +118,8 @@ impl TownMap {
     /// `TextBoxBorder` under it is covered by all 360 tiles of the picture.
     fn load_town_map(&mut self, ctx: &mut Ctx) {
         ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
-        let graphics = pokered_symbols::WorldMapTileGraphics;
-        let len = (pokered_symbols::WorldMapTileGraphicsEnd.address - graphics.address) as usize;
-        ctx.screen.tiles.load(V_CHARS2 + 0x60, &rom_slice(graphics)[..len]);
-        ctx.screen.tiles.load_1bpp(V_CHARS0 + BIRD_BASE_TILE as usize, rom_bytes(pokered_symbols::MonNestIcon,
-            pokered_symbols::MonNestIconEnd));
+        ctx.screen.tiles.load(V_CHARS2 + 0x60, gfx::town_map::TOWN_MAP);
+        ctx.screen.tiles.load_1bpp(V_CHARS0 + BIRD_BASE_TILE as usize, gfx::town_map::MON_NEST_ICON);
         for (i, tile) in compressed_map().into_iter().enumerate() {
             ctx.screen.ui.set(i % SCREEN_TILES_X, i / SCREEN_TILES_X, tile);
         }
@@ -223,8 +217,8 @@ impl TownMap {
         let tileset = ctx.screen.map.tileset.unwrap_or_default();
         load_player_sprite_graphics(&mut ctx.screen.tiles, &mut ctx.world.location, tileset);
         ctx.screen.tiles.load_font();
-        ctx.screen.tiles.load(V_CHARS0 + BIRD_BASE_TILE as usize, &rom_slice(pokered_symbols::BirdSprite)[..12 * TILE_BYTES]);
-        ctx.screen.tiles.load_1bpp(V_CHARS1 + 0x6D, rom_bytes(pokered_symbols::TownMapUpArrow, pokered_symbols::TownMapUpArrowEnd));
+        ctx.screen.tiles.load(V_CHARS0 + BIRD_BASE_TILE as usize, &poke_core::gfx::sprites::BIRD[..12 * TILE_BYTES]);
+        ctx.screen.tiles.load_1bpp(V_CHARS1 + 0x6D, gfx::town_map::UP_ARROW);
         let visited = ctx.world.location.towns_visited;
         self.list = (0..NUM_CITY_MAPS).map(|town| if visited & 1 << town != 0 { town } else { NOT_VISITED }).collect();
         ctx.screen.ui.place(0, 0, &poke_core::charmap::encode("To").expect("`ToText` encodes"));
@@ -276,7 +270,7 @@ impl ModeUpdate for TownMap {
         let name = self.draw_player_or_bird_sprite(ctx, map, 0);
         ctx.screen.ui.place(1, 0, &name);
         ctx.screen.tiles.load_1bpp(V_CHARS0 + BIRD_BASE_TILE as usize,
-            rom_bytes(pokered_symbols::TownMapCursor, pokered_symbols::TownMapCursorEnd));
+            gfx::town_map::TOWN_MAP_CURSOR);
         self.draw_entry(ctx, map);
     }
 
@@ -347,36 +341,13 @@ impl ModeUpdate for TownMap {
     }
 }
 
-/// The bytes between two labels of the same table.
-fn rom_bytes(from: DmgPointer, to: DmgPointer) -> &'static [u8] {
-    &rom_slice(from)[..(to.address - from.address) as usize]
-}
-
 /// `FindWildLocationsOfMon`: a map for every grass or water slot of its table that holds `species`,
-/// in map order and with a map repeated for each slot. `WildDataPointers` ends at a pointer of `-1`.
+/// in map order and with a map repeated for each slot. `CheckMapForMon` skips a list at rate 0.
 fn find_wild_locations_of_mon(species: u8) -> Vec<u8> {
-    let pointers = pokered_symbols::WildDataPointers;
-    let table = rom_slice(pointers);
     let mut maps = Vec::new();
-    for (map, pointer) in table.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).enumerate() {
-        if pointer >> 8 == 0xFF {
-            break;
-        }
-        let data = rom_slice(DmgPointer { bank: pointers.bank, address: pointer });
-        let mut at = 0;
-        // `CheckMapForMon`, over the grass block and then the water block.
-        for _ in 0..2 {
-            let rate = data[at];
-            at += 1;
-            if rate == 0 {
-                continue;
-            }
-            for slot in 0..NUM_WILDMONS {
-                if data[at + 2 * slot + 1] == species {
-                    maps.push(map as u8);
-                }
-            }
-            at += 2 * NUM_WILDMONS;
+    for (map, data) in WILD_DATA.iter().enumerate() {
+        for slots in [data.grass, data.water] {
+            maps.extend(slots.iter().filter(|&&(_, mon)| mon == species).map(|_| map as u8));
         }
     }
     maps
@@ -402,14 +373,13 @@ fn town_map_coords_to_oam_coords(coords: u8) -> (u8, u8) {
 
 /// `TownMapOrder`: the places the bag's screen walks, in the order it walks them.
 fn town_map_order() -> &'static [u8] {
-    let start = pokered_symbols::TownMapOrder;
-    rom_bytes(start, pokered_symbols::TownMapOrderEnd)
+    poke_core::tables::TOWN_MAP_ORDER
 }
 
 /// `CompressedMap`: runs of one tile each, `$60` up, filling all 360 cells of the screen.
 fn compressed_map() -> Vec<u8> {
     let mut tiles = Vec::with_capacity(SCREEN_TILES_X * SCREEN_TILES_Y);
-    for &byte in rom_slice(pokered_symbols::CompressedMap) {
+    for &byte in gfx::town_map::TOWN_MAP_RLE {
         if byte == 0 {
             break;
         }
@@ -422,24 +392,13 @@ fn compressed_map() -> Vec<u8> {
 /// `x` in the low, and the map's name. An outside map indexes its own row; an indoor one belongs to
 /// the first group it is below, so a whole building shares one town's square.
 fn load_town_map_entry(map: u8) -> Option<(u8, Vec<u8>)> {
-    let (coords, name) = if map < FIRST_INDOOR_MAP {
-        let row = rom_slice(pokered_symbols::ExternalMapEntries + map as u16 * 3);
-        (row[0], u16::from_le_bytes([row[1], row[2]]))
+    let ((x, y), name) = if map < FIRST_INDOOR_MAP {
+        poke_core::tables::EXTERNAL_MAP_ENTRIES[map as usize]
     } else {
-        let table = pokered_symbols::InternalMapEntries;
-        let mut row = rom_slice(table);
-        let mut at = 0;
-        while row[0] != 0xFF && map >= row[0] {
-            at += 4;
-            row = rom_slice(table + at);
-        }
-        if row[0] == 0xFF {
-            return None;
-        }
-        (row[1], u16::from_le_bytes([row[2], row[3]]))
+        let &(_, at, name) = poke_core::tables::INTERNAL_MAP_ENTRIES.iter().find(|&&(group, _, _)| map < group)?;
+        (at, name)
     };
-    let at = DmgPointer { bank: pokered_symbols::ExternalMapEntries.bank, address: name };
-    Some((coords, rom_slice(at).iter().copied().take_while(|&byte| byte != TERMINATOR).collect()))
+    Some((y << 4 | x, poke_core::charmap::encode(name).expect("a map name is in the charmap")))
 }
 
 #[cfg(test)]

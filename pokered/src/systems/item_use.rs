@@ -11,9 +11,8 @@ use poke_core::base_stats::BaseStats;
 use poke_core::evos_moves::{EvosMoves, Evolution};
 use poke_core::item::ItemId;
 use poke_core::move_name::PokemonMoveName;
-use poke_core::rom_gfx::rom_slice;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::pokered_symbols;
+use poke_core::tables::TECHNICAL_MACHINES;
 use serde::{Deserialize, Serialize};
 use crate::party::PartyMon;
 use crate::systems::experience::calc_experience;
@@ -262,13 +261,11 @@ pub fn use_vitamin(item: ItemId, mon: &mut PartyMon) -> bool {
     true
 }
 
-/// `CanLearnTM`: the species' `tmhm` bit for the first machine in `TechnicalMachines` that teaches
-/// the move. The search has no terminator, so it is only ever asked about a machine's move.
+/// `CanLearnTM`: whether the species' `tmhm` list has the move. The cartridge's search has no
+/// terminator, so it is only ever asked about a machine's move.
 pub fn can_learn_tm(species: PokemonSpecies, mv: PokemonMoveName) -> bool {
-    let index = rom_slice(pokered_symbols::TechnicalMachines).iter()
-        .position(|&machine| machine == mv as u8)
-        .expect("a machine teaches the move");
-    BaseStats::of(species).tm_hm[index / 8] & 1 << (index % 8) != 0
+    assert!(TECHNICAL_MACHINES.contains(&(mv as u8)), "a machine teaches {mv}");
+    BaseStats::of(species).tm_hm.contains(&(mv as u8))
 }
 
 /// `RedrawPartyMenu_.evolutionStoneMenu`: whether any of the species' item evolutions takes this

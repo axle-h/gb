@@ -5,8 +5,7 @@ use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_events::{EVENT_1ST_ROUTE22_RIVAL_BATTLE, EVENT_2ND_ROUTE22_RIVAL_BATTLE,
     EVENT_BEAT_ROUTE22_RIVAL_1ST_BATTLE, EVENT_BEAT_ROUTE22_RIVAL_2ND_BATTLE, EVENT_ROUTE22_RIVAL_WANTS_BATTLE};
 use poke_core::symbols::pokered_map_scripts::*;
-use poke_core::symbols::pokered_symbols as sym;
-use poke_core::symbols::pokered_symbols::{ROUTE22_RIVAL1, ROUTE22_RIVAL2};
+use poke_core::symbols::pokered_map_scripts::{ROUTE22_RIVAL1, ROUTE22_RIVAL2};
 use poke_core::symbols::pokered_toggles::{TOGGLE_ROUTE_22_RIVAL_1, TOGGLE_ROUTE_22_RIVAL_2};
 use poke_core::trainer_headers::OPP_ID_OFFSET;
 use serde::{Deserialize, Serialize};
@@ -14,7 +13,7 @@ use crate::audio::data::{sounds, SoundId};
 use crate::input::Joypad;
 use crate::modes::overworld::movement::{NPC_MOVEMENT_DOWN, NPC_MOVEMENT_LEFT, NPC_MOVEMENT_RIGHT, NPC_MOVEMENT_UP};
 use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_RIGHT, SPRITE_FACING_UP};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `PLAYER_DIR_LEFT` and `PLAYER_DIR_DOWN`.
 const PLAYER_DIR_LEFT: u8 = 2;
@@ -195,16 +194,16 @@ fn rival_exit(rt: &mut Script, toggle: u16, battle_event: u16, next: u8) -> Flow
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let words = match text_id {
         TEXT_ROUTE22_RIVAL1 => match rt.check_event(EVENT_BEAT_ROUTE22_RIVAL_1ST_BATTLE) {
-            true => sym::Route22RivalAfterBattleText1,
-            false => sym::Route22RivalBeforeBattleText1,
+            true => "Route22RivalAfterBattleText1",
+            false => "Route22RivalBeforeBattleText1",
         },
         TEXT_ROUTE22_RIVAL2 => match rt.check_event(EVENT_BEAT_ROUTE22_RIVAL_2ND_BATTLE) {
-            true => sym::Route22RivalAfterBattleText2,
-            false => sym::Route22RivalBeforeBattleText2,
+            true => "Route22RivalAfterBattleText2",
+            false => "Route22RivalBeforeBattleText2",
         },
         _ => return None,
     };
-    Some(rt.print_text(text_at(words)).ret())
+    Some(rt.print_text(text_named(words)).ret())
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -224,7 +223,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::Rival1Text => {
             let set = trainer_no(rt, [4, 5, 6]);
-            rt.start_trainer_battle(OPP_RIVAL1, set, sym::Route22Rival1DefeatedText);
+            rt.start_trainer_battle(OPP_RIVAL1, set, "Route22Rival1DefeatedText");
             rt.maps().route22.cur_script = SCRIPT_ROUTE22_RIVAL1_AFTER_BATTLE;
             Flow::Return
         }
@@ -257,7 +256,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::Rival2Text => {
             let set = trainer_no(rt, [10, 11, 12]);
-            rt.start_trainer_battle(OPP_RIVAL2, set, sym::Route22Rival2DefeatedText);
+            rt.start_trainer_battle(OPP_RIVAL2, set, "Route22Rival2DefeatedText");
             rt.maps().route22.cur_script = SCRIPT_ROUTE22_RIVAL2_AFTER_BATTLE;
             Flow::Return
         }

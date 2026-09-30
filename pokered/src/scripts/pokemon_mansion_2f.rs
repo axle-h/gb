@@ -1,9 +1,8 @@
 //! `PokemonMansion2F_Script`: the second floor's switch, its three walls and the Super Nerd.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_events::EVENT_MANSION_SWITCH_ON;
-use poke_core::symbols::pokered_local_labels::PokemonMansion2FSwitchText as switch;
 use poke_core::symbols::pokered_map_scripts::{TEXT_POKEMONMANSION2F_SUPER_NERD, TEXT_POKEMONMANSION2F_SWITCH};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use super::pokemon_mansion_1f::{switch_answered, switch_done, switch_text};
 use super::{Flow, Script};
@@ -31,7 +30,7 @@ pub fn script(rt: &mut Script) -> Flow {
     check_replace_switch_door_blocks(rt);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().pokemon_mansion_2f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::Mansion2TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::Mansion2TrainerHeaders);
     rt.trainer_script(index).then(Label::StoreCurScript)
 }
 
@@ -48,9 +47,9 @@ fn check_replace_switch_door_blocks(rt: &mut Script) {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     match text_id {
-        TEXT_POKEMONMANSION2F_SUPER_NERD => Some(rt.talk_to_trainer(sym::Mansion2TrainerHeader0).ret()),
+        TEXT_POKEMONMANSION2F_SUPER_NERD => Some(rt.talk_to_trainer(trainers::Mansion2TrainerHeader0).ret()),
         // The words every floor's switch prints are this floor's.
-        TEXT_POKEMONMANSION2F_SWITCH => Some(switch_text(rt, switch::Text, Label::SwitchAsk)),
+        TEXT_POKEMONMANSION2F_SWITCH => Some(switch_text(rt, "PokemonMansion2FSwitchText.Text", Label::SwitchAsk)),
         _ => None,
     }
 }
@@ -62,7 +61,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             Flow::Return
         }
         Label::SwitchAsk => rt.yes_no_choice().then(Label::SwitchAnswered),
-        Label::SwitchAnswered => switch_answered(rt, switch::PressedText, switch::NotPressed, Label::SwitchDone),
+        Label::SwitchAnswered => switch_answered(rt, "PokemonMansion2FSwitchText.PressedText", "PokemonMansion2FSwitchText.NotPressed", Label::SwitchDone),
         Label::SwitchDone => switch_done(rt),
     }
 }

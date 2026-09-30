@@ -1,15 +1,13 @@
-use crate::rom_gfx::rom_slice;
-use crate::symbols::pokered_symbols;
+use crate::tables::{HIGH_CRITICAL_MOVES, STAT_MODIFIER_RATIOS};
 
 /// `HighCriticalMoves`.
 pub fn high_critical_moves() -> Vec<u8> {
-    rom_slice(pokered_symbols::HighCriticalMoves).iter().copied().take_while(|&m| m != 0xFF).collect()
+    HIGH_CRITICAL_MOVES.to_vec()
 }
 
 /// `StatModifierRatios`: `(numerator, denominator)` for stages -6 to +6.
 pub fn stat_modifier_ratios() -> [(u8, u8); 13] {
-    let bytes = rom_slice(pokered_symbols::StatModifierRatios);
-    std::array::from_fn(|stage| (bytes[stage * 2], bytes[stage * 2 + 1]))
+    STAT_MODIFIER_RATIOS
 }
 
 #[cfg(test)]

@@ -3,10 +3,9 @@
 
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::EVENT_GOT_HM03;
-use poke_core::symbols::pokered_local_labels::SafariZoneSecretHouseFishingGuruText as guru;
 use poke_core::symbols::pokered_map_scripts::TEXT_SAFARIZONESECRETHOUSE_FISHING_GURU;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {}
@@ -26,8 +25,8 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         return None;
     }
     Some(match rt.check_event(EVENT_GOT_HM03) {
-        true => rt.print_text(text_at(guru::HM03ExplanationText)).ret(),
-        false => rt.print_text(text_at(guru::YouHaveWonText)).then(Label::Congratulated),
+        true => rt.print_text(text_named("SafariZoneSecretHouseFishingGuruText.HM03ExplanationText")).ret(),
+        false => rt.print_text(text_named("SafariZoneSecretHouseFishingGuruText.YouHaveWonText")).then(Label::Congratulated),
     })
 }
 
@@ -37,11 +36,11 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             let said = match rt.give_item(ItemId::Hm03Surf, 1) {
                 true => {
                     rt.set_event(EVENT_GOT_HM03);
-                    guru::ReceivedHM03Text
+                    "SafariZoneSecretHouseFishingGuruText.ReceivedHM03Text"
                 }
-                false => guru::HM03NoRoomText,
+                false => "SafariZoneSecretHouseFishingGuruText.HM03NoRoomText",
             };
-            rt.print_text(text_at(said)).ret()
+            rt.print_text(text_named(said)).ret()
         }
     }
 }

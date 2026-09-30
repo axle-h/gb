@@ -3,10 +3,9 @@
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_GOT_HM01, EVENT_RUBBED_CAPTAINS_BACK};
 use poke_core::symbols::pokered_map_scripts::TEXT_SSANNECAPTAINSROOM_CAPTAIN;
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, SoundId};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {}
@@ -32,9 +31,9 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         return None;
     }
     if rt.check_event(EVENT_GOT_HM01) {
-        return Some(rt.print_text(text_at(sym::SSAnneCaptainsRoomCaptainNotSickAnymoreText)).ret());
+        return Some(rt.print_text(text_named("SSAnneCaptainsRoomCaptainNotSickAnymoreText")).ret());
     }
-    Some(rt.print_text(text_at(sym::SSAnneCaptainsRoomRubCaptainsBackText)).then(Label::RubbedBack))
+    Some(rt.print_text(text_named("SSAnneCaptainsRoomRubCaptainsBackText")).then(Label::RubbedBack))
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -50,16 +49,16 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             rt.play_default_music().then(Label::MusicBack)
         }
         Label::MusicBack => {
-            rt.print_text(text_at(sym::SSAnneCaptainsRoomCaptainIFeelMuchBetterText)).then(Label::FeelMuchBetter)
+            rt.print_text(text_named("SSAnneCaptainsRoomCaptainIFeelMuchBetterText")).then(Label::FeelMuchBetter)
         }
         // A bag with no room leaves him facing away again, so the offer can be taken up later.
         Label::FeelMuchBetter => {
             if !rt.give_item(ItemId::Hm01Cut, 1) {
                 rt.set_no_npc_face_player(true);
-                return rt.print_text(text_at(sym::SSAnneCaptainsRoomCaptainHM01NoRoomText)).ret();
+                return rt.print_text(text_named("SSAnneCaptainsRoomCaptainHM01NoRoomText")).ret();
             }
             rt.set_event(EVENT_GOT_HM01);
-            rt.print_text(text_at(sym::SSAnneCaptainsRoomCaptainReceivedHM01Text)).ret()
+            rt.print_text(text_named("SSAnneCaptainsRoomCaptainReceivedHM01Text")).ret()
         }
     }
 }

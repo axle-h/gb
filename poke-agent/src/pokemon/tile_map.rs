@@ -162,6 +162,8 @@ pub enum WarpTrigger {
 pub struct Crossing {
     /// The tile to leave by, in action-id coordinates: the reachable one nearest the player if any.
     pub at: Point8,
+    /// The run's first tile in reading order, people put back: what the row's id names.
+    pub key: Point8,
     /// The landing on the far map, in raw coordinates; two runs into one map differ only here.
     pub to_position: Point8,
     /// Whether any tile of the run can be walked to from where the player is standing.
@@ -395,7 +397,7 @@ impl MetaTileMap {
             .map(|(p, _)| *p)?;
         let route = self.route_to(dest)?;
         (!route.is_empty()).then(|| crate::pokemon::actions::OverworldAction {
-            map: self.map, origin: self.player_position, destination: dest,
+            map: self.map, key: dest, destination: dest,
             tile: self.meta_tiles[dest.x as usize + dest.y as usize * self.width], route,
         })
     }
@@ -1043,7 +1045,9 @@ impl MetaTileMap {
             } else {
                 route.push(enter_dir);
             }
-            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile, route });
+            // Both squares of a two-square door lead to one landing, so the door is one row, one id.
+            let key = self.first_square(|t| *t == tile).unwrap_or(dest);
+            actions.push(OverworldAction { map: self.map, key, destination: dest, tile, route });
         }
 
         for sprite in self.sprites.iter().filter(|s| !s.hidden) {
@@ -1100,7 +1104,7 @@ impl MetaTileMap {
                 route.push(face_button);
             }
             route.push(JoypadButton::A);
-            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Sprite(sprite.name), route });
+            actions.push(OverworldAction { map: self.map, key: dest, destination: dest, tile: MetaTile::Sprite(sprite.name), route });
         }
 
         // One row per opening on land, nearest first: a wall across a map edge makes two ways into
@@ -1112,12 +1116,12 @@ impl MetaTileMap {
             let openings = self.crossings_from(*to_map, &full_dist).into_iter()
                 .filter(|crossing| crossing.reachable)
                 .map(|crossing| (MetaTile::Connection { to_map: *to_map, to_position: crossing.to_position },
-                                 crossing.at));
+                                 crossing.at, crossing.key));
             let by_water = nearest(&|t| match t {
                 MetaTile::ConnectionWater(m) => self.can_surf && m == to_map,
                 _ => false,
-            });
-            for (tile, dest) in openings.chain(by_water) {
+            }).map(|(tile, dest)| (tile, dest, self.first_square(|t| *t == tile).unwrap_or(dest)));
+            for (tile, dest, key) in openings.chain(by_water) {
                 let (_, came_from) = best_dist_from(&dest).unwrap();
                 let mut route = reconstruct(dest, came_from);
 
@@ -1128,7 +1132,7 @@ impl MetaTileMap {
                 route.push(enter_dir);
                 actions.push(OverworldAction {
                     map: self.map,
-                    origin: self.player_position,
+                    key,
                     destination: dest,
                     tile,
                     route
@@ -1138,19 +1142,19 @@ impl MetaTileMap {
 
         if self.has_grass_encounters && let Some((_, dest)) = nearest(&|t| *t == MetaTile::Grass) {
             let route = reconstruct(dest, &full_from);
-            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Grass, route });
+            actions.push(OverworldAction { map: self.map, key: dest, destination: dest, tile: MetaTile::Grass, route });
         } else if self.floor_encounters
             && let Some(dest) = self.nearest_pacing_square(MetaTile::Empty, &full_dist)
         {
             let route = reconstruct(dest, &full_from);
-            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest,
+            actions.push(OverworldAction { map: self.map, key: dest, destination: dest,
                                            tile: MetaTile::Pace { water: false }, route });
         }
         if self.has_water_encounters && self.can_surf
             && let Some(dest) = self.nearest_pacing_square(MetaTile::Water, &full_dist)
         {
             let route = reconstruct(dest, &full_from);
-            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest,
+            actions.push(OverworldAction { map: self.map, key: dest, destination: dest,
                                            tile: MetaTile::Pace { water: true }, route });
         }
 
@@ -1181,7 +1185,7 @@ impl MetaTileMap {
                 } else if route.last() != Some(&face_button) {
                     route.push(face_button);
                 }
-                actions.push(OverworldAction { map: self.map, origin: self.player_position,
+                actions.push(OverworldAction { map: self.map, key: dest,
                     destination: dest, tile: MetaTile::Fish { rod }, route });
             }
         }
@@ -1201,7 +1205,7 @@ impl MetaTileMap {
                 route.push(face_button);
             }
             route.push(JoypadButton::A);
-            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Pc, route });
+            actions.push(OverworldAction { map: self.map, key: dest, destination: dest, tile: MetaTile::Pc, route });
         }
 
         for (index, site) in self.hidden_objects().iter().enumerate() {
@@ -1234,7 +1238,7 @@ impl MetaTileMap {
                 route.push(face_button);
             }
             route.push(JoypadButton::A);
-            actions.push(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile: MetaTile::Switch { object: site.object, ordinal }, route });
+            actions.push(OverworldAction { map: self.map, key: dest, destination: dest, tile: MetaTile::Switch { object: site.object, ordinal }, route });
         }
 
         let cut_trees: Vec<Point8> = match self.can_cut {
@@ -1268,7 +1272,7 @@ impl MetaTileMap {
             } else if route.last() != Some(&face_button) {
                 route.push(face_button);
             }
-            actions.push(OverworldAction { map: self.map, origin: self.player_position,
+            actions.push(OverworldAction { map: self.map, key: dest,
                 destination: dest, tile: MetaTile::Cut { at: tree }, route });
         }
 
@@ -1310,7 +1314,7 @@ impl MetaTileMap {
                 } else if route.last() != Some(&push) {
                     route.push(push);
                 }
-                actions.push(OverworldAction { map: self.map, origin: self.player_position,
+                actions.push(OverworldAction { map: self.map, key: stand,
                     destination: stand, tile: MetaTile::BoulderGoal { boulder: which, at, hole }, route });
             }
 
@@ -1331,7 +1335,7 @@ impl MetaTileMap {
                     } else if route.last() != Some(&push) {
                         route.push(push);
                     }
-                    actions.push(OverworldAction { map: self.map, origin: self.player_position,
+                    actions.push(OverworldAction { map: self.map, key: stand,
                         destination: stand, tile: MetaTile::BoulderPush { boulder, dir: push }, route });
                 }
             }
@@ -1446,6 +1450,53 @@ impl MetaTileMap {
         cleared.actions().iter().any(|action| action.tile.is_same_row_as(&row))
     }
 
+    /// The first square in reading order whose tile passes `pred`, with anyone standing on one put
+    /// back: what a door's id names, which holds still whoever walks across it.
+    fn first_square(&self, pred: impl Fn(&MetaTile) -> bool) -> Option<Point8> {
+        let live = self.meta_tiles.iter().position(&pred)
+            .map(|i| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 });
+        let under = self.underfoot.iter().filter(|(_, t)| pred(t)).map(|(p, _)| *p);
+        live.into_iter().chain(under).min_by_key(|p| (p.y, p.x))
+    }
+
+    /// Every edge tile leading into `to_map`, with anyone standing on one put back, so a person on
+    /// the edge neither splits an opening in two nor moves the square its id names.
+    fn connection_squares(&self, to_map: Map) -> std::collections::HashSet<Point8> {
+        let into = |t: &MetaTile| matches!(t, MetaTile::Connection { to_map: m, .. } if *m == to_map);
+        self.meta_tiles.iter().enumerate()
+            .filter(|(_, t)| into(t))
+            .map(|(i, _)| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 })
+            .chain(self.underfoot.iter().filter(|(_, t)| into(t)).map(|(p, _)| *p))
+            .collect()
+    }
+
+    /// The run of touching tiles of `all` that holds `start`. Runs flood over 4-neighbours, so a
+    /// wall splits one and a diagonal notch does not.
+    fn opening(&self, all: &std::collections::HashSet<Point8>, start: Point8) -> Vec<Point8> {
+        let mut run = vec![start];
+        let mut seen = std::collections::HashSet::from([start]);
+        let mut queue = std::collections::VecDeque::from([start]);
+        while let Some(p) = queue.pop_front() {
+            for next in [
+                p.y.checked_sub(1).map(|y| Point8 { x: p.x, y }),
+                (p.y as usize + 1 < self.height).then(|| Point8 { x: p.x, y: p.y + 1 }),
+                p.x.checked_sub(1).map(|x| Point8 { x, y: p.y }),
+                (p.x as usize + 1 < self.width).then(|| Point8 { x: p.x + 1, y: p.y }),
+            ].into_iter().flatten() {
+                if all.contains(&next) && seen.insert(next) {
+                    run.push(next);
+                    queue.push_back(next);
+                }
+            }
+        }
+        run
+    }
+
+    /// [`Crossing::key`] for the opening holding `at`.
+    fn opening_key(&self, all: &std::collections::HashSet<Point8>, at: Point8) -> Point8 {
+        self.opening(all, at).into_iter().min_by_key(|p| (p.y, p.x)).unwrap_or(at)
+    }
+
     /// Every distinct way off this map into `to_map`, one [`Crossing`] per run of touching edge
     /// tiles, nearest-reachable first and then in reading order.
     pub fn crossings(&self, to_map: Map) -> Vec<Crossing> {
@@ -1455,46 +1506,30 @@ impl MetaTileMap {
 
     /// [`Self::crossings`] on a search already made, for the caller that makes one anyway.
     fn crossings_from(&self, to_map: Map, dist: &HashMap<Point8, u32>) -> Vec<Crossing> {
-        use std::collections::{HashSet, VecDeque};
-        let at = |i: usize| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 };
+        use std::collections::HashSet;
         let landing = |p: Point8| match self.meta_tiles[p.x as usize + p.y as usize * self.width] {
             MetaTile::Connection { to_map: m, to_position } if m == to_map => Some(to_position),
             _ => None,
         };
-        let all: HashSet<Point8> = self.meta_tiles.iter().enumerate()
-            .filter(|(_, t)| matches!(t, MetaTile::Connection { to_map: m, .. } if *m == to_map))
-            .map(|(i, _)| at(i))
-            .collect();
+        let all = self.connection_squares(to_map);
 
         let mut seen: HashSet<Point8> = HashSet::new();
         let mut crossings = vec![];
-        // Runs flood over 4-neighbours, so a wall splits one and a diagonal notch does not.
         for &start in &all {
-            if !seen.insert(start) { continue }
-            let mut run = vec![start];
-            let mut queue = VecDeque::from([start]);
-            while let Some(p) = queue.pop_front() {
-                for next in [
-                    p.y.checked_sub(1).map(|y| Point8 { x: p.x, y }),
-                    (p.y as usize + 1 < self.height).then(|| Point8 { x: p.x, y: p.y + 1 }),
-                    p.x.checked_sub(1).map(|x| Point8 { x, y: p.y }),
-                    (p.x as usize + 1 < self.width).then(|| Point8 { x: p.x + 1, y: p.y }),
-                ].into_iter().flatten() {
-                    if all.contains(&next) && seen.insert(next) {
-                        run.push(next);
-                        queue.push_back(next);
-                    }
-                }
-            }
-            // Named by its reachable tile nearest the player, else its first in reading order.
+            if seen.contains(&start) { continue }
+            let run = self.opening(&all, start);
+            seen.extend(run.iter().copied());
+            // Named by its reachable tile nearest the player, else its first in reading order that
+            // nobody stands on.
             let named = run.iter().copied()
                 .filter(|p| dist.contains_key(p))
                 .min_by_key(|p| (dist[p], p.y, p.x))
-                .or_else(|| run.iter().copied().min_by_key(|p| (p.y, p.x)));
+                .or_else(|| run.iter().copied().filter(|p| landing(*p).is_some()).min_by_key(|p| (p.y, p.x)));
             let Some(named) = named else { continue };
             let Some(to_position) = landing(named) else { continue };
             crossings.push(Crossing {
                 at: named,
+                key: run.iter().copied().min_by_key(|p| (p.y, p.x)).unwrap_or(named),
                 to_position,
                 reachable: run.iter().any(|p| dist.contains_key(p)),
                 tiles: run.len(),
@@ -1559,7 +1594,8 @@ impl MetaTileMap {
             else if dest.x == 0 { JoypadButton::Left }
             else { JoypadButton::Right };
         route.push(enter_dir);
-        Some(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile, route })
+        let key = self.opening_key(&self.connection_squares(to_map), dest);
+        Some(OverworldAction { map: self.map, key, destination: dest, tile, route })
     }
 
     /// The goal row for one named boulder onto `at`, built on demand.
@@ -1580,7 +1616,7 @@ impl MetaTileMap {
             route.push(push);
         }
         Some(OverworldAction {
-            map: self.map, origin: self.player_position, destination: stand,
+            map: self.map, key: stand, destination: stand,
             tile: MetaTile::BoulderGoal { boulder, at, hole }, route,
         })
     }
@@ -1621,7 +1657,8 @@ impl MetaTileMap {
             else if dest.x == 0 { JoypadButton::Left }
             else { JoypadButton::Right };
         route.push(enter_dir);
-        Some(OverworldAction { map: self.map, origin: self.player_position, destination: dest, tile, route })
+        let key = self.first_square(|t| *t == tile).unwrap_or(dest);
+        Some(OverworldAction { map: self.map, key, destination: dest, tile, route })
     }
 
     /// The tile directly in front of the player (based on facing), if within bounds.
@@ -2017,7 +2054,8 @@ mod boulder_solver_tests {
     use crate::pokemon::sprite::{Sprite, PictureId};
 
     /// A map from ASCII: `#` wall, `.` floor, `P` player, `S` switch, `W` warp (standable), `w`
-    /// water, `=` counter, `1..9` boulders.
+    /// water, `=` counter, `g` tall grass, `T` a cuttable tree, `C` an edge into Route 22 landing
+    /// level with it, `1..9` boulders.
     fn from_ascii(rows: &[&str]) -> (MetaTileMap, Point8) {
         let h = rows.len();
         let w = rows[0].len();
@@ -2035,6 +2073,9 @@ mod boulder_solver_tests {
                     'W' => meta[idx] = MetaTile::Warp { to_map: Map::Route23, to_position: Point8 { x: 0, y: 0 } },
                     'w' => meta[idx] = MetaTile::Water,
                     '=' => meta[idx] = MetaTile::Counter,
+                    'g' => meta[idx] = MetaTile::Grass,
+                    'T' => meta[idx] = MetaTile::CutTree,
+                    'C' => meta[idx] = MetaTile::Connection { to_map: Map::Route22, to_position: Point8 { x: 39, y: p.y } },
                     'P' => { meta[idx] = MetaTile::Empty; player = p; }
                     'S' => { meta[idx] = MetaTile::Empty; switch = p; }
                     d if d.is_ascii_digit() => {
@@ -2067,6 +2108,70 @@ mod boulder_solver_tests {
             // No ROM map behind it.
             metadata: None,
         }, switch)
+    }
+
+    /// Every id `actions()` offers with the player at `at`, the targets recounted as `game_state()`
+    /// counts them.
+    fn ids_from(map: &MetaTileMap, at: Point8) -> Vec<String> {
+        let mut map = map.clone();
+        map.player_position = at;
+        map.warp_targets = warp_targets_of(&map.meta_tiles);
+        map.connection_targets = connection_targets_of(&map.meta_tiles);
+        let mut ids: Vec<String> = map.actions().iter().map(|action| action.id()).collect();
+        ids.sort();
+        ids
+    }
+
+    /// Both halves of a two-square door lead to one landing, so the door is one row, and its id
+    /// does not follow whichever half is nearer.
+    #[test]
+    fn a_two_square_door_is_one_id_whichever_half_is_nearer() {
+        let (map, _) = from_ascii(&["######", "#....#", "#....#", "##WW##"]);
+        let (left, right) = (ids_from(&map, Point8 { x: 1, y: 1 }), ids_from(&map, Point8 { x: 4, y: 1 }));
+        assert_eq!(left, vec!["VictoryRoad1F:2,3:Warp".to_string()]);
+        assert_eq!(left, right, "one door, one id");
+    }
+
+    /// An opening along a map edge is one row keyed on its first square, wherever the player
+    /// stands and whoever stands in it.
+    #[test]
+    fn a_map_edge_opening_is_one_id_wherever_you_stand_and_whoever_stands_in_it() {
+        let (map, _) = from_ascii(&["#####", "C...#", "C...#", "C...#", "C...#", "#####"]);
+        let (top, bottom) = (ids_from(&map, Point8 { x: 3, y: 1 }), ids_from(&map, Point8 { x: 3, y: 4 }));
+        assert_eq!(top, vec!["VictoryRoad1F:0,1:Connection".to_string()]);
+        assert_eq!(top, bottom, "one opening, one id");
+
+        let ground = map.clone();
+        let stand_on_the_edge = |y: u8| {
+            let mut map = ground.clone();
+            let at = Point8 { x: 0, y };
+            map.underfoot = vec![(at, map.tile_at(at))];
+            map.meta_tiles[y as usize * map.width] = MetaTile::Sprite("Youngster");
+            map
+        };
+        assert_eq!(ids_from(&stand_on_the_edge(2), Point8 { x: 3, y: 4 }), top, "a person does not split the opening");
+        assert_eq!(ids_from(&stand_on_the_edge(1), Point8 { x: 3, y: 4 }), top, "nor move the square it is keyed on");
+    }
+
+    /// A map offers its grass once, so the row names no square: the nearest blade moves with every
+    /// step.
+    #[test]
+    fn the_grass_row_is_one_id_wherever_you_stand() {
+        let (mut map, _) = from_ascii(&["#######", "#g...g#", "#.....#", "#######"]);
+        map.has_grass_encounters = true;
+        let (left, right) = (ids_from(&map, Point8 { x: 2, y: 2 }), ids_from(&map, Point8 { x: 4, y: 2 }));
+        assert_eq!(left, vec!["VictoryRoad1F:Grass".to_string()]);
+        assert_eq!(left, right);
+    }
+
+    /// A tree is cut from whichever side is nearest and keyed on the tree.
+    #[test]
+    fn a_cut_row_is_one_id_whichever_side_it_is_cut_from() {
+        let (mut map, _) = from_ascii(&["#####", "#...#", "#.T.#", "#...#", "#####"]);
+        map.can_cut = true;
+        let (above, below) = (ids_from(&map, Point8 { x: 2, y: 1 }), ids_from(&map, Point8 { x: 2, y: 3 }));
+        assert_eq!(above, vec!["VictoryRoad1F:2,2:CutTree".to_string()]);
+        assert_eq!(above, below);
     }
 
     /// A floor with nothing to aim at: the shove is the action, one row per way it will go.

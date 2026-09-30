@@ -269,7 +269,7 @@ fn native_maxed(species: PokemonSpecies, nickname: &str, moves: [PokemonMoveName
             stats,
         },
         ot: ot.to_vec(),
-        nick: crate::pokemon::strings::PokemonString::from_string(nickname).0,
+        nick: poke_core::charmap::encode(nickname).expect("a nickname the charmap spells"),
     }
 }
 
@@ -373,6 +373,17 @@ mod tests {
         // A missing slot or member is an error, not a silent no-op.
         assert!(fixture.api().debug_teach_move(9, 0, PokemonMoveName::Cut).is_err());
         assert!(fixture.api().debug_teach_move(0, 9, PokemonMoveName::Cut).is_err());
+    }
+
+    /// A battle text splices the nickname in whole, so a terminator in it ends every text at the
+    /// name: "MEWTWO's attack missed!" read as "MEWTWO".
+    #[test]
+    #[cfg(feature = "slow-tests")]
+    fn the_recreation_s_god_party_is_named_unterminated() {
+        for (species, nickname) in [(PokemonSpecies::Mewtwo, "MEWTWO"), (PokemonSpecies::Lapras, "TERRAIN")] {
+            let named = native_maxed(species, nickname, FIGHTER_MOVES, &[], 0);
+            assert_eq!(named.nick, poke_core::charmap::encode(nickname).unwrap());
+        }
     }
 
     #[test]

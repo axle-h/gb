@@ -7,6 +7,7 @@ use gb::mmu::MMU;
 use crate::pokemon::bag::BagReader;
 use crate::pokemon::map::Map;
 use crate::pokemon::map_header::{MapConnectionDirection, MapHeader, MapHeaderReader, TileSetId};
+use poke_core::map_objects::MapObjects;
 use crate::pokemon::sprite::{PictureId, Sprite, SpriteFacing};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::tile::{JumpDirection, MetaTile, WarpEvent};
@@ -466,7 +467,7 @@ fn warp_entry_exits(mmu: &MMU) -> Vec<(u8, u8)> {
 pub(crate) fn with_live_exits(rom: &MMU, metadata: &MapMetadata, exits: impl IntoIterator<Item = (u8, u8)>) -> MapMetadata {
     let mut live = metadata.clone();
     for (warp, (warp_id, raw_map)) in live.warp_events.iter_mut().zip(exits) {
-        let Some(map) = Map::from_repr(raw_map).filter(|map| map.header_pointer().is_some()) else { continue };
+        let Some(map) = Map::from_repr(raw_map).filter(|map| map.has_header()) else { continue };
         if let Ok(position) = rom.read_destination_warp_position(map, warp_id as u16) {
             warp.destination_map = map;
             warp.destination_position = position;
@@ -637,7 +638,7 @@ const SURFING: u8 = 2;
 
 /// The cartridge has finished loading the map `wCurMap` already names.
 pub fn map_header_is_loaded(mmu: &impl DmgPointerRead, map: Map) -> bool {
-    let Some(rom) = map.header_pointer() else { return true };
+    let Some(rom) = crate::pokemon::map_header::rom_header_pointer(map) else { return true };
     let live = mmu.read_pointer_vec(&pokered_symbols::wCurMapHeader, MAP_HEADER_BYTES);
     let rom = &crate::pokemon::rom_gfx::rom_slice(rom)[..MAP_HEADER_BYTES];
     live.iter().zip(rom).enumerate()
@@ -707,7 +708,7 @@ impl MapMetadataReader for MMU {
 
     fn read_map_metadata(&self, map: Map) -> Result<MapMetadata, String> {
         let map_header = self.read_map_header(map)?;
-        let map_data = self.rom_data_from_rom_pointer(&map_header.blocks_pointer(), map_header.height as usize * map_header.width as usize).to_vec();
+        let map_data = map_header.blocks.to_vec();
         self.finish_map_metadata(map, map_header, map_data)
     }
 
@@ -828,7 +829,7 @@ trait MapMetadataInternals {
 
 /// The raw ROM and RAM reads the two above are built out of.
 trait MapRomReader {
-    fn read_warp_events(&self, cur_map: Map, map_header: &MapHeader) -> Result<Vec<WarpEvent>, String>;
+    fn read_warp_events(&self, cur_map: Map) -> Result<Vec<WarpEvent>, String>;
     fn read_tileset_header(&self, tileset: TileSetId) -> TilesetHeader;
     fn read_destination_warp_position(&self, dest_map: Map, dest_warp_id: u16) -> Result<Point8, String>;
     fn find_outdoor_entry_map(&self, indoor_map: Map, gate_warp_index: u16) -> Option<Map>;
@@ -848,7 +849,7 @@ impl MapMetadataInternals for MMU {
         let max_block_id = (*map_data.iter().max().unwrap() as usize).max(max_door_block_id(map));
         let tileset_data = self.rom_data_from_pointer(ts.bank, ts.blocks_ptr, (max_block_id + 1) * MapMetadata::BLOCK_TILES).to_vec();
 
-        let warp_events = self.read_warp_events(map, &map_header)?;
+        let warp_events = self.read_warp_events(map)?;
         let tileset_id = map_header.tileset as u8;
         let water_tilesets = self.rom_data_from_rom_pointer(&pokered_symbols::WaterTilesets, 16);
         let is_water_tileset = water_tilesets.iter().take_while(|&&b| b != 0xFF).any(|&b| b == tileset_id);
@@ -894,16 +895,12 @@ struct TilesetHeader {
 }
 
 impl MapRomReader for MMU {
-    fn read_warp_events(&self, cur_map: Map, map_header: &MapHeader) -> Result<Vec<WarpEvent>, String> {
+    fn read_warp_events(&self, cur_map: Map) -> Result<Vec<WarpEvent>, String> {
         // From ROM, because the runtime `wLastMap` resolution goes stale between indoor floors.
-        let objects_pointer = map_header.objects_pointer();
-        let warp_count = self.read_pointer(&(objects_pointer + 1)) as u16;
         let mut result = vec![];
-        for index in 0..warp_count {
-            let base = objects_pointer + (2 + index * 4);
-            let entry = self.rom_data_from_rom_pointer(&base, 4);
-            let raw_map_id = entry[3];
-            let dest_warp_id = entry[2] as u16;
+        for (index, warp) in (0..).zip(MapObjects::read(cur_map)?.warps) {
+            let raw_map_id = warp.destination_map;
+            let dest_warp_id = warp.destination_warp as u16;
             let map_id = if raw_map_id == 0xFF {
                 // `LAST_MAP`: the outdoor map whose warp table points back here.
                 match self.find_outdoor_entry_map(cur_map, index) {
@@ -918,14 +915,14 @@ impl MapRomReader for MMU {
                     .ok_or_else(|| format!("Invalid map number {raw_map_id}"))?
             };
             // An elevator's exits point at a headerless placeholder, redirected once a floor is picked.
-            let destination_position = if map_id.header_pointer().is_some() {
+            let destination_position = if map_id.has_header() {
                 self.read_destination_warp_position(map_id, dest_warp_id)
                     .unwrap_or(Point8 { y: 0, x: 0 })
             } else {
                 Point8 { y: 0, x: 0 }
             };
             result.push(WarpEvent {
-                position: Point8 { y: entry[0], x: entry[1] },
+                position: Point8 { y: warp.y, x: warp.x },
                 destination_map: map_id,
                 destination_position,
             });
@@ -949,34 +946,25 @@ impl MapRomReader for MMU {
 
     /// Where the player lands taking warp `dest_warp_id` into `dest_map`.
     fn read_destination_warp_position(&self, dest_map: Map, dest_warp_id: u16) -> Result<Point8, String> {
-        let header = self.read_map_header(dest_map)?;
-        let objects_pointer = header.objects_pointer();
-        let warp_count = self.read_pointer(&(objects_pointer + 1)) as u16;
-        if dest_warp_id >= warp_count {
-            return Err(format!(
-                "dest_warp_id {dest_warp_id} out of range (map {dest_map} has {warp_count} warps)"
-            ));
-        }
-        let base = objects_pointer + (2 + dest_warp_id * 4);
-        let dest_entry = self.rom_data_from_rom_pointer(&base, 4);
-        Ok(Point8 { y: dest_entry[0], x: dest_entry[1] })
+        let warps = MapObjects::read(dest_map)?.warps;
+        let warp = warps.get(dest_warp_id as usize).ok_or_else(|| format!(
+            "dest_warp_id {dest_warp_id} out of range (map {dest_map} has {} warps)", warps.len()
+        ))?;
+        Ok(Point8 { y: warp.y, x: warp.x })
     }
 
     /// The outdoor map with a warp into `indoor_map`, preferring the one back to our warp.
     fn find_outdoor_entry_map(&self, indoor_map: Map, gate_warp_index: u16) -> Option<Map> {
-        let map_banks = self.rom_data_from_rom_pointer(&pokered_symbols::MapHeaderBanks, Map::COUNT);
         let mut fallback = None;
         for id in 0..Map::COUNT {
             let Some(outdoor_map) = Map::from_repr(id as u8) else { continue };
             if outdoor_map == indoor_map { continue; }
             let Ok(header) = self.read_map_header(outdoor_map) else { continue };
             if !matches!(header.tileset, TileSetId::Overworld | TileSetId::Plateau | TileSetId::Cavern) { continue; }
-            let bank        = map_banks[id] as usize;
-            let warp_count  = self.rom_data_from_pointer(bank, header.objects_address + 1, 1)[0] as u16;
-            for wi in 0..warp_count {
-                let entry = self.rom_data_from_pointer(bank, header.objects_address + 2 + wi * 4, 4);
-                if entry[3] == indoor_map as u8 {
-                    if entry[2] as u16 == gate_warp_index { return Some(outdoor_map); }
+            let Ok(objects) = MapObjects::read(outdoor_map) else { continue };
+            for warp in objects.warps {
+                if warp.destination_map == indoor_map as u8 {
+                    if warp.destination_warp as u16 == gate_warp_index { return Some(outdoor_map); }
                     fallback.get_or_insert(outdoor_map);
                 }
             }
@@ -1031,9 +1019,6 @@ impl MapRomReader for MMU {
     }
 
     fn load_connected_strips(&self, map_header: &MapHeader) -> Vec<ConnectedMapStrip> {
-        let all_map_banks: Vec<u8> = self
-            .rom_data_from_rom_pointer(&pokered_symbols::MapHeaderBanks, Map::COUNT)
-            .to_vec();
         let water_tilesets: Vec<u8> = self
             .rom_data_from_rom_pointer(&pokered_symbols::WaterTilesets, 16)
             .to_vec();
@@ -1041,53 +1026,18 @@ impl MapRomReader for MMU {
         map_header.connections()
             .into_iter()
             .filter_map(|connection| {
-                let connected_map_bank = all_map_banks[connection.map as usize] as usize;
                 let connected_header = self.read_map_header(connection.map).ok()?;
+                let strip = &connected_header.blocks[connection.strip_src_block as usize..];
+                let width = connection.connected_map_width as usize;
+                let length = connection.strip_length as usize;
 
                 let (border_blocks, block_sub_offset): (Vec<u8>, u8) = match connection.direction {
-                    MapConnectionDirection::South => {
-                        let blocks = self.rom_data_from_pointer(
-                            connected_map_bank,
-                            connection.strip_src,
-                            connection.strip_length as usize,
-                        ).to_vec();
-                        (blocks, 0)
-                    }
-                    MapConnectionDirection::North => {
-                        // `strip_src` is the top of the 3-block-deep strip; the border row is its last.
-                        let addr = connection.strip_src + 2 * connection.connected_map_width as u16;
-                        let blocks = self.rom_data_from_pointer(
-                            connected_map_bank,
-                            addr,
-                            connection.strip_length as usize,
-                        ).to_vec();
-                        (blocks, 1)
-                    }
-                    MapConnectionDirection::East => {
-                        let blocks = (0..connection.strip_length as u16)
-                            .map(|row| {
-                                self.rom_data_from_pointer(
-                                    connected_map_bank,
-                                    connection.strip_src + row * connection.connected_map_width as u16,
-                                    1,
-                                )[0]
-                            })
-                            .collect();
-                        (blocks, 0)
-                    }
-                    MapConnectionDirection::West => {
-                        // `strip_src` is column width−3; the border column is width−1.
-                        let blocks = (0..connection.strip_length as u16)
-                            .map(|row| {
-                                self.rom_data_from_pointer(
-                                    connected_map_bank,
-                                    connection.strip_src + row * connection.connected_map_width as u16 + 2,
-                                    1,
-                                )[0]
-                            })
-                            .collect();
-                        (blocks, 1)
-                    }
+                    MapConnectionDirection::South => (strip[..length].to_vec(), 0),
+                    // The strip is 3 blocks deep; the border row is its last.
+                    MapConnectionDirection::North => (strip[2 * width..2 * width + length].to_vec(), 1),
+                    MapConnectionDirection::East => ((0..length).map(|row| strip[row * width]).collect(), 0),
+                    // The strip starts at column width−3; the border column is width−1.
+                    MapConnectionDirection::West => ((0..length).map(|row| strip[row * width + 2]).collect(), 1),
                 };
 
                 if border_blocks.is_empty() {
@@ -1325,8 +1275,7 @@ mod test {
 
         let mmu = MMU::from_rom(POKERED).unwrap();
 
-        let pt_header = mmu.read_map_header(Map::PalletTown).unwrap();
-        let pt_warps  = mmu.read_warp_events(Map::PalletTown, &pt_header).unwrap();
+        let pt_warps  = mmu.read_warp_events(Map::PalletTown).unwrap();
         assert_eq!(pt_warps.len(), 3);
 
         assert_eq!(pt_warps[0].position,             Point8 { y: 5, x: 5  });
@@ -1340,8 +1289,7 @@ mod test {
         assert_eq!(pt_warps[2].destination_map,      Map::OaksLab);
         assert_eq!(pt_warps[2].destination_position, Point8 { y: 11, x: 5  });
 
-        let rh1_header = mmu.read_map_header(Map::RedsHouse1F).unwrap();
-        let rh1_warps  = mmu.read_warp_events(Map::RedsHouse1F, &rh1_header).unwrap();
+        let rh1_warps  = mmu.read_warp_events(Map::RedsHouse1F).unwrap();
         assert_eq!(rh1_warps.len(), 3);
 
         // `LAST_MAP` exits resolve to Pallet Town.
@@ -1357,8 +1305,7 @@ mod test {
         assert_eq!(rh1_warps[2].destination_map,      Map::RedsHouse2F);
         assert_eq!(rh1_warps[2].destination_position, Point8 { y: 1, x: 7 });
 
-        let rh2_header = mmu.read_map_header(Map::RedsHouse2F).unwrap();
-        let rh2_warps  = mmu.read_warp_events(Map::RedsHouse2F, &rh2_header).unwrap();
+        let rh2_warps  = mmu.read_warp_events(Map::RedsHouse2F).unwrap();
         assert_eq!(rh2_warps.len(), 1);
         assert_eq!(rh2_warps[0].position,             Point8 { y: 1, x: 7 });
         assert_eq!(rh2_warps[0].destination_map,      Map::RedsHouse1F);

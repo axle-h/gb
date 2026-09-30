@@ -1,23 +1,10 @@
 //! The SGB packets, decoded where `SendSGBPacket` would bit-bang them out of the joypad port.
 //!
-//! Inputs: a label in `data/sgb/sgb_packets.asm`, or a copy of one the game has patched. Outputs:
-//! the four palette ids a `PAL_SET` names, and the rectangles an `ATTR_BLK` colours. The packets
-//! are read out of the cartridge rather than transcribed, so the `ATTR_BLK_DATA` rows are the
-//! cartridge's own.
+//! Inputs: a packet of `poke_core::gfx::sgb_packets`, assembled from `data/sgb/sgb_packets.asm`,
+//! or a copy of one the game has patched. Outputs: the four palette ids a `PAL_SET` names, and the
+//! rectangles an `ATTR_BLK` colours.
 
-use poke_core::rom_gfx::rom_slice;
-use poke_core::symbols::DmgPointer;
 use crate::gfx::ui::{SCREEN_TILES_X, SCREEN_TILES_Y};
-
-/// One packet. A transfer is up to seven of them.
-pub const PACKET_BYTES: usize = 16;
-
-/// A whole transfer as `SendSGBPacket` reads it: the low three bits of the first byte are how many
-/// packets it is, and the other five are the command.
-pub fn transfer(at: DmgPointer) -> Vec<u8> {
-    let bytes = rom_slice(at);
-    bytes[..(bytes[0] & 0x07) as usize * PACKET_BYTES].to_vec()
-}
 
 /// The four `SuperPalettes` ids a `PAL_SET` names. They are written as words, and no palette id
 /// needs the high byte, which is why `SetPal_Overworld` patches one byte and is done.

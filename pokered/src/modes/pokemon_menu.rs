@@ -22,8 +22,7 @@
 
 use poke_core::map_header::MapHeader;
 use poke_core::move_name::PokemonMoveName;
-use poke_core::symbols::{pokered_local_labels as local, pokered_symbols, DmgPointer};
-use poke_core::text_script::{decode, far_text, TextBuffer};
+use poke_core::text_script::{far_text, TextBuffer, TextLabel};
 use serde::{Deserialize, Serialize};
 use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::field_move_menu::{FieldMoveChoice, FieldMoveMenu};
@@ -59,7 +58,11 @@ enum Phase {
     /// `ChooseFlyDestination`.
     TownMap,
     /// `PlayDefaultMusic`'s `WaitForSoundToFinish` inside `ItemUseSurfboard`, then its song and text.
-    Music { text: Option<DmgPointer>, result: bool },
+    Music {
+        #[serde(with = "poke_core::text_script::saved_text")]
+        text: Option<TextLabel>,
+        result: bool,
+    },
     /// A field move's text, and whether the start menu closes after it rather than the list coming back.
     Text { result: bool },
     /// `UsedStrengthText`'s `text_asm`: the cry, `PlayCry`'s wait for it, its `Delay3`, then
@@ -160,7 +163,7 @@ impl PokemonMenu {
         }
         let tileset = MapHeader::read(ctx.world.location.map).expect("the player stands on a map with a header").tileset;
         let Some(tile) = cut_tile(tileset, ctx.world.location.ahead.tile) else {
-            return self.text(decode(local::UsedCut::NothingToCutText).expect("the text decodes"), false);
+            return self.text(far_text("UsedCut.NothingToCutText").expect("the text decodes"), false);
         };
         self.name_the_mon(ctx);
         ctx.world.location.used_field_move = Some(UsedFieldMove::Cut(tile));
@@ -225,7 +228,7 @@ impl PokemonMenu {
         // `.strength` calls no `GetPartyMonName`, so both its texts read whichever name
         // `RedrawPartyMenu_` left in `wNameBuffer`: the last mon drawn, not the one chosen.
         self.phase = Phase::StrengthCry;
-        Transition::Push(Mode::TextBox(TextBox::script(decode(pokered_symbols::UsedStrengthText).expect("the text decodes"))))
+        Transition::Push(Mode::TextBox(TextBox::script(far_text("UsedStrengthText").expect("the text decodes"))))
     }
 
     /// `.flash`. `wMapPalOffset` is the overworld's, so lighting the map is left to it.
@@ -234,7 +237,7 @@ impl PokemonMenu {
             return self.new_badge_required();
         }
         ctx.world.location.used_field_move = Some(UsedFieldMove::Flash);
-        self.text(decode(local::StartMenu_Pokemon::flashLightsAreaText).expect("the text decodes"), true)
+        self.text(far_text("StartMenu_Pokemon.flashLightsAreaText").expect("the text decodes"), true)
     }
 }
 
@@ -246,7 +249,7 @@ impl PokemonMenu {
             return self.new_badge_required();
         }
         if let Some(text) = surfing_refusal(&ctx.world.location, &ctx.world.events) {
-            return self.text(decode(text).expect("the text decodes"), false);
+            return self.text(far_text(text).expect("the text decodes"), false);
         }
         let used = item_use_surfboard(ctx);
         if used.music {
@@ -261,9 +264,9 @@ impl PokemonMenu {
         Transition::Push(Mode::TextBox(TextBox::script(text)))
     }
 
-    fn after_music(&mut self, text: Option<DmgPointer>, result: bool) -> Transition {
+    fn after_music(&mut self, text: Option<TextLabel>, result: bool) -> Transition {
         match text {
-            Some(text) => self.text(decode(text).expect("the text decodes"), result),
+            Some(text) => self.text(far_text(text).expect("the text decodes"), result),
             None => self.after_text(result),
         }
     }
@@ -306,7 +309,7 @@ impl ModeUpdate for PokemonMenu {
             }
             Phase::StrengthBeat(1) => {
                 self.phase = Phase::Text { result: true };
-                Transition::Push(Mode::TextBox(TextBox::script(decode(pokered_symbols::CanMoveBouldersText).expect("the text decodes"))))
+                Transition::Push(Mode::TextBox(TextBox::script(far_text("CanMoveBouldersText").expect("the text decodes"))))
             }
             Phase::StrengthBeat(frames) => {
                 self.phase = Phase::StrengthBeat(frames - 1);

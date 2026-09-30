@@ -2,11 +2,9 @@
 //! eight, until the list is backed out of.
 
 use poke_core::item::ItemId;
-use poke_core::symbols::pokered_local_labels::CeruleanBadgeHouseMiddleAgedManText as man;
 use poke_core::symbols::pokered_map_scripts::TEXT_CERULEANBADGEHOUSE_MIDDLE_AGED_MAN;
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `.BadgeItemList`.
 const BADGE_ITEM_LIST: [ItemId; 8] = [
@@ -32,12 +30,12 @@ pub fn script(rt: &mut Script) -> Flow {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     (text_id == TEXT_CERULEANBADGEHOUSE_MIDDLE_AGED_MAN)
-        .then(|| rt.print_text(text_at(man::Text)).then(Label::Loop(0, 0)))
+        .then(|| rt.print_text(text_named("CeruleanBadgeHouseMiddleAgedManText.Text")).then(Label::Loop(0, 0)))
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
-        Label::Loop(current, scroll) => rt.print_text(text_at(man::WhichBadgeText)).then(Label::WhichBadgeAsked(current, scroll)),
+        Label::Loop(current, scroll) => rt.print_text(text_named("CeruleanBadgeHouseMiddleAgedManText.WhichBadgeText")).then(Label::WhichBadgeAsked(current, scroll)),
         Label::WhichBadgeAsked(current, scroll) => {
             rt.display_special_list_menu(BADGE_ITEM_LIST.to_vec(), current, scroll).then(Label::BadgeChosen)
         }
@@ -45,15 +43,15 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             let (current, scroll) = rt.list_menu_position();
             let Some(badge) = rt.chosen_row() else {
                 rt.set_list_scroll_offset(0);
-                return rt.print_text(text_at(man::VisitAnyTimeText)).ret();
+                return rt.print_text(text_named("CeruleanBadgeHouseMiddleAgedManText.VisitAnyTimeText")).ret();
             };
             let words = [
-                sym::CeruleanBadgeHouseBoulderBadgeText, sym::CeruleanBadgeHouseCascadeBadgeText,
-                sym::CeruleanBadgeHouseThunderBadgeText, sym::CeruleanBadgeHouseRainbowBadgeText,
-                sym::CeruleanBadgeHouseSoulBadgeText, sym::CeruleanBadgeHouseMarshBadgeText,
-                sym::CeruleanBadgeHouseVolcanoBadgeText, sym::CeruleanBadgeHouseEarthBadgeText,
+                "CeruleanBadgeHouseBoulderBadgeText", "CeruleanBadgeHouseCascadeBadgeText",
+                "CeruleanBadgeHouseThunderBadgeText", "CeruleanBadgeHouseRainbowBadgeText",
+                "CeruleanBadgeHouseSoulBadgeText", "CeruleanBadgeHouseMarshBadgeText",
+                "CeruleanBadgeHouseVolcanoBadgeText", "CeruleanBadgeHouseEarthBadgeText",
             ][badge as usize];
-            rt.print_text(text_at(words)).then(Label::Loop(current, scroll))
+            rt.print_text(text_named(words)).then(Label::Loop(current, scroll))
         }
     }
 }

@@ -2,7 +2,9 @@ use gb::mmu::MMU;
 use gb::ram::{RAM, ROM};
 use crate::pokemon::strings::PokemonString;
 
-pub use poke_core::symbols::{pokered_events, pokered_symbols, pokered_toggles, DmgBank, DmgPointer};
+pub use poke_core::symbols::{pokered_events, pokered_toggles, DmgBank, DmgPointer};
+
+include!(concat!(env!("OUT_DIR"), "/pokered_symbols.rs"));
 
 /// Trait for reading memory using pokered symbol file pointers
 pub trait DmgPointerRead {
@@ -175,5 +177,22 @@ impl DmgPointerRead for MMU {
                 Err("SRAM banking not implemented".to_string())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A symbol's prefix names its memory, and the exported one-byte constants are values.
+    #[test]
+    fn symbols_are_read_into_their_memory() {
+        assert_eq!(pokered_symbols::CalcCheckSum, DmgPointer { bank: DmgBank::ROM { bank: 0x1C }, address: 0x7856 });
+        assert_eq!(pokered_symbols::wEnemyMonUnmodifiedSpecial, DmgPointer { bank: DmgBank::WRAM, address: 0xCD2C });
+        assert_eq!(pokered_symbols::sCurBoxData, DmgPointer { bank: DmgBank::SRAM { bank: 0x01 }, address: 0xB0C0 });
+        assert_eq!(pokered_symbols::vTileset, DmgPointer { bank: DmgBank::VRAM, address: 0x9000 });
+        assert_eq!(pokered_symbols::hSlideAmount, DmgPointer { bank: DmgBank::HRAM, address: 0xFF8B });
+        assert_eq!(pokered_local_labels::DisableLCD::wait, DmgPointer { bank: DmgBank::ROM { bank: 0 }, address: 0x006B });
+        assert_eq!((pokered_symbols::ROUTE6GATE_GUARD, pokered_symbols::PEWTERPOKECENTER_GENTLEMAN), (0x01, 0x02));
     }
 }

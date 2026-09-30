@@ -320,7 +320,7 @@ impl PowerOn {
         ctx.screen.tiles.load_font();
         ctx.screen.tiles.load_text_box_tiles();
         self.stage = Stage::ClearSave { asking: false };
-        let text = poke_core::text_script::decode(poke_core::symbols::pokered_symbols::ClearSaveDataText)
+        let text = poke_core::text_script::far_text("ClearSaveDataText")
             .expect("the clear save text decodes");
         Transition::Push(Mode::TextBox(TextBox::script(text)))
     }

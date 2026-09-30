@@ -13,8 +13,7 @@
 
 use poke_core::move_name::PokemonMoveName;
 use poke_core::moves::MoveData;
-use poke_core::symbols::{pokered_symbols, DmgPointer};
-use poke_core::text_script::{decode, TextBuffer, TextCommand};
+use poke_core::text_script::{far_text, TextBuffer, TextCommand};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use crate::command::Decision;
@@ -60,8 +59,8 @@ enum Phase {
     DidNotLearn,
 }
 
-fn script(at: DmgPointer) -> Vec<TextCommand> {
-    decode(at).expect("LearnMove's texts are in the cartridge")
+fn script(at: &'static str) -> Vec<TextCommand> {
+    far_text(at).expect("LearnMove's texts are in the cartridge")
 }
 
 impl LearnMove {
@@ -112,7 +111,7 @@ impl LearnMove {
         let moves = &ctx.world.party[self.slot as usize].mon.mon.moves;
         match moves.iter().position(Option::is_none) {
             Some(free) => self.learn(free as u8, ctx),
-            None => self.text(Phase::TryingToLearn, script(pokered_symbols::TryingToLearnText)),
+            None => self.text(Phase::TryingToLearn, script("TryingToLearnText")),
         }
     }
 
@@ -121,12 +120,12 @@ impl LearnMove {
         let mon = &mut ctx.world.party[self.slot as usize].mon.mon;
         mon.moves[slot as usize] = Some(self.learning);
         mon.pp[slot as usize] = MoveData::of_move(self.learning).pp;
-        self.text(Phase::Learned, script(pokered_symbols::LearnedMove1Text))
+        self.text(Phase::Learned, script("LearnedMove1Text"))
     }
 
     /// `AbandonLearning`.
     fn abandon(&mut self) -> Transition {
-        self.text(Phase::AbandonLearning, script(pokered_symbols::AbandonLearningText))
+        self.text(Phase::AbandonLearning, script("AbandonLearningText"))
     }
 
     /// `TryingToLearn`'s `.loop`, after `WhichMoveToForgetText`: the four names single spaced in a
@@ -155,13 +154,13 @@ impl LearnMove {
         let forgotten = ctx.world.party[self.slot as usize].mon.mon.moves[row as usize]
             .expect("the list holds only moves the mon knows");
         if is_move_hm(forgotten) {
-            return self.text(Phase::HmCantDelete, script(pokered_symbols::HMCantDeleteText));
+            return self.text(Phase::HmCantDelete, script("HMCantDeleteText"));
         }
         ctx.world.text.strings.insert(TextBuffer::NameBuffer, forgotten.name());
         // `OneTwoAndText` ends in a `text_asm` that plays `SFX_SWAP` and carries on with `PoofText`,
         // which runs on into `ForgotAndText`.
-        let mut commands = script(pokered_symbols::OneTwoAndText);
-        commands.extend(script(pokered_symbols::PoofText));
+        let mut commands = script("OneTwoAndText");
+        commands.extend(script("PoofText"));
         self.phase = Phase::Forgetting(row);
         Transition::Push(Mode::TextBox(TextBox::script(commands).with_asm_sound(sounds::SFX_SWAP)))
     }
@@ -192,16 +191,16 @@ impl ModeUpdate for LearnMove {
         match self.phase {
             Phase::TryingToLearn => self.yes_no(Phase::AskingToDelete),
             Phase::AskingToDelete if chose_yes =>
-                self.text(Phase::WhichMoveToForget, script(pokered_symbols::WhichMoveToForgetText)),
+                self.text(Phase::WhichMoveToForget, script("WhichMoveToForgetText")),
             Phase::AskingToDelete => self.abandon(),
             Phase::WhichMoveToForget => self.show_moves(ctx),
             Phase::HmCantDelete =>
-                self.text(Phase::WhichMoveToForget, script(pokered_symbols::WhichMoveToForgetText)),
+                self.text(Phase::WhichMoveToForget, script("WhichMoveToForgetText")),
             Phase::Forgetting(row) => self.learn(row, ctx),
             Phase::Learned => Transition::Pop(Outcome::Chosen(1)),
             Phase::AbandonLearning => self.yes_no(Phase::AskingToAbandon),
             Phase::AskingToAbandon if chose_yes =>
-                self.text(Phase::DidNotLearn, script(pokered_symbols::DidNotLearnText)),
+                self.text(Phase::DidNotLearn, script("DidNotLearnText")),
             Phase::AskingToAbandon => self.dont_abandon(ctx),
             Phase::DidNotLearn => Transition::Pop(Outcome::Chosen(0)),
             Phase::Starting | Phase::ChoosingMove => Transition::Stay,

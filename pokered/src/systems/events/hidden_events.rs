@@ -4,9 +4,8 @@
 
 use poke_core::map::Map;
 use poke_core::map_header::TileSetId;
-use poke_core::rom_gfx::rom_slice;
 use poke_core::sprite::SpriteFacing;
-use poke_core::symbols::{pokered_symbols, DmgBank, DmgPointer};
+use poke_core::tables::{HiddenRoutine, TextPredef, BENCH_GUY_TEXTS, BOOKSHELF_TILE_IDS, HIDDEN_EVENTS, MAP_BADGE_FLAGS, SILPH_CO_MAP_LIST};
 use serde::{Deserialize, Serialize};
 
 const END: u8 = 0xFF;
@@ -19,24 +18,20 @@ pub struct HiddenEvent {
     pub x: u8,
     /// `wHiddenEventFunctionArgument`: an item, a facing, a text id, a trash can.
     pub argument: u8,
-    /// `wHiddenEventFunctionRomBank` and the address `hl` holds.
-    pub function: DmgPointer,
+    /// The routine `hl` holds.
+    pub function: HiddenRoutine,
     /// How far `wHiddenEventIndex` moved: the rows passed over before this one.
     pub skipped: u8,
 }
 
 /// Every hidden event on `map`, in the table's order, or `None` for a map not in `HiddenEventMaps`.
 pub fn hidden_events(map: Map) -> Option<Vec<HiddenEvent>> {
-    let maps = rom_slice(pokered_symbols::HiddenEventMaps);
-    let index = maps.iter().take_while(|&&m| m != END).position(|&m| m == map as u8)?;
-    let pointers = rom_slice(pokered_symbols::HiddenEventPointers + 2 * index as u16);
-    let table = DmgPointer { bank: pokered_symbols::HiddenEventPointers.bank, address: u16::from_le_bytes([pointers[0], pointers[1]]) };
-    let rows = rom_slice(table);
-    Some(rows.chunks(6).take_while(|row| row[0] != END).enumerate().map(|(i, row)| HiddenEvent {
-        y: row[0],
-        x: row[1],
-        argument: row[2],
-        function: DmgPointer { bank: DmgBank::ROM { bank: row[3] }, address: u16::from_le_bytes([row[4], row[5]]) },
+    let &(_, rows) = HIDDEN_EVENTS.iter().find(|&&(m, _)| m == map as u8)?;
+    Some(rows.iter().enumerate().map(|(i, row)| HiddenEvent {
+        y: row.y,
+        x: row.x,
+        argument: row.argument,
+        function: row.routine,
         skipped: i as u8,
     }).collect())
 }
@@ -60,18 +55,16 @@ pub fn check_for_hidden_event(map: Map, x: u8, y: u8, facing: u8) -> Option<Hidd
 
 /// `FindHiddenItemOrCoinsIndex` over `HiddenItemCoords` or `HiddenCoinCoords`: the row of the map
 /// and square, or `$ff` when there is none.
-fn find_hidden_item_or_coins_index(table: DmgPointer, map: Map, x: u8, y: u8) -> u8 {
-    rom_slice(table).chunks(3).take_while(|row| row[0] != END)
-        .position(|row| row[0] == map as u8 && row[1] == y && row[2] == x)
-        .map_or(END, |i| i as u8)
+fn find_hidden_item_or_coins_index(table: &[(u8, u8, u8)], map: Map, x: u8, y: u8) -> u8 {
+    table.iter().position(|&row| row == (map as u8, x, y)).map_or(END, |i| i as u8)
 }
 
 pub fn hidden_item_index(map: Map, x: u8, y: u8) -> u8 {
-    find_hidden_item_or_coins_index(pokered_symbols::HiddenItemCoords, map, x, y)
+    find_hidden_item_or_coins_index(poke_core::tables::HIDDEN_ITEM_COORDS, map, x, y)
 }
 
 pub fn hidden_coin_index(map: Map, x: u8, y: u8) -> u8 {
-    find_hidden_item_or_coins_index(pokered_symbols::HiddenCoinCoords, map, x, y)
+    find_hidden_item_or_coins_index(poke_core::tables::HIDDEN_COIN_COORDS, map, x, y)
 }
 
 /// `HiddenCoins`' amount, BCD, from its argument less `COIN`: anything it does not name is a
@@ -89,17 +82,13 @@ pub fn hidden_coins_amount(argument: u8, cartridge_bugs: bool) -> [u8; 2] {
 
 /// `PrintBookshelfText`'s lookup: the text predef of the bookshelf, statue or poster whose tile is
 /// in front of a player facing up, by tileset.
-pub fn bookshelf_text(tileset: TileSetId, tile: u8) -> Option<u8> {
-    rom_slice(pokered_symbols::BookshelfTileIDs).chunks(3).take_while(|row| row[0] != END)
-        .find(|row| row[0] == tileset as u8 && row[1] == tile)
-        .map(|row| row[2])
+pub fn bookshelf_text(tileset: TileSetId, tile: u8) -> Option<TextPredef> {
+    BOOKSHELF_TILE_IDS.iter().find(|&&(of, at, _)| of == tileset as u8 && at == tile).map(|&(_, _, text)| text)
 }
 
-/// `PrintBenchGuyText`'s lookup. A facing that does not match is not stepped past, so the scan goes
-/// on a byte out of step and reads every third byte after it as a map, into whatever follows the
-/// table. It reads on to the end of the bank here; the cartridge, running out of ROM, reads VRAM.
-pub fn bench_guy_text(map: Map, facing: u8) -> Option<u8> {
-    let bytes = rom_slice(pokered_symbols::BenchGuyTextPointers);
+/// `PrintBenchGuyText`'s lookup: the text predef for a player facing the bench guy on `map`.
+pub fn bench_guy_text(map: Map, facing: u8, cartridge_bugs: bool) -> Option<TextPredef> {
+    let bytes: Vec<u8> = BENCH_GUY_TEXTS.iter().flat_map(|&(map, facing, text)| [map, facing, text as u8]).chain([END]).collect();
     let mut i = 0;
     while let Some(&m) = bytes.get(i) {
         i += 1;
@@ -113,7 +102,12 @@ pub fn bench_guy_text(map: Map, facing: u8) -> Option<u8> {
         let &wanted = bytes.get(i)?;
         i += 1;
         if wanted == facing {
-            return bytes.get(i).copied();
+            return bytes.get(i).and_then(|&id| TextPredef::from_id(id));
+        }
+        // The cartridge does not step past the text on a wrong facing, so its scan goes on out of
+        // step, and past the table into VRAM; `rom_equality` pins that it finds nothing there.
+        if !cartridge_bugs {
+            i += 1;
         }
     }
     None
@@ -121,14 +115,13 @@ pub fn bench_guy_text(map: Map, facing: u8) -> Option<u8> {
 
 /// `GymStatues`' `MapBadgeFlags`: the badge bit of a gym, which `wBeatGymFlags` is compared against.
 pub fn gym_badge(map: Map) -> Option<u8> {
-    rom_slice(pokered_symbols::MapBadgeFlags).chunks(2).take_while(|row| row[0] != END)
-        .find(|row| row[0] == map as u8).map(|row| row[1])
+    MAP_BADGE_FLAGS.iter().find(|&&(gym, _)| gym == map as u8).map(|&(_, badge)| badge)
 }
 
 /// `PrintCardKeyText`'s test: a Silph Co floor and a card key door in front. The door is tile `$18`
 /// or `$24`, or `$5e` on the eleventh floor.
 pub fn card_key_door(map: Map, tile_in_front: u8) -> bool {
-    let silph = rom_slice(pokered_symbols::SilphCoMapList).iter().take_while(|&&m| m != END).any(|&m| m == map as u8);
+    let silph = SILPH_CO_MAP_LIST.contains(&(map as u8));
     silph && (matches!(tile_in_front, 0x18 | 0x24) || map == Map::SilphCo11F && tile_in_front == 0x5E)
 }
 
@@ -170,7 +163,7 @@ mod tests {
     fn every_harvested_case_of_print_bookshelf_text() {
         let jsonl = include_str!("../../../fixtures/events/print_bookshelf_text.jsonl");
         for (i, expected, _) in cases::<BookshelfInput, Option<u8>>(jsonl) {
-            let text = (i.facing == SpriteFacing::Up as u8).then(|| bookshelf_text(i.tileset, i.tile)).flatten();
+            let text = (i.facing == SpriteFacing::Up as u8).then(|| bookshelf_text(i.tileset, i.tile)).flatten().map(|text| text as u8);
             assert_eq!(text, expected, "{:?} tile {:#04x} facing {:#04x}", i.tileset, i.tile, i.facing);
         }
     }
@@ -180,7 +173,7 @@ mod tests {
         let events = hidden_events(Map::ViridianForest).unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!((events[1].x, events[1].y, events[1].argument), (16, 42, poke_core::item::ItemId::Antidote as u8));
-        assert_eq!(events[1].function, pokered_symbols::HiddenItems);
+        assert_eq!(events[1].function, HiddenRoutine::HiddenItems);
         assert_eq!(hidden_item_index(Map::ViridianForest, 16, 42), 1);
         assert_eq!(hidden_item_index(Map::ViridianForest, 16, 41), 0xFF);
     }
@@ -193,27 +186,36 @@ mod tests {
 
     #[test]
     fn every_hidden_event_function_is_a_label() {
-        let named = [
-            pokered_symbols::HiddenItems, pokered_symbols::HiddenCoins, pokered_symbols::OpenPokemonCenterPC,
-            pokered_symbols::PrintBenchGuyText, pokered_symbols::GymStatues, pokered_symbols::OpenRedsPC,
-        ];
+        use HiddenRoutine::*;
+        let named = [HiddenItems, HiddenCoins, OpenPokemonCenterPC, PrintBenchGuyText, GymStatues, OpenRedsPC];
         let all: Vec<_> = Map::all().filter_map(hidden_events).flatten().collect();
         assert_eq!(all.len(), 217);
         for function in named {
-            assert!(all.iter().any(|event| event.function == function), "{function}");
+            assert!(all.iter().any(|event| event.function == function), "{function:?}");
         }
     }
 
     #[test]
     fn a_bookshelf_is_a_text_predef_by_tileset() {
-        assert_eq!(bookshelf_text(TileSetId::Pokecenter, 0x54), Some(0x42));
-        assert_eq!(bookshelf_text(TileSetId::House, 0x3D), Some(0x3F));
+        assert_eq!(bookshelf_text(TileSetId::Pokecenter, 0x54), Some(TextPredef::PokemonStuffText));
+        assert_eq!(bookshelf_text(TileSetId::House, 0x3D), Some(TextPredef::TownMapText));
         assert_eq!(bookshelf_text(TileSetId::Overworld, 0x54), None);
     }
 
     #[test]
     fn the_bench_guy_answers_the_left_facing() {
-        assert_eq!(bench_guy_text(Map::ViridianPokecenter, SpriteFacing::Left as u8), Some(0x0F));
+        let text = Some(TextPredef::ViridianCityPokecenterBenchGuyText);
+        assert_eq!(bench_guy_text(Map::ViridianPokecenter, SpriteFacing::Left as u8, false), text);
+        assert_eq!(bench_guy_text(Map::ViridianPokecenter, SpriteFacing::Left as u8, true), text);
+    }
+
+    #[test]
+    fn the_bench_guy_is_silent_to_any_other_facing() {
+        for map in Map::all() {
+            for facing in [SpriteFacing::Down, SpriteFacing::Up, SpriteFacing::Right] {
+                assert_eq!(bench_guy_text(map, facing as u8, false), None, "{map:?} {facing:?}");
+            }
+        }
     }
 
     #[test]

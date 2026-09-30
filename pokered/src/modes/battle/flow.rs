@@ -1891,6 +1891,11 @@ impl BattleMode {
             self.call_jump_move_effect(side, ctx);
         }
         if self.b().side(side.other()).mon.hp == 0 {
+            // The cartridge lets a Hyper Beam that faints its target skip the recharge.
+            let battle = self.battle_mut();
+            if !battle.cartridge_bugs && move_effect == effect::HYPER_BEAM_EFFECT {
+                battle.side_mut(side).status2 |= Status2::NEEDS_TO_RECHARGE;
+            }
             self.target_standing = false;
             return;
         }
@@ -2310,6 +2315,23 @@ pub(super) mod tests {
         };
         assert_eq!(bide_left_after_a_faint(false), 0);
         assert_eq!(bide_left_after_a_faint(true), 0x23, "the cartridge zeroes the high byte only");
+    }
+
+    #[test]
+    fn a_hyper_beam_that_faints_its_target_still_needs_a_recharge_for_the_next_foe() {
+        let must_recharge = |cartridge_bugs| {
+            let (mut mode, mut world) = battle_mode(cartridge_bugs);
+            mode.battle_mut().player.current_move = MoveData::of_move(PokemonMoveName::HyperBeam);
+            mode.battle_mut().enemy.mon.hp = 0;
+            with_ctx(&mut world, |ctx| {
+                mode.not_done(Side::Player, ctx);
+                mode.call_faint_enemy_pokemon(ctx);
+            });
+            assert!(!mode.target_standing);
+            mode.b().player.status2.contains(Status2::NEEDS_TO_RECHARGE)
+        };
+        assert!(must_recharge(false));
+        assert!(!must_recharge(true), "the cartridge skips the recharge after a KO");
     }
 
     #[test]

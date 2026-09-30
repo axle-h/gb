@@ -2,7 +2,6 @@
 //! `AskName` offers, or with a full party `SendNewMonToBox`, which offers one too. A full box refuses.
 
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::pokered_symbols;
 use poke_core::text_script::TextBuffer;
 use crate::mode::{Ctx, Mode, Outcome};
 use crate::modes::naming_screen::{NamingScreen, NamingScreenType};
@@ -13,7 +12,7 @@ use crate::systems::experience::calc_experience;
 use crate::systems::battle::enemy::load_enemy_mon_data;
 use crate::systems::battle::{Battle, BattleKind};
 use crate::systems::add_mon::{add_party_mon, new_party_mon, Origin};
-use super::script::{text_at, Block, Flow, Routine, Then};
+use super::script::{text_named, Block, Flow, Routine, Then};
 use super::Overworld;
 
 /// `wBoxCount` at `MONS_PER_BOX`.
@@ -59,7 +58,7 @@ impl Overworld {
         if ctx.world.party.len() >= PARTY_LENGTH {
             if box_is_full(ctx) {
                 self.rt.gave_pokemon = false;
-                return Then::block(Block::PrintText(text_at(pokered_symbols::BoxIsFullText))).ret();
+                return Then::block(Block::PrintText(text_named("BoxIsFullText"))).ret();
             }
             // `LoadEnemyMonData` draws the DVs before anything is printed.
             let lead = ctx.world.party[0].mon.clone();
@@ -69,14 +68,14 @@ impl Overworld {
         }
         ctx.world.pokedex.set_owned(species);
         ctx.world.text.strings.insert(TextBuffer::NameBuffer, species.name());
-        Then::block(Block::PrintText(text_at(pokered_symbols::GotMonText))).then(Routine::GivePokemonAskName(species, level))
+        Then::block(Block::PrintText(text_named("GotMonText"))).then(Routine::GivePokemonAskName(species, level))
     }
 
     /// `AskName`'s question.
     pub(super) fn give_pokemon_ask_name(&mut self, ctx: &mut Ctx, species: PokemonSpecies, level: u8) -> Flow {
         self.rt.saved_screen = Some(ctx.screen.ui.clone());
         ctx.world.text.strings.insert(TextBuffer::NameBuffer, species.name());
-        Then::block(Block::PrintText(text_at(pokered_symbols::DoYouWantToNicknameText)))
+        Then::block(Block::PrintText(text_named("DoYouWantToNicknameText")))
             .then(Routine::GivePokemonYesNo(species, level))
     }
 
@@ -108,7 +107,7 @@ impl Overworld {
             let current = ctx.world.current_box;
             let number = if current < 9 { vec![0xF7 + current] } else { vec![0xF7, 0xF6 + current - 9] };
             ctx.world.text.strings.insert(TextBuffer::StringBuffer, number);
-            return Then::block(Block::PrintText(text_at(pokered_symbols::SentToBoxText))).ret();
+            return Then::block(Block::PrintText(text_named("SentToBoxText"))).ret();
         }
         let mon = new_party_mon(species, level, ctx.world.player_id, &Origin::Given, ctx.rng);
         let named = Named { mon, ot: ctx.world.player_name.clone(), nick };

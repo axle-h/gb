@@ -1,5 +1,7 @@
 use std::fmt::{Debug, Display};
 use unicode_segmentation::UnicodeSegmentation;
+use crate::charmap::{encode, TEXT_OF};
+use crate::gfx::font::FONT;
 
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct PokemonString(pub Vec<u8>);
@@ -19,126 +21,67 @@ impl PokemonString {
         PokemonString(vec)
     }
 
+    /// Each grapheme as the byte whose text it is, and `$00` for one that is no byte's.
     pub fn from_string(string: &str) -> Self {
-        // Https://bulbapedia.bulbagarden.net/wiki/Character_encoding_(Generation_I)
-        let graphemes = string.graphemes(true);
-        let mut vec = Vec::new();
-        for grapheme in graphemes {
-            let byte = if grapheme.bytes().count() > 1 {
-                // Unicode
-                match grapheme {
-                    "ァ" => 0xE9,
-                    "ゥ" => 0xEA,
-                    "ェ" => 0xEB,
-                    "▷" => 0xEC,
-                    "▶" => 0xED,
-                    "▼" => 0xEE,
-                    "♂" => 0xEF,
-                    "⨯" => 0xF1,
-                    "♀" => 0xF5,
-                    _ => 0x00
-                }
-            } else {
-                // Ascii
-                let char = grapheme.bytes().next().unwrap();
-                match char {
-                    b'A'..=b'Z' => (char - b'A') + 0x80,
-                    b'a'..=b'z' => (char - b'a') + 0xA0,
-                    b'0'..=b'9' => (char - b'0') + 0xF6,
-                    b'(' => 0x9A,
-                    b')' => 0x9B,
-                    b':' => 0x9C,
-                    b';' => 0x9D,
-                    b'[' => 0x9E,
-                    b']' => 0x9F,
-                    b'\'' => 0xE0,
-                    b'-' => 0xE3,
-                    b'?' => 0xE6,
-                    b'!' => 0xE7,
-                    b'.' => 0xE8,
-                    b'/' => 0xF3,
-                    b',' => 0xF4,
-                    b' ' => 0x7F,
-                    _ => 0x00
-                }
-            };
-            vec.push(byte);
-        }
+        let mut vec: Vec<u8> = string.graphemes(true).map(byte_of).collect();
         vec.push(Self::TERMINATOR);
         PokemonString(vec)
     }
-    
+
     pub fn to_default_string(&self) -> String {
         self.to_string("Ash", "Gary").unwrap()
     }
 
+    /// The string as a reader wants it: the names and words the control codes stand for spelled
+    /// out, and a run of anything the font does not draw as one space.
     pub fn to_string(&self, trainer_name: &str, rival_name: &str) -> Result<String, String> {
-        // Https://bulbapedia.bulbagarden.net/wiki/Character_encoding_(Generation_I)
-        let mut utf8 = vec![];
+        let mut text = String::new();
         let mut last_char_empty = false;
         for &byte in self.0.iter() {
-            match byte {
-                0x4A => utf8.extend_from_slice("Pokémon".as_bytes()), // pk mn characters
-                0x50 => break, // end: marks the end of a string
-                0x52 => utf8.extend_from_slice(trainer_name.as_bytes()), // trainer name
-                0x53 => utf8.extend_from_slice(rival_name.as_bytes()), // rival name
-                0x56 => utf8.extend_from_slice("……".as_bytes()),
-                0x59 => utf8.extend_from_slice("<TARGET>".as_bytes()), // TODO PlaceMoveTargetsName::
-                0x5A => utf8.extend_from_slice("<USER>".as_bytes()), // TODO PlaceMoveUsersName::
-                0x5B => utf8.extend_from_slice("PC".as_bytes()),
-                0x5C => utf8.extend_from_slice("TM".as_bytes()),
-                0x5D => utf8.extend_from_slice("TRAINER".as_bytes()),
-                0x5E => utf8.extend_from_slice("ROCKET".as_bytes()),
-                0x80..=0x99 => utf8.push(byte - 0x80 + b'A'), // A-Z
-                0x9A => utf8.push(b'('),
-                0x9B => utf8.push(b')'),
-                0x9C => utf8.push(b':'),
-                0x9D => utf8.push(b';'),
-                0x9E => utf8.push(b'['),
-                0x9F => utf8.push(b']'),
-                0xA0..=0xB9 => utf8.push(byte - 0xA0 + b'a'), // a-z
-                0xBA => utf8.push(b'e'),
-                0xBB => utf8.push(b'd'),
-                0xBC => utf8.push(b'l'),
-                0xBD => utf8.push(b's'),
-                0xBE => utf8.push(b't'),
-                0xBF => utf8.push(b'v'),
-                0xE0 => utf8.push(b'\''),
-                0xE1 => utf8.extend_from_slice("Poké".as_bytes()), // pk character
-                0xE2 => utf8.extend_from_slice("mon".as_bytes()), // mn character
-                0xE3 => utf8.push(b'-'),
-                0xE4 => utf8.push(b'r'),
-                0xE5 => utf8.push(b'm'),
-                0xE6 => utf8.push(b'?'),
-                0xE7 => utf8.push(b'!'),
-                0xE8 => utf8.push(b'.'),
-                0xE9 => utf8.extend_from_slice("ァ".as_bytes()),
-                0xEA => utf8.extend_from_slice("ゥ".as_bytes()),
-                0xEB => utf8.extend_from_slice("ェ".as_bytes()),
-                0xEC => utf8.extend_from_slice("▷".as_bytes()),
-                0xED => utf8.extend_from_slice("▶".as_bytes()),
-                0xEE => utf8.extend_from_slice("▼".as_bytes()),
-                0xEF => utf8.extend_from_slice("♂".as_bytes()),
-                0xF1 => utf8.extend_from_slice("⨯".as_bytes()),
-                0xF2 => utf8.push(b'.'),
-                0xF3 => utf8.push(b'/'),
-                0xF4 => utf8.push(b','),
-                0xF5 => utf8.extend_from_slice("♀".as_bytes()),
-                0xF6..=0xFF => utf8.push(byte - 0xF6 + b'0'), // 0-9
+            let spelled = match TEXT_OF[byte as usize] {
+                Some("@") => break,
+                Some("<PLAYER>") => trainer_name,
+                Some("<RIVAL>") => rival_name,
+                Some("<PKMN>") => "Pokémon",
+                Some("<PK>") => "Poké",
+                Some("<MN>") => "mon",
+                Some("<DOT>") => ".",
+                Some("<……>") => "……",
+                Some("<PC>") => "PC",
+                Some("<TM>") => "TM",
+                Some("<TRAINER>") => "TRAINER",
+                Some("<ROCKET>") => "ROCKET",
+                Some(code @ ("<TARGET>" | "<USER>")) => code,
+                Some(glyph) if drawn(byte) && !glyph.starts_with('<') => glyph,
                 _ => {
                     if !last_char_empty {
-                        utf8.push(b' ');
+                        text.push(' ');
                         last_char_empty = true;
                     }
                     continue;
                 }
-            }
+            };
+            text.push_str(spelled);
             last_char_empty = false;
         }
-        std::str::from_utf8(&utf8)
-            .map_err(|_| "Invalid UTF-8 in string".to_string())
-            .map(|s| s.trim().to_string())
+        Ok(text.trim().to_string())
     }
+}
+
+/// The byte `grapheme` is the text of, or `$00`.
+fn byte_of(grapheme: &str) -> u8 {
+    match encode(grapheme).as_deref() {
+        Ok(&[byte]) if TEXT_OF[byte as usize] == Some(grapheme) => byte,
+        _ => 0x00,
+    }
+}
+
+/// Whether the font has a glyph for `byte` that is not blank: it starts at `$80`, and the kana
+/// Red leaves untranslated are blank tiles in it.
+fn drawn(byte: u8) -> bool {
+    const FIRST_GLYPH: u8 = 0x80;
+    const GLYPH_BYTES: usize = 8;
+    byte.checked_sub(FIRST_GLYPH).is_some_and(|glyph| FONT[glyph as usize * GLYPH_BYTES..][..GLYPH_BYTES].iter().any(|&row| row != 0))
 }
 
 impl Display for PokemonString {
@@ -168,5 +111,30 @@ impl From<String> for PokemonString {
 impl From<&[u8]> for PokemonString {
     fn from(s: &[u8]) -> Self {
         Self::from_slice(s)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_reads_back_as_it_was_written() {
+        for name in ["NIDORAN♂", "MR.MIME", "FARFETCH'D", "Lv 12 (x/y)?!", "▶ ♀-9"] {
+            assert_eq!(PokemonString::from_string(name).to_default_string(), name);
+        }
+    }
+
+    #[test]
+    fn control_codes_are_spelled_out() {
+        let bytes = encode("<PLAYER> and <RIVAL>, <PKMN> <PK><MN> <TM>@").unwrap();
+        assert_eq!(PokemonString(bytes).to_string("RED", "BLUE").unwrap(), "RED and BLUE, Pokémon Pokémon TM");
+    }
+
+    /// Katakana shares its bytes with the English letters, and the kana the font leaves blank read
+    /// as one space.
+    #[test]
+    fn what_the_font_does_not_draw_is_not_read() {
+        assert_eq!(PokemonString::from_string("アA").0, [0x00, 0x80, PokemonString::TERMINATOR]);
+        assert_eq!(PokemonString(encode("A<LINE>たちB").unwrap()).to_default_string(), "A B");
     }
 }

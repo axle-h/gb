@@ -5,7 +5,7 @@
 use poke_core::item::{self, ItemId};
 use poke_core::map::Map;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::{pokered_events, pokered_symbols};
+use poke_core::symbols::pokered_events;
 use poke_core::text_script::TextBuffer;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
@@ -145,7 +145,7 @@ impl BattleMode {
     fn item_use_text(&mut self, ctx: &Ctx) {
         let name = ctx.world.text.string(TextBuffer::StringBuffer);
         self.push(Present::TextWith {
-            commands: local(pokered_symbols::ItemUseText00),
+            commands: local("ItemUseText00"),
             strings: vec![(TextBuffer::StringBuffer, name)],
             numbers: vec![],
         });
@@ -279,7 +279,7 @@ impl BattleMode {
             self.push(Present::Text(far("_PlayedFluteNoEffectText")));
             return self.goto(Step::AfterUseBagItem);
         }
-        self.push(Present::Text(local(pokered_symbols::PlayedFluteHadEffectText)));
+        self.push(Present::Text(local("PlayedFluteHadEffectText")));
         self.push(Present::PokeFluteInBattle);
         self.push(Present::Text(far("_FluteWokeUpText")));
         self.goto(Step::AfterUseBagItem);
@@ -380,7 +380,7 @@ impl BattleMode {
         self.enemy_nick = species.name();
         self.captured = true;
         self.push(Present::TextWith {
-            commands: local(pokered_symbols::ItemUseBallText05),
+            commands: local("ItemUseBallText05"),
             strings: vec![(TextBuffer::EnemyMonNick, self.enemy_nick.clone())],
             numbers: vec![],
         });
@@ -392,7 +392,7 @@ impl BattleMode {
         ctx.world.pokedex.set_owned(species);
         if !owned {
             self.push(Present::TextWith {
-                commands: local(pokered_symbols::ItemUseBallText06),
+                commands: local("ItemUseBallText06"),
                 strings: vec![(TextBuffer::EnemyMonNick, self.enemy_nick.clone())],
                 numbers: vec![],
             });
@@ -411,7 +411,7 @@ impl BattleMode {
         self.push(Present::SaveScreen1);
         self.push(Present::Clear { x: 0, y: 0, width: 11, height: 4 });
         self.push(Present::TextWith {
-            commands: local(pokered_symbols::DoYouWantToNicknameText),
+            commands: local("DoYouWantToNicknameText"),
             strings: vec![(TextBuffer::NameBuffer, species.name())],
             numbers: vec![],
         });

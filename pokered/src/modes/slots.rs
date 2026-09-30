@@ -9,17 +9,18 @@
 //!
 //! The cabinet is a tilemap and a tile set of its own, and the three wheels are thirty-six objects
 //! redrawn every step, so this mode owns the whole screen. Its loading is not modelled: the
-//! white-outs either side, the LCD-off tile copies, `LoadScreenTilesFromBuffer1`'s `Delay3`. What
+//! white-outs either side, the LCD-off tile copies, the `Delay3` after each box and cursor. What
 //! is kept is what a player watches: two frames a step while the wheels wind up, three once they
 //! can be stopped, five between flashes of a win, and four or eight frames a coin as the payout
 //! counts up.
 //!
-//! `BIT_NO_TEXT_DELAY` is set for the whole session, so every text here appears whole.
+//! `BIT_NO_TEXT_DELAY` is set when the session opens, so its texts appear whole until the first
+//! "One more go?", whose yes/no clears it for the rest of the session.
 
 use poke_core::text_script::{far_text, TextBuffer, TextCommand};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
+use crate::command::Decision;
 use crate::gfx::layers::Effects;
 use crate::gfx::sgb::PaletteCommand;
 use crate::gfx::text_boxes::TextBoxId;
@@ -96,7 +97,8 @@ pub struct SlotMachine {
     /// `wTileMapBackup`: the screen as `SaveScreenTilesToBuffer1` left it, with the question up and
     /// no bet menu over it.
     saved: Option<UiSurface>,
-    /// Presses that have stopped a wheel, so a driver can see its own land.
+    /// Presses the machine has taken, a wheel stopped or a win's `▼` answered, so a driver can see
+    /// its own land.
     answered: u32,
     phase: Phase,
 }
@@ -173,7 +175,7 @@ impl SlotMachine {
         }
     }
 
-    /// Presses that have stopped a wheel.
+    /// Presses the machine has taken: a wheel stopped or a win's `▼` answered.
     pub fn answered(&self) -> u32 {
         self.answered
     }
@@ -188,8 +190,8 @@ impl SlotMachine {
         matches!(self.phase, Phase::Spinning { .. })
     }
 
-    /// Whether the next frame reads the pad, which this mode's `Busy` status does not show:
-    /// `SlotMachine_HandleInputWhileWheelsSpin`, and the `WaitForTextScrollButtonPress` under a win.
+    /// Whether the next frame reads the pad: `SlotMachine_HandleInputWhileWheelsSpin`, and the
+    /// `WaitForTextScrollButtonPress` under a win. A press to a wheel may still be ignored.
     pub fn reading_the_pad(&self) -> bool {
         matches!(self.phase, Phase::Spinning { wait: 0 } | Phase::WaitingForPress(_))
     }
@@ -267,7 +269,7 @@ impl SlotMachine {
     fn bet_menu(&mut self, ctx: &mut Ctx) -> Transition {
         let ui = &mut ctx.screen.ui;
         ui.text_box_border(BET_BOX.0, BET_BOX.1, BET_BOX.2, BET_BOX.3);
-        place_rom_string(ui, MULTIPLIERS_AT, sym::CoinMultiplierSlotMachineText);
+        place_rom_string(ui, MULTIPLIERS_AT, "CoinMultiplierSlotMachineText");
         self.phase = Phase::Child(After::Bet);
         Transition::Push(Mode::CursorMenu(CursorMenu::new(0, 2, BET_CURSOR)))
     }
@@ -286,7 +288,7 @@ impl SlotMachine {
         Transition::Stay
     }
 
-    /// `LoadScreenTilesFromBuffer1`, whose `Delay3` is loading.
+    /// `LoadScreenTilesFromBuffer1`.
     fn restore(&mut self, ctx: &mut Ctx) {
         if let Some(saved) = self.saved.clone() {
             ctx.screen.ui = saved;
@@ -490,6 +492,7 @@ impl ModeUpdate for SlotMachine {
             }
             Phase::WaitingForPress(blink) => {
                 if ctx.pad.low_sensitivity(ctx.frame_counter).intersects(Joypad::A | Joypad::B) {
+                    self.answered += 1;
                     self.phase = Phase::WaitingForSound(Sound::Payout);
                     return self.update(ctx);
                 }
@@ -565,8 +568,13 @@ impl ModeUpdate for SlotMachine {
         }
     }
 
+    /// Waiting only on a frame that reads the pad, so a command's press lands where a player's does.
     fn status(&self) -> Status {
-        Status::Busy
+        match self.phase {
+            Phase::Spinning { wait: 0 } if self.stopping < 3 => Status::Waiting(Decision::SlotWheels),
+            Phase::WaitingForPress(_) => Status::Waiting(Decision::Text),
+            _ => Status::Busy,
+        }
     }
 }
 
@@ -581,12 +589,12 @@ fn delay(ctx: &Ctx, frames: u8) -> u8 {
     if ctx.pacing == Pacing::Instant { 0 } else { frames }
 }
 
-/// `PlaceString` of a string in the cartridge, `<NEXT>` two rows down at the column it started in.
-fn place_rom_string(ui: &mut UiSurface, (x, y): (usize, usize), at: poke_core::symbols::DmgPointer) {
+/// `PlaceString` of a `db` string, `<NEXT>` two rows down at the column it started in.
+fn place_rom_string(ui: &mut UiSurface, (x, y): (usize, usize), label: &str) {
     const NEXT: u8 = 0x4E;
     const END: u8 = 0x50;
     let (mut column, mut row) = (x, y);
-    for &byte in poke_core::rom_gfx::rom_slice(at) {
+    for byte in poke_core::tables::db_string(label) {
         match byte {
             END => return,
             NEXT => {

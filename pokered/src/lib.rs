@@ -197,7 +197,7 @@ impl Game {
             Input::Command(command) => reply = Some(self.accept(command)),
         }
         if let Some(executor) = &mut self.executor {
-            match executor.drive(&self.modes, &self.world) {
+            match executor.drive(&self.modes, &self.world, &self.pad) {
                 Drive::Press(held) => buttons = held,
                 Drive::Done => {
                     events.push(Event::CommandDone(executor.command.clone()));
@@ -295,6 +295,7 @@ impl Game {
         };
         let mut game: Self = rmp_serde::from_slice(&body).map_err(|e| e.to_string())?;
         game.pacing = pacing;
+        game.audio.restart_saved_music();
         Ok(game)
     }
 }
@@ -378,7 +379,6 @@ mod tests {
     /// What one frame is fed, kept so a loaded copy can be fed it again.
     #[derive(Clone)]
     enum Fed {
-        Buttons(Joypad),
         Command(Command),
         Nothing,
     }
@@ -386,7 +386,6 @@ mod tests {
     impl Fed {
         fn input(&self) -> Input {
             match self {
-                Fed::Buttons(held) => Input::Buttons(*held),
                 Fed::Command(command) => Input::Command(command.clone()),
                 Fed::Nothing => Input::None,
             }
@@ -592,22 +591,19 @@ mod tests {
         assert_eq!(saved.len(), 10);
     }
 
-    /// A slot machine taken from the bet through the spin to the next offer, saved as the wheels turn.
+    /// A slot machine taken from the bet through the spin to the next offer by commands alone, saved
+    /// as the wheels turn and a stop is in flight.
     #[test]
     fn a_slot_machine_saved_mid_spin_resumes_identically() {
         let world = World { coins: [0x10, 0x00], ..World::default() };
         let mut game = Game::new(world, GameRng::seeded(3), Pacing::Faithful);
         game.push(Mode::SlotMachine(SlotMachine::new(crate::systems::slots::NOT_LUCKY)));
-        let mut frames = 0;
-        let play = move |game: &Game| {
-            frames += 1;
-            match game.status() {
-                Status::Waiting(Decision::TwoOption) => Fed::Command(Command::ChooseOption(1)),
-                Status::Waiting(Decision::Text) => Fed::Command(Command::Advance),
-                Status::Waiting(_) => Fed::Command(Command::ChooseOption(0)),
-                _ if frames % 2 == 0 => Fed::Buttons(Joypad::A),
-                _ => Fed::Nothing,
-            }
+        let play = |game: &Game| match game.status() {
+            Status::Waiting(Decision::TwoOption) => Fed::Command(Command::ChooseOption(1)),
+            Status::Waiting(Decision::Text) => Fed::Command(Command::Advance),
+            Status::Waiting(Decision::SlotWheels) => Fed::Command(Command::StopWheel),
+            Status::Waiting(_) => Fed::Command(Command::ChooseOption(0)),
+            _ => Fed::Nothing,
         };
         let spinning = |game: &Game| matches!(game.modes().last(), Some(Mode::SlotMachine(machine)) if machine.spinning());
         let saved = resumes_identically(game, 1500, play, move |game, frame| spinning(game) && frame % 11 == 0);

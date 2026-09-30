@@ -1,11 +1,11 @@
 //! `AgathasRoom_Script`: the third of the Elite Four, the door that seals behind the player and
 //! the walk up to her.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_events::{EVENT_AUTOWALKED_INTO_AGATHAS_ROOM, EVENT_BEAT_AGATHAS_ROOM_TRAINER_0};
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_AGATHASROOM_DEFAULT, SCRIPT_AGATHASROOM_AGATHA_END_BATTLE,
     SCRIPT_AGATHASROOM_NOOP, SCRIPT_AGATHASROOM_PLAYER_IS_MOVING, SCRIPT_CHAMPIONSROOM_PLAYER_ENTERS,
     TEXT_AGATHASROOM_AGATHA, TEXT_AGATHASROOM_AGATHA_DONT_RUN_AWAY};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use super::{Code, Flow, Script};
@@ -43,7 +43,7 @@ pub fn script(rt: &mut Script) -> Flow {
     show_or_hide_exit_block(rt);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().agathas_room.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::AgathasRoomTrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::AgathasRoomTrainerHeaders);
     let entry: Code = match index {
         SCRIPT_AGATHASROOM_DEFAULT => Label::DefaultScript.into(),
         SCRIPT_AGATHASROOM_AGATHA_END_BATTLE => Label::EndBattle.into(),
@@ -110,7 +110,7 @@ fn end_battle(rt: &mut Script) -> Flow {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     match text_id {
-        TEXT_AGATHASROOM_AGATHA => Some(rt.talk_to_trainer(sym::AgathasRoomTrainerHeader0).ret()),
+        TEXT_AGATHASROOM_AGATHA => Some(rt.talk_to_trainer(trainers::AgathasRoomTrainerHeader0).ret()),
         _ => None,
     }
 }

@@ -1,10 +1,9 @@
 //! `ViridianNicknameHouse_Script`: Speary, who cries after its name.
 
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::TEXT_VIRIDIANNICKNAMEHOUSE_SPEAROW;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {}
@@ -21,7 +20,7 @@ pub fn script(rt: &mut Script) -> Flow {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     (text_id == TEXT_VIRIDIANNICKNAMEHOUSE_SPEAROW)
-        .then(|| rt.print_text(text_at(local::ViridianNicknameHouseSpearowText::Text)).then(Label::SpearowCry))
+        .then(|| rt.print_text(text_named("ViridianNicknameHouseSpearowText.Text")).then(Label::SpearowCry))
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {

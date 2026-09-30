@@ -21,7 +21,7 @@ pub const RUNTIME_REDIRECTED_WARPS: &[(Map, Map)] = &[
 pub fn visitable() -> Vec<Map> {
     use strum::IntoEnumIterator;
     Map::iter()
-        .filter(|m| m.header_pointer().is_some())
+        .filter(|m| m.has_header())
         .filter(|m| !LINK_CABLE_MAPS.contains(m))
         .filter(|m| !DUPLICATE_MAPS.contains(m))
         .collect()
@@ -138,7 +138,7 @@ pub fn room_paths(hub: Map, depth: u8) -> Vec<Vec<Map>> {
         let mut next: Vec<Map> = Vec::new();
         for warp in &metadata.warp_events {
             let to = warp.destination_map;
-            if to.header_pointer().is_none() || seen.contains(&to) || next.contains(&to) { continue }
+            if !to.has_header() || seen.contains(&to) || next.contains(&to) { continue }
             if skip_tour(to).is_some() { continue }
             next.push(to);
         }
@@ -234,7 +234,7 @@ mod tests {
     fn the_visitable_set_is_what_the_plan_says() {
         use strum::IntoEnumIterator;
         let all = Map::iter().count();
-        let headerless: Vec<Map> = Map::iter().filter(|m| m.header_pointer().is_none()).collect();
+        let headerless: Vec<Map> = Map::iter().filter(|m| !m.has_header()).collect();
         let visitable = visitable();
         println!("{all} Map variants · {} headerless · {} link-cable · {} duplicates · {} visitable",
             headerless.len(), LINK_CABLE_MAPS.len(), DUPLICATE_MAPS.len(), visitable.len());
@@ -247,7 +247,7 @@ mod tests {
             .collect();
         assert_eq!(visitable.len() + struck.len(), all, "every map should be in exactly one bucket");
         let headered_duplicates: Vec<Map> = DUPLICATE_MAPS.iter().copied()
-            .filter(|m| m.header_pointer().is_some()).collect();
+            .filter(|m| m.has_header()).collect();
         println!("duplicates that are not already headerless: {headered_duplicates:?}");
         assert_eq!(headered_duplicates, vec![Map::UndergroundPathRoute7Copy]);
         assert!((215..=225).contains(&visitable.len()),
@@ -279,7 +279,7 @@ mod tests {
             }
             for warp in &metadata.warp_events {
                 warps += 1;
-                if warp.destination_map.header_pointer().is_none()
+                if !warp.destination_map.has_header()
                     && !LINK_CABLE_MAPS.contains(&warp.destination_map)
                     && !RUNTIME_REDIRECTED_WARPS.contains(&(map, warp.destination_map)) {
                     broken.push(format!("{map}: warp at {} leads to {}, which has no header",
@@ -287,7 +287,7 @@ mod tests {
                 }
             }
             for connection in header.connections() {
-                if connection.map.header_pointer().is_none() {
+                if !connection.map.has_header() {
                     broken.push(format!("{map}: {:?} connection to {}, which has no header",
                         connection.direction, connection.map));
                 }
@@ -324,29 +324,16 @@ mod tests {
     /// A map with objects in the ROM must have sprites in [`Map::sprites`].
     #[test]
     fn every_map_with_objects_has_a_sprite_table() {
-        let mmu = rom();
         let mut missing = Vec::new();
         for map in visitable() {
-            let Ok(header) = mmu.read_map_header(map) else { continue };
-            let object_count = object_event_count(&mmu, &header);
+            let Ok(objects) = poke_core::map_objects::MapObjects::read(map) else { continue };
+            let object_count = objects.objects.len();
             if object_count > 0 && map.sprites().is_empty() {
                 missing.push(format!("{map}: {object_count} object events in the ROM, no sprite table"));
             }
         }
         assert!(missing.is_empty(), "{} maps have objects the agent cannot name:\n{}",
             missing.len(), missing.join("\n"));
-    }
-
-    /// Walk a map's `*_Object` structure to its object-event count.
-    fn object_event_count(mmu: &MMU, header: &crate::pokemon::map_header::MapHeader) -> u8 {
-        use crate::pokemon::symbols::{DmgBank, DmgPointer, DmgPointerRead};
-        let ptr = DmgPointer { bank: DmgBank::ROM { bank: header.header_bank },
-                               address: header.objects_address };
-        let data = mmu.rom_data_from_rom_pointer(&ptr, 0x400);
-        let warps = data[1] as usize;
-        let bg_at = 2 + warps * 4;
-        let bgs = data[bg_at] as usize;
-        data[bg_at + 1 + bgs * 3]
     }
 
     /// A headered duplicate slot shares its original's tileset, dimensions and blocks.
@@ -359,14 +346,14 @@ mod tests {
             (Map::UndergroundPathRoute6Copy, Map::UndergroundPathRoute6),
             (Map::UndergroundPathRoute7Copy, Map::UndergroundPathRoute7),
         ] {
-            let Some(_) = copy.header_pointer() else {
+            if !copy.has_header() {
                 println!("{copy}: headerless — struck before the duplicate check even applies");
                 continue;
-            };
+            }
             let a = mmu.read_map_header(copy).unwrap_or_else(|e| panic!("{copy}: {e}"));
             let b = mmu.read_map_header(original).unwrap_or_else(|e| panic!("{original}: {e}"));
-            assert_eq!((a.tileset, a.width, a.height, a.blocks_address),
-                       (b.tileset, b.width, b.height, b.blocks_address),
+            assert_eq!((a.tileset, a.width, a.height, a.blocks),
+                       (b.tileset, b.width, b.height, b.blocks),
                 "{copy} is not a copy of {original} after all — it should be back in the tour");
         }
     }

@@ -1,9 +1,9 @@
 //! `RocketHideoutB1F_Script`: five Rockets, and the door the last of them opens.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_ROCKET_HIDEOUT_1_TRAINER_4, EVENT_ENTERED_ROCKET_HIDEOUT};
 use poke_core::symbols::pokered_map_scripts::{TEXT_ROCKETHIDEOUTB1F_ROCKET1, TEXT_ROCKETHIDEOUTB1F_ROCKET2,
     TEXT_ROCKETHIDEOUTB1F_ROCKET3, TEXT_ROCKETHIDEOUTB1F_ROCKET4, TEXT_ROCKETHIDEOUTB1F_ROCKET5};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use super::{Flow, Script};
@@ -29,7 +29,7 @@ pub fn script(rt: &mut Script) -> Flow {
     door_callback(rt);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().rocket_hideout_b1f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::RocketHideout1TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::RocketHideout1TrainerHeaders);
     rt.trainer_script(index).then(Label::StoreCurScript)
 }
 
@@ -53,11 +53,11 @@ fn door_callback(rt: &mut Script) {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
-        TEXT_ROCKETHIDEOUTB1F_ROCKET1 => sym::RocketHideout1TrainerHeader0,
-        TEXT_ROCKETHIDEOUTB1F_ROCKET2 => sym::RocketHideout1TrainerHeader1,
-        TEXT_ROCKETHIDEOUTB1F_ROCKET3 => sym::RocketHideout1TrainerHeader2,
-        TEXT_ROCKETHIDEOUTB1F_ROCKET4 => sym::RocketHideout1TrainerHeader3,
-        TEXT_ROCKETHIDEOUTB1F_ROCKET5 => sym::RocketHideout1TrainerHeader4,
+        TEXT_ROCKETHIDEOUTB1F_ROCKET1 => trainers::RocketHideout1TrainerHeader0,
+        TEXT_ROCKETHIDEOUTB1F_ROCKET2 => trainers::RocketHideout1TrainerHeader1,
+        TEXT_ROCKETHIDEOUTB1F_ROCKET3 => trainers::RocketHideout1TrainerHeader2,
+        TEXT_ROCKETHIDEOUTB1F_ROCKET4 => trainers::RocketHideout1TrainerHeader3,
+        TEXT_ROCKETHIDEOUTB1F_ROCKET5 => trainers::RocketHideout1TrainerHeader4,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())

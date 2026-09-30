@@ -7,7 +7,7 @@
 //! clears the flag; here that prints nothing.
 
 use poke_core::symbols::pokered_events::EVENT_HALL_OF_FAME_DEX_RATING;
-use poke_core::symbols::{pokered_symbols as sym, DmgPointer};
+
 use poke_core::text_script::{TextCommand, TextNumber};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::SoundId;
@@ -49,7 +49,7 @@ impl OaksPc {
     pub fn start(ctx: &mut Ctx) -> (Self, Transition) {
         let saved = ctx.screen.ui.clone();
         let pc = Self { saved, under_yes_no: UiSurface::default(), phase: Phase::Accessed };
-        (pc, print_at(sym::AccessedOaksPCText, ctx))
+        (pc, print_at("AccessedOaksPCText", ctx))
     }
 
     pub fn update(&mut self, ctx: &mut Ctx) -> Transition {
@@ -62,7 +62,7 @@ impl OaksPc {
     /// A child has closed. `Pop` means the link is closed too.
     pub fn resume(&mut self, outcome: Outcome, ctx: &mut Ctx) -> Transition {
         match self.phase {
-            Phase::Accessed => self.text(sym::GetDexRatedText, Phase::Asked, ctx),
+            Phase::Accessed => self.text("GetDexRatedText", Phase::Asked, ctx),
             Phase::Asked => {
                 self.under_yes_no = ctx.screen.ui.clone();
                 self.phase = Phase::Answered;
@@ -88,7 +88,7 @@ impl OaksPc {
         }
     }
 
-    fn text(&mut self, at: DmgPointer, then: Phase, ctx: &mut Ctx) -> Transition {
+    fn text(&mut self, at: &str, then: Phase, ctx: &mut Ctx) -> Transition {
         self.phase = then;
         print_at(at, ctx)
     }
@@ -111,7 +111,7 @@ impl OaksPc {
             return self.close(ctx);
         }
         self.phase = Phase::Completion;
-        print_at(sym::DexCompletionText, ctx)
+        print_at("DexCompletionText", ctx)
     }
 
     /// `PlayPokedexRatingSfx`, then `WaitForTextScrollButtonPress`.
@@ -129,6 +129,6 @@ impl OaksPc {
 
     fn close(&mut self, ctx: &mut Ctx) -> Transition {
         // `ClosedOaksPCText` is the text and then `text_waitbutton`, which is the wait for a press.
-        self.text(sym::ClosedOaksPCText, Phase::Closed, ctx)
+        self.text("ClosedOaksPCText", Phase::Closed, ctx)
     }
 }

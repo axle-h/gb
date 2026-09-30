@@ -10,7 +10,7 @@ use super::super::modified_stats::{apply_badge_stat_boosts, apply_burn_and_paral
 use super::super::{effect, stat, Battle, Side, Status1, Status2, MAX_STAT_LEVEL};
 use super::BattleText;
 
-/// `25 percent + 1`: below it, an enemy's stat-lowering move misses outright.
+/// `25 percent + 1`: below it, the cartridge's enemy stat-lowering move misses outright.
 const ENEMY_STAT_DOWN_MISS: u8 = 64;
 /// `33 percent + 1`: below it, a stat-lowering side effect happens.
 const STAT_DOWN_SIDE_EFFECT_CHANCE: u8 = 85;
@@ -59,11 +59,11 @@ pub fn stat_modifier_up_effect(battle: &mut Battle, user: Side, badges: u8) -> V
     vec![BattleText::MonsStatsRoseText]
 }
 
-/// `StatModifierDownEffect`, on the user's target. The enemy's copy misses a quarter of the time
-/// before anything else, a substitute blocks it, and a side effect lands a third of the time
-/// without a hit test while the move itself takes one. One stage, or two for the `_DOWN2` effects,
-/// not below -6, and nothing for a stat of exactly 1. The stat is worked out afresh, never below 1,
-/// then given back its own penalty and badge boost. A side effect that fails says nothing.
+/// `StatModifierDownEffect`, on the user's target. A substitute blocks it, and a side effect lands
+/// a third of the time without a hit test while the move itself takes one. One stage, or two for
+/// the `_DOWN2` effects, not below -6, and nothing for a stat of exactly 1. The stat is worked out
+/// afresh, never below 1, then given back its own penalty and badge boost. A side effect that fails
+/// says nothing.
 pub fn stat_modifier_down_effect(battle: &mut Battle, user: Side, badges: u8, rng: &mut impl Rng) -> Vec<BattleText> {
     let cartridge_bugs = battle.cartridge_bugs;
     let move_effect = battle.side(user).current_move.effect;
@@ -74,7 +74,8 @@ pub fn stat_modifier_down_effect(battle: &mut Battle, user: Side, badges: u8, rn
     };
     let cant_lower = || if side_effect { vec![] } else { vec![BattleText::NothingHappenedText] };
     let target = user.other();
-    if user == Side::Enemy && rng.random() < ENEMY_STAT_DOWN_MISS {
+    // The cartridge makes the enemy's copy miss a quarter of the time before any other check.
+    if cartridge_bugs && user == Side::Enemy && rng.random() < ENEMY_STAT_DOWN_MISS {
         return missed(battle);
     }
     if battle.side(target).status2.contains(Status2::HAS_SUBSTITUTE_UP) {
@@ -167,9 +168,22 @@ mod tests {
         &mut arena.battle
     }
 
-    /// An enemy stat-down move that neither misses outright nor misses its hit test.
+    /// An enemy stat-down move that does not miss its hit test.
     fn enemy_hits() -> GameRng {
-        GameRng::tape(vec![ENEMY_STAT_DOWN_MISS, 0])
+        GameRng::tape(vec![0])
+    }
+
+    #[test]
+    fn an_enemy_stat_down_move_misses_no_more_often_than_the_players() {
+        let lowered = |cartridge_bugs: bool| {
+            let mut arena = Arena::baseline();
+            let battle = playing(&mut arena, Side::Enemy, effect::ATTACK_DOWN1_EFFECT);
+            battle.cartridge_bugs = cartridge_bugs;
+            let texts = stat_modifier_down_effect(battle, Side::Enemy, 0, &mut GameRng::tape(vec![0, 0]));
+            (texts, arena.battle.player.stat_mods[0])
+        };
+        assert_eq!(lowered(false), (vec![BattleText::MonsStatsFellText], BASE_STAT_LEVEL - 1));
+        assert_eq!(lowered(true), (vec![BattleText::ButItFailedText], BASE_STAT_LEVEL));
     }
 
     #[test]

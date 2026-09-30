@@ -12,10 +12,9 @@ use crate::mode::{Ctx, Mode, Outcome, Transition};
 use crate::modes::battle::BattleMode;
 use crate::systems::math::divide_bcd;
 use crate::systems::overworld::encounters::{try_do_wild_encounter, EncounterInput};
-use crate::systems::overworld::map_view::MapView;
 use crate::systems::overworld::sprites::SpriteState;
 use crate::systems::events::heal_party::heal_party;
-use super::script::{text_at, Block, Flow, Routine, Then, Waiting};
+use super::script::{text_named, Block, Flow, Routine, Then, Waiting};
 use super::{AfterFade, Overworld, Phase};
 
 /// `EnterMap`'s steps without a random battle after one.
@@ -79,7 +78,7 @@ impl Overworld {
         let battle = BattleMode::trainer(opponent - OPP_ID_OFFSET, self.rt.trainer_no, self.rt.gym_leader_no,
             ctx.world.scripts.rival_starter);
         Some(match self.rt.end_battle_text.filter(|_| self.rt.print_end_battle_text) {
-            Some(words) => battle.with_end_battle_text(text_at(words)),
+            Some(words) => battle.with_end_battle_text(text_named(words)),
             None => battle,
         })
     }
@@ -207,7 +206,7 @@ impl Overworld {
         location.map = location.last_blackout_map;
         location.last_map = location.map;
         let warp = fly_warp(location.map).expect("a blackout returns to a town with a fly warp");
-        self.view.view = MapView::view_from_address(warp.view);
+        self.view.view = warp.view;
         location.y = warp.y;
         location.x = warp.x;
         self.view.y_block = warp.y & 1;

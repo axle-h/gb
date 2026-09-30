@@ -1,10 +1,8 @@
 //! `VermilionDock_Script`: the S.S. Anne sailing off as the player comes down its gangway with
 //! HM01, and the walk off the dock after.
 
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
 use poke_core::symbols::pokered_events::{EVENT_GOT_HM01, EVENT_SS_ANNE_LEFT, EVENT_STARTED_WALKING_OUT_OF_DOCK,
     EVENT_WALKED_OUT_OF_DOCK};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, SoundId};
 use crate::gfx::layers::{Object, TileMap, Window};
@@ -80,7 +78,7 @@ fn ss_anne_leaves(rt: &mut Script) -> Flow {
     rt.play_new_sound(SoundId::STOP_ALL_MUSIC);
     rt.play_music(sounds::MUSIC_SURFING);
     // `LoadSmokeTileFourTimes`, over the player's walking pictures.
-    let smoke = &rom_slice(sym::SSAnneSmokePuffTile)[..TILE_BYTES];
+    let smoke = poke_core::gfx::overworld::SMOKE;
     for i in 0..4 {
         rt.screen().tiles.load(V_CHARS1 + 0x7C + i, smoke);
     }

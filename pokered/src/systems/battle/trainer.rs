@@ -3,7 +3,7 @@
 
 use poke_core::move_name::PokemonMoveName;
 use poke_core::species::PokemonSpecies;
-use poke_core::trainers::{lone_moves, party_data, pic_and_money, team_moves};
+use poke_core::trainers::{base_money, lone_moves, parties, team_moves};
 use serde::{Deserialize, Serialize};
 use crate::party::PartyMon;
 use crate::rng::GameRng;
@@ -32,14 +32,14 @@ pub struct TrainerParty {
 /// champion's first and sixth. The prize is the class's base money once per level of the *last*
 /// mon, in two BCD bytes that stop at 9999.
 pub fn read_trainer(class: u8, trainer_no: u8, lone_attack_no: u8, rival_starter: u8, player_id: u16) -> TrainerParty {
-    let (per_mon_levels, data) = &party_data(class)[trainer_no as usize - 1];
-    let mut mons: Vec<PartyMon> = data.iter()
+    let party = &parties(class)[trainer_no as usize - 1];
+    let mut mons: Vec<PartyMon> = party.mons.iter()
         .map(|&(level, species)| {
             let species = PokemonSpecies::from_repr(species).expect("a trainer's species");
             new_party_mon(species, level, player_id, &Origin::Trainer, &mut GameRng::tape(vec![]))
         })
         .collect();
-    if *per_mon_levels {
+    if party.per_mon_levels {
         // Into a party too short for it the cartridge writes past the last mon, where nothing reads.
         let mut teach = |index: usize, name: u8| {
             if let Some(mon) = mons.get_mut(index) {
@@ -61,9 +61,9 @@ pub fn read_trainer(class: u8, trainer_no: u8, lone_attack_no: u8, rival_starter
             teach(5, starter_move as u8);
         }
     }
-    let (_, base) = pic_and_money(class);
+    let base = base_money(class);
     let mut money = [0; 3];
-    let last_level = data.last().expect("a party").0;
+    let last_level = party.mons.last().expect("a party").0;
     for _ in 0..if last_level == 0 { 256 } else { last_level as u32 } {
         add_bcd(&mut money[1..], &base[..2]);
     }

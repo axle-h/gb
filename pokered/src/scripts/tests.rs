@@ -4126,7 +4126,7 @@ fn overworld_of(game: &Game) -> &Overworld {
 #[test]
 fn pewter_s_gym_guide_is_still_pointing_when_his_text_opens() {
     use poke_core::symbols::pokered_map_scripts::SCRIPT_PEWTERCITY_YOUNGSTER_SHOWS_PLAYER_GYM;
-    use poke_core::symbols::pokered_symbols::PEWTERCITY_YOUNGSTER;
+    use poke_core::symbols::pokered_map_scripts::PEWTERCITY_YOUNGSTER;
     let mut game = game(Map::PewterCity, 35, 17, SpriteFacing::Down, 5, |world| {
         world.events.clear(EVENT_BEAT_BROCK);
     });
@@ -4167,7 +4167,7 @@ fn the_celadon_poliwrath_and_the_mansion_pets_close_their_text_only_after_the_cr
 #[test]
 fn the_cerulean_rival_walks_off_with_his_movement_bytes_set_to_ff() {
     use poke_core::symbols::pokered_map_scripts::SCRIPT_CERULEANCITY_RIVAL_DEFEATED;
-    use poke_core::symbols::pokered_symbols::CERULEANCITY_RIVAL;
+    use poke_core::symbols::pokered_map_scripts::CERULEANCITY_RIVAL;
     use poke_core::symbols::pokered_toggles::TOGGLE_CERULEAN_RIVAL;
     let mut game = game(Map::CeruleanCity, 20, 6, SpriteFacing::Up, 8, |world| {
         world.events.set(EVENT_BEAT_CERULEAN_ROCKET_THIEF);
@@ -4194,7 +4194,7 @@ fn the_cerulean_rival_walks_off_with_his_movement_bytes_set_to_ff() {
 /// and a `Delay3`, before his text opens.
 #[test]
 fn oak_is_held_turned_to_the_champion_before_he_speaks() {
-    use poke_core::symbols::pokered_symbols::HALLOFFAME_OAK;
+    use poke_core::symbols::pokered_map_scripts::HALLOFFAME_OAK;
     use crate::systems::overworld::sprites::SPRITE_FACING_LEFT;
     let mut game = game(Map::HallOfFame, 4, 7, SpriteFacing::Up, 5, |_| {});
     let mut turned = None;
@@ -4231,7 +4231,7 @@ fn the_celadon_gramps_keeps_tm41_for_a_player_whose_bag_is_full() {
 
 /// `PokemonTower7FNPCCoordMovementTable` read from each Rocket's own rows onward: all twelve squares
 /// find their own row, a later Rocket's square found from an earlier one walks the later one's way,
-/// and a square no row names before the bank ends leaves him standing.
+/// and a square no row names leaves him standing.
 #[test]
 fn the_tower_7f_rockets_find_their_way_out_anywhere_in_the_table() {
     use super::pokemon_tower_7f::leave_movement;
@@ -4250,7 +4250,10 @@ fn the_tower_7f_rockets_find_their_way_out_anywhere_in_the_table() {
             assert_eq!(leave_movement(earlier, x, y), Some(path), "Rocket {earlier} from Rocket {slot}'s ({x}, {y})");
         }
     }
-    assert_eq!(leave_movement(2, 13, 9), None, "behind Rocket 2");
+    let named = |x, y| rows.iter().any(|&(_, at, _)| at == (x, y));
+    for (slot, x, y) in (1..=3).flat_map(|slot| (0..20).flat_map(move |x| (0..20).map(move |y| (slot, x, y)))).filter(|&(_, x, y)| !named(x, y)) {
+        assert_eq!(leave_movement(slot, x, y), None, "Rocket {slot} from ({x}, {y})");
+    }
 }
 
 /// The first quiz machine, below the gate `CinnabarGymGateCoords` lists first: `CATERPIE evolves

@@ -10,10 +10,8 @@
 
 use poke_core::default_names::{player_names, rival_names};
 use poke_core::item::ItemId;
-use poke_core::rom_gfx::rom_slice;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::{pokered_symbols as sym, DmgPointer};
-use poke_core::text_script::{decode, TextBuffer};
+use poke_core::text_script::{far_text, TextBuffer};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, AudioBank, SoundId};
 use crate::gfx::layers::{TileMap, Window};
@@ -49,29 +47,29 @@ pub enum Who {
 }
 
 impl Who {
-    fn pic(self) -> DmgPointer {
+    fn pic(self) -> &'static [u8] {
         match self {
-            Who::Player => sym::RedPicFront,
-            Who::Rival => sym::Rival1Pic,
+            Who::Player => poke_core::gfx::player::RED,
+            Who::Rival => poke_core::gfx::trainers::RIVAL1,
         }
     }
 }
 
 /// One statement of `OakSpeech`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
     /// Up to the first picture: the music, the new game's world and the warp to Red's room.
     Prepare,
     ClearScreen,
     /// `IntroDisplayPicCenteredOrUpperRight`, centred.
-    Pic(DmgPointer),
+    Pic(&'static [u8]),
     /// Nidorino, turned to face the player.
     Nidorino,
     FadeInIntroPic,
     FadeOutToWhite,
     FadeInFromWhite,
     MovePicLeft,
-    Text(DmgPointer),
+    Text(&'static str),
     ChooseName(Who),
     Sound(SoundId),
     Delay(u16),
@@ -84,15 +82,15 @@ enum Op {
 }
 
 const SPEECH: &[Op] = &[
-    Op::Prepare, Op::Pic(sym::ProfOakPic), Op::FadeInIntroPic, Op::Text(sym::OakSpeechText1),
-    Op::FadeOutToWhite, Op::ClearScreen, Op::Nidorino, Op::MovePicLeft, Op::Text(sym::OakSpeechText2),
-    Op::FadeOutToWhite, Op::ClearScreen, Op::Pic(sym::RedPicFront), Op::MovePicLeft, Op::Text(sym::IntroducePlayerText),
+    Op::Prepare, Op::Pic(poke_core::gfx::trainers::PROF_OAK), Op::FadeInIntroPic, Op::Text("OakSpeechText1"),
+    Op::FadeOutToWhite, Op::ClearScreen, Op::Nidorino, Op::MovePicLeft, Op::Text("OakSpeechText2"),
+    Op::FadeOutToWhite, Op::ClearScreen, Op::Pic(poke_core::gfx::player::RED), Op::MovePicLeft, Op::Text("IntroducePlayerText"),
     Op::ChooseName(Who::Player),
-    Op::FadeOutToWhite, Op::ClearScreen, Op::Pic(sym::Rival1Pic), Op::FadeInIntroPic, Op::Text(sym::IntroduceRivalText),
+    Op::FadeOutToWhite, Op::ClearScreen, Op::Pic(poke_core::gfx::trainers::RIVAL1), Op::FadeInIntroPic, Op::Text("IntroduceRivalText"),
     Op::ChooseName(Who::Rival),
-    Op::FadeOutToWhite, Op::ClearScreen, Op::Pic(sym::RedPicFront), Op::FadeInFromWhite, Op::Text(sym::OakSpeechText3),
-    Op::Sound(sounds::SFX_SHRINK), Op::Delay(4), Op::LoadRedSprite, Op::Pic(sym::ShrinkPic1), Op::Delay(4),
-    Op::Pic(sym::ShrinkPic2), Op::FadeMusic, Op::Delay(20), Op::ShowSprite, Op::Delay(50),
+    Op::FadeOutToWhite, Op::ClearScreen, Op::Pic(poke_core::gfx::player::RED), Op::FadeInFromWhite, Op::Text("OakSpeechText3"),
+    Op::Sound(sounds::SFX_SHRINK), Op::Delay(4), Op::LoadRedSprite, Op::Pic(poke_core::gfx::player::SHRINK1), Op::Delay(4),
+    Op::Pic(poke_core::gfx::player::SHRINK2), Op::FadeMusic, Op::Delay(20), Op::ShowSprite, Op::Delay(50),
     Op::FadeOutToWhite, Op::ClearScreen,
 ];
 
@@ -238,9 +236,8 @@ impl OakSpeech {
                 self.next();
             }
             Op::FadeInIntroPic => {
-                let palettes = rom_slice(sym::IntroFadePalettes);
                 if self.progress < 6 {
-                    ctx.screen.effects.bgp = palettes[self.progress as usize];
+                    ctx.screen.effects.bgp = poke_core::tables::INTRO_FADE_PALETTES[self.progress as usize];
                     self.progress += 1;
                     self.wait = Wait::frames(INTRO_FADE_STEP);
                 } else {
@@ -262,7 +259,7 @@ impl OakSpeech {
             }
             Op::MovePicLeft => self.move_pic_left(ctx),
             Op::Text(text) => {
-                let commands = decode(text).expect("Oak's texts decode");
+                let commands = far_text(text).expect("Oak's texts decode");
                 return Some(self.push(Mode::TextBox(TextBox::script(commands))));
             }
             Op::ChooseName(who) => return self.choose_name(ctx, who),
@@ -279,11 +276,11 @@ impl OakSpeech {
                 }
             }
             Op::LoadRedSprite => {
-                ctx.screen.tiles.load(V_CHARS0, &rom_slice(sym::RedSprite)[..12 * 16]);
+                ctx.screen.tiles.load(V_CHARS0, &poke_core::gfx::sprites::RED[..12 * 16]);
                 self.next();
             }
             Op::FadeMusic => {
-                ctx.audio.set_bank(AudioBank::from_rom_bank(sym::Music_PalletTown.bank.id()).expect("an audio bank"));
+                ctx.audio.set_bank(AudioBank::holding("Music_PalletTown"));
                 ctx.audio.fade_out(10);
                 ctx.audio.play_new_sound(SoundId::STOP_ALL_MUSIC);
                 self.next();
@@ -333,10 +330,10 @@ impl OakSpeech {
     fn name_said(&mut self, who: Who) -> Transition {
         self.naming = Naming::Text;
         let text = match who {
-            Who::Player => sym::YourNameIsText,
-            Who::Rival => sym::HisNameIsText,
+            Who::Player => "YourNameIsText",
+            Who::Rival => "HisNameIsText",
         };
-        self.push(Mode::TextBox(TextBox::script(decode(text).expect("the name texts decode"))))
+        self.push(Mode::TextBox(TextBox::script(far_text(text).expect("the name texts decode"))))
     }
 
     fn choose_name(&mut self, ctx: &mut Ctx, who: Who) -> Option<Transition> {
@@ -352,10 +349,10 @@ impl OakSpeech {
                 ui.text_box_border(0, 0, 9, 10);
                 place_string_lines(ui, 3, 0, &poke_core::charmap::encode("NAME").expect("NAME encodes"));
                 let list = match who {
-                    Who::Player => sym::DefaultNamesPlayer,
-                    Who::Rival => sym::DefaultNamesRival,
+                    Who::Player => "DefaultNamesPlayer",
+                    Who::Rival => "DefaultNamesRival",
                 };
-                place_string_lines(ui, 2, 2, rom_slice(list));
+                place_string_lines(ui, 2, 2, &poke_core::tables::db_string(list));
                 ctx.menu.last_item = 0;
                 self.input = MenuInput::new(0, 3, (1, 2), Joypad::A);
                 self.input.call(ctx);

@@ -1,5 +1,4 @@
-use crate::rom_gfx::rom_slice;
-use crate::symbols::pokered_symbols;
+use crate::tables::TYPE_EFFECTS;
 
 pub const SUPER_EFFECTIVE: u8 = 20;
 pub const NOT_VERY_EFFECTIVE: u8 = 5;
@@ -8,11 +7,7 @@ pub const NO_EFFECT: u8 = 0;
 /// `TypeEffects` in the cartridge's order, which is the order the damage routine applies them:
 /// `(attacker, defender, multiplier × 10)`.
 pub fn matchups() -> Vec<(u8, u8, u8)> {
-    rom_slice(pokered_symbols::TypeEffects)
-        .chunks_exact(3)
-        .take_while(|row| row[0] != 0xFF)
-        .map(|row| (row[0], row[1], row[2]))
-        .collect()
+    TYPE_EFFECTS.to_vec()
 }
 
 #[cfg(test)]

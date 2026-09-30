@@ -2,7 +2,7 @@
 
 use poke_core::item::ItemId;
 use serde::{Deserialize, Serialize};
-use crate::input::Joypad;
+use crate::input::{Joypad, Pad};
 use crate::mode::{Mode, ModeUpdate, Status};
 use crate::modes::battle::BattleDriver;
 use crate::modes::naming_screen::NamingScreen;
@@ -62,6 +62,9 @@ pub enum Command {
     SafariBall,
     SafariBait,
     SafariRock,
+    /// Stop the slot machine's next wheel. A press while the wheel before it still slips is
+    /// ignored, so A goes on being pressed until one is taken.
+    StopWheel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +126,10 @@ pub enum Decision {
     CursorMenu,
     /// The overworld, with the player free to move.
     Overworld,
+    /// The slot machine's wheels turning, a wheel still to be stopped: `StopWheel` answers. Its bet
+    /// is a `CursorMenu` (row 0 bets three coins, row 2 one), its texts and a win's `▼` are `Text`,
+    /// and "One more go?" is a `TwoOption`.
+    SlotWheels,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +189,9 @@ enum Driver {
     Overworld(OverworldDriver),
     /// The battle's own, which walks its menus to a move, a mon or an item.
     Battle(BattleDriver),
+    /// A on a frame the machine reads the pad, until it has taken a press. The wheels read it only
+    /// every few frames, so an A still down at the last read is let go at a read first.
+    StopWheel { answered: u32 },
 }
 
 impl Executor {
@@ -204,6 +214,8 @@ impl Executor {
                     Driver::Advance { answered: battle.answered(), held: 0 },
                 Some(Mode::Movie(movie)) if movie.status() == Status::Waiting(Decision::TitleScreen) =>
                     Driver::Advance { answered: movie.answered(), held: 0 },
+                Some(Mode::SlotMachine(machine)) if machine.status() == Status::Waiting(Decision::Text) =>
+                    Driver::Advance { answered: machine.answered(), held: 0 },
                 _ => return Err(Refusal::Invalid("no text box is waiting".into())),
             },
             Command::ChooseListEntry(_) | Command::CancelList => match modes.last() {
@@ -351,11 +363,16 @@ impl Executor {
             Command::Fight(_) | Command::Run | Command::SwitchPokemon(_) | Command::UseItem { .. }
             | Command::SafariBall | Command::SafariBait | Command::SafariRock =>
                 Driver::Battle(BattleDriver::accept(&command, modes, world)?),
+            Command::StopWheel => match modes.last() {
+                Some(Mode::SlotMachine(machine)) if machine.status() == Status::Waiting(Decision::SlotWheels) =>
+                    Driver::StopWheel { answered: machine.answered() },
+                _ => return Err(Refusal::Invalid("no slot machine wheel is waiting to be stopped".into())),
+            },
         };
         Ok(Self { command, driver })
     }
 
-    pub fn drive(&mut self, modes: &[Mode], world: &World) -> Drive {
+    pub fn drive(&mut self, modes: &[Mode], world: &World, pad: &Pad) -> Drive {
         match &mut self.driver {
             Driver::Advance { answered, held } => {
                 let (count, status, decision) = match modes.last() {
@@ -367,6 +384,7 @@ impl Executor {
                     Some(Mode::MainMenu(menu)) => (menu.answered(), menu.status(), Decision::ContinueGame),
                     Some(Mode::Battle(battle)) => (battle.answered(), battle.status(), Decision::Text),
                     Some(Mode::Movie(movie)) => (movie.answered(), movie.status(), Decision::TitleScreen),
+                    Some(Mode::SlotMachine(machine)) => (machine.answered(), machine.status(), Decision::Text),
                     _ => return Drive::Done,
                 };
                 if count != *answered || (*held > 0 && status != Status::Waiting(decision)) {
@@ -524,6 +542,11 @@ impl Executor {
                     *released = false;
                     Drive::Press(Joypad::B)
                 }
+                _ => Drive::Done,
+            },
+            Driver::StopWheel { answered } => match modes.last() {
+                Some(Mode::SlotMachine(machine)) if machine.answered() == *answered =>
+                    Drive::Press(if machine.reading_the_pad() && !pad.polled().contains(Joypad::A) { Joypad::A } else { Joypad::empty() }),
                 _ => Drive::Done,
             },
             Driver::CancelEvolution => match modes.last() {

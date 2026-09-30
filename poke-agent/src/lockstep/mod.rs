@@ -7,6 +7,7 @@ mod battle_animations;
 mod events;
 pub(crate) mod bridge;
 mod game_state;
+mod harness;
 mod evolution;
 mod field_move_menu;
 mod item_menu;

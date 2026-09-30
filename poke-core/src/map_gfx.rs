@@ -1,27 +1,21 @@
-//! The graphics a map is drawn from, read out of the cartridge: tileset sheets, overworld sprite
-//! sheets, and the game's own font.
+//! The graphics a map is drawn from: tileset sheets and blocksets, overworld sprite sheets, and
+//! the game's own font.
 
 use crate::font::FONT_BYTES;
+use crate::gfx::{blocksets, tilesets};
 use crate::map_header::TileSetId;
-use crate::rom_gfx::{decode_tile, rom_slice, TILE_BYTES};
+use crate::rom_gfx::{decode_tile, TILE_BYTES};
 use crate::sprite::{PictureId, SpriteFacing};
 use crate::strings::PokemonString;
-use crate::symbols::{pokered_symbols, DmgBank, DmgPointer};
 
 pub const TILE_PX: usize = 8;
 /// What `LoadTilesetTilePatternData` copies to `vTileset`.
 pub const TILESET_TILES: usize = 0x60;
 pub const SPRITE_PX: usize = 16;
 
-/// One row of pokered's `Tilesets`.
+/// One row of pokered's `Tilesets`, bar the graphics, blocks and collision list it points at.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct TilesetEntry {
-    pub bank: u8,
-    /// `<Tileset>_Block`: block id to 16 tile ids.
-    pub blocks: u16,
-    pub gfx: u16,
-    /// `<Tileset>_Coll`: the `$FF`-terminated list of walkable tile ids.
-    pub coll: u16,
     /// Counter / "talk over" tile ids; `0xFF` where unused.
     pub talking_over: [u8; 3],
     /// The tile id wild encounters happen on, or `0xFF` for a tileset with no grass.
@@ -30,30 +24,49 @@ pub struct TilesetEntry {
     pub animation: u8,
 }
 
-const TILESET_ENTRY_SIZE: u16 = 12;
-
 pub fn tileset_entry(tileset: TileSetId) -> TilesetEntry {
-    let row = rom_slice(pokered_symbols::Tilesets + tileset as u16 * TILESET_ENTRY_SIZE);
-    let le = |i: usize| u16::from_le_bytes([row[i], row[i + 1]]);
-    TilesetEntry {
-        bank: row[0],
-        blocks: le(1),
-        gfx: le(3),
-        coll: le(5),
-        talking_over: [row[7], row[8], row[9]],
-        grass_tile: row[10],
-        animation: row[11],
+    let row = crate::tables::TILESETS[tileset as usize];
+    TilesetEntry { talking_over: row.counter_tiles, grass_tile: row.grass_tile, animation: row.animation }
+}
+
+/// `<Tileset>_GFX` and `<Tileset>_Block`, which `gfx/tilesets.asm` shares between aliases.
+fn tileset_files(tileset: TileSetId) -> (&'static [u8], &'static [u8]) {
+    use TileSetId::*;
+    match tileset {
+        Overworld => (tilesets::OVERWORLD, blocksets::OVERWORLD),
+        RedsHouse1 | RedsHouse2 => (tilesets::REDS_HOUSE, blocksets::REDS_HOUSE),
+        Mart | Pokecenter => (tilesets::POKECENTER, blocksets::POKECENTER),
+        Forest => (tilesets::FOREST, blocksets::FOREST),
+        Dojo | Gym => (tilesets::GYM, blocksets::GYM),
+        House => (tilesets::HOUSE, blocksets::HOUSE),
+        ForestGate | Museum | Gate => (tilesets::GATE, blocksets::GATE),
+        Underground => (tilesets::UNDERGROUND, blocksets::UNDERGROUND),
+        Ship => (tilesets::SHIP, blocksets::SHIP),
+        ShipPort => (tilesets::SHIP_PORT, blocksets::SHIP_PORT),
+        Cemetery => (tilesets::CEMETERY, blocksets::CEMETERY),
+        Interior => (tilesets::INTERIOR, blocksets::INTERIOR),
+        Cavern => (tilesets::CAVERN, blocksets::CAVERN),
+        Lobby => (tilesets::LOBBY, blocksets::LOBBY),
+        Mansion => (tilesets::MANSION, blocksets::MANSION),
+        Lab => (tilesets::LAB, blocksets::LAB),
+        Club => (tilesets::CLUB, blocksets::CLUB),
+        Facility => (tilesets::FACILITY, blocksets::FACILITY),
+        Plateau => (tilesets::PLATEAU, blocksets::PLATEAU),
     }
 }
 
-/// Clamped to the bank: a sheet can run off its end, because the cartridge copies a fixed count.
+/// The tileset's own tiles, as few as `--trim-whitespace` left: often short of the `TILESET_TILES`
+/// the cartridge copies, which then fills the rest from whatever follows the sheet in its bank.
 pub fn tileset_sheet(tileset: TileSetId) -> &'static [u8] {
-    let entry = tileset_entry(tileset);
-    let bytes = rom_slice(DmgPointer { bank: DmgBank::ROM { bank: entry.bank }, address: entry.gfx });
-    &bytes[..bytes.len().min(TILESET_TILES * TILE_BYTES)]
+    tileset_files(tileset).0
 }
 
-/// One tile of `tileset` as shade indices, blank past the end of the clamped sheet.
+/// Block id to its 16 tile ids, row-major.
+pub fn blockset(tileset: TileSetId) -> &'static [u8] {
+    tileset_files(tileset).1
+}
+
+/// One tile of `tileset` as shade indices, blank past the end of the sheet.
 pub fn tileset_tile(tileset: TileSetId, tile_id: u8) -> [u8; 64] {
     sheet_tile(tileset_sheet(tileset), tile_id as usize)
 }
@@ -73,15 +86,8 @@ pub struct NpcSprite {
 
 /// The standing frame of `picture` facing `facing`, or `None` if the picture id has no sheet.
 pub fn npc_sprite(picture: PictureId, facing: SpriteFacing) -> Option<NpcSprite> {
-    const SPRITE_ENTRY_SIZE: u16 = 4;
-    let entry = rom_slice(
-        pokered_symbols::SpriteSheetPointerTable + (picture as u16 - 1) * SPRITE_ENTRY_SIZE);
-    let (gfx, byte_count, bank) = (u16::from_le_bytes([entry[0], entry[1]]), entry[2] as usize, entry[3]);
-    if byte_count == 0 {
-        return None;
-    }
-    let sheet = rom_slice(DmgPointer { bank: DmgBank::ROM { bank }, address: gfx });
-    let sheet = &sheet[..sheet.len().min(byte_count)];
+    let sheet = crate::map_objects::sprite_sheet(picture as u8)?;
+    let sheet = &sheet.tiles[..sheet.bytes];
 
     // An immobile sprite falls back to facing down wholesale, layout included.
     let fits = |frame: &([u8; 4], _)| frame.0.iter().all(|&id| (id as usize + 1) * TILE_BYTES <= sheet.len());
@@ -111,22 +117,11 @@ pub fn npc_sprite(picture: PictureId, facing: SpriteFacing) -> Option<NpcSprite>
 
 const OAM_XFLIP: u8 = 0x20;
 
-/// The four tile ids and each one's `(y, x, attributes)` for a standing frame, read from the ROM
-/// rather than mirrored by hand.
+/// The four tile ids and each one's `(y, x, attributes)` for a standing frame, read from
+/// `SpriteFacingAndAnimationTable` rather than mirrored by hand.
 fn facing_frame(facing: SpriteFacing) -> ([u8; 4], [(u8, u8, u8); 4]) {
-    let entry = rom_slice(pokered_symbols::SpriteFacingAndAnimationTable + facing as u16 * 4);
-    let bank = pokered_symbols::SpriteFacingAndAnimationTable.bank;
-    let at = |address: u16| rom_slice(DmgPointer { bank, address });
-
-    let tiles = at(u16::from_le_bytes([entry[0], entry[1]]));
-    let oam = at(u16::from_le_bytes([entry[2], entry[3]]));
-    let mut tile_ids = [0u8; 4];
-    let mut layout = [(0u8, 0u8, 0u8); 4];
-    for quadrant in 0..4 {
-        tile_ids[quadrant] = tiles[quadrant];
-        layout[quadrant] = (oam[quadrant * 3], oam[quadrant * 3 + 1], oam[quadrant * 3 + 2]);
-    }
-    (tile_ids, layout)
+    let (tiles, oam) = crate::tables::SPRITE_FACING_AND_ANIMATION_TABLE[facing as usize];
+    (*tiles, oam.map(|[y, x, attributes]| (y, x, attributes)))
 }
 
 pub const GLYPHS: usize = FONT_BYTES.len() / TILE_BYTES;
@@ -157,43 +152,9 @@ pub fn text_width(text: &str) -> usize {
 mod tests {
     use super::*;
     use crate::font::render_font_string;
-    use crate::symbols::pokered_symbols;
 
     fn all_tilesets() -> impl Iterator<Item = TileSetId> {
         (0..=23u8).map(|id| TileSetId::from_repr(id).expect("24 tilesets"))
-    }
-
-    /// Every `Tilesets` row's three pointers match the linker's own symbols.
-    #[test]
-    fn the_tileset_table_agrees_with_the_generated_symbols() {
-        let expected: Vec<(TileSetId, DmgPointer, DmgPointer, DmgPointer)> = vec![
-            (TileSetId::Overworld,  pokered_symbols::Overworld_GFX,  pokered_symbols::Overworld_Block,  pokered_symbols::Overworld_Coll),
-            (TileSetId::RedsHouse1, pokered_symbols::RedsHouse1_GFX, pokered_symbols::RedsHouse1_Block, pokered_symbols::RedsHouse1_Coll),
-            (TileSetId::Mart,       pokered_symbols::Mart_GFX,       pokered_symbols::Mart_Block,       pokered_symbols::Mart_Coll),
-            (TileSetId::Forest,     pokered_symbols::Forest_GFX,     pokered_symbols::Forest_Block,     pokered_symbols::Forest_Coll),
-            (TileSetId::Dojo,       pokered_symbols::Dojo_GFX,       pokered_symbols::Dojo_Block,       pokered_symbols::Dojo_Coll),
-            (TileSetId::Pokecenter, pokered_symbols::Pokecenter_GFX, pokered_symbols::Pokecenter_Block, pokered_symbols::Pokecenter_Coll),
-            (TileSetId::Gym,        pokered_symbols::Gym_GFX,        pokered_symbols::Gym_Block,        pokered_symbols::Gym_Coll),
-            (TileSetId::House,      pokered_symbols::House_GFX,      pokered_symbols::House_Block,      pokered_symbols::House_Coll),
-            (TileSetId::Underground, pokered_symbols::Underground_GFX, pokered_symbols::Underground_Block, pokered_symbols::Underground_Coll),
-            (TileSetId::Ship,       pokered_symbols::Ship_GFX,       pokered_symbols::Ship_Block,       pokered_symbols::Ship_Coll),
-            (TileSetId::ShipPort,   pokered_symbols::ShipPort_GFX,   pokered_symbols::ShipPort_Block,   pokered_symbols::ShipPort_Coll),
-            (TileSetId::Cemetery,   pokered_symbols::Cemetery_GFX,   pokered_symbols::Cemetery_Block,   pokered_symbols::Cemetery_Coll),
-            (TileSetId::Interior,   pokered_symbols::Interior_GFX,   pokered_symbols::Interior_Block,   pokered_symbols::Interior_Coll),
-            (TileSetId::Cavern,     pokered_symbols::Cavern_GFX,     pokered_symbols::Cavern_Block,     pokered_symbols::Cavern_Coll),
-            (TileSetId::Lobby,      pokered_symbols::Lobby_GFX,      pokered_symbols::Lobby_Block,      pokered_symbols::Lobby_Coll),
-            (TileSetId::Mansion,    pokered_symbols::Mansion_GFX,    pokered_symbols::Mansion_Block,    pokered_symbols::Mansion_Coll),
-            (TileSetId::Lab,        pokered_symbols::Lab_GFX,        pokered_symbols::Lab_Block,        pokered_symbols::Lab_Coll),
-            (TileSetId::Club,       pokered_symbols::Club_GFX,       pokered_symbols::Club_Block,       pokered_symbols::Club_Coll),
-            (TileSetId::Facility,   pokered_symbols::Facility_GFX,   pokered_symbols::Facility_Block,   pokered_symbols::Facility_Coll),
-            (TileSetId::Plateau,    pokered_symbols::Plateau_GFX,    pokered_symbols::Plateau_Block,    pokered_symbols::Plateau_Coll),
-        ];
-        for (tileset, gfx, blocks, coll) in expected {
-            let entry = tileset_entry(tileset);
-            assert_eq!((entry.bank, entry.gfx), (gfx.bank.id(), gfx.address), "{tileset} gfx");
-            assert_eq!((entry.bank, entry.blocks), (blocks.bank.id(), blocks.address), "{tileset} blockset");
-            assert_eq!(entry.coll, coll.address, "{tileset} collision list");
-        }
     }
 
     #[test]
@@ -217,13 +178,19 @@ mod tests {
         }
     }
 
-    /// `Underground`'s graphics run off the end of their bank, which is clamped.
+    /// Past a trimmed sheet is blank, and no block draws from there: below `TILESET_TILES` a
+    /// blockset names only tiles its sheet has.
     #[test]
-    fn a_tileset_that_overruns_its_bank_is_clamped_not_panicked() {
+    fn a_short_sheet_is_blank_past_its_end_and_no_block_reaches_it() {
         let sheet = tileset_sheet(TileSetId::Underground);
-        assert!(sheet.len() < TILESET_TILES * TILE_BYTES,
-                "Underground is the short one — if this stops being true the clamp is untested");
+        assert_eq!(sheet.len(), 25 * TILE_BYTES);
+        assert_eq!(tileset_tile(TileSetId::Underground, 25), [0; 64]);
         assert_eq!(tileset_tile(TileSetId::Underground, 0xFF), [0; 64]);
+        for tileset in all_tilesets() {
+            let tiles = tileset_sheet(tileset).len() / TILE_BYTES;
+            assert!(blockset(tileset).iter().all(|&id| (id as usize) < tiles || id as usize >= TILESET_TILES),
+                    "{tileset} has a block drawing past its {tiles}-tile sheet");
+        }
     }
 
     /// A walking NPC has four distinct facings and an immobile sprite one picture for all four.

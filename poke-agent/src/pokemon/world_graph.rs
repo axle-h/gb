@@ -433,7 +433,7 @@ mod tests {
         let g = small_world();
         let mk = |to_map: Map, to: Point8| OverworldAction {
             map: Map::PalletTown,
-            origin: p(9, 7),
+            key: to,
             destination: to,
             tile: MetaTile::Warp { to_map, to_position: to },
             route: vec![],

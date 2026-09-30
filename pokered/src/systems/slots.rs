@@ -3,8 +3,6 @@
 //! `GameCornerSelectLuckySlotMachine`. The machine decides whether the player may win before the
 //! wheels move, and the wheels are then stopped where that answer needs them.
 
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::gfx::layers::Object;
 use crate::gfx::ui::SCREEN_TILES_X;
@@ -41,10 +39,11 @@ pub const LUCKY: u8 = 250;
 pub const BALL_LIT: u8 = 0x14;
 pub const BALL_OUT: u8 = 0x23;
 
-/// A wheel table, 36 bytes. A wheel is read a byte at a time, so a half symbol at a time.
-pub fn wheel(index: usize) -> &'static [u8] {
-    let table = [sym::SlotMachineWheel1, sym::SlotMachineWheel2, sym::SlotMachineWheel3][index];
-    &rom_slice(table)[..36]
+/// A wheel table as the cartridge reads it, a byte and so a half symbol at a time: each symbol's
+/// `dw` little-endian, its top pair of tiles first.
+pub fn wheel(index: usize) -> [u8; 36] {
+    let words = poke_core::tables::SLOT_MACHINE_WHEELS[index];
+    std::array::from_fn(|i| words[i / 2].to_le_bytes()[i % 2])
 }
 
 /// `SlotMachine_GetWheel1Tiles`..`3`: the bottom, middle and top symbol of each wheel, read at a
@@ -144,7 +143,11 @@ impl Wheels {
             return true;
         }
         self.slip[index] -= 1;
-        let stop = if index == 0 { self.stop_wheel1_early(flags, cartridge_bugs) } else { self.stop_wheel2_early(flags) };
+        let stop = if index == 0 {
+            self.stop_wheel1_early(flags, cartridge_bugs)
+        } else {
+            self.stop_wheel2_early(flags, cartridge_bugs)
+        };
         if stop {
             self.slip[index] = 0;
         }
@@ -162,16 +165,19 @@ impl Wheels {
         !cartridge_bugs && tiles.contains(&SEVEN)
     }
 
-    /// `SlotMachine_StopWheel2Early`: wheel 2 stops where wheels 1 and 2 could still line up. In
-    /// seven-and-bar mode it stops on a seven or a bar instead, read off the row the match search
-    /// left pointing at, which with no match at all is wheel 2's bottom symbol.
-    fn stop_wheel2_early(&self, flags: u8) -> bool {
+    /// `SlotMachine_StopWheel2Early`: wheel 2 stops where wheels 1 and 2 could still line up, in
+    /// seven-and-bar mode only on a line of sevens or bars.
+    fn stop_wheel2_early(&self, flags: u8, cartridge_bugs: bool) -> bool {
         let tiles = wheel_tiles(self.offsets);
         let matched = find_wheel1_wheel2_matches(&tiles);
         if flags & CAN_WIN_WITH_7_OR_BAR == 0 {
             return matched.is_some();
         }
-        tiles[1][matched.unwrap_or(0)] <= BAR
+        // With no match the cartridge reads wheel 2's bottom symbol and stops on a seven or bar anyway.
+        match matched {
+            Some(row) => tiles[1][row] <= BAR,
+            None => cartridge_bugs && tiles[1][0] <= BAR,
+        }
     }
 }
 
@@ -267,16 +273,11 @@ pub fn slot_reward(rng: &mut impl Rng, symbol: u8, flags: &mut u8, allow_matches
     }
 }
 
-/// `SlotReward*Text`, four bytes of it as the cartridge copies into `wStringBuffer`. The shorter
-/// ones bring two bytes of the next text with them, which the `@` between them never lets show.
+/// `SlotReward*Text`, the payout a line of `symbol` prints. The cartridge copies four bytes whatever
+/// the string's length, which only its `@` keeps from showing.
 pub fn reward_text(symbol: u8) -> Vec<u8> {
-    let at = match symbol {
-        SEVEN => sym::SlotReward300Text,
-        BAR => sym::SlotReward100Text,
-        CHERRY => sym::SlotReward8Text,
-        _ => sym::SlotReward15Text,
-    };
-    rom_slice(at)[..4].to_vec()
+    let text = poke_core::tables::SLOT_REWARD_TEXTS[(symbol - SEVEN) as usize / 4];
+    poke_core::charmap::encode(text).expect("a payout is in the charmap")
 }
 
 /// `SlotMachine_AnimWheel`: the twelve objects a wheel is drawn from, six rows of two, bottom row
@@ -313,22 +314,20 @@ pub fn ball_tiles(row: usize, tile: u8) -> [(usize, u8); 4] {
     [(at, tile), (at + 13, tile), (at + 20, tile + 1), (at + 33, tile + 1)]
 }
 
-/// `SlotMachineTiles2`, the symbols. The cartridge copies `$1c` tiles where the data is only `$18`
-/// long, so four tiles of whatever follows it come along, both times it is loaded.
+/// `SlotMachineTiles2`, the symbols. The cartridge copies `$1c` tiles of a `$18`-tile picture, the
+/// four past it being `MoveAnimation`'s code, which nothing draws; the recreation copies the picture.
 pub fn symbol_tiles() -> &'static [u8] {
-    &rom_slice(sym::SlotMachineTiles2)[..0x1C * TILE_BYTES]
+    poke_core::gfx::slots::RED_SLOTS_2
 }
 
 /// `SlotMachineTiles1`, the cabinet.
 pub fn cabinet_tiles() -> &'static [u8] {
-    let len = (sym::SlotMachineTiles1End.address - sym::SlotMachineTiles1.address) as usize;
-    &rom_slice(sym::SlotMachineTiles1)[..len]
+    poke_core::gfx::slots::RED_SLOTS_1
 }
 
-/// `SlotMachineMap`, the cabinet as a screen: twenty by eighteen tiles.
+/// `SlotMachineMap`, the cabinet as a screen: twenty tiles wide.
 pub fn screen_map() -> &'static [u8] {
-    let len = (sym::SlotMachineMapEnd.address - sym::SlotMachineMap.address) as usize;
-    &rom_slice(sym::SlotMachineMap)[..len]
+    poke_core::gfx::slots::SLOTS_TILEMAP
 }
 
 #[cfg(test)]
@@ -401,6 +400,24 @@ mod tests {
         assert_eq!(spin(none, false).offsets[0], none + 1);
     }
 
+    #[test]
+    fn in_seven_and_bar_mode_wheel_2_does_not_stop_without_a_match() {
+        let odd = || (1..WHEEL_WRAP).step_by(2);
+        let (one, two) = odd().flat_map(|a| odd().map(move |b| (a, b)))
+            .find(|&(a, b)| {
+                let tiles = wheel_tiles([a, b, Wheels::START]);
+                find_wheel1_wheel2_matches(&tiles).is_none() && tiles[1][0] <= BAR
+            })
+            .expect("a seven or bar at the bottom of wheel 2 with nothing lined up");
+        let spin = |cartridge_bugs: bool| {
+            let mut wheels = Wheels { offsets: [one, two, Wheels::START], slip: [0, SLIP] };
+            wheels.stop_or_anim(2, CAN_WIN_WITH_7_OR_BAR, cartridge_bugs);
+            wheels
+        };
+        assert_eq!(spin(false).offsets[1], two + 1);
+        assert_eq!((spin(true).offsets[1], spin(true).slip[1]), (two, 0), "the cartridge stops on it");
+    }
+
     #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
     struct AnimOutput {
         objects: Vec<Object>,
@@ -465,5 +482,19 @@ mod tests {
         let bottoms: Vec<u8> = (0..WHEEL_WRAP).filter(|o| o % 2 == 1).map(|o| wheel(0)[o as usize]).collect();
         assert_eq!(bottoms, (0..15).map(|i| wheel(0)[2 * i + 1]).collect::<Vec<_>>());
         assert!(wheel(0).len() > 30, "three rows past the last resting place");
+    }
+
+    /// A payout is its own string, not the four bytes the cartridge copies across the next one.
+    #[test]
+    fn a_payout_reads_only_its_own_string() {
+        let payouts: Vec<Vec<u8>> = [SEVEN, BAR, CHERRY, FISH, BIRD, MOUSE].map(reward_text).into();
+        let expected: Vec<Vec<u8>> = ["300", "100", "8", "15", "15", "15"].map(|t| poke_core::charmap::encode(t).unwrap()).into();
+        assert_eq!(payouts, expected);
+    }
+
+    /// The symbols are the twenty-four tiles of their picture and nothing after it.
+    #[test]
+    fn the_symbol_tiles_stop_at_the_end_of_their_picture() {
+        assert_eq!(symbol_tiles().len(), 0x18 * poke_core::rom_gfx::TILE_BYTES);
     }
 }

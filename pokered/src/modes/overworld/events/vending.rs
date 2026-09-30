@@ -1,7 +1,6 @@
 //! `VendingMachineMenu`: three drinks, a money box, and sixty rattles before one drops.
 
 use poke_core::item::vending_prices;
-use poke_core::symbols::pokered_symbols as sym;
 use crate::audio::data::sounds;
 use crate::gfx::text_boxes::money_box;
 use crate::mode::{Mode, Outcome};
@@ -19,7 +18,7 @@ const RATTLE_FRAMES: u8 = 2;
 const PRICE_CHECKED: [u8; 3] = [0x00, 0x02, 0x00];
 
 pub(super) fn vending_machine(_s: &mut Script) -> Flow {
-    print(sym::VendingMachineText1).then(Label::VendingMachineMenu)
+    print("VendingMachineText1").then(Label::VendingMachineMenu)
 }
 
 pub(super) fn menu(s: &mut Script) -> Flow {
@@ -30,8 +29,8 @@ pub(super) fn menu(s: &mut Script) -> Flow {
     ui.text_box_border(0, 3, 12, 8);
     s.update_sprites();
     let ui = &mut s.ctx.screen.ui;
-    place_rom_string(ui, 2, 5, sym::DrinkText);
-    place_rom_string(ui, 9, 6, sym::DrinkPriceText);
+    place_rom_string(ui, 2, 5, "DrinkText");
+    place_rom_string(ui, 9, 6, "DrinkPriceText");
     let menu = CursorMenu::new(0, CANCEL, (1, 5));
     Then::block(Block::Mode(Box::new(Mode::CursorMenu(menu)))).then(Label::VendingMachineChosen)
 }
@@ -39,14 +38,14 @@ pub(super) fn menu(s: &mut Script) -> Flow {
 pub(super) fn chosen(s: &mut Script) -> Flow {
     let row = match s.ow.rt.outcome {
         Some(Outcome::Chosen(row)) if row != CANCEL => row,
-        _ => return print(sym::VendingMachineText7).ret(),
+        _ => return print("VendingMachineText7").ret(),
     };
     if !has_enough(&s.ctx.world.money, &PRICE_CHECKED) {
-        return print(sym::VendingMachineText4).ret();
+        return print("VendingMachineText4").ret();
     }
     let (drink, price) = vending_prices()[row as usize];
     if !s.give_item(drink, 1) {
-        return print(sym::VendingMachineText6).ret();
+        return print("VendingMachineText6").ret();
     }
     s.ow.rt.events.vending_price = price;
     Flow::Jump(Label::VendingMachineDeliver(RATTLES).into())
@@ -54,7 +53,7 @@ pub(super) fn chosen(s: &mut Script) -> Flow {
 
 pub(super) fn deliver(s: &mut Script, rattles: u8) -> Flow {
     if rattles == 0 {
-        return print(sym::VendingMachineText5).then(Label::VendingMachinePaid);
+        return print("VendingMachineText5").then(Label::VendingMachinePaid);
     }
     s.delay_frames(RATTLE_FRAMES).then(Label::VendingMachineRattle(rattles))
 }

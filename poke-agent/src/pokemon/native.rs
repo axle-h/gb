@@ -203,12 +203,30 @@ impl NativeGame {
             .collect()
     }
 
+    /// The party alone, which outlives the overworld: the Hall of Fame takes its place.
+    pub fn party(&self) -> Result<PokemonParty, String> {
+        party(&self.world().party)
+    }
+
+    /// A finished run's badges, species owned and seen, money and party, read without the
+    /// overworld the ceremony has replaced.
+    pub fn final_tally(&self) -> Result<(Badge, usize, usize, u32, PokemonParty), String> {
+        let world = self.world();
+        Ok((
+            Badge::from_bits(world.badges).ok_or("cannot parse badges")?,
+            Pokedex::try_from_slice(&world.pokedex.owned)?.species().len(),
+            Pokedex::try_from_slice(&world.pokedex.seen)?.species().len(),
+            bcd(&world.money),
+            self.party()?,
+        ))
+    }
+
     /// Everything a policy is shown, from the recreation's own fields.
     pub fn game_state(&self) -> Result<GameState, String> {
         let world = self.world();
         let location = &world.location;
         let badges = Badge::from_bits(world.badges).ok_or("cannot parse badges")?;
-        let pokemon = party(&world.party)?;
+        let pokemon = self.party()?;
 
         let has_move = |want: PokemonMoveName| {
             pokemon.iter().any(|mon| mon.moves.iter().flatten().any(|m| m.name == want))

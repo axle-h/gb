@@ -1,13 +1,11 @@
 //! `PokemonMansion1F_Script`: the switch on the ground floor, which opens one wall and shuts three.
 
-use poke_core::symbols::DmgPointer;
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_events::EVENT_MANSION_SWITCH_ON;
-use poke_core::symbols::pokered_local_labels::PokemonMansion1FSwitchText as switch;
 use poke_core::symbols::pokered_map_scripts::{TEXT_POKEMONMANSION1F_SCIENTIST, TEXT_POKEMONMANSION1F_SWITCH};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
-use super::{text_at, Code, Flow, Script};
+use super::{text_named, Code, Flow, Script};
 
 /// `HORIZONTAL_GATE_BLOCK` and the plain floor that replaces it.
 const HORIZONTAL_GATE: u8 = 0x2D;
@@ -36,7 +34,7 @@ pub fn script(rt: &mut Script) -> Flow {
     check_replace_switch_door_blocks(rt);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().pokemon_mansion_1f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::Mansion1TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::Mansion1TrainerHeaders);
     rt.trainer_script(index).then(Label::StoreCurScript)
 }
 
@@ -54,19 +52,19 @@ fn check_replace_switch_door_blocks(rt: &mut Script) {
 
 /// `PokemonMansion1FSwitchText`, which every floor's switch is: the same routine over its own three
 /// texts, and one event that every floor's walls read.
-pub fn switch_text(rt: &mut Script, ask: DmgPointer, answered: impl Into<Code>) -> Flow {
-    rt.print_text(text_at(ask)).then(answered)
+pub fn switch_text(rt: &mut Script, ask: &'static str, answered: impl Into<Code>) -> Flow {
+    rt.print_text(text_named(ask)).then(answered)
 }
 
 /// The half after the yes/no. A press sets `BIT_CUR_MAP_LOADED_1`, so the next pass redraws the
 /// walls of whichever floor the player is on.
-pub fn switch_answered(rt: &mut Script, pressed: DmgPointer, not_pressed: DmgPointer, done: impl Into<Code>) -> Flow {
+pub fn switch_answered(rt: &mut Script, pressed: &'static str, not_pressed: &'static str, done: impl Into<Code>) -> Flow {
     if !rt.chose_yes() {
-        return rt.print_text(text_at(not_pressed)).ret();
+        return rt.print_text(text_named(not_pressed)).ret();
     }
     rt.set_do_not_wait_for_button_press(true);
     rt.set_cur_map_loaded(1);
-    rt.print_text(text_at(pressed)).then(done)
+    rt.print_text(text_named(pressed)).then(done)
 }
 
 /// The switch toggles its one event rather than setting it, which is what makes it a switch.
@@ -80,8 +78,8 @@ pub fn switch_done(rt: &mut Script) -> Flow {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     match text_id {
-        TEXT_POKEMONMANSION1F_SCIENTIST => Some(rt.talk_to_trainer(sym::Mansion1TrainerHeader0).ret()),
-        TEXT_POKEMONMANSION1F_SWITCH => Some(switch_text(rt, switch::Text, Label::SwitchAsk)),
+        TEXT_POKEMONMANSION1F_SCIENTIST => Some(rt.talk_to_trainer(trainers::Mansion1TrainerHeader0).ret()),
+        TEXT_POKEMONMANSION1F_SWITCH => Some(switch_text(rt, "PokemonMansion1FSwitchText.Text", Label::SwitchAsk)),
         _ => None,
     }
 }
@@ -93,7 +91,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             Flow::Return
         }
         Label::SwitchAsk => rt.yes_no_choice().then(Label::SwitchAnswered),
-        Label::SwitchAnswered => switch_answered(rt, switch::PressedText, switch::NotPressedText, Label::SwitchDone),
+        Label::SwitchAnswered => switch_answered(rt, "PokemonMansion1FSwitchText.PressedText", "PokemonMansion1FSwitchText.NotPressedText", Label::SwitchDone),
         Label::SwitchDone => switch_done(rt),
     }
 }

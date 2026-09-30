@@ -5,10 +5,9 @@ use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_ENTERED_BLUES_HOUSE, EVENT_GOT_POKEDEX, EVENT_GOT_TOWN_MAP};
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_BLUESHOUSE_DEFAULT, SCRIPT_BLUESHOUSE_NOOP,
     TEXT_BLUESHOUSE_DAISY_SITTING};
-use poke_core::symbols::pokered_symbols as sym;
 use poke_core::symbols::pokered_toggles::TOGGLE_TOWN_MAP;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
@@ -38,11 +37,11 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         return None;
     }
     Some(if rt.check_event(EVENT_GOT_TOWN_MAP) {
-        rt.print_text(text_at(sym::BluesHouseDaisyUseMapText)).ret()
+        rt.print_text(text_named("BluesHouseDaisyUseMapText")).ret()
     } else if rt.check_event(EVENT_GOT_POKEDEX) {
-        rt.print_text(text_at(sym::BluesHouseDaisyOfferMapText)).then(Label::GiveTownMap)
+        rt.print_text(text_named("BluesHouseDaisyOfferMapText")).then(Label::GiveTownMap)
     } else {
-        rt.print_text(text_at(sym::BluesHouseDaisyRivalAtLabText)).ret()
+        rt.print_text(text_named("BluesHouseDaisyRivalAtLabText")).ret()
     })
 }
 
@@ -50,10 +49,10 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
         Label::GiveTownMap => {
             if !rt.give_item(ItemId::TownMap, 1) {
-                return rt.print_text(text_at(sym::BluesHouseDaisyBagFullText)).ret();
+                return rt.print_text(text_named("BluesHouseDaisyBagFullText")).ret();
             }
             rt.hide_object(TOGGLE_TOWN_MAP);
-            rt.print_text(text_at(sym::GotMapText)).then(Label::GotMap)
+            rt.print_text(text_named("GotMapText")).then(Label::GotMap)
         }
         Label::GotMap => {
             rt.set_event(EVENT_GOT_TOWN_MAP);

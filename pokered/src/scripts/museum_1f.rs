@@ -3,17 +3,14 @@
 
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_BOUGHT_MUSEUM_TICKET, EVENT_GOT_OLD_AMBER};
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_MUSEUM1F_NOOP, TEXT_MUSEUM1F_GAMBLER, TEXT_MUSEUM1F_OLD_AMBER,
     TEXT_MUSEUM1F_SCIENTIST1, TEXT_MUSEUM1F_SCIENTIST2, TEXT_MUSEUM1F_SCIENTIST3};
 use poke_core::symbols::pokered_toggles::TOGGLE_OLD_AMBER;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use crate::input::Joypad;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
-use local::Museum1FScientist1Text as counter;
-use local::Museum1FScientist2Text as amber;
 
 /// A child's ticket, as BCD.
 const FEE: [u8; 3] = [0x00, 0x00, 0x50];
@@ -72,31 +69,31 @@ fn default_script(rt: &mut Script) -> Flow {
 fn counter_text(rt: &mut Script) -> Flow {
     let (x, y) = (rt.x(), rt.y());
     if (y == 4 && x == 13) || (y == 3 && x == 12) {
-        return rt.print_text(text_at(counter::DoYouKnowWhatAmberIsText)).then(Label::AmberAsked);
+        return rt.print_text(text_named("Museum1FScientist1Text.DoYouKnowWhatAmberIsText")).then(Label::AmberAsked);
     }
     if rt.check_event(EVENT_BOUGHT_MUSEUM_TICKET) {
-        return rt.print_text(text_at(counter::TakePlentyOfTimeText)).ret();
+        return rt.print_text(text_named("Museum1FScientist1Text.TakePlentyOfTimeText")).ret();
     }
     if y != 4 {
-        return rt.print_text(text_at(counter::GoToOtherSideText)).ret();
+        return rt.print_text(text_named("Museum1FScientist1Text.GoToOtherSideText")).ret();
     }
     rt.money_box();
     rt.clear_joy_held();
-    rt.print_text(text_at(counter::WouldYouLikeToComeInText)).then(Label::TicketAsked)
+    rt.print_text(text_named("Museum1FScientist1Text.WouldYouLikeToComeInText")).then(Label::TicketAsked)
 }
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     Some(match text_id {
         TEXT_MUSEUM1F_SCIENTIST1 => counter_text(rt),
-        TEXT_MUSEUM1F_GAMBLER => rt.print_text(text_at(local::Museum1FGamblerText::Text)).ret(),
+        TEXT_MUSEUM1F_GAMBLER => rt.print_text(text_named("Museum1FGamblerText.Text")).ret(),
         TEXT_MUSEUM1F_SCIENTIST2 => {
             if rt.check_event(EVENT_GOT_OLD_AMBER) {
-                return Some(rt.print_text(text_at(amber::GetTheOldAmberCheckText)).ret());
+                return Some(rt.print_text(text_named("Museum1FScientist2Text.GetTheOldAmberCheckText")).ret());
             }
-            rt.print_text(text_at(amber::TakeThisToAPokemonLabText)).then(Label::AmberOffered)
+            rt.print_text(text_named("Museum1FScientist2Text.TakeThisToAPokemonLabText")).then(Label::AmberOffered)
         }
-        TEXT_MUSEUM1F_SCIENTIST3 => rt.print_text(text_at(local::Museum1FScientist3Text::Text)).ret(),
-        TEXT_MUSEUM1F_OLD_AMBER => rt.print_text(text_at(local::Museum1FOldAmberText::Text)).ret(),
+        TEXT_MUSEUM1F_SCIENTIST3 => rt.print_text(text_named("Museum1FScientist3Text.Text")).ret(),
+        TEXT_MUSEUM1F_OLD_AMBER => rt.print_text(text_named("Museum1FOldAmberText.Text")).ret(),
         _ => return None,
     })
 }
@@ -109,9 +106,9 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
                 return deny_entry(rt);
             }
             if !rt.has_enough_money(FEE) {
-                return rt.print_text(text_at(counter::DontHaveEnoughMoneyText)).then(Label::NoMoney);
+                return rt.print_text(text_named("Museum1FScientist1Text.DontHaveEnoughMoneyText")).then(Label::NoMoney);
             }
-            rt.print_text(text_at(counter::ThankYouText)).then(Label::BoughtTicket)
+            rt.print_text(text_named("Museum1FScientist1Text.ThankYouText")).then(Label::BoughtTicket)
         }
         Label::NoMoney => deny_entry(rt),
         // Nothing arms a script to wait on the step, so the default routine asks again as soon as
@@ -140,22 +137,22 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         // Saying yes to knowing what amber is earns the tip about the lab, saying no the definition.
         Label::AmberAnswered => {
             let said = match rt.chose_yes() {
-                true => counter::TheresALabSomewhereText,
-                false => counter::AmberIsFossilizedTreeSapText,
+                true => "Museum1FScientist1Text.TheresALabSomewhereText",
+                false => "Museum1FScientist1Text.AmberIsFossilizedTreeSapText",
             };
-            rt.print_text(text_at(said)).ret()
+            rt.print_text(text_named(said)).ret()
         }
         Label::AmberOffered => {
             if !rt.give_item(ItemId::OldAmber, 1) {
-                return rt.print_text(text_at(amber::YouDontHaveSpaceText)).ret();
+                return rt.print_text(text_named("Museum1FScientist2Text.YouDontHaveSpaceText")).ret();
             }
             rt.set_event(EVENT_GOT_OLD_AMBER);
             rt.hide_object(TOGGLE_OLD_AMBER);
-            rt.print_text(text_at(amber::ReceivedOldAmberText)).ret()
+            rt.print_text(text_named("Museum1FScientist2Text.ReceivedOldAmberText")).ret()
         }
     }
 }
 
 fn deny_entry(rt: &mut Script) -> Flow {
-    rt.print_text(text_at(counter::ComeAgainText)).then(Label::DenyEntry)
+    rt.print_text(text_named("Museum1FScientist1Text.ComeAgainText")).then(Label::DenyEntry)
 }

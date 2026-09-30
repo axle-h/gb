@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::move_name::PokemonMoveName;
-use crate::rom_gfx::rom_slice;
-use crate::symbols::pokered_symbols;
-
-const MOVE_LENGTH: usize = 6;
+use crate::tables::MOVES;
 
 /// One row of `Moves`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,8 +17,9 @@ pub struct MoveData {
 impl MoveData {
     pub fn of(id: u8) -> Self {
         assert!(id != 0, "NO_MOVE has no row");
-        let row = &rom_slice(pokered_symbols::Moves)[(id as usize - 1) * MOVE_LENGTH..][..MOVE_LENGTH];
-        Self { animation: row[0], effect: row[1], power: row[2], move_type: row[3], accuracy: row[4], pp: row[5] }
+        let row = MOVES[id as usize - 1];
+        let accuracy = (row.accuracy as u16 * 0xFF / 100) as u8;
+        Self { animation: row.animation, effect: row.effect, power: row.power, move_type: row.move_type, accuracy, pp: row.pp }
     }
 
     pub fn of_move(name: PokemonMoveName) -> Self {

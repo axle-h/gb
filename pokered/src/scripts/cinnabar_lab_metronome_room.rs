@@ -3,10 +3,9 @@
 
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::EVENT_GOT_TM35;
-use poke_core::symbols::pokered_local_labels::CinnabarLabMetronomeRoomScientist1Text as scientist;
 use poke_core::symbols::pokered_map_scripts::TEXT_CINNABARLABMETRONOMEROOM_SCIENTIST1;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {}
@@ -28,18 +27,18 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         return None;
     }
     if rt.check_event(EVENT_GOT_TM35) {
-        return Some(rt.print_text(text_at(scientist::TM35ExplanationText)).ret());
+        return Some(rt.print_text(text_named("CinnabarLabMetronomeRoomScientist1Text.TM35ExplanationText")).ret());
     }
-    Some(rt.print_text(text_at(scientist::Text)).then(Label::Offered))
+    Some(rt.print_text(text_named("CinnabarLabMetronomeRoomScientist1Text.Text")).then(Label::Offered))
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
         Label::Offered => {
             if !rt.give_item(ItemId::Tm35Metronome, 1) {
-                return rt.print_text(text_at(scientist::TM35NoRoomText)).ret();
+                return rt.print_text(text_named("CinnabarLabMetronomeRoomScientist1Text.TM35NoRoomText")).ret();
             }
-            rt.print_text(text_at(scientist::ReceivedTM35Text)).then(Label::Received)
+            rt.print_text(text_named("CinnabarLabMetronomeRoomScientist1Text.ReceivedTM35Text")).then(Label::Received)
         }
         Label::Received => {
             rt.set_event(EVENT_GOT_TM35);

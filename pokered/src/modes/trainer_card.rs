@@ -11,8 +11,7 @@
 //! sees take time. `WaitForTextScrollButtonPress` seeds its blink with zero, so no `▼` is drawn.
 
 use poke_core::mon_gfx::pic_shades;
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
-use poke_core::symbols::{pokered_symbols, DmgPointer};
+use poke_core::rom_gfx::TILE_BYTES;
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
 use crate::gfx::sgb::PaletteCommand;
@@ -59,7 +58,7 @@ impl TrainerCard {
     /// `DrawTrainerInfo`.
     fn draw_trainer_info(ctx: &mut Ctx) {
         let tiles = &mut ctx.screen.tiles;
-        let picture = pic_tiles(&pic_shades(rom_slice(pokered_symbols::RedPicFront)), false).concat();
+        let picture = pic_tiles(&pic_shades(poke_core::gfx::player::RED), false).concat();
         tiles.load(V_CHARS2, &picture);
         let ui = &mut ctx.screen.ui;
         for column in 0..PIC_TILES {
@@ -74,14 +73,16 @@ impl TrainerCard {
         let shifted = picture[PIC_TILES * TILE_BYTES..(PIC_TILES + 0x1C) * TILE_BYTES].to_vec();
         tiles.load(V_CHARS2, &shifted);
 
-        let tiles_at = |start: DmgPointer, count: usize| &rom_slice(start)[..count * TILE_BYTES];
-        tiles.load(V_CHARS2 + BORDER_TILES as usize, tiles_at(pokered_symbols::TrainerInfoTextBoxTileGraphics, 8));
-        tiles.load(V_CHARS2 + LEADER_NAMES as usize, tiles_at(pokered_symbols::BlankLeaderNames, 0x17));
-        tiles.load(V_CHARS1 + (BADGE_NUMBERS - 0x80) as usize, tiles_at(pokered_symbols::BadgeNumbersTileGraphics, 8));
-        tiles.load(V_CHARS2 + FACES as usize, tiles_at(pokered_symbols::GymLeaderFaceAndBadgeTileGraphics, 8 * 8));
-        let colon = &tiles_at(pokered_symbols::TextBoxGraphics, TEXT_BOX_COLON + 1)[TEXT_BOX_COLON * TILE_BYTES..];
+        let card = &poke_core::gfx::trainer_card::TRAINER_INFO[..];
+        tiles.load(V_CHARS2 + BORDER_TILES as usize, &card[..8 * TILE_BYTES]);
+        // `$17` tiles from `BlankLeaderNames`, the last of them the `CircleTile` that follows it.
+        tiles.load(V_CHARS2 + LEADER_NAMES as usize, poke_core::gfx::trainer_card::BLANK_LEADER_NAMES);
+        tiles.load(V_CHARS2 + CIRCLE as usize, poke_core::gfx::trainer_card::CIRCLE_TILE);
+        tiles.load(V_CHARS1 + (BADGE_NUMBERS - 0x80) as usize, poke_core::gfx::trainer_card::BADGE_NUMBERS);
+        tiles.load(V_CHARS2 + FACES as usize, poke_core::gfx::trainer_card::BADGES);
+        let colon = &poke_core::gfx::font::FONT_EXTRA[TEXT_BOX_COLON * TILE_BYTES..(TEXT_BOX_COLON + 1) * TILE_BYTES];
         tiles.load(V_CHARS1 + (COLON - 0x80) as usize, colon);
-        let background = &tiles_at(pokered_symbols::TrainerInfoTextBoxTileGraphics, 9)[8 * TILE_BYTES..];
+        let background = &card[8 * TILE_BYTES..];
         tiles.load(V_CHARS1 + (BACKGROUND - 0x80) as usize, background);
 
         let ui = &mut ctx.screen.ui;

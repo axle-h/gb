@@ -3,10 +3,8 @@
 
 use poke_core::map::Map;
 use poke_core::map_header::TileSetId;
-use poke_core::rom_gfx::rom_slice;
 use poke_core::sprite::SpriteFacing;
-use poke_core::symbols::pokered_symbols;
-use poke_core::tilesets::{collision_tiles, door_tile_ids, ledge_tiles, warp_carpet_tile_ids, warp_tile_ids};
+use poke_core::tilesets::{collision_tiles, door_tile_ids, ledge_tiles, tile_pair_collisions, warp_carpet_tile_ids, warp_tile_ids};
 use serde::{Deserialize, Serialize};
 use super::map_view::TileMap;
 
@@ -15,46 +13,14 @@ pub fn tile_passable(tileset: TileSetId, tile: u8) -> bool {
     collision_tiles(tileset).contains(&tile)
 }
 
-/// `CheckForTilePairCollisions`.
+/// `CheckForTilePairCollisions`. The cartridge's walk steps a byte out of step after a row whose
+/// first tile alone matched, which no shipped row makes a difference to, and this reads rows.
 pub fn tile_pair_collision(tileset: u8, standing: u8, front: u8, water: bool) -> bool {
-    let table = rom_slice(if water { pokered_symbols::TilePairCollisionsWater } else { pokered_symbols::TilePairCollisionsLand });
-    pair_in(table, tileset, standing, front)
+    pair_in(tile_pair_collisions(water), tileset, standing, front)
 }
 
-/// The routine's walk over a table's bytes. No switch keeps the cartridge's version: a row whose
-/// first tile matched and second did not left it a byte out of step, which the shipped tables never
-/// make a difference to (no row of theirs repeats a tileset's first tile further down).
-fn pair_in(table: &[u8], tileset: u8, standing: u8, front: u8) -> bool {
-    let mut hl = 0;
-    loop {
-        let a = table[hl];
-        hl += 1;
-        if a == 0xFF {
-            return false;
-        }
-        if a != tileset {
-            hl += 2;
-            continue;
-        }
-        if table[hl] == standing {
-            hl += 1;
-            if table[hl] == front {
-                return true;
-            }
-            hl += 1;
-            continue;
-        }
-        hl += 1;
-        if table[hl] == standing {
-            let first = table[hl - 1];
-            hl += 1;
-            if first == front {
-                return true;
-            }
-            continue;
-        }
-        hl += 1;
-    }
+fn pair_in(rows: &[(u8, u8, u8)], tileset: u8, standing: u8, front: u8) -> bool {
+    rows.iter().any(|&(at, one, other)| at == tileset && [(one, other), (other, one)].contains(&(standing, front)))
 }
 
 /// `HandleLedges`' match: the buttons that jump from `standing` over `front` facing that way, on
@@ -157,7 +123,7 @@ mod tests {
     #[test]
     fn a_pair_whose_first_tile_alone_matches_leaves_the_table_in_step() {
         const CAVERN: u8 = TileSetId::Cavern as u8;
-        let table = [CAVERN, 0x20, 0x05, CAVERN, 0x20, 0x06, 0xFF];
+        let table = [(CAVERN, 0x20, 0x05), (CAVERN, 0x20, 0x06)];
         assert!(pair_in(&table, CAVERN, 0x20, 0x06));
         assert!(pair_in(&table, CAVERN, 0x06, 0x20));
         assert!(!pair_in(&table, CAVERN, 0x20, 0x07));

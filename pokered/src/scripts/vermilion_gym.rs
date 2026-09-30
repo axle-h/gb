@@ -1,20 +1,19 @@
 //! `VermilionGym_Script`: the double doors the two rubbish-bin switches open, LT.SURGE, the Thunder
 //! Badge and TM24.
 
+use poke_core::tables::trainers;
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_2ND_LOCK_OPENED, EVENT_BEAT_LT_SURGE,
     EVENT_BEAT_VERMILION_GYM_TRAINER_0, EVENT_BEAT_VERMILION_GYM_TRAINER_2, EVENT_GOT_TM24};
-use poke_core::symbols::pokered_local_labels::{VermilionGymGymGuideText, VermilionGymLTSurgeText};
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_VERMILIONGYM_DEFAULT,
     SCRIPT_VERMILIONGYM_LT_SURGE_AFTER_BATTLE, TEXT_VERMILIONGYM_GENTLEMAN, TEXT_VERMILIONGYM_GYM_GUIDE,
     TEXT_VERMILIONGYM_LT_SURGE, TEXT_VERMILIONGYM_LT_SURGE_RECEIVED_TM24,
     TEXT_VERMILIONGYM_LT_SURGE_THUNDER_BADGE_INFO, TEXT_VERMILIONGYM_LT_SURGE_TM24_NO_ROOM,
     TEXT_VERMILIONGYM_SAILOR, TEXT_VERMILIONGYM_SUPER_NERD};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use crate::input::Joypad;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `BIT_THUNDERBADGE`.
 const BIT_THUNDERBADGE: u8 = 2;
@@ -55,7 +54,7 @@ pub fn script(rt: &mut Script) -> Flow {
     }
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().vermilion_gym.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::VermilionGymTrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::VermilionGymTrainerHeaders);
     if index == SCRIPT_VERMILIONGYM_LT_SURGE_AFTER_BATTLE {
         return lt_surge_after_battle(rt);
     }
@@ -99,15 +98,15 @@ fn reset_scripts(rt: &mut Script) -> Flow {
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     Some(match text_id {
         TEXT_VERMILIONGYM_LT_SURGE => lt_surge_text(rt),
-        TEXT_VERMILIONGYM_GENTLEMAN => rt.talk_to_trainer(sym::VermilionGymTrainerHeader0).ret(),
-        TEXT_VERMILIONGYM_SUPER_NERD => rt.talk_to_trainer(sym::VermilionGymTrainerHeader1).ret(),
-        TEXT_VERMILIONGYM_SAILOR => rt.talk_to_trainer(sym::VermilionGymTrainerHeader2).ret(),
+        TEXT_VERMILIONGYM_GENTLEMAN => rt.talk_to_trainer(trainers::VermilionGymTrainerHeader0).ret(),
+        TEXT_VERMILIONGYM_SUPER_NERD => rt.talk_to_trainer(trainers::VermilionGymTrainerHeader1).ret(),
+        TEXT_VERMILIONGYM_SAILOR => rt.talk_to_trainer(trainers::VermilionGymTrainerHeader2).ret(),
         TEXT_VERMILIONGYM_GYM_GUIDE => {
             let words = match rt.badges() & (1 << BIT_THUNDERBADGE) != 0 {
-                true => VermilionGymGymGuideText::BeatLTSurgeText,
-                false => VermilionGymGymGuideText::ChampInMakingText,
+                true => "VermilionGymGymGuideText.BeatLTSurgeText",
+                false => "VermilionGymGymGuideText.ChampInMakingText",
             };
-            rt.print_text(text_at(words)).ret()
+            rt.print_text(text_named(words)).ret()
         }
         _ => return None,
     })
@@ -116,12 +115,12 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 /// `VermilionGymLTSurgeText`.
 fn lt_surge_text(rt: &mut Script) -> Flow {
     if !rt.check_event(EVENT_BEAT_LT_SURGE) {
-        return rt.print_text(text_at(VermilionGymLTSurgeText::PreBattleText)).then(Label::PreBattle);
+        return rt.print_text(text_named("VermilionGymLTSurgeText.PreBattleText")).then(Label::PreBattle);
     }
     if !rt.check_event(EVENT_GOT_TM24) {
         return Flow::Call(Label::ReceiveTm24.into(), Label::TextDone.into());
     }
-    rt.print_text(text_at(VermilionGymLTSurgeText::PostBattleAdviceText)).ret()
+    rt.print_text(text_named("VermilionGymLTSurgeText.PostBattleAdviceText")).ret()
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -154,7 +153,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             reset_scripts(rt)
         }
         Label::PreBattle => {
-            rt.save_end_battle_text(sym::VermilionGymLTSurgeReceivedThunderBadgeText);
+            rt.save_end_battle_text("VermilionGymLTSurgeReceivedThunderBadgeText");
             rt.engage_map_trainer(rt.sprite_index(), LT_SURGE);
             rt.maps().vermilion_gym.cur_script = SCRIPT_VERMILIONGYM_LT_SURGE_AFTER_BATTLE;
             rt.set_cur_map_script(SCRIPT_VERMILIONGYM_LT_SURGE_AFTER_BATTLE);

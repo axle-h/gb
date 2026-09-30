@@ -1,18 +1,17 @@
 //! `SeafoamIslandsB4F_Script`: the bottom floor's current, which pushes a surfing player back out of
 //! the water at the foot of the steps and, once both boulders are in, round the whirlpool to Articuno.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_events::{EVENT_SEAFOAM3_BOULDER1_DOWN_HOLE, EVENT_SEAFOAM3_BOULDER2_DOWN_HOLE,
     EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE, EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE};
-use poke_core::symbols::pokered_local_labels::SeafoamIslandsB4FMoveObjectScript;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_SEAFOAMISLANDSB4F_DEFAULT, SCRIPT_SEAFOAMISLANDSB4F_MOVE_OBJECT,
     SCRIPT_SEAFOAMISLANDSB4F_OBJECT_MOVING1, SCRIPT_SEAFOAMISLANDSB4F_OBJECT_MOVING2,
     SCRIPT_SEAFOAMISLANDSB4F_OBJECT_MOVING3, TEXT_SEAFOAMISLANDSB4F_ARTICUNO};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use crate::systems::overworld::location::WALKING;
 use poke_core::species::PokemonSpecies;
-use super::{text_at, Flow, Routine, Script};
+use super::{text_named, Flow, Routine, Script};
 
 /// `SeafoamIslandsB4FDefaultScript.Coords`, as (x, y): the water in front of the exit, one row of
 /// which is two steps from dry land and the other one.
@@ -86,8 +85,8 @@ fn default_script(rt: &mut Script) -> Flow {
 fn move_object_script(rt: &mut Script) -> Flow {
     let slowed = rt.check_event(EVENT_SEAFOAM4_BOULDER1_DOWN_HOLE) && rt.check_event(EVENT_SEAFOAM4_BOULDER2_DOWN_HOLE);
     let list = match rt.are_player_coords_in_array(&STRONG_CURRENT).filter(|_| !slowed) {
-        Some(1) => SeafoamIslandsB4FMoveObjectScript::RLEList_StrongCurrentNearLeftBoulder,
-        Some(_) => SeafoamIslandsB4FMoveObjectScript::RLEList_StrongCurrentNearRightBoulder,
+        Some(1) => poke_core::tables::rle_lists::SEAFOAM_ISLANDS_B4F_NEAR_LEFT_BOULDER,
+        Some(_) => poke_core::tables::rle_lists::SEAFOAM_ISLANDS_B4F_NEAR_RIGHT_BOULDER,
         None => {
             rt.maps().seafoam_islands_b4f.cur_script = SCRIPT_SEAFOAMISLANDSB4F_DEFAULT;
             return Flow::Return;
@@ -128,7 +127,7 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     // Articuno's object carries a species and a level rather than a trainer, so its header's zero
     // opponent starts a wild battle where a trainer's would start a trainer one.
     let before = Some(Label::ArticunoBattleText.into());
-    Some(rt.talk_to_trainer_asm(sym::ArticunoTrainerHeader, before, None).then(Label::ArticunoTalkedTo))
+    Some(rt.talk_to_trainer_asm(trainers::ArticunoTrainerHeader, before, None).then(Label::ArticunoTalkedTo))
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -136,7 +135,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::ArticunoTalkedTo => SCRIPT_SEAFOAMISLANDSB4F_OBJECT_MOVING3,
         Label::BattleEnded => SCRIPT_SEAFOAMISLANDSB4F_DEFAULT,
         Label::ArticunoBattleText => {
-            return rt.print_text(text_at(sym::SeafoamIslandsB4FArticunoBattleText)).then(Label::ArticunoCry);
+            return rt.print_text(text_named("SeafoamIslandsB4FArticunoBattleText")).then(Label::ArticunoCry);
         }
         Label::ArticunoCry => {
             rt.play_cry(PokemonSpecies::Articuno);

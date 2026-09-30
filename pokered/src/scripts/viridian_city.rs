@@ -5,14 +5,13 @@ use poke_core::item::ItemId;
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_VIRIDIAN_GYM_GIOVANNI, EVENT_GOT_POKEDEX, EVENT_GOT_TM42,
     EVENT_VIRIDIAN_GYM_OPEN};
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::*;
-use poke_core::symbols::pokered_symbols::VIRIDIANCITY_YOUNGSTER2;
+use poke_core::symbols::pokered_map_scripts::VIRIDIANCITY_YOUNGSTER2;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use crate::modes::overworld::script::SpritePosition;
 use crate::systems::overworld::sprites::SPRITE_FACING_DOWN;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `~(1 << BIT_EARTHBADGE)`: every badge but the Earth Badge, which is when Giovanni is back.
 const ALL_BUT_EARTH: u8 = 0x7F;
@@ -116,34 +115,34 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         TEXT_VIRIDIANCITY_GAMBLER1 => {
             let returned = rt.badges() == ALL_BUT_EARTH || rt.check_event(EVENT_BEAT_VIRIDIAN_GYM_GIOVANNI);
             let words = match returned {
-                true => local::ViridianCityGambler1Text::GymLeaderReturnedText,
-                false => local::ViridianCityGambler1Text::GymAlwaysClosedText,
+                true => "ViridianCityGambler1Text.GymLeaderReturnedText",
+                false => "ViridianCityGambler1Text.GymAlwaysClosedText",
             };
-            rt.print_text(text_at(words)).ret()
+            rt.print_text(text_named(words)).ret()
         }
         TEXT_VIRIDIANCITY_YOUNGSTER2 => {
-            rt.print_text(text_at(local::ViridianCityYoungster2Text::YouWantToKnowAboutText))
+            rt.print_text(text_named("ViridianCityYoungster2Text.YouWantToKnowAboutText"))
                 .then(Label::Youngster2YesNo)
         }
         TEXT_VIRIDIANCITY_GIRL => {
             let words = match rt.check_event(EVENT_GOT_POKEDEX) {
-                true => local::ViridianCityGirlText::WhenIGoShopText,
-                false => local::ViridianCityGirlText::HasntHadHisCoffeeYetText,
+                true => "ViridianCityGirlText.WhenIGoShopText",
+                false => "ViridianCityGirlText.HasntHadHisCoffeeYetText",
             };
-            rt.print_text(text_at(words)).ret()
+            rt.print_text(text_named(words)).ret()
         }
         TEXT_VIRIDIANCITY_OLD_MAN_SLEEPY => {
-            rt.print_text(text_at(local::ViridianCityOldManSleepyText::PrivatePropertyText))
+            rt.print_text(text_named("ViridianCityOldManSleepyText.PrivatePropertyText"))
                 .then(Label::OldManSleepyStopped)
         }
         TEXT_VIRIDIANCITY_FISHER => {
             if rt.check_event(EVENT_GOT_TM42) {
-                return Some(rt.print_text(text_at(local::ViridianCityFisherText::TM42ExplanationText)).ret());
+                return Some(rt.print_text(text_named("ViridianCityFisherText.TM42ExplanationText")).ret());
             }
-            rt.print_text(text_at(local::ViridianCityFisherText::YouCanHaveThisText)).then(Label::FisherGiveTm)
+            rt.print_text(text_named("ViridianCityFisherText.YouCanHaveThisText")).then(Label::FisherGiveTm)
         }
         TEXT_VIRIDIANCITY_OLD_MAN => {
-            rt.print_text(text_at(local::ViridianCityOldManText::HadMyCoffeeNowText)).then(Label::OldManDelay)
+            rt.print_text(text_named("ViridianCityOldManText.HadMyCoffeeNowText")).then(Label::OldManDelay)
         }
         _ => return None,
     })
@@ -181,27 +180,27 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::Youngster2YesNo => rt.yes_no_choice().then(Label::Youngster2Answered),
         Label::Youngster2Answered => {
             let words = match rt.chose_yes() {
-                true => local::ViridianCityYoungster2Text::CaterpieAndWeedleDescriptionText,
-                false => local::ViridianCityYoungster2Text::OkThenText,
+                true => "ViridianCityYoungster2Text.CaterpieAndWeedleDescriptionText",
+                false => "ViridianCityYoungster2Text.OkThenText",
             };
-            rt.print_text(text_at(words)).ret()
+            rt.print_text(text_named(words)).ret()
         }
         Label::FisherGiveTm => {
             if !rt.give_item(ItemId::Tm42DreamEater, 1) {
-                return rt.print_text(text_at(local::ViridianCityFisherText::TM42NoRoomText)).ret();
+                return rt.print_text(text_named("ViridianCityFisherText.TM42NoRoomText")).ret();
             }
             rt.set_event(EVENT_GOT_TM42);
-            rt.print_text(text_at(local::ViridianCityFisherText::ReceivedTM42Text)).ret()
+            rt.print_text(text_named("ViridianCityFisherText.ReceivedTM42Text")).ret()
         }
         Label::OldManDelay => rt.delay_frames(2).then(Label::OldManYesNo),
         Label::OldManYesNo => rt.yes_no_choice().then(Label::OldManAnswered),
         // The old man asks whether the player is in a hurry, so yes is the answer that refuses him.
         Label::OldManAnswered => {
             if rt.chose_yes() {
-                return rt.print_text(text_at(local::ViridianCityOldManText::TimeIsMoneyText)).ret();
+                return rt.print_text(text_named("ViridianCityOldManText.TimeIsMoneyText")).ret();
             }
             rt.maps().viridian_city.cur_script = SCRIPT_VIRIDIANCITY_OLD_MAN_START_CATCH_TRAINING;
-            rt.print_text(text_at(local::ViridianCityOldManText::KnowHowToCatchPokemonText)).ret()
+            rt.print_text(text_named("ViridianCityOldManText.KnowHowToCatchPokemonText")).ret()
         }
     }
 }

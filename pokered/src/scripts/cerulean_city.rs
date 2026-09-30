@@ -4,10 +4,8 @@
 use poke_core::item::ItemId;
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_CERULEAN_RIVAL, EVENT_BEAT_CERULEAN_ROCKET_THIEF};
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::*;
-use poke_core::symbols::pokered_symbols as sym;
-use poke_core::symbols::pokered_symbols::{CERULEANCITY_RIVAL, CERULEANCITY_ROCKET};
+use poke_core::symbols::pokered_map_scripts::{CERULEANCITY_RIVAL, CERULEANCITY_ROCKET};
 use poke_core::symbols::pokered_toggles::{TOGGLE_CERULEAN_GUARD_1, TOGGLE_CERULEAN_GUARD_2,
     TOGGLE_CERULEAN_RIVAL, TOGGLE_CERULEAN_ROCKET};
 use poke_core::trainer_headers::OPP_ID_OFFSET;
@@ -16,7 +14,7 @@ use crate::audio::data::{sounds, SoundId};
 use crate::input::Joypad;
 use crate::modes::overworld::movement::{NPC_MOVEMENT_DOWN, NPC_MOVEMENT_LEFT, NPC_MOVEMENT_RIGHT};
 use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_UP};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `PLAYER_DIR_DOWN` and `PLAYER_DIR_UP`.
 const PLAYER_DIR_UP: u8 = 8;
@@ -160,33 +158,33 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     Some(match text_id {
         TEXT_CERULEANCITY_RIVAL => {
             let words = match rt.check_event(EVENT_BEAT_CERULEAN_RIVAL) {
-                true => sym::CeruleanCityRivalIWentToBillsText,
-                false => local::CeruleanCityRivalText::PreBattleText,
+                true => "CeruleanCityRivalIWentToBillsText",
+                false => "CeruleanCityRivalText.PreBattleText",
             };
-            rt.print_text(text_at(words)).ret()
+            rt.print_text(text_named(words)).ret()
         }
         TEXT_CERULEANCITY_ROCKET => rocket_text(rt),
         // Two people watch the same Slowbro and neither is obeyed; which line either says is rolled.
         TEXT_CERULEANCITY_COOLTRAINER_F1 => {
-            use local::CeruleanCityCooltrainerF1Text as words;
+            
             let roll = rt.random();
             let said = match roll {
-                180.. => words::SlowbroUseSonicboomText,
-                100.. => words::SlowbroPunchText,
-                _ => words::SlowbroWithdrawText,
+                180.. => "CeruleanCityCooltrainerF1Text.SlowbroUseSonicboomText",
+                100.. => "CeruleanCityCooltrainerF1Text.SlowbroPunchText",
+                _ => "CeruleanCityCooltrainerF1Text.SlowbroWithdrawText",
             };
-            rt.print_text(text_at(said)).ret()
+            rt.print_text(text_named(said)).ret()
         }
         TEXT_CERULEANCITY_SLOWBRO => {
-            use local::CeruleanCitySlowbroText as words;
+            
             let roll = rt.random();
             let said = match roll {
-                180.. => words::TookASnoozeText,
-                120.. => words::IsLoafingAroundText,
-                60.. => words::TurnedAwayText,
-                _ => words::IgnoredOrdersText,
+                180.. => "CeruleanCitySlowbroText.TookASnoozeText",
+                120.. => "CeruleanCitySlowbroText.IsLoafingAroundText",
+                60.. => "CeruleanCitySlowbroText.TurnedAwayText",
+                _ => "CeruleanCitySlowbroText.IgnoredOrdersText",
             };
-            rt.print_text(text_at(said)).ret()
+            rt.print_text(text_named(said)).ret()
         }
         _ => return None,
     })
@@ -194,25 +192,25 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 
 /// `CeruleanCityRocketText`: he fights on the spot, and once beaten hands over TM28 and goes.
 fn rocket_text(rt: &mut Script) -> Flow {
-    use local::CeruleanCityRocketText as words;
+    
     if !rt.check_event(EVENT_BEAT_CERULEAN_ROCKET_THIEF) {
-        return rt.print_text(text_at(words::Text)).then(Label::RocketBattleText);
+        return rt.print_text(text_named("CeruleanCityRocketText.Text")).then(Label::RocketBattleText);
     }
-    rt.print_text(text_at(words::IllReturnTheTMText)).then(Label::RocketTmText)
+    rt.print_text(text_named("CeruleanCityRocketText.IllReturnTheTMText")).then(Label::RocketTmText)
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
-    use local::CeruleanCityRocketText as rocket;
+    
     match label {
         Label::RocketGreeting => rt.display_text_id(TEXT_CERULEANCITY_ROCKET).ret(),
         Label::RivalBattleText => {
-            rt.save_end_battle_text(sym::CeruleanCityRivalDefeatedText);
+            rt.save_end_battle_text("CeruleanCityRivalDefeatedText");
             let set = match PokemonSpecies::from_repr(rt.globals().rival_starter) {
                 Some(PokemonSpecies::Squirtle) => 7,
                 Some(PokemonSpecies::Bulbasaur) => 8,
                 _ => 9,
             };
-            rt.start_trainer_battle(OPP_RIVAL1, set, sym::CeruleanCityRivalDefeatedText);
+            rt.start_trainer_battle(OPP_RIVAL1, set, "CeruleanCityRivalDefeatedText");
             rt.clear_joy_held();
             rt.maps().cerulean_city.cur_script = SCRIPT_CERULEANCITY_RIVAL_DEFEATED;
             rt.set_sprite_facing_direction_and_delay(CERULEANCITY_RIVAL, SPRITE_FACING_DOWN).ret()
@@ -240,17 +238,17 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             Flow::Return
         }
         Label::RocketBattleText => {
-            rt.save_end_battle_text(rocket::IGiveUpText);
+            rt.save_end_battle_text("CeruleanCityRocketText.IGiveUpText");
             rt.engage_map_trainer(CERULEANCITY_ROCKET, 0);
             rt.maps().cerulean_city.cur_script = SCRIPT_CERULEANCITY_ROCKET_DEFEATED;
             Flow::Return
         }
         Label::RocketTmText => {
             if !rt.give_item(ItemId::Tm28Dig, 1) {
-                return rt.print_text(text_at(rocket::TM28NoRoomText)).ret();
+                return rt.print_text(text_named("CeruleanCityRocketText.TM28NoRoomText")).ret();
             }
             rt.set_do_not_wait_for_button_press(true);
-            rt.print_text(text_at(rocket::ReceivedTM28Text)).then(Label::RocketTmReceived)
+            rt.print_text(text_named("CeruleanCityRocketText.ReceivedTM28Text")).then(Label::RocketTmReceived)
         }
         // `CeruleanHideRocket`: the hole in the wall is a guard again, behind a fade.
         Label::RocketTmReceived => rt.gb_fade_out_to_black().then(Label::RocketHidden),

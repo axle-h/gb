@@ -6,9 +6,8 @@
 //! frame. A latched register, and the shadow OAM, written in one frame reach the screen in the
 //! next, as `VBlank` copies them; `rBGP`, `rWX` and a mid-frame `rSCX` land at once.
 
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
+use poke_core::rom_gfx::TILE_BYTES;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::DmgPointer;
 use serde::{Deserialize, Serialize};
 use crate::gfx::layers::{Object, TileMap, Window};
 use crate::gfx::tiles::V_CHARS2;
@@ -140,20 +139,15 @@ impl MovieScreen {
     }
 }
 
-/// Bytes between two labels.
-pub fn between(start: DmgPointer, end: DmgPointer) -> &'static [u8] {
-    &rom_slice(start)[..(end.address - start.address) as usize]
-}
-
 /// `ClearScreen` without its `Delay3`.
 pub fn clear_screen(ui: &mut UiSurface) {
     ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
 }
 
-/// A compressed 7x7 pic into `vFrontPic`, as `IntroDisplayPicCenteredOrUpperRight` and
-/// `HoFLoadPlayerPics` decompress one.
-pub fn load_pic(ctx: &mut Ctx, pic: DmgPointer) {
-    let tiles = pic_tiles(&poke_core::mon_gfx::pic_shades(rom_slice(pic)), false);
+/// A 7x7 pic into `vFrontPic`, as `IntroDisplayPicCenteredOrUpperRight` and `HoFLoadPlayerPics`
+/// load one.
+pub fn load_pic(ctx: &mut Ctx, pic: &[u8]) {
+    let tiles = pic_tiles(&poke_core::mon_gfx::pic_shades(pic), false);
     load_front_pic_tiles(ctx, &tiles);
 }
 
@@ -182,11 +176,7 @@ pub fn copy_pic_to_tile_map(ui: &mut UiSurface, x: usize, y: usize, start: u8, f
 /// `CopyTileIDsFromList` over `TileIDListPointerTable`'s entry: `width` by `height` ids, row by row,
 /// each `base` past.
 pub fn copy_tile_ids(ui: &mut UiSurface, x: usize, y: usize, entry: usize, base: u8) {
-    let pointers = rom_slice(poke_core::symbols::pokered_symbols::TileIDListPointerTable);
-    let row = &pointers[entry * 3..entry * 3 + 3];
-    let list = DmgPointer { address: u16::from_le_bytes([row[0], row[1]]), ..poke_core::symbols::pokered_symbols::TileIDListPointerTable };
-    let (height, width) = ((row[2] >> 4) as usize, (row[2] & 0xF) as usize);
-    let ids = rom_slice(list);
+    let (ids, width, height) = poke_core::gfx::TILE_ID_LISTS[entry];
     for r in 0..height {
         for c in 0..width {
             ui.set(x + c, y + r, ids[r * width + c].wrapping_add(base));

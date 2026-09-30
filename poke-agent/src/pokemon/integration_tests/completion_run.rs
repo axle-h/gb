@@ -15,12 +15,14 @@ use crate::pokemon::integration_tests::cheats::Cheats;
 use crate::pokemon::integration_tests::completion::{checklist, Entry, Ledger, Legend, Way, WorldFlags};
 use crate::pokemon::integration_tests::scripted_brain::{names_map, Intent};
 use crate::pokemon::integration_tests::llm_harness::{Brain, Call, LlmRun, NativeLlmRun, Reply, TurnRequest};
+use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::PokemonApiTrait;
 use crate::pokemon::symbols::DmgPointerRead;
 
 /// Trainers are fought by the script; a wild battle is the brain's, because only it knows what the
-/// run is hunting.
+/// run is hunting. A frozen lead is switched out while anyone else can fight, or else cured from the
+/// bag: only a Fire move thaws it, so it would sit out every turn until it fainted.
 const SCRIPT: &str = r#"
 if battle.kind == "wild" { battle.ask(); }
 if battle.me.fainted {
@@ -28,7 +30,7 @@ if battle.me.fainted {
         if !mon.fainted && mon.slot != battle.me.slot { battle.switch_to(mon); }
     }
 }
-if battle.best_move != () { battle.fight(battle.best_move); }
+if battle.best_move != () && battle.me.status != "frozen" { battle.fight(battle.best_move); }
 for mon in battle.party {
     if !mon.fainted && mon.slot != battle.me.slot {
         for mv in mon.moves {
@@ -36,6 +38,12 @@ for mon in battle.party {
         }
     }
 }
+if battle.me.status == "frozen" {
+    for item in battle.bag {
+        if item.name == "IceHeal" || item.name == "FullHeal" || item.name == "FullRestore" { battle.use_item(item.name); }
+    }
+}
+if battle.best_move != () { battle.fight(battle.best_move); }
 battle.ask();
 "#;
 
@@ -387,8 +395,9 @@ impl CompletionBrain {
     pub fn finished(&self) -> bool {
         // A machine sent to be taught is checked on the next overworld turn, and a phase that ends
         // on the call never reaches it: the fixture is cut with the move still on its way to the
-        // slot, and the phase after opens with a party that cannot do what it was taught.
-        self.at >= self.steps.len() && self.taught.is_none()
+        // slot, and the phase after opens with a party that cannot do what it was taught. A talk
+        // is done when it is chosen and happens after, so the tour's last one waits for its verdict.
+        self.at >= self.steps.len() && self.taught.is_none() && self.taking.is_none()
     }
 
     fn saw(&self, way: Way) {
@@ -568,7 +577,7 @@ impl CompletionBrain {
         // Never a legendary: each is its phase's `Hunt`, and one met before the collecting is on is
         // run from, which hides it for the rest of the game.
         let things = rows.iter().map(|(id, _)| id.clone())
-            .filter(|id| id.matches(':').count() == 1 && !id.contains("Boulder"))
+            .filter(|id| OverworldAction::names_a_sprite(id) && !id.contains("Boulder"))
             .filter(|id| !Legend::iter().any(|legend| id.ends_with(&format!(":{legend:?}"))))
             .collect();
         // A walk a battle interrupted comes back to the same pocket, which is no passage; one the
@@ -693,7 +702,7 @@ impl CompletionBrain {
         // cutting a tree that was not cut before in this exploring: a cut row carries coordinates
         // and so two colons, and Route 2's eight trees regrow on every battle, so counting each one
         // as standing still spent the whole idle allowance on the work that opens the route.
-        if id.matches(':').count() == 1 || (id.ends_with(":CutTree") && self.explore_cut.insert(id.clone())) {
+        if OverworldAction::names_a_sprite(&id) || (id.ends_with(":CutTree") && self.explore_cut.insert(id.clone())) {
             self.explore_idle = 0;
         }
         *self.travelled.entry(format!("{map}|{id}")).or_default() += 1;
@@ -939,7 +948,7 @@ impl CompletionBrain {
                 }
                 Step::Clear(skip) => {
                     let next = rows.iter().map(|(id, _)| id)
-                        .filter(|id| id.matches(':').count() == 1)
+                        .filter(|id| OverworldAction::names_a_sprite(id))
                         .filter(|id| !id.contains("Boulder") && !skip.iter().any(|s| id.ends_with(&format!(":{s}"))))
                         .find(|id| !chosen.contains(*id)).cloned();
                     if next.is_none() { self.at += 1; continue }
@@ -1304,7 +1313,11 @@ impl Brain for CompletionBrain {
                                  ("Got away safely", Way::SafariRun), ("Time's up", Way::SafariOutOfSteps)] {
                 if said.contains(words) {
                     self.saw(way);
-                    self.safari_seen.insert(way);
+                    // A hunt before the step can run a game out of steps, and the step then
+                    // plays a game of its own.
+                    if matches!(self.steps.get(self.at), Some(Step::Safari)) {
+                        self.safari_seen.insert(way);
+                    }
                 }
             }
         }
@@ -1319,6 +1332,13 @@ impl Brain for CompletionBrain {
         // latest outcome is the verdict, since a walk cut short can be taken up again after the
         // battle and finish; a first turn with neither an outcome nor a walk begun is a choice the
         // policy never carried out.
+        // A row whose id the game moved on from is refused before any walk begins, and the turn
+        // that says so has nothing since the last decision to show for it.
+        if let Some((_, _, verdict)) = self.taking.as_mut()
+            && verdict.is_none() && request.situation().contains("` is no longer available")
+        {
+            *verdict = Some(true);
+        }
         if let Some((_, _, verdict)) = self.taking.as_mut()
             && let Some(since) = request.situation().split("### Since your last decision").nth(1)
         {
@@ -1391,7 +1411,8 @@ pub fn play_phases_with(fixture: &'static [u8], name: &'static str, phases: Vec<
     let (stuck, turns) = (Arc::clone(&brain.stuck), Arc::clone(&brain.turns));
     let done = Arc::new(Mutex::new(false));
     let finished = Arc::clone(&done);
-    let brain = FinishFlag { brain, phases, phase: 1, finished };
+    let unresolved = Arc::new(Mutex::new(BTreeMap::new()));
+    let brain = FinishFlag { brain, phases, phase: 1, finished, unresolved: Arc::clone(&unresolved) };
     let mut builder = LlmRun::builder(fixture)
         .named(name)
         .game_time(Duration::from_mins(game_minutes))
@@ -1452,6 +1473,7 @@ pub fn play_phases_with(fixture: &'static [u8], name: &'static str, phases: Vec<
     let turns = *turns.lock().expect("not poisoned");
     println!("[completion:{name}] {total} steps, {turns} turns, {:?} of game time in {:?}",
              run.fixture().total_cycles.to_duration(), started.elapsed());
+    print_unresolved(name, &unresolved);
     if let Some(why) = stuck.lock().expect("not poisoned").clone() {
         // Where it stuck, to load and look at.
         let at = std::env::temp_dir().join(format!("{name}-stuck.bin"));
@@ -1502,7 +1524,8 @@ pub fn play_phases_native(seed: u64, name: &'static str, phases: Vec<Vec<Step>>,
     let (stuck, turns) = (Arc::clone(&brain.stuck), Arc::clone(&brain.turns));
     let done = Arc::new(Mutex::new(false));
     let finished = Arc::clone(&done);
-    let brain = FinishFlag { brain, phases, phase: 1, finished };
+    let unresolved = Arc::new(Mutex::new(BTreeMap::new()));
+    let brain = FinishFlag { brain, phases, phase: 1, finished, unresolved: Arc::clone(&unresolved) };
     // At a served game's pace: a text with no wait on it is on screen only for the frames it is
     // printed in, which instant pacing makes none.
     let game = crate::pokemon::integration_tests::playthrough::native_new_game(seed, true, pokered::Pacing::Faithful);
@@ -1540,6 +1563,7 @@ pub fn play_phases_native(seed: u64, name: &'static str, phases: Vec<Vec<Step>>,
     let frames = run.agent().game().frames();
     println!("[completion:{name}] {total} steps, {turns} turns, {} of game time in {:?}",
              Duration::from_secs(frames / 60).as_secs(), started.elapsed());
+    print_unresolved(name, &unresolved);
     let why = match ticked {
         Err(why) => Some(why),
         Ok(_) => stuck.lock().expect("not poisoned").clone(),
@@ -1557,17 +1581,45 @@ pub fn play_phases_native(seed: u64, name: &'static str, phases: Vec<Vec<Step>>,
 }
 
 /// The brain, handed the next phase's steps as each finishes, with a flag the driver reads to know
-/// every step of the last has been taken.
+/// every step of the last has been carried out.
 struct FinishFlag {
     brain: CompletionBrain,
     phases: VecDeque<Vec<Step>>,
     phase: usize,
     finished: Arc<Mutex<bool>>,
+    /// Every chosen id the policy could not find again, by kind.
+    unresolved: Arc<Mutex<BTreeMap<String, usize>>>,
+}
+
+/// The kind of every id the policy refused as gone, counted, since each one is a paid turn to a
+/// model: an id is meant to outlive the turn it was offered on.
+fn print_unresolved(name: &str, unresolved: &Mutex<BTreeMap<String, usize>>) {
+    let unresolved = unresolved.lock().expect("not poisoned");
+    let rows: Vec<String> = unresolved.iter().map(|(kind, n)| format!("{kind} {n}")).collect();
+    println!("[completion:{name}] {} ids no longer available: {}",
+             unresolved.values().sum::<usize>(), rows.join(", "));
 }
 
 impl Brain for FinishFlag {
     fn respond(&mut self, request: &TurnRequest) -> Reply {
+        // Once a turn: the note heads the situation, and a turn's later tool steps repeat it.
+        if request.messages.last().is_some_and(|message| message.role == "user") {
+            let situation = request.situation();
+            let gone = situation.split_once("` is no longer available").map(|(id, _)| (id, "gone"))
+                .or_else(|| situation.split_once("` is an id for `").map(|(id, _)| (id, "another map")));
+            if let Some((id, why)) = gone
+                && let Some(id) = id.rsplit('`').next()
+            {
+                println!("[completion] unresolved ({why}): {id}");
+                let kind = match why {
+                    "gone" => id.rsplit(':').next().unwrap_or(id).trim_end_matches(char::is_numeric).to_string(),
+                    _ => why.to_string(),
+                };
+                *self.unresolved.lock().expect("not poisoned").entry(kind).or_default() += 1;
+            }
+        }
         let before = self.brain.at;
+        let was_finished = self.brain.finished();
         let reply = self.brain.respond(request);
         for step in before..self.brain.at.min(self.brain.steps.len()) {
             println!("[completion] step {} done on {}: {:?}", step + 1,
@@ -1584,7 +1636,12 @@ impl Brain for FinishFlag {
                     next.turns = Arc::clone(&self.brain.turns);
                     self.brain = next;
                 }
-                None => *self.finished.lock().expect("not poisoned") = true,
+                // The reply that takes the last step is carried out after this turn, so the run is
+                // over at the next free turn: stopping here drops that step, a talk to an aide
+                // included.
+                None if was_finished && request.has_tool("choose_action") && !request.is_battle() =>
+                    *self.finished.lock().expect("not poisoned") = true,
+                None => {}
             }
         }
         reply
@@ -1928,6 +1985,9 @@ pub fn to_celadon() -> Vec<Step> {
         Hunt { species: "*", row: "Pace", ball: "MasterBall", way: Way::WildOnACaveFloor, on: "" },
         GoTo("DiglettsCaveRoute2"), Clear(&[]), GoTo("Route2"),
         Explore { maps: &["Route2", "Route2TradeHouse", "Route2Gate"], patience: 300 },
+        // The exploring can spend its whole idle allowance re-cutting the trees every battle
+        // regrows before the trade house's door comes up, and the Abra is for its trade.
+        GoTo("Route2TradeHouse"), Clear(&[]),
         GoTo("DiglettsCaveRoute2"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute11"), GoTo("Route11"),
         GoTo("VermilionCity"), GoTo("Route6"), GoTo("UndergroundPathRoute6"), GoTo("UndergroundPathNorthSouth"),
         GoTo("UndergroundPathRoute5"), GoTo("Route5"), GoTo("CeruleanCity"),
@@ -3068,7 +3128,7 @@ pub fn to_the_middle_errands() -> Vec<Step> {
         // The Slowbro the trade over Route 18 wants was caught in Cerulean Cave, into the box the
         // north errands left current. The party comes in full, and slot 3 is the seat the
         // collecting fills, so that is the one that makes room. Lickitung and the Nidorino a candy
-        // makes are the two species that take the count to the fifty the Route 15 aide asks for.
+        // makes are two more species toward the fifty the Route 15 aide asks for.
         AtPc(Pc::ChangeBox(4)), AtPc(Pc::DepositSlot(3)), AtPc(Pc::Withdraw("Slowbro")),
         GoTo("FuchsiaCity"),
         GoTo("Route18"), GoTo("Route18Gate1F"), GoTo("Route18Gate2F"), Trade("Youngster"),
@@ -3216,6 +3276,32 @@ fn completion_phase_cinnabar_errands() {
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
 
+#[test]
+fn the_tour_script_switches_a_frozen_lead_out() {
+    use crate::llm::battle_script::{run, scenarios, Outcome};
+    use crate::pokemon::battle::BattleAction;
+    use crate::pokemon::status::PokemonStatus;
+    let mut state = scenarios::hurt_trainer();
+    state.pokemon.get_mut(0).expect("a lead").status = PokemonStatus::Frozen;
+    state.battle.as_mut().expect("a battle").player.status = PokemonStatus::Frozen;
+    let outcome = run(SCRIPT, &state, 2).outcome;
+    assert!(matches!(outcome, Outcome::Action(BattleAction::SwitchPokemon { slot: 1, .. })), "got {outcome:?}");
+}
+
+#[test]
+fn the_tour_script_cures_a_frozen_lead_with_nobody_to_switch_to() {
+    use crate::llm::battle_script::{run, scenarios, Outcome};
+    use crate::pokemon::bag::{Bag, BagItem};
+    use crate::pokemon::battle::BattleAction;
+    use crate::pokemon::status::PokemonStatus;
+    let mut state = scenarios::last_mon();
+    state.bag = Bag::new(vec![BagItem::new(ItemId::SuperPotion, 2), BagItem::new(ItemId::IceHeal, 1)]);
+    state.pokemon.get_mut(0).expect("a lead").status = PokemonStatus::Frozen;
+    state.battle.as_mut().expect("a battle").player.status = PokemonStatus::Frozen;
+    let outcome = run(SCRIPT, &state, 2).outcome;
+    assert!(matches!(&outcome, Outcome::Action(BattleAction::UseItem { item, .. }) if item.id == ItemId::IceHeal), "got {outcome:?}");
+}
+
 /// Every phase above, back to back in one run from the fresh save, and the whole ledger asserted:
 /// each phase green from its own fixture proves every entry reachable, and only this proves one run
 /// reaches them all.
@@ -3309,3 +3395,4 @@ fn assert_the_tour_complete(name: &str, list: &[crate::pokemon::integration_test
              rest - others - excused.iter().filter(|entry| elsewhere(entry)).count());
     assert!(missing.is_empty(), "the run left {} entries: {missing:?}", missing.len());
 }
+

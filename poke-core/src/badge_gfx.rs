@@ -1,8 +1,8 @@
-//! The eight gym badges, decoded from the cartridge. Each gym is eight tiles, a 2×2 face then its
-//! 2×2 badge.
+//! The eight gym badges, from `gfx/trainer_card/badges.png`. Each gym is eight tiles, a 2×2 face
+//! then its 2×2 badge.
 
+use crate::gfx::trainer_card::BADGES;
 use crate::rom_gfx::{TILE_BYTES, tile_grid_shades};
-use crate::symbols::pokered_symbols::GymLeaderFaceAndBadgeTileGraphics;
 
 pub const BADGE_PX: usize = 16;
 pub const BADGE_COUNT: usize = 8;
@@ -13,18 +13,16 @@ const TILES_PER_GYM: usize = 8;
 pub fn badge_shades(index: usize) -> [u8; BADGE_PX * BADGE_PX] {
     assert!(index < BADGE_COUNT, "there are only {BADGE_COUNT} badges");
     let first_tile = index * TILES_PER_GYM + 4; // past the gym leader's face
-    let shades = tile_grid_shades(GymLeaderFaceAndBadgeTileGraphics + (first_tile * TILE_BYTES) as u16, 2, 2);
+    let shades = tile_grid_shades(&BADGES[first_tile * TILE_BYTES..], 2, 2);
     shades.try_into().expect("2×2 tiles is 16×16 pixels")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rom_gfx::rom_slice;
 
     fn tile_bytes(tile: usize) -> &'static [u8] {
-        let at = tile * TILE_BYTES;
-        &rom_slice(GymLeaderFaceAndBadgeTileGraphics)[at..at + TILE_BYTES]
+        &BADGES[tile * TILE_BYTES..][..TILE_BYTES]
     }
 
     /// Eight distinct badge shapes decode, where one tile out would give half a face.

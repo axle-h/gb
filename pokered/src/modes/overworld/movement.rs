@@ -1,9 +1,9 @@
 //! Moving sprites for a script: `MoveSprite`, `RunNPCMovementScript`'s tables, `FindPathToPlayer`,
 //! `EmotionBubble`, and the player's simulated presses.
 
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
-use poke_core::symbols::{pokered_symbols, DmgPointer};
+use poke_core::gfx;
 use poke_core::symbols::pokered_toggles::TOGGLE_PALLET_TOWN_OAK;
+use poke_core::tables::rle_lists;
 use crate::gfx::layers::Object;
 use crate::gfx::tiles::V_CHARS1;
 use crate::input::Joypad;
@@ -81,8 +81,9 @@ impl Overworld {
     /// `EmotionBubble` up to its `DelayFrames 60`: the bubble's tiles, the objects moved four along to
     /// make room at the front, and OAM held still.
     pub(super) fn emotion_bubble(&mut self, ctx: &mut Ctx, slot: u8, bubble: u8) {
-        let tiles = rom_slice(pokered_symbols::EmotionBubbles + bubble as u16 * 4 * TILE_BYTES as u16);
-        ctx.screen.tiles.load(V_CHARS1 + 0x78, &tiles[..4 * TILE_BYTES]);
+        // `EmotionBubblesPointerTable`'s order.
+        let tiles = [gfx::emotes::SHOCK, gfx::emotes::QUESTION, gfx::emotes::HAPPY][bubble as usize];
+        ctx.screen.tiles.load(V_CHARS1 + 0x78, tiles);
         self.rt.sprites_frozen = true;
         let objects = &mut ctx.screen.sprites;
         objects.resize(40, Object { y: 160, ..Object::default() });
@@ -145,10 +146,10 @@ impl Overworld {
                 self.rt.override_simulated = Joypad::empty();
                 self.rt.paths.script_sprite = oak;
                 self.sprites[0].movement1 = 0;
-                let presses = decode_rle_list(pokered_symbols::RLEList_PlayerWalkToLab);
+                let presses = decode_rle_list(rle_lists::PLAYER_WALK_TO_LAB);
                 self.simulated_index = presses.len() as u8 - 1;
                 self.simulated = presses.into_iter().map(Joypad::from_bits_truncate).collect();
-                self.rt.paths.directions2 = decode_rle_list(pokered_symbols::RLEList_ProfOakWalkToLab);
+                self.rt.paths.directions2 = decode_rle_list(rle_lists::PROF_OAK_WALK_TO_LAB);
                 self.rt.paths.init_scripted_movement = false;
                 self.scripted = true;
                 self.rt.npc_movement_script_function = 4;
@@ -178,8 +179,8 @@ impl Overworld {
             return;
         }
         let (player, guide) = match which {
-            0 => (pokered_symbols::RLEList_PewterMuseumPlayer, pokered_symbols::RLEList_PewterMuseumGuy),
-            _ => (pokered_symbols::RLEList_PewterGymPlayer, pokered_symbols::RLEList_PewterGymGuy),
+            0 => (rle_lists::PEWTER_MUSEUM_PLAYER, rle_lists::PEWTER_MUSEUM_GUY),
+            _ => (rle_lists::PEWTER_GYM_PLAYER, rle_lists::PEWTER_GYM_GUY),
         };
         ctx.audio.play_music(crate::audio::data::sounds::MUSIC_MUSEUM_GUY);
         self.rt.paths.script_sprite = self.rt.sprite_index;
@@ -216,13 +217,8 @@ impl Overworld {
 }
 
 /// `DecodeRLEList`: pairs of a value and a count, with the list's `$ff` kept at the end.
-pub(super) fn decode_rle_list(at: DmgPointer) -> Vec<u8> {
-    let bytes = rom_slice(at);
-    let mut list: Vec<u8> = bytes.chunks(2).take_while(|pair| pair[0] != 0xFF)
-        .flat_map(|pair| std::iter::repeat_n(pair[0], pair[1] as usize))
-        .collect();
-    list.push(0xFF);
-    list
+pub(super) fn decode_rle_list(list: &[(u8, u8)]) -> Vec<u8> {
+    list.iter().flat_map(|&(value, count)| std::iter::repeat_n(value, count as usize)).chain([0xFF]).collect()
 }
 
 /// `ConvertNPCMovementDirectionsToJoypadMasks`: the first `count` directions as presses, reversed,
@@ -278,7 +274,7 @@ mod tests {
 
     #[test]
     fn the_player_s_walk_to_the_lab_is_read_from_its_end() {
-        let presses = decode_rle_list(pokered_symbols::RLEList_PlayerWalkToLab);
+        let presses = decode_rle_list(rle_lists::PLAYER_WALK_TO_LAB);
         assert_eq!(presses.len(), 2 + 3 + 5 + 1 + 6 + 1);
         assert_eq!((presses[0], presses[16], presses[17]), (Joypad::UP.bits(), Joypad::DOWN.bits(), 0xFF));
     }

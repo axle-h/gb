@@ -5,9 +5,7 @@ use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_SSANNE2F_DEFAULT, SCRIPT_SSANNE2F_NOOP,
     SCRIPT_SSANNE2F_RIVAL_AFTER_BATTLE, SCRIPT_SSANNE2F_RIVAL_EXIT, SCRIPT_SSANNE2F_RIVAL_START_BATTLE,
     TEXT_SSANNE2F_RIVAL, TEXT_SSANNE2F_RIVAL_CUT_MASTER};
-use poke_core::symbols::pokered_local_labels::SSAnne2FRivalText;
-use poke_core::symbols::pokered_symbols as sym;
-use poke_core::symbols::pokered_symbols::SSANNE2F_RIVAL;
+use poke_core::symbols::pokered_map_scripts::SSANNE2F_RIVAL;
 use poke_core::symbols::pokered_toggles::TOGGLE_SS_ANNE_2F_RIVAL;
 use poke_core::trainer_headers::OPP_ID_OFFSET;
 use serde::{Deserialize, Serialize};
@@ -15,7 +13,7 @@ use crate::audio::data::{sounds, SoundId};
 use crate::input::Joypad;
 use crate::modes::overworld::movement::{NPC_MOVEMENT_DOWN, NPC_MOVEMENT_RIGHT};
 use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_RIGHT};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `OPP_RIVAL2`.
 const OPP_RIVAL2: u8 = OPP_ID_OFFSET + 0x2A;
@@ -131,8 +129,8 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         TEXT_SSANNE2F_RIVAL => {
             // His words arm the battle the script starts a pass later, with different words for
             // either outcome; only the one for a win is kept.
-            rt.save_end_battle_text(sym::SSAnne2FRivalDefeatedText);
-            Some(rt.print_text(text_at(SSAnne2FRivalText::Text)).ret())
+            rt.save_end_battle_text("SSAnne2FRivalDefeatedText");
+            Some(rt.print_text(text_named("SSAnne2FRivalText.Text")).ret())
         }
         _ => None,
     }
@@ -150,7 +148,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
                 Some(PokemonSpecies::Bulbasaur) => 2,
                 _ => 3,
             };
-            rt.start_trainer_battle(OPP_RIVAL2, set, sym::SSAnne2FRivalDefeatedText);
+            rt.start_trainer_battle(OPP_RIVAL2, set, "SSAnne2FRivalDefeatedText");
             set_facing_direction(rt, Label::FacedBeforeBattle)
         }
         Label::FacedBeforeBattle => {

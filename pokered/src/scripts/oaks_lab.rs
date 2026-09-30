@@ -1,13 +1,12 @@
 //! `OaksLab_Script`: the rival, the three Poké Balls on the table, the first battle, the Pokédex and
 //! the parcel.
 
+use poke_core::tables::text_pointers;
 use poke_core::item::ItemId;
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_events::*;
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::*;
-use poke_core::symbols::pokered_symbols as sym;
-use poke_core::symbols::pokered_symbols::{OAKSLAB_BULBASAUR_POKE_BALL, OAKSLAB_CHARMANDER_POKE_BALL, OAKSLAB_OAK1,
+use poke_core::symbols::pokered_map_scripts::{OAKSLAB_BULBASAUR_POKE_BALL, OAKSLAB_CHARMANDER_POKE_BALL, OAKSLAB_OAK1,
     OAKSLAB_OAK2, OAKSLAB_RIVAL, OAKSLAB_SQUIRTLE_POKE_BALL};
 use poke_core::symbols::pokered_toggles::*;
 use poke_core::trainer_headers::OPP_ID_OFFSET;
@@ -18,7 +17,7 @@ use crate::modes::overworld::movement::{NPC_MOVEMENT_DOWN, NPC_MOVEMENT_LEFT, NP
 use crate::modes::overworld::script::{SpritePosition, Then};
 use crate::systems::pokedex::index_to_pokedex;
 use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_LEFT, SPRITE_FACING_RIGHT, SPRITE_FACING_UP};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `PLAYER_DIR_UP`.
 const PLAYER_DIR_UP: u8 = 8;
@@ -124,7 +123,7 @@ fn ball(slot: u8) -> (u8, u8, PokemonSpecies, u16) {
 
 pub fn script(rt: &mut Script) -> Flow {
     if rt.check_event(EVENT_PALLET_AFTER_GETTING_POKEBALLS_2) {
-        rt.set_text_pointers(sym::OaksLab_TextPointers2);
+        rt.set_text_pointers(text_pointers::OaksLab_TextPointers2);
     }
     rt.disable_auto_text_box_drawing();
     rt.set_do_not_wait_for_button_press(false);
@@ -267,7 +266,7 @@ fn rival_start_battle(rt: &mut Script) -> Flow {
     };
     let at = rt.sprite_position(OAKSLAB_RIVAL);
     rt.maps().oaks_lab.rival_at = Some(at);
-    rt.start_trainer_battle(OPP_RIVAL1, trainer_no, sym::OaksLabRivalIPickedTheWrongPokemonText);
+    rt.start_trainer_battle(OPP_RIVAL1, trainer_no, "OaksLabRivalIPickedTheWrongPokemonText");
     rt.joy_ignore(Joypad::empty());
     rt.set_player_moving_direction(PLAYER_DIR_UP);
     rt.maps().oaks_lab.cur_script = SCRIPT_OAKSLAB_RIVAL_END_BATTLE;
@@ -353,25 +352,25 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         }
         TEXT_OAKSLAB_OAK1 => oak1_text(rt),
         TEXT_OAKSLAB_POKEDEX1 | TEXT_OAKSLAB_POKEDEX2 => {
-            rt.print_text(text_at(local::OaksLabPokedexText::Text)).ret()
+            rt.print_text(text_named("OaksLabPokedexText.Text")).ret()
         }
-        TEXT_OAKSLAB_GIRL => rt.print_text(text_at(local::OaksLabGirlText::Text)).ret(),
+        TEXT_OAKSLAB_GIRL => rt.print_text(text_named("OaksLabGirlText.Text")).ret(),
         TEXT_OAKSLAB_SCIENTIST1 | TEXT_OAKSLAB_SCIENTIST2 => {
-            rt.print_text(text_at(local::OaksLabScientistText::Text)).ret()
+            rt.print_text(text_named("OaksLabScientistText.Text")).ret()
         }
-        TEXT_OAKSLAB_OAK_DONT_GO_AWAY_YET => rt.print_text(text_at(local::OaksLabOakDontGoAwayYetText::Text)).ret(),
+        TEXT_OAKSLAB_OAK_DONT_GO_AWAY_YET => rt.print_text(text_named("OaksLabOakDontGoAwayYetText.Text")).ret(),
         TEXT_OAKSLAB_RIVAL_ILL_TAKE_THIS_ONE => {
-            rt.print_text(text_at(local::OaksLabRivalIllTakeThisOneText::Text)).ret()
+            rt.print_text(text_named("OaksLabRivalIllTakeThisOneText.Text")).ret()
         }
-        TEXT_OAKSLAB_RIVAL_RECEIVED_MON => rt.print_text(text_at(local::OaksLabRivalReceivedMonText::Text)).ret(),
-        TEXT_OAKSLAB_RIVAL_ILL_TAKE_YOU_ON => rt.print_text(text_at(local::OaksLabRivalIllTakeYouOnText::Text)).ret(),
-        TEXT_OAKSLAB_RIVAL_SMELL_YOU_LATER => rt.print_text(text_at(local::OaksLabRivalSmellYouLaterText::Text)).ret(),
+        TEXT_OAKSLAB_RIVAL_RECEIVED_MON => rt.print_text(text_named("OaksLabRivalReceivedMonText.Text")).ret(),
+        TEXT_OAKSLAB_RIVAL_ILL_TAKE_YOU_ON => rt.print_text(text_named("OaksLabRivalIllTakeYouOnText.Text")).ret(),
+        TEXT_OAKSLAB_RIVAL_SMELL_YOU_LATER => rt.print_text(text_named("OaksLabRivalSmellYouLaterText.Text")).ret(),
         TEXT_OAKSLAB_RIVAL_FED_UP_WITH_WAITING => {
-            rt.print_text(text_at(local::OaksLabRivalFedUpWithWaitingText::Text)).ret()
+            rt.print_text(text_named("OaksLabRivalFedUpWithWaitingText.Text")).ret()
         }
-        TEXT_OAKSLAB_OAK_CHOOSE_MON => rt.print_text(text_at(local::OaksLabOakChooseMonText::Text)).ret(),
-        TEXT_OAKSLAB_RIVAL_WHAT_ABOUT_ME => rt.print_text(text_at(local::OaksLabRivalWhatAboutMeText::Text)).ret(),
-        TEXT_OAKSLAB_OAK_BE_PATIENT => rt.print_text(text_at(local::OaksLabOakBePatientText::Text)).ret(),
+        TEXT_OAKSLAB_OAK_CHOOSE_MON => rt.print_text(text_named("OaksLabOakChooseMonText.Text")).ret(),
+        TEXT_OAKSLAB_RIVAL_WHAT_ABOUT_ME => rt.print_text(text_named("OaksLabRivalWhatAboutMeText.Text")).ret(),
+        TEXT_OAKSLAB_OAK_BE_PATIENT => rt.print_text(text_named("OaksLabOakBePatientText.Text")).ret(),
         _ => return None,
     })
 }
@@ -379,13 +378,13 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 /// `OaksLabRivalText`.
 fn rival_text(rt: &mut Script) -> Flow {
     let words = if !rt.check_event(EVENT_FOLLOWED_OAK_INTO_LAB_2) {
-        local::OaksLabRivalText::GrampsIsntAroundText
+        "OaksLabRivalText.GrampsIsntAroundText"
     } else if !rt.check_event(EVENT_GOT_STARTER) {
-        local::OaksLabRivalText::GoAheadAndChooseText
+        "OaksLabRivalText.GoAheadAndChooseText"
     } else {
-        local::OaksLabRivalText::MyPokemonLooksStrongerText
+        "OaksLabRivalText.MyPokemonLooksStrongerText"
     };
-    rt.print_text(text_at(words)).ret()
+    rt.print_text(text_named(words)).ret()
 }
 
 /// `OaksLabCharmanderPokeBallText` and its two siblings into `OaksLabSelectedPokeBallScript`: each
@@ -401,10 +400,10 @@ fn poke_ball_text(rt: &mut Script, text_id: u8) -> Flow {
     if rt.check_event(EVENT_GOT_STARTER) {
         // `OaksLabLastMonScript`: the ball the rival left behind is only ever looked at.
         rt.set_sprite_facing(OAKSLAB_OAK1, SPRITE_FACING_DOWN);
-        return rt.print_text(text_at(sym::OaksLabLastMonText)).ret();
+        return rt.print_text(text_named("OaksLabLastMonText")).ret();
     }
     if !rt.check_event(EVENT_OAK_ASKED_TO_CHOOSE_MON) {
-        return rt.print_text(text_at(sym::OaksLabThoseArePokeBallsText)).ret();
+        return rt.print_text(text_named("OaksLabThoseArePokeBallsText")).ret();
     }
     // `OaksLabShowPokeBallPokemonScript`.
     rt.set_sprite_facing(OAKSLAB_OAK1, SPRITE_FACING_DOWN);
@@ -418,38 +417,38 @@ fn oak1_text(rt: &mut Script) -> Flow {
         || (rt.pokedex_owned() >= 2 && rt.check_event(EVENT_GOT_POKEDEX));
     if rated {
         rt.set_do_not_wait_for_button_press(true);
-        return rt.print_text(text_at(local::OaksLabOak1Text::HowIsYourPokedexComingText)).then(Label::Oak1DexRating);
+        return rt.print_text(text_named("OaksLabOak1Text.HowIsYourPokedexComingText")).then(Label::Oak1DexRating);
     }
     if rt.is_item_in_bag(ItemId::PokeBall) {
-        return rt.print_text(text_at(local::OaksLabOak1Text::ComeSeeMeSometimesText)).ret();
+        return rt.print_text(text_named("OaksLabOak1Text.ComeSeeMeSometimesText")).ret();
     }
     if rt.check_event(EVENT_BEAT_ROUTE22_RIVAL_1ST_BATTLE) {
         if rt.check_and_set_event(EVENT_GOT_POKEBALLS_FROM_OAK) {
-            return rt.print_text(text_at(local::OaksLabOak1Text::ComeSeeMeSometimesText)).ret();
+            return rt.print_text(text_named("OaksLabOak1Text.ComeSeeMeSometimesText")).ret();
         }
         rt.give_item(ItemId::PokeBall, 5);
-        return rt.print_text(text_at(local::OaksLabOak1Text::GivePokeballsText)).ret();
+        return rt.print_text(text_named("OaksLabOak1Text.GivePokeballsText")).ret();
     }
     if rt.check_event(EVENT_GOT_POKEDEX) {
-        return rt.print_text(text_at(local::OaksLabOak1Text::PokemonAroundTheWorldText)).ret();
+        return rt.print_text(text_named("OaksLabOak1Text.PokemonAroundTheWorldText")).ret();
     }
     if rt.check_event(EVENT_BATTLED_RIVAL_IN_OAKS_LAB) {
         if !rt.is_item_in_bag(ItemId::OaksParcel) {
-            return rt.print_text(text_at(local::OaksLabOak1Text::RaiseYourYoungPokemonText)).ret();
+            return rt.print_text(text_named("OaksLabOak1Text.RaiseYourYoungPokemonText")).ret();
         }
-        return rt.print_text(text_at(local::OaksLabOak1Text::DeliverParcelText)).then(Label::Oak1DeliverParcel);
+        return rt.print_text(text_named("OaksLabOak1Text.DeliverParcelText")).then(Label::Oak1DeliverParcel);
     }
     let words = match rt.check_event(EVENT_GOT_STARTER) {
-        true => local::OaksLabOak1Text::YourPokemonCanFightText,
-        false => local::OaksLabOak1Text::WhichPokemonDoYouWantText,
+        true => "OaksLabOak1Text.YourPokemonCanFightText",
+        false => "OaksLabOak1Text.WhichPokemonDoYouWantText",
     };
-    rt.print_text(text_at(words)).ret()
+    rt.print_text(text_named(words)).ret()
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
         Label::PlayerEntersLabWalk => {
-            rt.simulate_joypad_rle(sym::PlayerEntryMovementRLE);
+            rt.simulate_joypad_rle(poke_core::tables::rle_lists::OAKS_LAB_PLAYER_ENTRY);
             rt.set_sprite_facing_direction_and_delay(OAKSLAB_RIVAL, SPRITE_FACING_DOWN).then(Label::PlayerEntersLabOakFaces)
         }
         Label::PlayerEntersLabOakFaces => {
@@ -639,11 +638,11 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::BallDexShown => {
             let (.., species, _) = ball(rt.sprite_index());
             let words = match species {
-                STARTER1 => local::OaksLabYouWantCharmanderText::Text,
-                STARTER2 => local::OaksLabYouWantSquirtleText::Text,
-                _ => local::OaksLabYouWantBulbasaurText::Text,
+                STARTER1 => "OaksLabYouWantCharmanderText.Text",
+                STARTER2 => "OaksLabYouWantSquirtleText.Text",
+                _ => "OaksLabYouWantBulbasaurText.Text",
             };
-            rt.print_text(text_at(words)).then(Label::BallChoiceAnswered)
+            rt.print_text(text_named(words)).then(Label::BallChoiceAnswered)
         }
         // `OaksLabMonChoiceMenu`'s yes/no.
         Label::BallChoiceAnswered => {
@@ -659,9 +658,9 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             rt.get_mon_name(species);
             rt.hide_object(toggle);
             rt.set_do_not_wait_for_button_press(true);
-            rt.print_text(text_at(sym::OaksLabMonEnergeticText)).then(Label::BallAddMon)
+            rt.print_text(text_named("OaksLabMonEnergeticText")).then(Label::BallAddMon)
         }
-        Label::BallAddMon => rt.print_text(text_at(sym::OaksLabReceivedMonText)).then(Label::BallAdded),
+        Label::BallAddMon => rt.print_text(text_named("OaksLabReceivedMonText")).then(Label::BallAdded),
         Label::BallAdded => {
             let (.., species, _) = ball(rt.sprite_index());
             rt.add_party_mon(species, 5).then(Label::BallNamed)

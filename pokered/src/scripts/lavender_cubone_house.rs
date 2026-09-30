@@ -3,11 +3,9 @@
 
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_events::EVENT_RESCUED_MR_FUJI;
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::{TEXT_LAVENDERCUBONEHOUSE_BRUNETTE_GIRL, TEXT_LAVENDERCUBONEHOUSE_CUBONE};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {}
@@ -23,18 +21,18 @@ pub fn script(rt: &mut Script) -> Flow {
 }
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
-    use local::LavenderCuboneHouseBrunetteGirlText as girl;
+    
     Some(match text_id {
         // The words come from the table as they are, and only the cry after them is code.
         TEXT_LAVENDERCUBONEHOUSE_CUBONE => {
-            rt.print_text(text_at(sym::LavenderCuboneHouseCuboneText)).then(Label::CuboneCry)
+            rt.print_text(text_named("LavenderCuboneHouseCuboneText")).then(Label::CuboneCry)
         }
         TEXT_LAVENDERCUBONEHOUSE_BRUNETTE_GIRL => {
             let said = match rt.check_event(EVENT_RESCUED_MR_FUJI) {
-                true => girl::TheGhostIsGoneText,
-                false => girl::PoorCubonesMotherText,
+                true => "LavenderCuboneHouseBrunetteGirlText.TheGhostIsGoneText",
+                false => "LavenderCuboneHouseBrunetteGirlText.PoorCubonesMotherText",
             };
-            rt.print_text(text_at(said)).ret()
+            rt.print_text(text_named(said)).ret()
         }
         _ => return None,
     })

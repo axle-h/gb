@@ -3,11 +3,9 @@
 
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_GOT_TM13, EVENT_GOT_TM48, EVENT_GOT_TM49};
-use poke_core::symbols::pokered_local_labels::CeladonMartRoofLittleGirlText as girl;
 use poke_core::symbols::pokered_map_scripts::TEXT_CELADONMARTROOF_LITTLE_GIRL;
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `CeladonMartRoofDrinkList`, each with the event and the TM it is worth.
 const DRINKS: [(ItemId, u16, ItemId); 3] = [
@@ -46,17 +44,17 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         return None;
     }
     if drinks_in_bag(rt).is_empty() {
-        return Some(rt.print_text(text_at(girl::ImThirstyText)).ret());
+        return Some(rt.print_text(text_named("CeladonMartRoofLittleGirlText.ImThirstyText")).ret());
     }
     rt.set_do_not_wait_for_button_press(true);
-    Some(rt.print_text(text_at(girl::GiveHerADrinkText)).then(Label::DrinkAsked))
+    Some(rt.print_text(text_named("CeladonMartRoofLittleGirlText.GiveHerADrinkText")).then(Label::DrinkAsked))
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
     match label {
         Label::DrinkAsked => rt.yes_no_choice().then(Label::DrinkAnswered),
         Label::DrinkAnswered => match rt.chose_yes() {
-            true => rt.print_text(text_at(sym::CeladonMartRoofLittleGirlGiveHerWhichDrinkText)).then(Label::DrinkMenu),
+            true => rt.print_text(text_named("CeladonMartRoofLittleGirlGiveHerWhichDrinkText")).then(Label::DrinkMenu),
             false => Flow::Return,
         },
         Label::DrinkMenu => {
@@ -70,22 +68,22 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             let held = drinks_in_bag(rt);
             let Some(&drink) = held.get(row as usize) else { return Flow::Return };
             if rt.check_event(DRINKS[drink].1) {
-                return rt.print_text(text_at(sym::CeladonMartRoofLittleGirlImNotThirstyText)).ret();
+                return rt.print_text(text_named("CeladonMartRoofLittleGirlImNotThirstyText")).ret();
             }
-            let yay = [sym::CeladonMartRoofLittleGirlYayFreshWaterText, sym::CeladonMartRoofLittleGirlYaySodaPopText,
-                sym::CeladonMartRoofLittleGirlYayLemonadeText][drink];
-            rt.print_text(text_at(yay)).then(Label::DrinkThanked(drink))
+            let yay = ["CeladonMartRoofLittleGirlYayFreshWaterText", "CeladonMartRoofLittleGirlYaySodaPopText",
+                "CeladonMartRoofLittleGirlYayLemonadeText"][drink];
+            rt.print_text(text_named(yay)).then(Label::DrinkThanked(drink))
         }
         Label::DrinkThanked(drink) => {
             let (item, event, tm) = DRINKS[drink];
             rt.remove_item(item, 1);
             if !rt.give_item(tm, 1) {
-                return rt.print_text(text_at(sym::CeladonMartRoofLittleGirlNoRoomText)).ret();
+                return rt.print_text(text_named("CeladonMartRoofLittleGirlNoRoomText")).ret();
             }
-            let received = [sym::CeladonMartRoofLittleGirlReceivedTM13Text, sym::CeladonMartRoofLittleGirlReceivedTM48Text,
-                sym::CeladonMartRoofLittleGirlReceivedTM49Text][drink];
+            let received = ["CeladonMartRoofLittleGirlReceivedTM13Text", "CeladonMartRoofLittleGirlReceivedTM48Text",
+                "CeladonMartRoofLittleGirlReceivedTM49Text"][drink];
             rt.set_event(event);
-            rt.print_text(text_at(received)).ret()
+            rt.print_text(text_named(received)).ret()
         }
     }
 }

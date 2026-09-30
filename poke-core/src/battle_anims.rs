@@ -1,10 +1,8 @@
-//! The battle animations as the cartridge stores them: `AttackAnimationPointers`' command streams,
-//! `SubanimationPointers`, `FrameBlockPointers`, `FrameBlockBaseCoords`, `MoveSoundTable` and the
-//! pic tile id lists of `TileIDListPointerTable`.
+//! The battle animations: `AttackAnimationPointers`' command streams, `SubanimationPointers`,
+//! `FrameBlockPointers`, `FrameBlockBaseCoords`, `MoveSoundTable` and the pic tile id lists of
+//! `TileIDListPointerTable`.
 
 use serde::{Deserialize, Serialize};
-use crate::rom_gfx::rom_slice;
-use crate::symbols::{pokered_symbols, DmgBank, DmgPointer};
 
 /// `FIRST_SE_ID`: a command byte from here on is a special effect, below it a subanimation.
 pub const FIRST_SE_ID: u8 = 0xC0;
@@ -21,35 +19,10 @@ pub enum AnimCommand {
     SpecialEffect { id: u8, sound: u8 },
 }
 
-fn banked(address: u16) -> &'static [u8] {
-    let DmgBank::ROM { bank } = pokered_symbols::AttackAnimationPointers.bank else { unreachable!() };
-    rom_slice(DmgPointer { bank: DmgBank::ROM { bank }, address })
-}
-
-fn pointer(table: DmgPointer, index: usize) -> u16 {
-    let bytes = rom_slice(table);
-    u16::from_le_bytes([bytes[index * 2], bytes[index * 2 + 1]])
-}
-
 /// Animation `id`'s commands, from 1 as `wAnimationID` counts, up to its `-1`.
 pub fn attack_animation(id: u8) -> Vec<AnimCommand> {
     assert!(id != 0, "animation 0 is no animation");
-    let mut bytes = banked(pointer(pokered_symbols::AttackAnimationPointers, id as usize - 1));
-    let mut commands = vec![];
-    loop {
-        match bytes {
-            [0xFF, ..] => return commands,
-            [first, sound, rest @ ..] if *first >= FIRST_SE_ID => {
-                commands.push(AnimCommand::SpecialEffect { id: *first, sound: *sound });
-                bytes = rest;
-            }
-            [first, sound, id, rest @ ..] => {
-                commands.push(AnimCommand::Subanimation { tileset: first >> 6, delay: first & 0x3F, sound: *sound, id: *id });
-                bytes = rest;
-            }
-            _ => panic!("animation {id} runs off its bank"),
-        }
-    }
+    crate::tables::ATTACK_ANIMATIONS[id as usize - 1].to_vec()
 }
 
 /// `SUBANIMTYPE_*`, the top three bits of a subanimation's first byte.
@@ -87,12 +60,9 @@ pub struct Subanimation {
 /// `SubanimationPointers` entry `id`. The count is five bits, so 0 would be read as 256 by nothing:
 /// `PlaySubanimation` stops when the count reaches 0 after a block.
 pub fn subanimation(id: u8) -> Subanimation {
-    let bytes = banked(pointer(pokered_symbols::SubanimationPointers, id as usize));
-    let count = (bytes[0] & 0x1F) as usize;
-    let entries = bytes[1..1 + 3 * count].chunks_exact(3)
-        .map(|entry| SubanimEntry { frame_block: entry[0], base_coord: entry[1], mode: entry[2] })
-        .collect();
-    Subanimation { kind: bytes[0] >> 5, entries }
+    let (kind, entries) = crate::tables::SUBANIMATIONS[id as usize];
+    let entries = entries.iter().map(|&[frame_block, base_coord, mode]| SubanimEntry { frame_block, base_coord, mode }).collect();
+    Subanimation { kind, entries }
 }
 
 /// One `dbsprite` of a frame block: offsets from the base coordinate, the tile past `$31` and the
@@ -109,17 +79,12 @@ pub struct FrameBlockTile {
 /// lists, since a block that lists fewer runs on into the next one. `FrameBlock00` counts 0, which
 /// `DrawFrameBlock` would take as 256, and no subanimation uses it.
 pub fn frame_block(id: u8) -> Vec<FrameBlockTile> {
-    let bytes = banked(pointer(pokered_symbols::FrameBlockPointers, id as usize));
-    let count = bytes[0] as usize;
-    bytes[1..1 + 4 * count].chunks_exact(4)
-        .map(|tile| FrameBlockTile { y: tile[0], x: tile[1], tile: tile[2], flags: tile[3] })
-        .collect()
+    crate::tables::FRAME_BLOCKS[id as usize].iter().map(|&[y, x, tile, flags]| FrameBlockTile { y, x, tile, flags }).collect()
 }
 
 /// `FrameBlockBaseCoords` entry `id`, as `(y, x)`.
 pub fn base_coord(id: u8) -> (u8, u8) {
-    let bytes = rom_slice(pokered_symbols::FrameBlockBaseCoords);
-    (bytes[id as usize * 2], bytes[id as usize * 2 + 1])
+    crate::tables::FRAME_BLOCK_BASE_COORDS[id as usize]
 }
 
 /// A row of `MoveSoundTable`.
@@ -132,8 +97,8 @@ pub struct MoveSound {
 
 /// `MoveSoundTable` row `index`, which is a command's sound byte.
 pub fn move_sound(index: u8) -> MoveSound {
-    let row = &rom_slice(pokered_symbols::MoveSoundTable)[index as usize * 3..];
-    MoveSound { sound: row[0], pitch: row[1], tempo: row[2] }
+    let (sound, pitch, tempo) = crate::audio::MOVE_SOUND_TABLE[index as usize];
+    MoveSound { sound, pitch, tempo }
 }
 
 /// `TILEMAP_*`.
@@ -145,10 +110,8 @@ pub mod tilemap {
 
 /// `GetTileIDList`: the tile ids, rows and columns of list `index`.
 pub fn tile_id_list(index: u8) -> (&'static [u8], usize, usize) {
-    let entry = &rom_slice(pokered_symbols::TileIDListPointerTable)[index as usize * 3..];
-    let address = u16::from_le_bytes([entry[0], entry[1]]);
-    let (rows, columns) = ((entry[2] >> 4) as usize, (entry[2] & 0xF) as usize);
-    (&banked(address)[..rows * columns], rows, columns)
+    let (ids, columns, rows) = crate::gfx::TILE_ID_LISTS[index as usize];
+    (ids, rows, columns)
 }
 
 #[cfg(test)]

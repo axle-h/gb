@@ -15,8 +15,7 @@
 //! The list is scrolled with a *dex number*; the data page needs the cartridge's *index*, which is
 //! what `PokedexToIndex` is for and what every table on that page is keyed by.
 
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
-use poke_core::symbols::pokered_symbols;
+use poke_core::rom_gfx::TILE_BYTES;
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
 use crate::gfx::sgb::{determine_palette_id_out_of_battle, PaletteCommand};
@@ -187,10 +186,8 @@ impl PokedexMenu {
     /// `LoadPokedexTilePatterns`: the HP bar tiles, the dex's own frame and the ball.
     fn set_up_graphics(ctx: &mut Ctx) {
         ctx.screen.tiles.load_hp_bar_and_status_tiles();
-        let start = pokered_symbols::PokedexTileGraphics;
-        let len = (pokered_symbols::PokedexTileGraphicsEnd.address - start.address) as usize;
-        ctx.screen.tiles.load(V_CHARS2 + 0x60, &rom_slice(start)[..len]);
-        ctx.screen.tiles.load(V_CHARS2 + BALL as usize, &rom_slice(pokered_symbols::PokeballTileGraphics)[..TILE_BYTES]);
+        ctx.screen.tiles.load(V_CHARS2 + 0x60, poke_core::gfx::pokedex::POKEDEX);
+        ctx.screen.tiles.load(V_CHARS2 + BALL as usize, &poke_core::gfx::battle::BALLS[..TILE_BYTES]);
     }
 
     /// `HandlePokedexListMenu` from the top: the parts that do not change, then the window.

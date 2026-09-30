@@ -8,3 +8,5 @@ pub mod run;
 mod lockstep;
 #[cfg(test)]
 mod harvest;
+#[cfg(test)]
+mod rom_equality;

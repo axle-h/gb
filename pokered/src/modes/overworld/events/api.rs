@@ -5,15 +5,14 @@
 use poke_core::item::{self, ItemId};
 use poke_core::map::Map;
 use poke_core::mon_gfx::pic_shades;
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
 use poke_core::species::PokemonSpecies;
 use poke_core::sprite::SpriteFacing;
 use poke_core::symbols::pokered_events::*;
 use poke_core::symbols::pokered_map_scripts::{TEXT_GAMECORNERPRIZEROOM_PRIZE_VENDOR_1,
     TEXT_POKEMONMANSION1F_SWITCH, TEXT_POKEMONMANSION2F_SWITCH, TEXT_POKEMONMANSION3F_SWITCH,
     TEXT_POKEMONMANSIONB1F_SWITCH};
-use poke_core::symbols::pokered_local_labels::GiveFossilToCinnabarLab as lab;
-use poke_core::symbols::{pokered_symbols as sym, DmgPointer};
+use poke_core::tables::{HiddenRoutine, TextPredef};
+use poke_core::trainer_headers::TrainerRef;
 use poke_core::text_script::{TextBuffer, TextNumber};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, SoundId};
@@ -38,8 +37,8 @@ use crate::systems::print_num::{print_bcd, BcdFormat};
 use crate::systems::slots;
 use crate::scripts::Code;
 use super::super::script::{Block, Flow, Routine, Script, Then};
-use super::hidden::{predef_in, print_without_box};
-use super::{after_yes_no, place_rom_string, print, restore_screen_tiles_and_reload_tile_patterns, save_screen_tiles_to_buffer2,
+use super::hidden::{predef, print_without_box};
+use super::{after_yes_no, place_rom_string, place_string, print, restore_screen_tiles_and_reload_tile_patterns, save_screen_tiles_to_buffer2,
     yes_no, Label};
 
 /// A picture `DisplayMonFrontSpriteInBox` shows.
@@ -55,7 +54,7 @@ impl Script<'_, '_> {
     /// `TalkToTrainer` for a trainer whose before- or after-battle text is a `text_asm`: the map's
     /// label in place of the runtime printing that text. An `after` label returns when its code is
     /// done; a `before` label must end by going on to `Routine::TalkToTrainerNotYetFought`.
-    pub fn talk_to_trainer_asm(&mut self, header: DmgPointer, before: Option<Code>, after: Option<Code>) -> Then {
+    pub fn talk_to_trainer_asm(&mut self, header: TrainerRef, before: Option<Code>, after: Option<Code>) -> Then {
         let beaten = self.ow.talk_to_trainer_header(self.ctx, header);
         match (beaten, before, after) {
             (true, _, Some(label)) | (false, Some(label), _) => Then::call(label),
@@ -95,7 +94,7 @@ impl Script<'_, '_> {
     }
 
     /// `wDexRatingText`'s source, as the Hall of Fame's rating left it.
-    pub fn dex_rating_text(&self) -> Option<DmgPointer> {
+    pub fn dex_rating_text(&self) -> Option<&'static str> {
         self.ow.rt.events.dex_rating_text
     }
 
@@ -205,107 +204,105 @@ impl Script<'_, '_> {
 
 /// A hidden event whose function `hidden.rs` does not recreate.
 pub(super) fn hidden_event(s: &mut Script, event: HiddenEvent) -> Flow {
+    use HiddenRoutine as R;
     let f = event.function;
     let up = s.ow.sprites[0].facing == SpriteFacing::Up as u8;
-    if f == sym::PrintCinnabarQuiz {
-        if !up {
-            return Flow::Return;
+    match f {
+        R::PrintCinnabarQuiz => {
+            if !up {
+                return Flow::Return;
+            }
+            s.enable_auto_text_box_drawing();
+            predef(TextPredef::CinnabarGymQuiz).ret()
         }
-        s.enable_auto_text_box_drawing();
-        return predef_in(f, 0x31).ret();
-    }
-    if f == sym::BillsHousePC {
-        s.enable_auto_text_box_drawing();
-        if !up {
-            return Flow::Return;
+        R::BillsHousePC => {
+            s.enable_auto_text_box_drawing();
+            if !up {
+                return Flow::Return;
+            }
+            if s.check_event(EVENT_LEFT_BILLS_HOUSE_AFTER_HELPING) {
+                s.set_do_not_wait_for_button_press(true);
+                return predef(TextPredef::BillsHousePokemonList).ret();
+            }
+            if !s.check_event(EVENT_USED_CELL_SEPARATOR_ON_BILL) && s.check_event(EVENT_BILL_SAID_USE_CELL_SEPARATOR) {
+                s.set_do_not_wait_for_button_press(true);
+                return predef(TextPredef::BillsHouseInitiatedText).then(Label::CellSeparator(0));
+            }
+            predef(TextPredef::BillsHouseMonitorText).ret()
         }
-        if s.check_event(EVENT_LEFT_BILLS_HOUSE_AFTER_HELPING) {
-            s.set_do_not_wait_for_button_press(true);
-            return predef_in(f, 0x2F).ret();
+        R::AerodactylFossil | R::KabutopsFossil => {
+            let (picture, text) = if f == R::AerodactylFossil {
+                (Picture::FossilAerodactyl, TextPredef::AerodactylFossilText)
+            } else {
+                (Picture::FossilKabutops, TextPredef::KabutopsFossilText)
+            };
+            Then::call(Label::MonPopup(picture)).then(Label::PredefAfterPopup { id: text as u8 })
         }
-        if !s.check_event(EVENT_USED_CELL_SEPARATOR_ON_BILL) && s.check_event(EVENT_BILL_SAID_USE_CELL_SEPARATOR) {
-            s.set_do_not_wait_for_button_press(true);
-            return predef_in(f, 0x2E).then(Label::CellSeparator(0));
+        R::Route15GateLeftBinoculars => {
+            if !up {
+                return Flow::Return;
+            }
+            s.enable_auto_text_box_drawing();
+            predef(TextPredef::Route15UpstairsBinocularsText).then(Label::Binoculars)
         }
-        return predef_in(f, 0x2D).ret();
-    }
-    if f == sym::AerodactylFossil || f == sym::KabutopsFossil {
-        let (picture, text) = if f == sym::AerodactylFossil { (Picture::FossilAerodactyl, 0x09) } else { (Picture::FossilKabutops, 0x0B) };
-        return Then::call(Label::MonPopup(picture)).then(Label::PredefAfterPopup { id: text, bank: bank(f) });
-    }
-    if f == sym::Route15GateLeftBinoculars {
-        if !up {
-            return Flow::Return;
+        R::GymTrashScript => gym_trash(s, event),
+        R::StartSlotMachine => start_slot_machine(s, event),
+        // A switch is only a switch from below it; the wall it moves is its map's own business.
+        R::Mansion1Script_Switches | R::Mansion2Script_Switches | R::Mansion3Script_Switches | R::Mansion4Script_Switches => {
+            if !up {
+                return Flow::Return;
+            }
+            let text = match f {
+                R::Mansion1Script_Switches => TEXT_POKEMONMANSION1F_SWITCH,
+                R::Mansion2Script_Switches => TEXT_POKEMONMANSION2F_SWITCH,
+                R::Mansion3Script_Switches => TEXT_POKEMONMANSION3F_SWITCH,
+                _ => TEXT_POKEMONMANSIONB1F_SWITCH,
+            };
+            s.clear_joy_held();
+            s.display_text_id(text).ret()
         }
-        s.enable_auto_text_box_drawing();
-        return predef_in(f, 0x0A).then(Label::Binoculars);
-    }
-    if f == sym::GymTrashScript {
-        return gym_trash(s, event);
-    }
-    if f == sym::StartSlotMachine {
-        return start_slot_machine(s, event);
-    }
-    // A switch is only a switch from below it; the wall it moves is its map's own business.
-    let switches = [(sym::Mansion1Script_Switches, TEXT_POKEMONMANSION1F_SWITCH),
-        (sym::Mansion2Script_Switches, TEXT_POKEMONMANSION2F_SWITCH),
-        (sym::Mansion3Script_Switches, TEXT_POKEMONMANSION3F_SWITCH),
-        (sym::Mansion4Script_Switches, TEXT_POKEMONMANSIONB1F_SWITCH)];
-    if let Some(&(_, text)) = switches.iter().find(|&&(at, _)| at == f) {
-        if !up {
-            return Flow::Return;
-        }
-        s.clear_joy_held();
-        return s.display_text_id(text).ret();
-    }
-    // The Cable Club's Game Boys are a non-goal.
-    Flow::Return
-}
-
-fn bank(at: DmgPointer) -> u8 {
-    match at.bank {
-        poke_core::symbols::DmgBank::ROM { bank } => bank,
-        _ => unreachable!("code is in ROM"),
+        // The Cable Club's Game Boys are a non-goal.
+        _ => Flow::Return,
     }
 }
 
 /// A text predef that runs code, not one `hidden.rs` handles.
-pub(super) fn predef_text(s: &mut Script, at: DmgPointer) -> Option<Flow> {
-    Some(if at == sym::CinnabarGymQuiz {
-        let argument = match s.ow.rt.events.hidden {
-            Some(super::Hidden::Event(event)) => event.argument,
-            _ => 0,
-        };
-        s.ow.rt.events.opponent_after_wrong_answer = 0;
-        s.ow.rt.events.gym_gate = (argument & 0xF, argument >> 4);
-        print(sym::CinnabarGymQuizIntroText).then(Label::QuizQuestion)
-    } else if at == sym::ViridianSchoolNotebook {
-        print(sym::ViridianSchoolNotebookText1).then(Label::NotebookTurnPage(1))
-    } else if at == sym::ViridianSchoolBlackboard {
-        s.ow.rt.saved_screen = Some(s.ctx.screen.ui.clone());
-        s.ow.rt.events.menu = (0, 0);
-        s.ctx.menu.last_item = 0;
-        print(sym::ViridianSchoolBlackboardText1).then(Label::BlackboardLoop)
-    } else if at == sym::LinkCableHelp {
-        s.ow.rt.saved_screen = Some(s.ctx.screen.ui.clone());
-        s.ow.rt.events.menu = (0, 0);
-        s.ctx.menu.last_item = 0;
-        print(sym::LinkCableHelpText1).then(Label::LinkCableHelpLoop)
-    } else if at == sym::BillsHousePokemonList {
-        s.ow.rt.saved_screen = Some(s.ctx.screen.ui.clone());
-        s.ow.rt.events.menu = (0, 0);
-        s.ctx.menu.last_item = 0;
-        print(sym::BillsHousePokemonListText1).then(Label::BillsListLoop)
-    } else if at == sym::BillsHouseInitiatedText {
-        print_without_box(at).then(Label::BillsHouseInitiated)
-    } else if at == sym::VermilionGymTrashSuccessText1 {
-        print_without_box(at).then(Label::TrashSound(sounds::SFX_SWITCH.0))
-    } else if at == sym::VermilionGymTrashSuccessText3 {
-        print_without_box(at).then(Label::TrashSound(sounds::SFX_GO_INSIDE.0))
-    } else if at == sym::VermilionGymTrashFailText {
-        print_without_box(at).then(Label::TrashSound(sounds::SFX_DENIED.0))
-    } else {
-        return None;
+pub(super) fn predef_text(s: &mut Script, text: TextPredef) -> Option<Flow> {
+    use TextPredef as T;
+    Some(match text {
+        T::CinnabarGymQuiz => {
+            let argument = match s.ow.rt.events.hidden {
+                Some(super::Hidden::Event(event)) => event.argument,
+                _ => 0,
+            };
+            s.ow.rt.events.opponent_after_wrong_answer = 0;
+            s.ow.rt.events.gym_gate = (argument & 0xF, argument >> 4);
+            print("CinnabarGymQuizIntroText").then(Label::QuizQuestion)
+        }
+        T::ViridianSchoolNotebook => print("ViridianSchoolNotebookText1").then(Label::NotebookTurnPage(1)),
+        T::ViridianSchoolBlackboard => {
+            s.ow.rt.saved_screen = Some(s.ctx.screen.ui.clone());
+            s.ow.rt.events.menu = (0, 0);
+            s.ctx.menu.last_item = 0;
+            print("ViridianSchoolBlackboardText1").then(Label::BlackboardLoop)
+        }
+        T::LinkCableHelp => {
+            s.ow.rt.saved_screen = Some(s.ctx.screen.ui.clone());
+            s.ow.rt.events.menu = (0, 0);
+            s.ctx.menu.last_item = 0;
+            print("LinkCableHelpText1").then(Label::LinkCableHelpLoop)
+        }
+        T::BillsHousePokemonList => {
+            s.ow.rt.saved_screen = Some(s.ctx.screen.ui.clone());
+            s.ow.rt.events.menu = (0, 0);
+            s.ctx.menu.last_item = 0;
+            print("BillsHousePokemonListText1").then(Label::BillsListLoop)
+        }
+        T::BillsHouseInitiatedText => print_without_box(text.label()).then(Label::BillsHouseInitiated),
+        T::VermilionGymTrashSuccessText1 => print_without_box(text.label()).then(Label::TrashSound(sounds::SFX_SWITCH.0)),
+        T::VermilionGymTrashSuccessText3 => print_without_box(text.label()).then(Label::TrashSound(sounds::SFX_GO_INSIDE.0)),
+        T::VermilionGymTrashFailText => print_without_box(text.label()).then(Label::TrashSound(sounds::SFX_DENIED.0)),
+        _ => return None,
     })
 }
 
@@ -320,9 +317,9 @@ pub(super) fn resume(s: &mut Script, label: Label) -> Flow {
             }
             Flow::Return
         }
-        PredefAfterPopup { id, bank } => {
+        PredefAfterPopup { id } => {
             s.enable_auto_text_box_drawing();
-            Then::call(Routine::PrintPredefTextId { id, bank }).ret()
+            Then::call(Routine::PrintPredefTextId { id }).ret()
         }
         Binoculars => {
             s.ctx.audio.play_cry(PokemonSpecies::Articuno as u8);
@@ -380,10 +377,7 @@ pub(super) fn resume(s: &mut Script, label: Label) -> Flow {
 
         QuizQuestion => {
             let (index, _) = s.ow.rt.events.gym_gate;
-            let questions = sym::CinnabarQuizQuestions;
-            let pointer = rom_slice(questions + 2 * (index as u16).wrapping_sub(1));
-            let question = DmgPointer { bank: questions.bank, address: u16::from_le_bytes([pointer[0], pointer[1]]) };
-            print(question).then(QuizAsk)
+            print(poke_core::tables::CINNABAR_QUIZ_QUESTIONS[index as usize - 1]).then(QuizAsk)
         }
         QuizAsk => {
             s.set_do_not_wait_for_button_press(true);
@@ -411,7 +405,7 @@ pub(super) fn resume(s: &mut Script, label: Label) -> Flow {
             s.play_sound(sounds::SFX_DENIED);
             s.wait_for_sound_to_finish().then(QuizWrongText)
         }
-        QuizWrongText => print(sym::CinnabarGymQuizIncorrectText).then(QuizWrongDone),
+        QuizWrongText => print("CinnabarGymQuizIncorrectText").then(QuizWrongDone),
         QuizWrongDone => {
             let (index, _) = s.ow.rt.events.gym_gate;
             if !s.check_event(EVENT_BEAT_CINNABAR_GYM_TRAINER_0 + index as u16) {
@@ -420,27 +414,27 @@ pub(super) fn resume(s: &mut Script, label: Label) -> Flow {
             Flow::Return
         }
 
-        NotebookTurnPage(page) => print(sym::TurnPageText).then(NotebookAsk(page)),
+        NotebookTurnPage(page) => print("TurnPageText").then(NotebookAsk(page)),
         NotebookAsk(page) => yes_no(s).then(NotebookAnswered(page)),
         NotebookAnswered(page) => {
             if !after_yes_no(s) {
                 return Flow::Return;
             }
             match page {
-                1 => print(sym::ViridianSchoolNotebookText2).then(NotebookTurnPage(2)),
-                2 => print(sym::ViridianSchoolNotebookText3).then(NotebookTurnPage(3)),
-                _ => print(sym::ViridianSchoolNotebookText4).then(NotebookLastPage),
+                1 => print("ViridianSchoolNotebookText2").then(NotebookTurnPage(2)),
+                2 => print("ViridianSchoolNotebookText3").then(NotebookTurnPage(3)),
+                _ => print("ViridianSchoolNotebookText4").then(NotebookLastPage),
             }
         }
-        NotebookLastPage => print(sym::ViridianSchoolNotebookText5).ret(),
+        NotebookLastPage => print("ViridianSchoolNotebookText5").ret(),
 
         BlackboardLoop => {
             s.ctx.world.no_text_delay = true;
             let ui = &mut s.ctx.screen.ui;
             ui.text_box_border(0, 0, 10, 6);
-            place_rom_string(ui, 1, 2, sym::StatusAilmentText1);
-            place_rom_string(ui, 6, 2, sym::StatusAilmentText2);
-            print(sym::ViridianSchoolBlackboardText2).then(BlackboardMenu)
+            place_rom_string(ui, 1, 2, "StatusAilmentText1");
+            place_rom_string(ui, 6, 2, "StatusAilmentText2");
+            print("ViridianSchoolBlackboardText2").then(BlackboardMenu)
         }
         BlackboardMenu => {
             let (offset, current) = s.ow.rt.events.menu;
@@ -454,8 +448,8 @@ pub(super) fn resume(s: &mut Script, label: Label) -> Flow {
             s.ctx.world.no_text_delay = true;
             let ui = &mut s.ctx.screen.ui;
             ui.text_box_border(0, 0, 13, 8);
-            place_rom_string(ui, 2, 2, sym::HowToLinkText);
-            print(sym::LinkCableHelpText2).then(LinkCableHelpMenu)
+            place_rom_string(ui, 2, 2, "HowToLinkText");
+            print("LinkCableHelpText2").then(LinkCableHelpMenu)
         }
         LinkCableHelpMenu => menu(s, 3, (1, 2), LinkCableHelpChosen),
         LinkCableHelpChosen => {
@@ -465,9 +459,7 @@ pub(super) fn resume(s: &mut Script, label: Label) -> Flow {
             };
             s.ow.rt.events.menu.1 = row;
             s.ctx.world.no_text_delay = false;
-            let pointer = rom_slice(sym::LinkCableInfoTexts + 2 * row as u16);
-            let text = DmgPointer { bank: sym::LinkCableInfoTexts.bank, address: u16::from_le_bytes([pointer[0], pointer[1]]) };
-            print(text).then(LinkCableHelpLoop)
+            print(poke_core::tables::LINK_CABLE_INFO_TEXTS[row as usize]).then(LinkCableHelpLoop)
         }
 
         TrashSound(sound) => s.wait_for_sound_to_finish().then(TrashSoundPlay(sound)),
@@ -476,31 +468,31 @@ pub(super) fn resume(s: &mut Script, label: Label) -> Flow {
             s.wait_for_sound_to_finish().ret()
         }
 
-        OaksAide => print(sym::OaksAideHiText).then(OaksAideAsk),
+        OaksAide => print("OaksAideHiText").then(OaksAideAsk),
         OaksAideAsk => yes_no(s).then(OaksAideAnswered),
         OaksAideAnswered => {
             if !after_yes_no(s) {
                 s.ow.rt.events.oaks_aide_result = Some(OaksAideResult::Refused);
-                return print(sym::OaksAideComeBackText).ret();
+                return print("OaksAideComeBackText").ret();
             }
             let owned = count_set_bits(&s.ctx.world.pokedex.owned);
             s.ctx.world.text.numbers.insert(TextNumber::OaksAideNumMonsOwned, owned as u32);
             let (requirement, _) = s.ow.rt.events.oaks_aide;
             if requirement > owned {
                 s.ow.rt.events.oaks_aide_result = Some(OaksAideResult::NotEnoughMons);
-                return print(sym::OaksAideUhOhText).ret();
+                return print("OaksAideUhOhText").ret();
             }
-            print(sym::OaksAideHereYouGoText).then(OaksAideGive)
+            print("OaksAideHereYouGoText").then(OaksAideGive)
         }
         OaksAideGive => {
             let (_, reward) = s.ow.rt.events.oaks_aide;
             let reward = ItemId::from_repr(reward).expect("an aide's reward is an item");
             if !s.give_item(reward, 1) {
                 s.ow.rt.events.oaks_aide_result = Some(OaksAideResult::BagFull);
-                return print(sym::OaksAideNoRoomText).ret();
+                return print("OaksAideNoRoomText").ret();
             }
             s.ow.rt.events.oaks_aide_result = Some(OaksAideResult::GotItem);
-            print(sym::OaksAideGotItemText).ret()
+            print("OaksAideGotItemText").ret()
         }
 
         DexRating => dex_rating(s),
@@ -522,9 +514,9 @@ pub(super) fn resume(s: &mut Script, label: Label) -> Flow {
         CinnabarLabAsk => yes_no(s).then(CinnabarLabAnswered),
         CinnabarLabAnswered => {
             if !after_yes_no(s) {
-                return print(lab::ComeAgainText).ret();
+                return print("GiveFossilToCinnabarLab.ComeAgainText").ret();
             }
-            print(lab::ScientistTakesFossilText).then(CinnabarLabTaken)
+            print("GiveFossilToCinnabarLab.ScientistTakesFossilText").then(CinnabarLabTaken)
         }
         CinnabarLabTaken => {
             if let Some((fossil, _)) = s.ctx.world.fossil
@@ -532,7 +524,7 @@ pub(super) fn resume(s: &mut Script, label: Label) -> Flow {
             {
                 s.ctx.world.bag.remove(slot, 1);
             }
-            print(lab::GoForAWalkText).then(CinnabarLabDone)
+            print("GiveFossilToCinnabarLab.GoForAWalkText").then(CinnabarLabDone)
         }
         CinnabarLabDone => {
             s.set_event(EVENT_GAVE_FOSSIL_TO_LAB);
@@ -558,7 +550,7 @@ pub(super) fn resume(s: &mut Script, label: Label) -> Flow {
             subtract_coins(s)
         }
 
-        ElevatorFloorMenu => print(sym::WhichFloorText).then(ElevatorFloorList),
+        ElevatorFloorMenu => print("WhichFloorText").then(ElevatorFloorList),
         ElevatorFloorList => {
             s.ow.rt.events.saved_list_scroll = s.ctx.menu.list_scroll;
             let floors = s.ow.rt.events.elevator.0.clone();
@@ -642,8 +634,8 @@ fn mon_popup(s: &mut Script, picture: Picture) -> Flow {
     s.update_sprites();
     let shades = match picture {
         Picture::Mon(species) => poke_core::mon_gfx::front_pic_shades(species),
-        Picture::FossilKabutops => pic_shades(rom_slice(sym::FossilKabutopsPic)),
-        Picture::FossilAerodactyl => pic_shades(rom_slice(sym::FossilAerodactylPic)),
+        Picture::FossilKabutops => pic_shades(poke_core::gfx::pokemon::front::FOSSILKABUTOPS),
+        Picture::FossilAerodactyl => pic_shades(poke_core::gfx::pokemon::front::FOSSILAERODACTYL),
     };
     s.ctx.screen.tiles.load(V_CHARS1 + 0x31, &pic_tiles(&shades, false).concat());
     s.ctx.screen.ui.set(POPUP_AT.0, POPUP_AT.1, POPUP_BALL);
@@ -653,8 +645,7 @@ fn mon_popup(s: &mut Script, picture: Picture) -> Flow {
 fn mon_popup_stage(s: &mut Script, stage: u8) -> Flow {
     let (x, y) = POPUP_AT;
     let ui = &mut s.ctx.screen.ui;
-    let copy = |ui: &mut UiSurface, x: usize, y: usize, size: usize, table: DmgPointer| {
-        let ids = rom_slice(table);
+    let copy = |ui: &mut UiSurface, x: usize, y: usize, size: usize, ids: &[u8]| {
         for row in 0..size {
             for column in 0..size {
                 ui.set(x + column, y + row, ids[row * size + column].wrapping_add(POPUP_BASE));
@@ -663,11 +654,11 @@ fn mon_popup_stage(s: &mut Script, stage: u8) -> Flow {
     };
     match stage {
         1 => {
-            copy(ui, x - 1, y - 2, 3, sym::DownscaledMonTiles_3x3);
+            copy(ui, x - 1, y - 2, 3, poke_core::gfx::pokemon::DOWNSCALED_3X3_TILEMAP);
             s.delay_frames(4).then(Label::MonPopupStage(2))
         }
         2 => {
-            copy(ui, x - 2, y - 4, 5, sym::DownscaledMonTiles_5x5);
+            copy(ui, x - 2, y - 4, 5, poke_core::gfx::pokemon::DOWNSCALED_5X5_TILEMAP);
             s.delay_frames(5).then(Label::MonPopupStage(3))
         }
         _ => {
@@ -695,8 +686,8 @@ fn bills_list_loop(s: &mut Script) -> Flow {
     s.ctx.world.no_text_delay = true;
     let ui = &mut s.ctx.screen.ui;
     ui.text_box_border(0, 0, 9, 10);
-    place_rom_string(ui, 2, 2, sym::BillsMonListText);
-    print(sym::BillsHousePokemonListText2).then(Label::BillsListMenu)
+    place_rom_string(ui, 2, 2, "BillsMonListText");
+    print("BillsHousePokemonListText2").then(Label::BillsListMenu)
 }
 
 fn bills_list_chosen(s: &mut Script) -> Flow {
@@ -745,7 +736,7 @@ fn quiz_answered(s: &mut Script) -> Flow {
     };
     if chosen == answer {
         s.ow.rt.cur_map_loaded[0] = true;
-        return print(sym::CinnabarGymQuizCorrectText).then(Label::QuizCorrectText);
+        return print("CinnabarGymQuizCorrectText").then(Label::QuizCorrectText);
     }
     s.wait_for_sound_to_finish().then(Label::QuizWrongSound)
 }
@@ -753,9 +744,9 @@ fn quiz_answered(s: &mut Script) -> Flow {
 /// `UpdateCinnabarGymGateTileBlocks_`: each of the six gates open or shut by its event.
 fn update_cinnabar_gym_gate_tile_blocks(s: &mut Script) {
     for gate in (1..=6u16).rev() {
-        let row = rom_slice(sym::CinnabarGymGateCoords + 4 * (gate - 1));
+        let (x, y, block) = poke_core::tables::CINNABAR_GYM_GATE_COORDS[gate as usize - 1];
         let open = s.check_event(EVENT_CINNABAR_GYM_GATE0_UNLOCKED + gate);
-        s.replace_tile_block(row[0], row[1], if open { 0x0E } else { row[2] });
+        s.replace_tile_block(x, y, if open { 0x0E } else { block });
     }
 }
 
@@ -781,9 +772,7 @@ fn blackboard_chosen(s: &mut Script) -> Flow {
         return leave_menu(s);
     }
     s.ctx.world.no_text_delay = false;
-    let pointer = rom_slice(sym::ViridianBlackboardStatusPointers + 2 * status as u16);
-    let text = DmgPointer { bank: sym::ViridianBlackboardStatusPointers.bank, address: u16::from_le_bytes([pointer[0], pointer[1]]) };
-    print(text).then(Label::BlackboardLoop)
+    print(poke_core::tables::VIRIDIAN_BLACKBOARD_STATUS_TEXTS[status as usize]).then(Label::BlackboardLoop)
 }
 
 // ---- The Vermilion Gym's trash cans ----
@@ -792,28 +781,26 @@ fn blackboard_chosen(s: &mut Script) -> Flow {
 /// wrong can after the first shuts it again somewhere new.
 fn gym_trash(s: &mut Script, event: HiddenEvent) -> Flow {
     s.enable_auto_text_box_drawing();
-    let f = event.function;
     let can = event.argument;
     if s.check_event(EVENT_2ND_LOCK_OPENED) {
-        return predef_in(f, 0x26).ret();
+        return predef(TextPredef::VermilionGymTrashText).ret();
     }
     let [first, second] = s.ctx.world.scripts.trash_cans;
     if s.check_event(EVENT_1ST_LOCK_OPENED) {
         if can == second {
             s.set_event(EVENT_2ND_LOCK_OPENED);
             s.ow.rt.cur_map_loaded[1] = true;
-            return predef_in(f, 0x3D).ret();
+            return predef(TextPredef::VermilionGymTrashSuccessText3).ret();
         }
         s.reset_event(EVENT_1ST_LOCK_OPENED);
         s.ctx.world.scripts.trash_cans[0] = s.ctx.rng.random() & 0x0E;
-        return predef_in(f, 0x3E).ret();
+        return predef(TextPredef::VermilionGymTrashFailText).ret();
     }
     if can != first {
-        return predef_in(f, 0x26).ret();
+        return predef(TextPredef::VermilionGymTrashText).ret();
     }
     s.set_event(EVENT_1ST_LOCK_OPENED);
-    let entry = &rom_slice(sym::GymTrashCans + 5 * can as u16)[..5];
-    let (mask, neighbours) = (entry[0], &entry[1..]);
+    let (mask, neighbours) = poke_core::tables::GYM_TRASH_CANS[can as usize];
     let draw = s.ctx.rng.random().rotate_left(4);
     s.ctx.world.scripts.trash_cans[1] = if s.ctx.world.cartridge_bugs {
         // The cartridge ANDs the mask with the draw and subtracts one, so no common bit reads the
@@ -825,7 +812,7 @@ fn gym_trash(s: &mut Script, event: HiddenEvent) -> Flow {
     } else {
         neighbours[(draw % mask) as usize] & 0x0F
     };
-    predef_in(f, 0x3B).ret()
+    predef(TextPredef::VermilionGymTrashSuccessText1).ret()
 }
 
 // ---- The Pokédex rating ----
@@ -847,7 +834,7 @@ fn dex_rating(s: &mut Script) -> Flow {
         s.ow.rt.events.dex_rating_text = Some(tables::dex_rating_text(owned));
         return Flow::Return;
     }
-    print(sym::DexCompletionText).then(Label::DexRatingText)
+    print("DexCompletionText").then(Label::DexRatingText)
 }
 
 // ---- The Cinnabar lab's fossils ----
@@ -869,7 +856,7 @@ fn cinnabar_lab(s: &mut Script) -> Flow {
 
 fn cinnabar_lab_chosen(s: &mut Script) -> Flow {
     let Some(Outcome::Chosen(row)) = s.ow.rt.outcome else {
-        return print(lab::ComeAgainText).ret();
+        return print("GiveFossilToCinnabarLab.ComeAgainText").ret();
     };
     let fossil = s.ow.rt.events.filtered_bag_items[row as usize];
     let mon = match fossil {
@@ -879,7 +866,7 @@ fn cinnabar_lab_chosen(s: &mut Script) -> Flow {
     };
     s.ctx.world.fossil = Some((fossil, mon));
     s.load_fossil_item_and_mon_name();
-    print(lab::ScientistSeesFossilText).then(Label::CinnabarLabAsk)
+    print("GiveFossilToCinnabarLab.ScientistSeesFossilText").then(Label::CinnabarLabAsk)
 }
 
 // ---- The Game Corner's slot machines ----
@@ -895,31 +882,29 @@ fn start_slot_machine(s: &mut Script, event: HiddenEvent) -> Flow {
     const OUT_TO_LUNCH: u8 = 0xFE;
     const SOMEONES_KEYS: u8 = 0xFF;
     if let Some(text) = match event.argument {
-        OUT_OF_ORDER => Some(0x28),
-        OUT_TO_LUNCH => Some(0x29),
-        SOMEONES_KEYS => Some(0x2A),
+        OUT_OF_ORDER => Some(TextPredef::GameCornerOutOfOrderText),
+        OUT_TO_LUNCH => Some(TextPredef::GameCornerOutToLunchText),
+        SOMEONES_KEYS => Some(TextPredef::GameCornerSomeonesKeysText),
         _ => None,
     } {
         s.enable_auto_text_box_drawing();
-        return predef_in(event.function, text).ret();
+        return predef(text).ret();
     }
     s.game_corner_select_lucky_slot_machine();
     if s.ow.sprites[0].facing & SpriteFacing::Left as u8 == 0 {
         return Flow::Return;
     }
-    // `AbleToPlaySlotsCheck` is farcalled, so its two texts are read from its bank rather than
-    // `StartSlotMachine`'s.
     if s.ctx.world.bag.quantity_of(ItemId::CoinCase) == 0 {
         s.enable_auto_text_box_drawing();
-        return predef_in(sym::AbleToPlaySlotsCheck, 0x33).ret();
+        return predef(TextPredef::GameCornerCoinCaseText).ret();
     }
     if s.ctx.world.coins == [0, 0] {
         s.enable_auto_text_box_drawing();
-        return predef_in(sym::AbleToPlaySlotsCheck, 0x32).ret();
+        return predef(TextPredef::GameCornerNoCoinsText).ret();
     }
     let chance = slots::seven_and_bar_mode_chance(s.ow.rt.events.lucky_slot_machine, s.ow.rt.events.hidden_event_index);
     save_screen_tiles_to_buffer2(s);
-    print(sym::PlaySlotMachineText).then(Label::SlotsAsk(chance))
+    print("PlaySlotMachineText").then(Label::SlotsAsk(chance))
 }
 
 // ---- The Game Corner's prizes ----
@@ -930,10 +915,10 @@ fn prize_window(s: &Script) -> u8 {
 
 fn prize_menu(s: &mut Script) -> Flow {
     if s.ctx.world.bag.quantity_of(ItemId::CoinCase) == 0 {
-        return print(sym::RequireCoinCaseText).ret();
+        return print("RequireCoinCaseText").ret();
     }
     s.ctx.world.no_text_delay = true;
-    print(sym::ExchangeCoinsForPrizesText).then(Label::PrizeMenuShown)
+    print("ExchangeCoinsForPrizesText").then(Label::PrizeMenuShown)
 }
 
 /// `PrintPrizePrice`: the purse in its box.
@@ -963,12 +948,12 @@ fn prize_menu_shown(s: &mut Script) -> Flow {
         s.ctx.screen.ui.place(2, 4 + 2 * i, &name);
     }
     let ui = &mut s.ctx.screen.ui;
-    place_rom_string(ui, 2, 10, sym::NoThanksText);
+    place_rom_string(ui, 2, 10, "NoThanksText");
     for (i, price) in window.prices.iter().enumerate() {
         print_bcd(ui, (5 + 2 * i) * SCREEN_TILES_X + 13, price, BcdFormat { skip_leading_zeroes: true, left_align: false, money_sign: false });
     }
     s.update_sprites();
-    print(sym::WhichPrizeText).then(Label::PrizeMenuMenu)
+    print("WhichPrizeText").then(Label::PrizeMenuMenu)
 }
 
 pub(super) fn prize_menu_menu(s: &mut Script) -> Flow {
@@ -995,7 +980,7 @@ fn prize_menu_chosen(s: &mut Script) -> Flow {
         PokemonSpecies::from_repr(prize).map(PokemonSpecies::name).unwrap_or_default()
     };
     s.ctx.world.text.strings.insert(TextBuffer::NameBuffer, name);
-    print(sym::SoYouWantPrizeText).then(Label::PrizeAsk)
+    print("SoYouWantPrizeText").then(Label::PrizeAsk)
 }
 
 fn prize_price(s: &Script) -> [u8; 2] {
@@ -1005,18 +990,18 @@ fn prize_price(s: &Script) -> [u8; 2] {
 fn prize_answered(s: &mut Script) -> Flow {
     if !after_yes_no(s) {
         s.ctx.world.no_text_delay = false;
-        return print(sym::OhFineThenText).ret();
+        return print("OhFineThenText").ret();
     }
     if s.ctx.world.coins < prize_price(s) {
         s.ctx.world.no_text_delay = false;
-        return print(sym::SorryNeedMoreCoinsText).ret();
+        return print("SorryNeedMoreCoinsText").ret();
     }
     let prize = PrizeWindow::of(prize_window(s)).prizes[s.ow.rt.events.prize as usize];
     if prize_window(s) == 2 {
         let tm = ItemId::from_repr(prize).expect("a TM");
         if !s.give_item(tm, 1) {
             s.ctx.world.no_text_delay = false;
-            return print(sym::PrizeRoomBagIsFullText).ret();
+            return print("PrizeRoomBagIsFullText").ret();
         }
         return subtract_coins(s);
     }
@@ -1066,8 +1051,7 @@ fn shake_elevator_step(s: &mut Script, n: u8) -> Flow {
     }
     s.ctx.screen.effects.scy = scy;
     s.play_sound(SoundId::STOP_ALL_MUSIC);
-    let poke_core::symbols::DmgBank::ROM { bank } = sym::SFX_Safari_Zone_PA.bank else { unreachable!() };
-    let bank = crate::audio::data::AudioBank::from_rom_bank(bank).expect("an audio bank");
+    let bank = crate::audio::data::AudioBank::holding("SFX_Safari_Zone_PA");
     s.play_music(crate::audio::data::Sound { bank, id: sounds::SFX_SAFARI_ZONE_PA });
     Flow::Jump(Label::ShakeElevatorChime.into())
 }
@@ -1081,21 +1065,17 @@ fn diploma(s: &mut Script) -> Flow {
     s.ctx.world.no_text_delay = true;
     s.ow.rt.sprites_frozen = true;
     let tiles = &mut s.ctx.screen.tiles;
-    tiles.load(V_CHARS2 + CIRCLE as usize, &rom_slice(sym::CircleTile)[..TILE_BYTES]);
+    tiles.load(V_CHARS2 + CIRCLE as usize, poke_core::gfx::trainer_card::CIRCLE_TILE);
     let ui = &mut s.ctx.screen.ui;
     ui.fill(0, 0, SCREEN_TILES_X, crate::gfx::ui::SCREEN_TILES_Y, UiSurface::BLANK);
     cable_club_text_box_border(ui, 0, 0, 18, 16);
-    let table = rom_slice(sym::DiplomaTextPointersAndCoords);
-    for row in table.chunks(4).take(5) {
-        let text = DmgPointer { bank: sym::DiplomaTextPointersAndCoords.bank, address: u16::from_le_bytes([row[0], row[1]]) };
-        let at = u16::from_le_bytes([row[2], row[3]]) as usize - 0xC3A0;
-        place_rom_string(ui, at % SCREEN_TILES_X, at / SCREEN_TILES_X, text);
+    for &((x, y), text) in &poke_core::tables::DIPLOMA_TEXTS {
+        place_string(ui, x as usize, y as usize, &poke_core::tables::Chars::encode(text));
     }
     let name = s.ctx.world.player_name.clone();
     ui.place(10, 4, &name);
     // `DrawPlayerCharacter`, moved 33 pixels right and behind the background.
-    let red = &rom_slice(sym::PlayerCharacterTitleGraphics)[..(sym::PlayerCharacterTitleGraphicsEnd.address - sym::PlayerCharacterTitleGraphics.address) as usize];
-    tiles_load(s, V_CHARS0, red);
+    tiles_load(s, V_CHARS0, poke_core::gfx::title::PLAYER);
     let objects = &mut s.ctx.screen.sprites;
     clear_sprites(objects);
     for row in 0..7u8 {
@@ -1104,9 +1084,7 @@ fn diploma(s: &mut Script) -> Flow {
             objects[at] = Object { y: 0x60 + 8 * row, x: 0x5A + 8 * column + 33, tile: row * 5 + column, attributes: Object::BEHIND_BG };
         }
     }
-    let border = rom_slice(sym::TrainerInfoTextBoxTileGraphics);
-    let count = (sym::TrainerInfoTextBoxTileGraphicsEnd.address - sym::TrainerInfoTextBoxTileGraphics.address) as usize;
-    tiles_load(s, V_CHARS2 + 0x76, &border[..count]);
+    tiles_load(s, V_CHARS2 + 0x76, poke_core::gfx::trainer_card::TRAINER_INFO);
     // `SET_PAL_GENERIC`, which nothing puts back until the next map's `SET_PAL_OVERWORLD`.
     s.ctx.screen.sgb.run(&PaletteCommand::Generic);
     s.ctx.screen.effects = Default::default();

@@ -97,9 +97,15 @@ fn the_loaders_put_the_same_patterns_where_the_cartridge_does() {
     tiles.load_text_box_tiles();
     let mut cartridge = TileData::default();
     cartridge.load(0, &vram(&gb, 0x8000, 384 * 16));
-    // Tiles $03 and $14 of the tileset are the flower and water, which animate.
+    // Tiles $03 and $14 of the tileset are the flower and water, which animate. Past a short sheet
+    // the cartridge has copied its blockset, which no block draws, and the recreation is blank.
+    let sheet = (poke_core::map_gfx::tileset_sheet(tileset).len() / 16) as u8;
+    assert!(sheet < 0x60, "Pallet Town's sheet is no longer short, so the blank tail is untested");
     for id in (0..0x80u8).filter(|&id| id != 0x03 && id != 0x14) {
-        assert_eq!(tiles.bg(id), cartridge.bg(id), "vChars2 tile ${id:02X}");
+        match id {
+            _ if id < sheet || id >= 0x60 => assert_eq!(tiles.bg(id), cartridge.bg(id), "vChars2 tile ${id:02X}"),
+            _ => assert_eq!(*tiles.bg(id), [0; 16], "vChars2 tile ${id:02X}"),
+        }
     }
 }
 

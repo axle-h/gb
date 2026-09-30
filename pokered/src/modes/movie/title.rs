@@ -10,9 +10,9 @@
 //! the LCD-off load, the picture's decompression, the `Delay3` before the title music and the one
 //! after the white-out.
 
-use poke_core::rom_gfx::rom_slice;
+use poke_core::gfx;
+use poke_core::tables::TITLE_MONS;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::{pokered_local_labels::DisplayTitleScreen as labels, pokered_symbols as sym};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, AudioBank};
 use crate::gfx::sgb::PaletteCommand;
@@ -22,7 +22,7 @@ use crate::gfx::layers::TileMap;
 use crate::mode::Ctx;
 use crate::rng::Rng;
 use super::intro::{pal_normal, place_string_lines, white_out};
-use super::screen::{between, clear_screen, copy_pic_to_tile_map, load_mon_pic, Dest, MovieScreen, WINDOW_HIDDEN};
+use super::screen::{clear_screen, copy_pic_to_tile_map, load_mon_pic, Dest, MovieScreen, WINDOW_HIDDEN};
 use super::wait::{Tick, Wait, CLEAR_SAVE_BUTTONS};
 
 /// `vTitleLogo2`: the tiles past `vFrontPic` in `vChars2`.
@@ -179,12 +179,12 @@ impl Title {
 
         let tiles = &mut ctx.screen.tiles;
         tiles.load_font();
-        tiles.load(TITLE_LOGO2 + 16, &rom_slice(sym::NintendoCopyrightLogoGraphics)[..5 * 16]);
-        tiles.load(TITLE_LOGO2 + 16 + 5, &rom_slice(sym::GameFreakLogoGraphics)[..9 * 16]);
-        let logo = rom_slice(sym::PokemonLogoGraphics);
+        tiles.load(TITLE_LOGO2 + 16, &gfx::splash::COPYRIGHT[..5 * 16]);
+        tiles.load(TITLE_LOGO2 + 16 + 5, gfx::title::GAMEFREAK_INC);
+        let logo = gfx::title::POKEMON_LOGO;
         tiles.load(V_CHARS1, &logo[..0x60 * 16]);
         tiles.load(TITLE_LOGO2, &logo[0x60 * 16..0x70 * 16]);
-        let version = between(sym::Version_GFX, sym::Version_GFXEnd);
+        let version = gfx::title::RED_VERSION;
         tiles.load_1bpp(V_CHARS2 + 0x60 + (10 * 16 - version.len() * 2) / 2 / 16, version);
         screen.maps = [TileMap::filled(UiSurface::BLANK), TileMap::filled(UiSurface::BLANK)];
 
@@ -198,7 +198,7 @@ impl Title {
             ui.set(2 + column, 7, 0x31 + column as u8);
         }
         // `DrawPlayerCharacter`, with a Pokéball put in Red's hand.
-        tiles.load(V_CHARS0, between(sym::PlayerCharacterTitleGraphics, sym::PlayerCharacterTitleGraphicsEnd));
+        tiles.load(V_CHARS0, gfx::title::PLAYER);
         screen.clear_sprites();
         for row in 0..7u8 {
             for column in 0..5u8 {
@@ -207,7 +207,7 @@ impl Title {
             }
         }
         screen.oam[BALL_OBJECT].y = 0x74;
-        ui.place(2, 17, between(labels::tileScreenCopyrightTiles, labels::tileScreenCopyrightTilesEnd));
+        ui.place(2, 17, poke_core::tables::TITLE_SCREEN_COPYRIGHT_TILES);
         self.without_mon = ui.clone();
 
         self.species = PokemonSpecies::Charmander;
@@ -224,9 +224,7 @@ impl Title {
     }
 
     fn scrolls(entry: u8) -> (i8, u8) {
-        let table = rom_slice(labels::TitleScreenPokemonLogoYScrolls);
-        let at = entry as usize * 2;
-        (table[at] as i8, table.get(at + 1).copied().unwrap_or(0))
+        poke_core::tables::TITLE_SCREEN_POKEMON_LOGO_Y_SCROLLS.get(entry as usize).copied().unwrap_or((0, 0))
     }
 
     /// An entry of `.TitleScreenPokemonLogoYScrolls`: the crash at the bounce's first rebound, then
@@ -281,30 +279,31 @@ impl Title {
     /// animating. Going from one entry of the table to the next costs no frame.
     fn scroll(&mut self, ctx: &mut Ctx, screen: &mut MovieScreen) -> bool {
         let Phase::Scrolling { scroll, mut entry, mut left, mut d } = self.phase else { unreachable!() };
-        let table = rom_slice(match scroll {
-            Scroll::Out => sym::TitleScroll_Out,
-            Scroll::In => sym::TitleScroll_In,
-            Scroll::Ball => sym::TitleScroll_WaitBall,
-        });
+        // A step's high nybble is the speed and its low one the frames it lasts.
+        let table = match scroll {
+            Scroll::Out => poke_core::tables::TITLE_SCROLL_OUT,
+            Scroll::In => poke_core::tables::TITLE_SCROLL_IN,
+            Scroll::Ball => poke_core::tables::TITLE_SCROLL_WAIT_BALL,
+        };
         if left == 0 {
-            if table[entry as usize] == 0 {
+            let Some(&step) = table.get(entry as usize) else {
                 self.scrolled(ctx, screen, scroll);
                 return true;
-            }
-            left = table[entry as usize] & 0xF;
+            };
+            left = step & 0xF;
             entry += 1;
         }
         split(ctx, screen.scx, MON_TOP, MON_BOTTOM, d);
         d = d.wrapping_add(table[entry as usize - 1] >> 4);
         // `GetTitleBallY`, which stops at the table's zero without moving on.
-        let y = rom_slice(sym::TitleBallYTable)[self.ball as usize];
+        let y = poke_core::tables::TITLE_BALL_Y_TABLE[self.ball as usize];
         if y != 0 {
             screen.oam[BALL_OBJECT].y = y;
             self.ball += 1;
         }
         left -= 1;
         self.phase = Phase::Scrolling { scroll, entry, left, d };
-        if left == 0 && table[entry as usize] == 0 {
+        if left == 0 && entry as usize == table.len() {
             self.scrolled(ctx, screen, scroll);
         }
         false
@@ -330,9 +329,8 @@ impl Title {
     /// cartridge reaches its line in.
     fn pick_new_mon(&mut self, ctx: &mut Ctx, screen: &mut MovieScreen) {
         screen.copy_to(&ctx.screen.ui, Dest::BG_MAP0);
-        let mons = rom_slice(sym::TitleMons);
         let species = loop {
-            let pick = PokemonSpecies::from_repr(mons[(ctx.rng.random() & 0xF) as usize]).expect("a title mon");
+            let pick = PokemonSpecies::from_repr(TITLE_MONS[(ctx.rng.random() & 0xF) as usize]).expect("a title mon");
             if pick != self.species {
                 break pick;
             }
@@ -360,8 +358,7 @@ impl Title {
         screen.copy_to(&ctx.screen.ui, Dest::BG_MAP0);
         screen.copy_to(&ctx.screen.ui, Dest::BG_MAP1);
         // `LoadGBPal`, with no dark map to offset it.
-        let fade = rom_slice(sym::FadePal4);
-        (ctx.screen.effects.bgp, ctx.screen.effects.obp0, ctx.screen.effects.obp1) = (fade[0], fade[1], fade[2]);
+        (ctx.screen.effects.bgp, ctx.screen.effects.obp0, ctx.screen.effects.obp1) = poke_core::tables::FADE_PALETTES[3];
         self.phase = Phase::Done;
     }
 }
@@ -380,6 +377,6 @@ fn load_title_mon(ctx: &mut Ctx, species: PokemonSpecies) {
 
 /// `PrintGameVersionOnTitleScreen`.
 fn print_version(ui: &mut UiSurface) {
-    place_string_lines(ui, 7, 8, rom_slice(sym::VersionOnTitleScreenText));
+    place_string_lines(ui, 7, 8, &poke_core::tables::Chars::encode(poke_core::tables::VERSION_ON_TITLE_SCREEN_TEXT));
 }
 

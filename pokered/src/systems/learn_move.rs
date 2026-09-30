@@ -5,8 +5,7 @@
 //! `wNumMovesMinusOne` wherever the last caller left it when the gap is in the first slot.
 
 use poke_core::move_name::PokemonMoveName;
-use poke_core::rom_gfx::rom_slice;
-use poke_core::symbols::pokered_symbols;
+use poke_core::tables::HM_MOVES;
 use serde::{Deserialize, Serialize};
 use crate::party::NUM_MOVES;
 
@@ -52,7 +51,7 @@ pub fn format_moves_string(moves: &[Option<PokemonMoveName>; NUM_MOVES]) -> Move
 
 /// `IsMoveHM`, over `HMMoves`.
 pub fn is_move_hm(known: PokemonMoveName) -> bool {
-    rom_slice(pokered_symbols::HMMoves).iter().take_while(|&&id| id != 0xFF).any(|&id| id == known as u8)
+    HM_MOVES.contains(&(known as u8))
 }
 
 #[cfg(test)]

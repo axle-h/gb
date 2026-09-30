@@ -29,10 +29,8 @@
 use poke_core::item::{self, ItemId};
 use poke_core::map::Map;
 use poke_core::map_header::MapHeader;
-use poke_core::rom_gfx::rom_slice;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_ROUTE12_SNORLAX, EVENT_BEAT_ROUTE16_SNORLAX,
     EVENT_FIGHT_ROUTE12_SNORLAX, EVENT_FIGHT_ROUTE16_SNORLAX};
-use poke_core::symbols::{pokered_symbols, DmgPointer};
 use poke_core::text_script::{far_text, TextBuffer, TextMoney};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, AudioBank, Sound, SoundId};
@@ -76,7 +74,11 @@ enum Phase {
     Child(After),
     UseToss,
     /// `PlayDefaultMusic`'s `WaitForSoundToFinish`, then its song and the text.
-    Music { text: Option<DmgPointer>, after: After },
+    Music {
+        #[serde(with = "poke_core::text_script::saved_text")]
+        text: Option<poke_core::text_script::TextLabel>,
+        after: After,
+    },
     /// `ItemUseEscapeRope`'s `DelayFrames 30` with the map back on screen.
     Delay(u8),
     /// `PlayedFluteHadEffectText`'s `text_asm`: the tune on channel 3, waited out.
@@ -164,11 +166,6 @@ impl ItemMenu {
         Transition::Push(Mode::TextBox(TextBox::script(script)))
     }
 
-    fn text_at(&mut self, text: DmgPointer, after: After) -> Transition {
-        self.phase = Phase::Child(after);
-        Transition::Push(Mode::TextBox(TextBox::script(poke_core::text_script::decode(text).expect("the item's text decodes"))))
-    }
-
     fn after(&mut self, ctx: &mut Ctx, after: After) -> Transition {
         match after {
             After::CloseMenu => Transition::Pop(Outcome::Chosen(self.item as u8)),
@@ -185,7 +182,7 @@ impl ItemMenu {
             return self.update(ctx);
         }
         match used.text {
-            Some(text) => self.text_at(text, after),
+            Some(text) => self.text(text, after),
             None => self.after(ctx, after),
         }
     }
@@ -272,7 +269,7 @@ impl ItemMenu {
             ItemUse::MaxRepel => self.repel(ctx, 250),
             ItemUse::CoinCase => {
                 ctx.world.text.money.insert(TextMoney::PlayerCoins, ctx.world.coins.to_vec());
-                self.text_at(pokered_symbols::CoinCaseNumCoinsText, after)
+                self.text("CoinCaseNumCoinsText", after)
             }
             // `ItemUseCardKey` compares the first byte of `GetTileAndCoordsInFrontOfPlayer`'s own code
             // rather than the tile it finds, which is never one of the three doors.
@@ -307,14 +304,14 @@ impl ItemMenu {
         if snorlax_to_wake(ctx).is_none() {
             return self.text("_PlayedFluteNoEffectText", After::CloseMenu);
         }
-        self.text_at(pokered_symbols::PlayedFluteHadEffectText, After::Flute)
+        self.text("PlayedFluteHadEffectText", After::Flute)
     }
 
     /// `ItemUseRepelCommon`: the steps set over whatever an earlier one left, then
     /// `PrintItemUseTextAndRemoveItem`.
     fn repel(&mut self, ctx: &mut Ctx, steps: u8) -> Transition {
         ctx.world.location.repel_steps = steps;
-        self.text_at(pokered_symbols::ItemUseText00, After::Used)
+        self.text("ItemUseText00", After::Used)
     }
 
     /// `ItemUseItemfinder`: `ItemUseReloadOverworldData`, then `HiddenItemNear`'s answer, after
@@ -323,7 +320,7 @@ impl ItemMenu {
         ctx.screen.ui.uncover(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y);
         ctx.update_sprites = true;
         if !hidden_item_near(ctx) {
-            return self.text_at(pokered_symbols::ItemfinderFoundNothingText, After::CloseMenu);
+            return self.text("ItemfinderFoundNothingText", After::CloseMenu);
         }
         self.phase = Phase::Itemfinder(ITEMFINDER_SOUNDS);
         self.update(ctx)
@@ -345,12 +342,10 @@ impl ItemMenu {
 fn hidden_item_near(ctx: &Ctx) -> bool {
     let location = &ctx.world.location;
     let near_edge = |at: u8| if at.wrapping_sub(5) < 0xF0 { at.wrapping_sub(5) } else { 0 };
-    let rows = rom_slice(pokered_symbols::HiddenItemCoords);
-    rows.chunks(3).take_while(|row| row[0] != 0xFF).enumerate()
-        .filter(|&(_, row)| row[0] == location.map as u8)
-        .any(|(index, row)| {
+    poke_core::tables::HIDDEN_ITEM_COORDS.iter().enumerate()
+        .filter(|&(_, &(map, _, _))| map == location.map as u8)
+        .any(|(index, &(_, x, y))| {
             let found = ctx.world.hidden_items[index / 8] & 1 << (index % 8) != 0;
-            let (y, x) = (row[1], row[2]);
             !found && near_edge(location.y) < y && y <= location.y.wrapping_add(4)
                 && near_edge(location.x) < x && x <= location.x.wrapping_add(5)
         })
@@ -378,7 +373,7 @@ impl ModeUpdate for ItemMenu {
             Phase::Music { text, after } => {
                 crate::modes::overworld::play_default_music(ctx);
                 match text {
-                    Some(text) => self.text_at(text, after),
+                    Some(text) => self.text(text, after),
                     None => self.after(ctx, after),
                 }
             }
@@ -398,7 +393,7 @@ impl ModeUpdate for ItemMenu {
                 remove_from_bag(ctx, self.slot as usize, 1);
                 self.menu_loop(ctx)
             }
-            Phase::Itemfinder(0) => self.text_at(pokered_symbols::ItemfinderFoundItemText, After::CloseMenu),
+            Phase::Itemfinder(0) => self.text("ItemfinderFoundItemText", After::CloseMenu),
             Phase::Itemfinder(_) if !ctx.audio.sound_finished() => Transition::Stay,
             Phase::Itemfinder(left) => {
                 let sound = if left % 2 == 0 { sounds::SFX_HEALING_MACHINE } else { sounds::SFX_PURCHASE };
@@ -926,8 +921,6 @@ mod tests {
 
     #[test]
     fn the_card_key_is_never_the_time() {
-        assert!(![0x18, 0x24, 0x5E].contains(&rom_slice(pokered_symbols::GetTileAndCoordsInFrontOfPlayer)[0]),
-            "the byte `ItemUseCardKey` compares is a door tile");
         let mut game = game(&[(ItemId::CardKey, 1)], 10);
         use_first(&mut game);
         assert_eq!(settle(&mut game), Decision::Text);

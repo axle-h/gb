@@ -8,8 +8,8 @@
 //! Loading, and not modelled: `ClearScreen`'s `Delay3`, the LCD-off graphics load and `ClearVram`,
 //! the `CopyVideoData` frames of the star's tiles, and the `Delay3` before the scene.
 
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
-use poke_core::symbols::{pokered_symbols as sym, DmgPointer};
+use poke_core::gfx;
+use poke_core::rom_gfx::TILE_BYTES;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, AudioBank, SoundId};
 use crate::gfx::layers::{Object, TileMap};
@@ -17,15 +17,13 @@ use crate::gfx::sgb::PaletteCommand;
 use crate::gfx::tiles::{TileData, V_CHARS0, V_CHARS1, V_CHARS2};
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
 use crate::mode::Ctx;
-use super::screen::{between, clear_screen, copy_tile_ids, Dest, MovieScreen, BGP_NORMAL, OBP0_NORMAL};
+use super::screen::{clear_screen, copy_tile_ids, Dest, MovieScreen, BGP_NORMAL, OBP0_NORMAL};
 use super::wait::{Tick, Wait};
 
 /// `TILEMAP_GENGAR_INTRO_1`; the next two follow it.
 const TILEMAP_GENGAR_INTRO_1: usize = 3;
-/// `ANIMATION_END`.
-const ANIMATION_END: u8 = 80;
-/// Tiles each Nidorino pose takes: `(FightIntroFrontMon2 - FightIntroFrontMon) / TILE_SIZE`.
-const POSE_TILES: u8 = 36;
+/// Tiles each Nidorino pose takes.
+const POSE_TILES: u8 = (gfx::intro::RED_NIDORINO_1.len() / TILE_BYTES) as u8;
 /// `SCREEN_HEIGHT_PX + OAM_Y_OFS`, which hides an object.
 const OFF_SCREEN_Y: u8 = 160;
 /// Where `.bigStarLoop` stops: the star's top-left object at this `Y`.
@@ -119,8 +117,8 @@ impl Default for Intro {
 }
 
 fn fade_palette(n: u16) -> [u8; 3] {
-    let table = rom_slice(sym::FadePal1 + (n - 1) * 3);
-    [table[0], table[1], table[2]]
+    let (bgp, obp0, obp1) = poke_core::tables::FADE_PALETTES[n as usize - 1];
+    [bgp, obp0, obp1]
 }
 
 fn set_palettes(ctx: &mut Ctx, [bgp, obp0, obp1]: [u8; 3]) {
@@ -148,12 +146,8 @@ pub fn pal_normal(ctx: &mut Ctx) {
     ctx.screen.effects.obp0 = OBP0_NORMAL;
 }
 
-pub fn objects(bytes: &[u8]) -> impl Iterator<Item = Object> + '_ {
-    bytes.chunks_exact(4).map(|o| Object { y: o[0], x: o[1], tile: o[2], attributes: o[3] })
-}
-
-fn audio_bank(label: DmgPointer) -> AudioBank {
-    AudioBank::from_rom_bank(label.bank.id()).expect("a sound lives in an audio bank")
+fn object([y, x, tile, attributes]: [u8; 4]) -> Object {
+    Object { y, x, tile, attributes }
 }
 
 impl Intro {
@@ -195,9 +189,7 @@ impl Intro {
             Phase::Flash(_) if interrupted => self.phase = Phase::Music,
             Phase::Flash(n) if n < 3 => self.flash_logo(ctx, n),
             Phase::Flash(_) => {
-                let small = rom_slice(sym::SmallStarsOAM);
-                let object = objects(&small[..4]).next().expect("one object");
-                screen.oam[..24].fill(object);
+                screen.oam[..24].fill(object(gfx::SMALL_STARS_OAM[0]));
                 self.small_stars = 0;
                 self.start_wave(ctx, screen, 0);
             }
@@ -218,7 +210,7 @@ impl Intro {
                 }
             }
             Phase::Music => {
-                ctx.audio.set_bank(audio_bank(sym::Music_IntroBattle));
+                ctx.audio.set_bank(AudioBank::holding("Music_IntroBattle"));
                 ctx.audio.play_new_sound(sounds::MUSIC_INTRO_BATTLE.id);
                 // `IntroClearMiddleOfScreen`.
                 ctx.screen.ui.fill(0, 4, SCREEN_TILES_X, 10, 0);
@@ -253,7 +245,7 @@ impl Intro {
     /// `Init`'s tail and `PlayShootingStar` to its first hold.
     fn copyright(&mut self, ctx: &mut Ctx, screen: &mut MovieScreen) {
         ctx.audio.stop_all_sounds();
-        ctx.audio.set_bank(audio_bank(sym::SFX_Shooting_Star));
+        ctx.audio.set_bank(AudioBank::holding("SFX_Shooting_Star"));
         screen.transfer = Some(Dest::BG_MAP1);
         ctx.screen.sgb.run(&PaletteCommand::GameFreakIntro);
         // `LoadCopyrightAndTextBoxTiles`. The window it shows `vBGMap1` through covers the whole
@@ -280,12 +272,15 @@ impl Intro {
                 screen.maps[1].set(column, row, BLACK);
             }
         }
-        let back = between(sym::FightIntroBackMon, sym::FightIntroBackMonEnd);
-        let game_freak = between(sym::GameFreakIntro, sym::GameFreakIntroEnd);
-        ctx.screen.tiles.load(V_CHARS2, back);
-        ctx.screen.tiles.load(V_CHARS2 + back.len() / TILE_BYTES, game_freak);
-        ctx.screen.tiles.load(V_CHARS1, game_freak);
-        ctx.screen.tiles.load(V_CHARS0, between(sym::FightIntroFrontMon, sym::FightIntroFrontMonEnd));
+        // `FightIntroBackMon` and `GameFreakIntro` each end in a blank tile of their own.
+        let blank = [0; TILE_BYTES];
+        let back = [&gfx::intro::GENGAR[..], &blank].concat();
+        let game_freak = [&gfx::splash::GAMEFREAK_PRESENTS[..], gfx::splash::GAMEFREAK_LOGO, &blank].concat();
+        ctx.screen.tiles.load(V_CHARS2, &back);
+        ctx.screen.tiles.load(V_CHARS2 + back.len() / TILE_BYTES, &game_freak);
+        ctx.screen.tiles.load(V_CHARS1, &game_freak);
+        let poses = [&gfx::intro::RED_NIDORINO_1[..], gfx::intro::RED_NIDORINO_2, gfx::intro::RED_NIDORINO_3].concat();
+        ctx.screen.tiles.load(V_CHARS0, &poses);
         screen.bg_map = 1;
         screen.wy = 144;
         self.phase = Phase::StarStart;
@@ -310,13 +305,10 @@ impl Intro {
 
     /// `.smallStarsInnerLoop` for one wave, then its first step down.
     fn start_wave(&mut self, ctx: &mut Ctx, screen: &mut MovieScreen, wave: u8) {
-        let table = rom_slice(sym::SmallStarsWaveCoordsPointerTable);
-        let pointer = u16::from_le_bytes([table[wave as usize * 2], table[wave as usize * 2 + 1]]);
-        let coords = rom_slice(DmgPointer { address: pointer, ..sym::SmallStarsWaveCoordsPointerTable });
-        if coords[0] != 0xFF {
-            for (i, pair) in coords.chunks_exact(2).take(4).enumerate() {
-                screen.oam[20 + i].y = pair[0];
-                screen.oam[20 + i].x = pair[1];
+        let coords = poke_core::tables::SMALL_STARS_WAVE_COORDS[wave as usize];
+        if !coords.is_empty() {
+            for (i, &[y, x]) in coords.iter().enumerate() {
+                (screen.oam[20 + i].y, screen.oam[20 + i].x) = (y, x);
             }
             // Six rather than four, but the two extra are never on the screen.
             if self.small_stars != 24 {
@@ -382,13 +374,11 @@ impl Intro {
                 self.phase = next;
             }
             Op::Animate(n) => {
-                let table = rom_slice(animation_table(n));
-                let entry = &table[progress as usize * 2..];
-                if entry[0] == ANIMATION_END {
+                let Some(&(dy, dx)) = poke_core::tables::INTRO_NIDORINO_ANIMATIONS[n as usize - 1].get(progress as usize) else {
                     self.phase = next;
                     return;
-                }
-                self.update_nidorino_oam(screen, entry[0], entry[1]);
+                };
+                self.update_nidorino_oam(screen, dy as u8, dx as u8);
                 self.phase = Phase::Scene { op, progress: progress + 1, waiting: true };
                 self.wait = Wait::frames(5);
             }
@@ -424,33 +414,26 @@ impl Intro {
     }
 }
 
-/// `IntroNidorinoAnimationN`: pairs of `(dy, dx)` to `ANIMATION_END`.
-fn animation_table(n: u8) -> DmgPointer {
-    [sym::IntroNidorinoAnimation1, sym::IntroNidorinoAnimation2, sym::IntroNidorinoAnimation3,
-     sym::IntroNidorinoAnimation4, sym::IntroNidorinoAnimation5, sym::IntroNidorinoAnimation6,
-     sym::IntroNidorinoAnimation7][n as usize - 1]
-}
-
 /// `LoadShootingStarGraphics`.
 fn load_shooting_star_graphics(ctx: &mut Ctx, screen: &mut MovieScreen) {
     ctx.screen.effects.obp0 = 0xF9;
     ctx.screen.effects.obp1 = 0xA4;
-    let tile = |n: u16| &rom_slice(sym::MoveAnimationTiles1 + n * TILE_BYTES as u16)[..TILE_BYTES];
+    let tile = |n: usize| &gfx::battle::MOVE_ANIM_1[n * TILE_BYTES..][..TILE_BYTES];
     ctx.screen.tiles.load(V_CHARS1 + 0x20, tile(3));
     ctx.screen.tiles.load(V_CHARS1 + 0x21, tile(19));
-    ctx.screen.tiles.load(V_CHARS1 + 0x22, between(sym::FallingStar, sym::FallingStarEnd));
-    for (i, object) in objects(between(sym::GameFreakLogoOAMData, sym::GameFreakLogoOAMDataEnd)).enumerate() {
-        screen.oam[24 + i] = object;
+    ctx.screen.tiles.load(V_CHARS1 + 0x22, gfx::splash::FALLING_STAR);
+    for (i, &bytes) in gfx::GAME_FREAK_LOGO_OAM.iter().enumerate() {
+        screen.oam[24 + i] = object(bytes);
     }
-    for (i, object) in objects(between(sym::GameFreakShootingStarOAMData, sym::GameFreakShootingStarOAMDataEnd)).enumerate() {
-        screen.oam[i] = object;
+    for (i, &bytes) in gfx::GAME_FREAK_SHOOTING_STAR_OAM.iter().enumerate() {
+        screen.oam[i] = object(bytes);
     }
 }
 
 /// `LoadCopyrightTiles`: the copyright's tiles at `vChars2 $60`, then its three lines.
 pub fn load_copyright_tiles(ctx: &mut Ctx) {
-    ctx.screen.tiles.load(V_CHARS2 + 0x60, between(sym::NintendoCopyrightLogoGraphics, sym::GameFreakLogoGraphicsEnd));
-    place_string_lines(&mut ctx.screen.ui, 2, 7, rom_slice(sym::CopyrightTextString));
+    ctx.screen.tiles.load(V_CHARS2 + 0x60, &[&gfx::splash::COPYRIGHT[..], gfx::title::GAMEFREAK_INC].concat());
+    place_string_lines(&mut ctx.screen.ui, 2, 7, &poke_core::tables::Chars::encode(poke_core::tables::COPYRIGHT_TEXT_STRING));
 }
 
 /// `PlaceString` for a string of plain tiles and `<NEXT>`, each line two rows below the last.

@@ -4,7 +4,6 @@
 //! (`Overworld::surf_step`).
 
 use poke_core::map_header::MapHeader;
-use poke_core::symbols::{pokered_symbols, DmgPointer};
 use crate::gfx::ui::{SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
 use crate::mode::Ctx;
@@ -19,11 +18,11 @@ pub struct Used {
     pub result: bool,
     /// `PlayDefaultMusic` runs, before the text.
     pub music: bool,
-    pub text: Option<DmgPointer>,
+    pub text: Option<poke_core::text_script::TextLabel>,
 }
 
 impl Used {
-    fn failed(text: DmgPointer) -> Self {
+    fn failed(text: poke_core::text_script::TextLabel) -> Self {
         Self { result: false, music: false, text: Some(text) }
     }
 }
@@ -37,21 +36,21 @@ fn tileset(ctx: &Ctx) -> poke_core::map_header::TileSetId {
 pub fn item_use_bicycle(ctx: &mut Ctx) -> Used {
     let location = &ctx.world.location;
     if location.walk_bike_surf == SURFING {
-        return Used::failed(pokered_symbols::ItemUseNotTimeText);
+        return Used::failed("ItemUseNotTimeText");
     }
     let getting_on = location.walk_bike_surf != BIKING;
     if getting_on && !is_bike_riding_allowed(location.map, tileset(ctx)) {
-        return Used::failed(pokered_symbols::NoCyclingAllowedHereText);
+        return Used::failed("NoCyclingAllowedHereText");
     }
     ctx.screen.ui.uncover(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y);
     ctx.update_sprites = true;
     let text = if getting_on {
         ctx.pad.held = Joypad::empty();
         ctx.world.location.walk_bike_surf = BIKING;
-        pokered_symbols::GotOnBicycleText
+        "GotOnBicycleText"
     } else {
         ctx.world.location.walk_bike_surf = WALKING;
-        pokered_symbols::GotOffBicycleText
+        "GotOffBicycleText"
     };
     Used { result: true, music: true, text: Some(text) }
 }
@@ -62,13 +61,13 @@ pub fn item_use_surfboard(ctx: &mut Ctx) -> Used {
     let location = &mut ctx.world.location;
     if location.walk_bike_surf != SURFING {
         if no_surfing_here(tileset, &location.ahead) {
-            return Used::failed(pokered_symbols::NoSurfingHereText);
+            return Used::failed("NoSurfingHereText");
         }
         location.walk_bike_surf = SURFING;
-        return Used { result: true, music: true, text: Some(pokered_symbols::SurfingGotOnText) };
+        return Used { result: true, music: true, text: Some("SurfingGotOnText") };
     }
     if no_place_to_get_off(tileset, &location.ahead) {
-        return Used { result: true, music: false, text: Some(pokered_symbols::SurfingNoPlaceToGetOffText) };
+        return Used { result: true, music: false, text: Some("SurfingNoPlaceToGetOffText") };
     }
     location.walk_bike_surf = WALKING;
     ctx.pad.ignore = Joypad::all();

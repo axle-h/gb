@@ -1,26 +1,22 @@
 //! `ViridianGym_Script`: the arrow tiles that slide the player around the gym, its eight trainers,
 //! and Giovanni, whose Earth Badge opens Route 22 for the second rival battle.
 
+use poke_core::tables::trainers;
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_2ND_ROUTE22_RIVAL_BATTLE, EVENT_BEAT_VIRIDIAN_GYM_GIOVANNI,
     EVENT_BEAT_VIRIDIAN_GYM_TRAINER_0, EVENT_BEAT_VIRIDIAN_GYM_TRAINER_7, EVENT_GOT_TM27,
     EVENT_ROUTE22_RIVAL_WANTS_BATTLE};
-use poke_core::symbols::pokered_local_labels::ViridianGymGiovanniText;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_VIRIDIANGYM_DEFAULT, SCRIPT_VIRIDIANGYM_GIOVANNI_POST_BATTLE,
     SCRIPT_VIRIDIANGYM_PLAYER_SPINNING, TEXT_VIRIDIANGYM_COOLTRAINER_M1, TEXT_VIRIDIANGYM_COOLTRAINER_M2,
     TEXT_VIRIDIANGYM_COOLTRAINER_M3, TEXT_VIRIDIANGYM_GIOVANNI, TEXT_VIRIDIANGYM_GIOVANNI_EARTH_BADGE_INFO,
     TEXT_VIRIDIANGYM_GIOVANNI_RECEIVED_TM27, TEXT_VIRIDIANGYM_GIOVANNI_TM27_NO_ROOM, TEXT_VIRIDIANGYM_GYM_GUIDE,
     TEXT_VIRIDIANGYM_HIKER1,
     TEXT_VIRIDIANGYM_HIKER2, TEXT_VIRIDIANGYM_HIKER3, TEXT_VIRIDIANGYM_ROCKER1, TEXT_VIRIDIANGYM_ROCKER2};
-use poke_core::symbols::pokered_symbols::{ViridianGymArrowTilePlayerMovement, ViridianGymGuidePostBattleText,
-    ViridianGymGuidePreBattleText, ViridianGymTrainerHeader0,
-    ViridianGymTrainerHeader1, ViridianGymTrainerHeader2, ViridianGymTrainerHeader3, ViridianGymTrainerHeader4,
-    ViridianGymTrainerHeader5, ViridianGymTrainerHeader6, ViridianGymTrainerHeader7, ViridianGymTrainerHeaders};
 use poke_core::symbols::pokered_toggles::{TOGGLE_ROUTE_22_RIVAL_2, TOGGLE_VIRIDIAN_GYM_GIOVANNI};
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use crate::modes::overworld::spinners::{arrow_tile_default, player_spinning};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `BIT_EARTHBADGE`.
 const BIT_EARTHBADGE: u8 = 7;
@@ -55,10 +51,10 @@ pub enum Label {
 pub fn script(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().viridian_gym.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, ViridianGymTrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::ViridianGymTrainerHeaders);
     let then = match index {
         SCRIPT_VIRIDIANGYM_DEFAULT => {
-            arrow_tile_default(rt, ViridianGymArrowTilePlayerMovement, SCRIPT_VIRIDIANGYM_PLAYER_SPINNING)
+            arrow_tile_default(rt, poke_core::tables::VIRIDIAN_GYM_ARROWS, SCRIPT_VIRIDIANGYM_PLAYER_SPINNING)
         }
         SCRIPT_VIRIDIANGYM_PLAYER_SPINNING => {
             player_spinning(rt, SCRIPT_VIRIDIANGYM_DEFAULT);
@@ -102,20 +98,20 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     // `ViridianGymGymGuideText`.
     if text_id == TEXT_VIRIDIANGYM_GYM_GUIDE {
         let words = match rt.check_event(EVENT_BEAT_VIRIDIAN_GYM_GIOVANNI) {
-            true => ViridianGymGuidePostBattleText,
-            false => ViridianGymGuidePreBattleText,
+            true => "ViridianGymGuidePostBattleText",
+            false => "ViridianGymGuidePreBattleText",
         };
-        return Some(rt.print_text(text_at(words)).ret());
+        return Some(rt.print_text(text_named(words)).ret());
     }
     let header = match text_id {
-        TEXT_VIRIDIANGYM_COOLTRAINER_M1 => ViridianGymTrainerHeader0,
-        TEXT_VIRIDIANGYM_HIKER1 => ViridianGymTrainerHeader1,
-        TEXT_VIRIDIANGYM_ROCKER1 => ViridianGymTrainerHeader2,
-        TEXT_VIRIDIANGYM_HIKER2 => ViridianGymTrainerHeader3,
-        TEXT_VIRIDIANGYM_COOLTRAINER_M2 => ViridianGymTrainerHeader4,
-        TEXT_VIRIDIANGYM_HIKER3 => ViridianGymTrainerHeader5,
-        TEXT_VIRIDIANGYM_ROCKER2 => ViridianGymTrainerHeader6,
-        TEXT_VIRIDIANGYM_COOLTRAINER_M3 => ViridianGymTrainerHeader7,
+        TEXT_VIRIDIANGYM_COOLTRAINER_M1 => trainers::ViridianGymTrainerHeader0,
+        TEXT_VIRIDIANGYM_HIKER1 => trainers::ViridianGymTrainerHeader1,
+        TEXT_VIRIDIANGYM_ROCKER1 => trainers::ViridianGymTrainerHeader2,
+        TEXT_VIRIDIANGYM_HIKER2 => trainers::ViridianGymTrainerHeader3,
+        TEXT_VIRIDIANGYM_COOLTRAINER_M2 => trainers::ViridianGymTrainerHeader4,
+        TEXT_VIRIDIANGYM_HIKER3 => trainers::ViridianGymTrainerHeader5,
+        TEXT_VIRIDIANGYM_ROCKER2 => trainers::ViridianGymTrainerHeader6,
+        TEXT_VIRIDIANGYM_COOLTRAINER_M3 => trainers::ViridianGymTrainerHeader7,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())
@@ -124,13 +120,13 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 /// `ViridianGymGiovanniText`.
 fn giovanni_text(rt: &mut Script) -> Flow {
     if !rt.check_event(EVENT_BEAT_VIRIDIAN_GYM_GIOVANNI) {
-        return rt.print_text(text_at(ViridianGymGiovanniText::PreBattleText)).then(Label::PreBattle);
+        return rt.print_text(text_named("ViridianGymGiovanniText.PreBattleText")).then(Label::PreBattle);
     }
     if !rt.check_event(EVENT_GOT_TM27) {
         return Flow::Call(Label::ReceiveTm27.into(), Label::TextDone.into());
     }
     rt.set_do_not_wait_for_button_press(true);
-    rt.print_text(text_at(ViridianGymGiovanniText::PostBattleAdviceText)).then(Label::PostBattleAdvice)
+    rt.print_text(text_named("ViridianGymGiovanniText.PostBattleAdviceText")).then(Label::PostBattleAdvice)
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -167,7 +163,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             reset_scripts(rt)
         }
         Label::PreBattle => {
-            rt.save_end_battle_text(ViridianGymGiovanniText::ReceivedEarthBadgeText);
+            rt.save_end_battle_text("ViridianGymGiovanniText.ReceivedEarthBadgeText");
             rt.engage_map_trainer(rt.sprite_index(), GIOVANNI);
             rt.maps().viridian_gym.cur_script = SCRIPT_VIRIDIANGYM_GIOVANNI_POST_BATTLE;
             Flow::Return

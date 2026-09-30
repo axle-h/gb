@@ -3,9 +3,10 @@
 //! world there, fed the same presses and the cartridge's random bytes.
 //!
 //! The cartridge runs first and alone, taping every `Random` byte that is not VBlank's own and
-//! recording what it shows at each poll; the recreation then replays the presses. While the wheels
-//! turn the cartridge polls every step and the recreation is `Busy`, so a press there is held until
-//! a poll has read it, and a poll in the recreation is the frame that reads the pad.
+//! recording what it shows at each poll; the recreation then replays the presses, and again the
+//! commands those presses answer, which must take the same frames. While the wheels turn the
+//! cartridge polls every step, so a press there is held until a poll has read it, and a poll in the
+//! recreation is the frame that reads the pad.
 
 use gb::cycles::MachineCycles;
 use gb::game_boy::{Breakpoint, GameBoy, Stop};
@@ -13,16 +14,17 @@ use gb::joypad::JoypadButtonState;
 use gb::ram::ROM;
 use poke_core::map::Map;
 use poke_core::sprite::SpriteFacing;
+use pokered::command::{Command, Decision, Reply};
 use pokered::input::Joypad;
 use pokered::mode::{Mode, Status};
 use pokered::modes::slots::SlotMachine;
 use pokered::rng::GameRng;
-use pokered::{Game, Input, Pacing};
+use pokered::{Event, Game, Input, Pacing};
 use crate::pokemon::symbols::pokered_symbols as sym;
 use super::battle::{cartridge_oam, letters};
 use super::scripts::{Action, Cartridge as Walker, Kind};
 use super::status_screen::{ours, screen};
-use super::{breakpoint, joypad};
+use super::{assert_late, breakpoint, joypad, ARROW, BOX, CURSOR};
 
 /// `wShadowOAMSprite00` to `Sprite35`: the three wheels' objects. The four after them are the
 /// overworld's, which the recreation does not draw here.
@@ -210,6 +212,94 @@ fn recreation_press(game: &mut Game, button: Joypad) {
     panic!("the recreation never read {button:?}");
 }
 
+/// The command a player's A answers with at what the recreation is waiting on; `None` for a cursor
+/// move, which is a button.
+fn command_for(game: &Game, button: Joypad) -> Option<Command> {
+    if button != Joypad::A {
+        return None;
+    }
+    let selected = || match game.modes().last() {
+        Some(Mode::TwoOptionMenu(menu)) => menu.selected(),
+        Some(Mode::CursorMenu(menu)) => menu.selected(),
+        _ => unreachable!("a menu of options"),
+    };
+    match game.status() {
+        Status::Waiting(Decision::SlotWheels) => Some(Command::StopWheel),
+        Status::Waiting(Decision::Text) => Some(Command::Advance),
+        Status::Waiting(Decision::TwoOption | Decision::CursorMenu) => Some(Command::ChooseOption(selected())),
+        _ => None,
+    }
+}
+
+/// The command handed in on the first frame it is taken, and frames played until it is done.
+fn recreation_command(game: &mut Game, command: Command) {
+    let mut input = Input::Command(command.clone());
+    for _ in 0..30 {
+        let frame = game.frame(std::mem::replace(&mut input, Input::None));
+        if let Some(Reply::Refused(refusal)) = frame.reply {
+            panic!("{command:?} refused: {refusal:?}");
+        }
+        if frame.events.iter().any(|event| matches!(event, Event::CommandDone(done) if *done == command)) {
+            return;
+        }
+    }
+    panic!("{command:?} never finished");
+}
+
+/// The loading the recreation leaves out on the way to a poll, by what the poll shows: `PrintText`'s
+/// box, the `▼`'s `ProtectedDelay3` and the cursor's. A win's `▼` is the machine's own, with no delay,
+/// and a poll of the wheels after another has none at all.
+fn loading(poll: &Poll, before: Option<(&Poll, Joypad)>) -> u32 {
+    let text: String = poll.screen.iter().map(|row| letters(row)).collect::<Vec<_>>().join("/");
+    match () {
+        _ if poll.spinning && before.is_some_and(|(last, _)| last.spinning) => 0,
+        _ if poll.spinning || text.contains("lined up") => BOX,
+        _ if text.contains("Not this time") => BOX + ARROW,
+        _ if text.contains("One more") && before.is_some_and(|(_, pressed)| pressed != Joypad::A) => CURSOR,
+        _ if text.contains("One more") || text.contains("Bet how many") => BOX + CURSOR,
+        _ => panic!("no loading worked out for\n{}", text.replace('/', "\n")),
+    }
+}
+
+/// The recreation from the machine's first frame, fed each press the cartridge took, or with
+/// `commands` the command that press answers, and compared at every poll: the screen, the wheels'
+/// objects, the palettes, the coins and, fed presses, the frames it took. Returns the frame each
+/// poll came on: a command is done some frames after its press, so only that compares across both.
+fn recreate(polls: &[Poll], presses: &[Joypad], world: pokered::world::World, chance: u8, tape: Vec<u8>, commands: bool) -> (Vec<u64>, [u8; 2]) {
+    let mut game = Game::new(world, GameRng::tape(tape), Pacing::Faithful);
+    game.push(Mode::SlotMachine(SlotMachine::new(chance)));
+    let mut took = vec![];
+    for (i, (theirs, &button)) in polls.iter().zip(presses).enumerate() {
+        let (frames, spinning) = recreation_to_poll(&mut game).unwrap_or_else(|| panic!("poll {i}: the recreation let go"));
+        println!("poll {i}: cartridge {} frames, recreation {frames}{}", theirs.frames, if spinning { " spinning" } else { "" });
+        let mine = ours(&game);
+        if theirs.screen != mine {
+            for (a, b) in theirs.screen.iter().zip(&mine) {
+                println!("  |{}|  |{}|", letters(a), letters(b));
+            }
+        }
+        assert_eq!(theirs.screen, mine, "the screen at poll {i}");
+        assert_eq!(spinning, theirs.spinning, "poll {i}: what is polled");
+        if !commands {
+            let before = i.checked_sub(1).map(|last| (&polls[last], presses[last]));
+            assert_late(theirs.frames, frames, loading(theirs, before), &format!("poll {i}"));
+        }
+        let objects: Vec<[u8; 4]> = game.screen().sprites[..WHEEL_OBJECTS].iter()
+            .map(|object| [object.y, object.x, object.tile, object.attributes]).collect();
+        assert_eq!(theirs.objects, objects, "the wheels at poll {i}");
+        let effects = &game.screen().effects;
+        assert_eq!(theirs.palettes, (effects.bgp, effects.obp0), "the palettes at poll {i}");
+        assert_eq!(theirs.coins, game.world().coins, "the coins at poll {i}");
+        took.push(game.frames());
+        match command_for(&game, button).filter(|_| commands) {
+            Some(command) => recreation_command(&mut game, command),
+            None => recreation_press(&mut game, button),
+        }
+    }
+    assert!(recreation_to_poll(&mut game).is_none(), "the recreation's machine lets go");
+    (took, game.world().coins)
+}
+
 /// A press for what the cartridge shows: A to every text, the ×3 bet and every other step of the
 /// wheels, and at the offer of another go YES until `spins` are played and one has won.
 fn choose(poll: &Poll, spins: usize, won: bool, wanted: usize) -> Joypad {
@@ -254,31 +344,13 @@ fn play(wanted: usize) {
     assert!(spins >= wanted, "{spins} spins");
     assert!(won, "no spin won");
 
-    let mut game = Game::new(world, GameRng::tape(std::mem::take(&mut cabinet.tape)), Pacing::Faithful);
-    game.push(Mode::SlotMachine(SlotMachine::new(chance)));
-    for (i, (theirs, &button)) in polls.iter().zip(&presses).enumerate() {
-        let (frames, spinning) = recreation_to_poll(&mut game).unwrap_or_else(|| panic!("poll {i}: the recreation let go"));
-        println!("poll {i}: cartridge {} frames, recreation {frames}{}", theirs.frames, if spinning { " spinning" } else { "" });
-        let mine = ours(&game);
-        if theirs.screen != mine {
-            for (a, b) in theirs.screen.iter().zip(&mine) {
-                println!("  |{}|  |{}|", letters(a), letters(b));
-            }
-        }
-        assert_eq!(theirs.screen, mine, "the screen at poll {i}");
-        assert_eq!(spinning, theirs.spinning, "poll {i}: what is polled");
-        let objects: Vec<[u8; 4]> = game.screen().sprites[..WHEEL_OBJECTS].iter()
-            .map(|object| [object.y, object.x, object.tile, object.attributes]).collect();
-        assert_eq!(theirs.objects, objects, "the wheels at poll {i}");
-        let effects = &game.screen().effects;
-        assert_eq!(theirs.palettes, (effects.bgp, effects.obp0), "the palettes at poll {i}");
-        assert_eq!(theirs.coins, game.world().coins, "the coins at poll {i}");
-        recreation_press(&mut game, button);
-    }
-    assert!(recreation_to_poll(&mut game).is_none(), "the recreation's machine lets go");
     let coins = [cabinet.gb.core().mmu().read(sym::wPlayerCoins.address), cabinet.gb.core().mmu().read(sym::wPlayerCoins.address + 1)];
-    assert_eq!(coins, game.world().coins, "the coins afterwards");
     assert_ne!(coins, before, "the coins moved");
+    let (by_buttons, left) = recreate(&polls, &presses, world.clone(), chance, cabinet.tape.clone(), false);
+    assert_eq!(left, coins, "the coins afterwards");
+    let (by_commands, left) = recreate(&polls, &presses, world, chance, std::mem::take(&mut cabinet.tape), true);
+    assert_eq!(left, coins, "the coins afterwards, by commands");
+    assert_eq!(by_commands, by_buttons, "a command's press lands on the frame a player's does");
 }
 
 #[test]

@@ -13,11 +13,12 @@ use gb::joypad::JoypadButton;
 use strum::IntoEnumIterator;
 use gb::ram::{RAM, ROM};
 use poke_core::bag::BagItem;
+use poke_core::item::ItemId;
 use poke_core::battle::BattleAction;
 use poke_core::map::Map;
 use poke_core::move_name::{PokemonMove, PokemonMoveName};
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::pokered_local_labels as local;
+use crate::pokemon::symbols::pokered_local_labels as local;
 use pokered::mode::Mode;
 use pokered::rng::GameRng;
 use pokered::{Game, Pacing};
@@ -304,7 +305,9 @@ impl Policy for ReplayPolicy {
     }
 
     /// The logged answer, or with none left the first move that can be used, as the tour's own
-    /// brain fights, and in the Safari Zone a run.
+    /// brain fights, and in the Safari Zone a run. A frozen lead is switched for a member that can
+    /// fight, or with nobody left cured from the bag: short of that only a Fire move thaws it, so
+    /// fighting on can outlast any budget.
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
         self.take(|answer| match answer { Answer::Battle(action) => Some(action.clone()), _ => None })
             .or_else(|| {
@@ -312,7 +315,20 @@ impl Policy for ReplayPolicy {
                 if battle.battle_type == poke_core::battle::BattleType::Safari {
                     return Some(BattleAction::Run);
                 }
-                battle.player.available_battle_moves().into_iter().next()
+                let fight = battle.player.available_battle_moves().into_iter().next();
+                if battle.player.status != poke_core::status::PokemonStatus::Frozen {
+                    return fight;
+                }
+                let can_fight = |pokemon: &poke_core::pokemon::PokemonSummary| pokemon.moves.iter().flatten()
+                    .any(|m| m.pp > 0 && poke_core::damage::is_damaging_move(m.name));
+                let options = crate::pokemon::policy::battle_options(state)?;
+                let relief = options.iter()
+                    .find(|action| matches!(action, BattleAction::SwitchPokemon { pokemon, .. } if can_fight(pokemon)));
+                let cure = options.iter().find(|action| matches!(action,
+                    BattleAction::UseItem { item, target: Some(target), .. }
+                        if *target == battle.active_party_slot
+                            && matches!(item.id, ItemId::IceHeal | ItemId::FullHeal | ItemId::FullRestore)));
+                relief.or(cure).cloned().or(fight)
             })
     }
 
@@ -693,7 +709,7 @@ pub(crate) fn replay(segment: &Segment) -> Result<(), String> {
         return Err(format!("the recreation: {missing}"));
     }
     // A person's row has no square in its id, because a person has none that holds still.
-    let talked = matches!(segment.answers.first(), Some(Answer::Overworld(id)) if id.matches(':').count() == 1);
+    let talked = matches!(segment.answers.first(), Some(Answer::Overworld(id)) if crate::pokemon::actions::OverworldAction::names_a_sprite(id));
     let theirs = theirs.paced_apart(talked);
     let ours = match before_the_ceremony {
         Some(ours) => ours,

@@ -2,9 +2,8 @@
 //! put back where they stood once they are out of sight.
 
 use poke_core::symbols::pokered_events::{EVENT_BEAT_BROCK, EVENT_BOUGHT_MUSEUM_TICKET};
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::*;
-use poke_core::symbols::pokered_symbols::{PEWTERCITY_SUPER_NERD1, PEWTERCITY_YOUNGSTER};
+use poke_core::symbols::pokered_map_scripts::{PEWTERCITY_SUPER_NERD1, PEWTERCITY_YOUNGSTER};
 use poke_core::symbols::pokered_toggles::{TOGGLE_GYM_GUY, TOGGLE_MUSEUM_GUY};
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
@@ -12,7 +11,7 @@ use crate::modes::overworld::movement::{NPC_MOVEMENT_DOWN, NPC_MOVEMENT_RIGHT, P
     PEWTER_MUSEUM_GUY_MOVEMENT_SCRIPT};
 use crate::modes::overworld::script::SpritePosition;
 use crate::systems::overworld::sprites::{SPRITE_FACING_LEFT, SPRITE_FACING_UP};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 const END: u8 = 0xFF;
 const PAD_CTRL_PAD: Joypad = Joypad::UP.union(Joypad::DOWN).union(Joypad::LEFT).union(Joypad::RIGHT);
@@ -138,15 +137,15 @@ fn walk_guide_away(rt: &mut Script, slot: u8, at: SpritePosition, path: &[u8], n
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     Some(match text_id {
         TEXT_PEWTERCITY_SUPER_NERD1 => {
-            rt.print_text(text_at(local::PewterCitySuperNerd1Text::DidYouCheckOutMuseumText))
+            rt.print_text(text_named("PewterCitySuperNerd1Text.DidYouCheckOutMuseumText"))
                 .then(Label::SuperNerd1YesNo)
         }
         TEXT_PEWTERCITY_SUPER_NERD2 => {
-            rt.print_text(text_at(local::PewterCitySuperNerd2Text::DoYouKnowWhatImDoingText))
+            rt.print_text(text_named("PewterCitySuperNerd2Text.DoYouKnowWhatImDoingText"))
                 .then(Label::SuperNerd2YesNo)
         }
         TEXT_PEWTERCITY_YOUNGSTER => {
-            rt.print_text(text_at(local::PewterCityYoungsterText::YoureATrainerFollowMeText))
+            rt.print_text(text_named("PewterCityYoungsterText.YoureATrainerFollowMeText"))
                 .then(Label::YoungsterFollowMe)
         }
         _ => return None,
@@ -184,23 +183,23 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::SuperNerd1YesNo => rt.yes_no_choice().then(Label::SuperNerd1Answered),
         Label::SuperNerd1Answered => {
             if rt.chose_yes() {
-                return rt.print_text(text_at(local::PewterCitySuperNerd1Text::WerentThoseFossilsAmazingText)).ret();
+                return rt.print_text(text_named("PewterCitySuperNerd1Text.WerentThoseFossilsAmazingText")).ret();
             }
             let at = rt.sprite_position(PEWTERCITY_SUPER_NERD1);
             rt.maps().pewter_city.guide_at = Some(at);
             rt.clear_joy_held();
             rt.start_npc_movement_script(PEWTER_MUSEUM_GUY_MOVEMENT_SCRIPT, PEWTERCITY_SUPER_NERD1);
             rt.maps().pewter_city.cur_script = SCRIPT_PEWTERCITY_SUPER_NERD1_SHOWS_PLAYER_MUSEUM;
-            rt.print_text(text_at(local::PewterCitySuperNerd1Text::YouHaveToGoText)).ret()
+            rt.print_text(text_named("PewterCitySuperNerd1Text.YouHaveToGoText")).ret()
         }
 
         Label::SuperNerd2YesNo => rt.yes_no_choice().then(Label::SuperNerd2Answered),
         Label::SuperNerd2Answered => {
             let words = match rt.chose_yes() {
-                true => local::PewterCitySuperNerd2Text::ThatsRightText,
-                false => local::PewterCitySuperNerd2Text::ImSprayingRepelText,
+                true => "PewterCitySuperNerd2Text.ThatsRightText",
+                false => "PewterCitySuperNerd2Text.ImSprayingRepelText",
             };
-            rt.print_text(text_at(words)).ret()
+            rt.print_text(text_named(words)).ret()
         }
 
         Label::YoungsterFollowMe => {

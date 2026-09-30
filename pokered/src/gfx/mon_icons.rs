@@ -2,14 +2,13 @@
 //! tile patterns, and `AnimatePartyMon`, which flips the selected one between two frames.
 //!
 //! The icon a species gets is `MonPartyData`, a nybble a dex number; its patterns are
-//! `MonPartySpritePointers`, both read out of the cartridge rather than transcribed. Every icon but
+//! `MonPartySpritePointers`, both read out of the disassembly rather than transcribed. Every icon but
 //! one kind is left-right symmetric and drawn from two patterns with the second column X-flipped;
 //! `ICON_HELIX` is drawn from four. Frame two is the same objects `ICONOFFSET` tiles on, except for
 //! `ICON_BALL` and `ICON_HELIX`, which instead drop a pixel.
 
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
+use poke_core::rom_gfx::TILE_BYTES;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::{pokered_symbols, DmgBank, DmgPointer};
 use crate::gfx::layers::Object;
 use crate::gfx::tiles::{TileData, V_CHARS0};
 use crate::systems::hp_bar::HpBarColour;
@@ -19,9 +18,6 @@ const ICON_BALL: u8 = 1 << 2;
 const ICON_HELIX: u8 = 2 << 2;
 /// `ICONOFFSET`: how far frame two's patterns sit from frame one's.
 const ICONOFFSET: u8 = 0x40;
-/// `MonPartySpritePointers`' entries, each six bytes.
-const ICON_POINTERS: usize = 0x1C;
-const V_SPRITES: u16 = 0x8000;
 /// `OBJ_SIZE * 4 * PARTY_LENGTH`, in objects: what `wMonPartySpritesSavedOAM` holds.
 pub const PARTY_OBJECTS: usize = 4 * 6;
 /// `wShadowOAM`'s forty objects.
@@ -32,22 +28,15 @@ const ICON_Y: u8 = 16;
 
 /// `LoadMonPartySpriteGfx`, and the LCD-off twin whose frames are loading.
 pub fn load_mon_party_sprite_gfx(tiles: &mut TileData) {
-    let table = rom_slice(pokered_symbols::MonPartySpritePointers);
-    for entry in table.chunks_exact(6).take(ICON_POINTERS) {
-        let source = DmgPointer { bank: DmgBank::ROM { bank: entry[3] }, address: u16::from_le_bytes([entry[0], entry[1]]) };
-        let count = entry[2] as usize;
-        let destination = (u16::from_le_bytes([entry[4], entry[5]]) - V_SPRITES) as usize / TILE_BYTES;
-        tiles.load(V_CHARS0 + destination, &rom_slice(source)[..count * TILE_BYTES]);
+    for &(picture, first, count, destination) in poke_core::gfx::MON_PARTY_SPRITES {
+        tiles.load(V_CHARS0 + destination as usize, &picture[first * TILE_BYTES..(first + count) * TILE_BYTES]);
     }
 }
 
-/// `GetPartyMonSpriteID`: the icon's base tile, `ICON_* << 2`. An odd dex number reads the high
-/// nybble of its byte and an even one the low.
+/// `GetPartyMonSpriteID`: the icon's base tile, `ICON_* << 2`.
 pub fn icon_tile(species: PokemonSpecies) -> u8 {
     let dex = species.metadata().pokedex_number;
-    let byte = rom_slice(pokered_symbols::MonPartyData)[(dex as usize - 1) / 2];
-    let nybble = if dex & 1 != 0 { byte >> 4 } else { byte & 0x0F };
-    nybble << 2
+    poke_core::tables::MON_PARTY_DATA[dex as usize - 1] << 2
 }
 
 /// `ClearSprites`.

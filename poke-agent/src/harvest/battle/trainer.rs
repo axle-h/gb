@@ -1,7 +1,7 @@
 //! `pokered/fixtures/battle/read_trainer.jsonl`.
 
 use poke_core::species::PokemonSpecies;
-use poke_core::trainers::pic_and_money;
+use poke_core::trainers::base_money;
 use pokered::party::PartyMon;
 use pokered::rng::GameRng;
 use pokered::systems::add_mon::{new_party_mon, Origin};
@@ -30,7 +30,7 @@ fn against_a_new_mon(mon: &PartyMon, player_id: u16) -> Value {
 
 /// `ReadTrainer`, with the base money `GetTrainerInformation` would have copied.
 fn read_trainer(oracle: &mut Oracle, input: Input) -> (Value, Vec<u8>) {
-    let (_, base) = pic_and_money(input.class);
+    let base = base_money(input.class);
     oracle.write(sym::wLinkState, &[0]);
     oracle.write(sym::wIsInBattle, &[TRAINER_BATTLE]);
     oracle.write(sym::wCurOpponent, &[input.class + OPP_ID_OFFSET]);
@@ -62,7 +62,7 @@ fn brock_s_onix_is_given_bide() {
 #[test]
 #[ignore = "a tool: writes pokered/fixtures/battle/read_trainer.jsonl under GB_REGEN_FIXTURES=1"]
 fn harvest_read_trainer() {
-    use poke_core::trainers::{party_data, NUM_TRAINERS};
+    use poke_core::trainers::{parties, NUM_TRAINERS};
     use rand::RngExt;
     use super::super::{write_fixture, Case};
     use super::generate::{pick, seeded};
@@ -71,8 +71,8 @@ fn harvest_read_trainer() {
     let starters = [PokemonSpecies::Charmander as u8, PokemonSpecies::Squirtle as u8, PokemonSpecies::Bulbasaur as u8];
     let mut cases = vec![];
     for class in 1..=NUM_TRAINERS {
-        for (index, (special, _)) in party_data(class).iter().enumerate() {
-            let lone_attacks: Vec<u8> = match special {
+        for (index, party) in parties(class).iter().enumerate() {
+            let lone_attacks: Vec<u8> = match party.per_mon_levels {
                 true if (34..=40).contains(&class) || class == 29 => (0..=8).collect(),
                 true => vec![0, rng.random_range(1..=8)],
                 false => vec![0],

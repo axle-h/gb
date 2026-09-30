@@ -1197,9 +1197,9 @@ const COVERAGE_BUDGET_MINUTES: u64 = 180;
 #[cfg(feature = "slow-tests")]
 /// What an id ends in: [`MetaTile::id_kind`], the name a family of rows shares.
 pub fn kind_of(id: &str) -> String {
-    match id.split(':').count() {
-        0 | 1 | 2 => "Sprite".to_string(),
-        _ => id.rsplit(':').next().unwrap_or("?").to_string(),
+    match crate::pokemon::actions::OverworldAction::names_a_sprite(id) {
+        true => "Sprite".to_string(),
+        false => id.rsplit(':').next().unwrap_or("?").to_string(),
     }
 }
 
@@ -1256,7 +1256,7 @@ fn kind_cross_check(offered: &std::collections::BTreeSet<&String>, pc_ops: usize
         _ => Expect::Row,
     };
 
-    let sprite_seen = offered.iter().any(|id| id.split(':').count() == 2);
+    let sprite_seen = offered.iter().any(|id| kind_of(id) == "Sprite");
     let mut lines: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     let (mut covered, mut expected) = (0usize, 0usize);

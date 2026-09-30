@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
-use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
+use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
 use crate::mode::Ctx;
 use crate::modes::blink::ArrowBlink;
@@ -190,10 +190,27 @@ impl MenuInput {
         let spacing = if self.single_spaced { 1 } else { 2 };
         let row = |item: u8| top + item as usize * spacing * SCREEN_TILES_X;
         let old = row(memory.last_item);
-        if tile_at(ui, old) == CURSOR {
+        // A previous menu's item can lie below this one's screen, where the cartridge reads past
+        // the tile map and finds no cursor.
+        if old < SCREEN_TILES_X * SCREEN_TILES_Y && tile_at(ui, old) == CURSOR {
             put(ui, old, memory.tile_behind);
         }
         memory.place_at(ui, row(self.current));
         memory.last_item = self.current;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The battle's SWITCH/STATS/CANCEL box opened from the party menu's fourth slot.
+    #[test]
+    fn a_stale_item_below_the_screen_erases_nothing() {
+        let mut ui = UiSurface::default();
+        let mut memory = CursorMemory { last_item: 3, ..CursorMemory::default() };
+        MenuInput::new(0, 2, (12, 12), Joypad::A).place_cursor(&mut ui, &mut memory);
+        assert_eq!(ui.get(12, 12), CURSOR);
+        assert_eq!(memory.last_item, 0);
     }
 }

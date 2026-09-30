@@ -199,9 +199,6 @@ impl ItemId {
 }
 /// `GetItemName`: charmap bytes, unterminated.
 pub fn name(item: ItemId) -> Vec<u8> {
-    use crate::rom_gfx::rom_slice;
-    use crate::symbols::pokered_symbols;
-    const TERMINATOR: u8 = 0x50;
     let id = item as u8;
     if id >= ItemId::Hm01Cut as u8 {
         // `GetMachineName`: an HM is numbered as if it were the TM `NUM_HMS` later.
@@ -213,52 +210,47 @@ pub fn name(item: ItemId) -> Vec<u8> {
         let digit = |d: u8| 0xF6 + d;
         return [prefix, vec![digit(number / 10), digit(number % 10)]].concat();
     }
-    rom_slice(pokered_symbols::ItemNames)
-        .split(|&b| b == TERMINATOR)
-        .nth(id as usize - 1)
-        .expect("every item below the machines has a name")
-        .to_vec()
+    crate::charmap::encode(crate::tables::ITEM_NAMES[id as usize - 1]).expect("an item name is in the charmap")
 }
 
 /// `GetItemPrice`: the price as three BCD bytes, most significant first. `None` for an HM, which
 /// `GetMachinePrice` refuses before it writes anything, leaving whatever the last item cost on
 /// screen.
 pub fn price(item: ItemId) -> Option<[u8; 3]> {
-    use crate::rom_gfx::rom_slice;
-    use crate::symbols::pokered_symbols;
+    use crate::tables::{ITEM_PRICES, TECHNICAL_MACHINE_PRICES};
     let id = item as u8;
     if item.is_hm() {
         return None;
     }
     if id >= ItemId::Tm01MegaPunch as u8 {
-        // `GetMachinePrice`: a nybble of thousands each, the first machine in the high nybble.
-        let machine = id - ItemId::Tm01MegaPunch as u8;
-        let byte = rom_slice(pokered_symbols::TechnicalMachinePrices)[machine as usize / 2];
-        let thousands = if machine % 2 == 0 { byte >> 4 } else { byte & 0xF };
+        // `GetMachinePrice`: in thousands.
+        let thousands = TECHNICAL_MACHINE_PRICES[(id - ItemId::Tm01MegaPunch as u8) as usize];
         return Some([0, thousands << 4, 0]);
     }
-    let row = &rom_slice(pokered_symbols::ItemPrices)[(id as usize - 1) * 3..][..3];
-    Some([row[0], row[1], row[2]])
+    Some(bcd3(ITEM_PRICES[id as usize - 1]))
+}
+
+/// A price as the three BCD bytes the cartridge stores and prints, most significant first.
+pub fn bcd3(value: u32) -> [u8; 3] {
+    assert!(value < 1_000_000, "{value} is more than six digits");
+    let digits = |n: u32| (n / 10 % 10 << 4 | n % 10) as u8;
+    [digits(value / 10_000), digits(value / 100), digits(value)]
 }
 
 /// `IsKeyItem_`: an HM counts, a TM does not, and everything below them is one bit of
 /// `KeyItemFlags`.
 pub fn is_key_item(item: ItemId) -> bool {
-    use crate::rom_gfx::rom_slice;
-    use crate::symbols::pokered_symbols;
     let id = item as u8;
     if id >= ItemId::Hm01Cut as u8 {
         return item.is_hm();
     }
-    let bit = id - 1;
-    rom_slice(pokered_symbols::KeyItemFlags)[bit as usize / 8] & 1 << (bit % 8) != 0
+    // The floors come after the last flag, where the cartridge reads padding and then whatever follows.
+    crate::tables::KEY_ITEM_FLAGS.get(id as usize - 1).copied().unwrap_or(false)
 }
 
 /// `TMToMove` over `TechnicalMachines`: the move a machine teaches. The HMs follow the 50 TMs in
 /// the table even though their item ids come first.
 pub fn machine_move(item: ItemId) -> Option<PokemonMoveName> {
-    use crate::rom_gfx::rom_slice;
-    use crate::symbols::pokered_symbols;
     const NUM_TMS: u8 = 50;
     let id = item as u8;
     let index = if item.is_hm() {
@@ -268,39 +260,29 @@ pub fn machine_move(item: ItemId) -> Option<PokemonMoveName> {
     } else {
         return None;
     };
-    PokemonMoveName::from_repr(rom_slice(pokered_symbols::TechnicalMachines)[index as usize])
+    PokemonMoveName::from_repr(crate::tables::TECHNICAL_MACHINES[index as usize])
 }
 
 /// `UsableItems_PartyMenu`: the items that ask which Pokémon to use them on.
 pub fn opens_party_menu(item: ItemId) -> bool {
-    in_terminated_list(crate::symbols::pokered_symbols::UsableItems_PartyMenu, item)
+    crate::tables::USABLE_ITEMS_PARTY_MENU.contains(&(item as u8))
 }
 
 /// `UsableItems_CloseMenu`: the items whose use closes the bag.
 pub fn closes_menu(item: ItemId) -> bool {
-    in_terminated_list(crate::symbols::pokered_symbols::UsableItems_CloseMenu, item)
+    crate::tables::USABLE_ITEMS_CLOSE_MENU.contains(&(item as u8))
 }
 
 /// `GuardDrinksList`: what the Saffron guards will take. Terminated by 0 rather than `-1`.
 pub fn is_guard_drink(item: ItemId) -> bool {
-    use crate::rom_gfx::rom_slice;
-    rom_slice(crate::symbols::pokered_symbols::GuardDrinksList)
-        .iter().take_while(|&&b| b != 0).any(|&b| b == item as u8)
+    crate::tables::GUARD_DRINKS_LIST.contains(&(item as u8))
 }
 
 /// `VendingPrices`: what the Celadon machine sells, each with its own price in BCD.
 pub fn vending_prices() -> Vec<(ItemId, [u8; 3])> {
-    use crate::rom_gfx::rom_slice;
-    const ENTRIES: usize = 3;
-    rom_slice(crate::symbols::pokered_symbols::VendingPrices)
-        .chunks(4).take(ENTRIES)
-        .map(|e| (ItemId::from_repr(e[0]).expect("a vending item"), [e[1], e[2], e[3]]))
+    crate::tables::VENDING_PRICES.iter()
+        .map(|&(item, price)| (ItemId::from_repr(item).expect("a vending item"), bcd3(price)))
         .collect()
-}
-
-fn in_terminated_list(list: crate::symbols::DmgPointer, item: ItemId) -> bool {
-    use crate::rom_gfx::rom_slice;
-    rom_slice(list).iter().take_while(|&&b| b != 0xFF).any(|&b| b == item as u8)
 }
 
 #[cfg(test)]
@@ -353,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn names_come_from_the_cartridge_and_machines_are_numbered() {
+    fn names_come_from_the_list_and_machines_are_numbered() {
         assert_eq!(name(ItemId::MasterBall), encode("MASTER BALL").unwrap());
         assert_eq!(name(ItemId::Potion), encode("POTION").unwrap());
         assert_eq!(name(ItemId::Hm01Cut), encode("HM01").unwrap());

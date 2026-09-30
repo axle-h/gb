@@ -27,8 +27,7 @@
 
 use poke_core::item::{machine_move, ItemId};
 use poke_core::move_name::PokemonMoveName;
-use poke_core::symbols::pokered_symbols;
-use poke_core::text_script::{decode, far_text, TextBuffer, TextCommand, TextNumber};
+use poke_core::text_script::{far_text, TextBuffer, TextCommand, TextNumber};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use crate::command::Decision;
@@ -282,7 +281,7 @@ impl UseItem {
                 ctx.world.text.strings.insert(TextBuffer::NameBuffer, nick);
                 self.no_text_delay = ctx.world.no_text_delay;
                 ctx.world.no_text_delay = true;
-                let script = decode(pokered_symbols::RareCandyText).expect("the Rare Candy's text is in the cartridge");
+                let script = far_text("RareCandyText").expect("the Rare Candy's text is in the cartridge");
                 self.push_text(script, After::RareCandyMessage)
             }
             Flow::PpRestore if matches!(self.item, ItemId::Elixer | ItemId::MaxElixer) => {

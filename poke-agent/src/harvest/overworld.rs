@@ -207,7 +207,7 @@ fn init_map_sprites(oracle: &mut Oracle, (map, x, y): (u8, u8, u8)) -> (Vec<u8>,
 }
 
 fn maps() -> Vec<Map> {
-    Map::all().filter(|map| map.header_pointer().is_some()).collect()
+    Map::all().filter(|map| map.has_header()).collect()
 }
 
 #[cfg(feature = "slow-tests")]
@@ -233,7 +233,7 @@ mod inputs {
     fn collision_tiles_in_pairs() -> Vec<u8> {
         let mut tiles: Vec<u8> = [false, true].iter()
             .flat_map(|&water| poke_core::tilesets::tile_pair_collisions(water))
-            .flat_map(|(_, a, b)| [a, b])
+            .flat_map(|&(_, a, b)| [a, b])
             .collect();
         tiles.sort();
         tiles.dedup();
@@ -437,6 +437,7 @@ fn recreated_npc(input: &NpcInput, rng: &[u8]) -> Vec<SpriteState> {
         spinning: false,
         simulating: false,
         beyond: None,
+        cartridge_bugs: true,
     };
     sprites::update_npc_sprite(&mut sprites, 1, &env, &mut sprites::NpcPaths::default(), &mut GameRng::tape(rng.to_vec()));
     sprites[..3].to_vec()

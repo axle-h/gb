@@ -31,6 +31,7 @@ can break in silence.
 - "There is no route" is a claim about a map people stand on. Past `MAX_ROUTE_LOST_TICKS`,
   `row_blocked_by_people` asks whether the row returns with everyone put back `underfoot`; only a yes
   buys `MAX_ROUTE_BLOCKED_TICKS`, and boulders are excluded because a rock will still be there.
+  The native agent waits the same game time, in frames (`native_agent::MAX_ROUTE_LOST_POLLS`).
 - `AgentState::open_overworld_action` is the one list of states carrying a row, and every door out of
   any of them closes it. A new state that borrows a walk belongs in that list the day it is written.
 - The Surf mount is the only driver entered from the middle of a walk, so it is the only one that
@@ -171,9 +172,11 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
 
 - `Display for AgentEvent` is a UI contract: the page formats it straight on and `describe_event`
   sends it to the model. `Display` is a sentence, an id is a key, and the two never mix.
-- `OverworldAction::id` is the one definition of an action id. A sprite id has no coordinate, because
-  the square it carried was the approach tile and `actions()` re-picks that whenever the player
-  moves; a reader takes the map off the front and the kind off the back.
+- `OverworldAction::id` is the one definition of an action id, and it names what holds still: the
+  object, the tree, the whole door, an opening's first square (`OverworldAction::key`), never the
+  square `actions()` re-picks whenever anyone moves. A sprite and a row a map offers once
+  (`ONE_PER_MAP`) name no square. A reader takes the map off the front and the kind off the back,
+  and asks `names_a_sprite` rather than counting colons.
 - Winning the game does not hand the world back. `PokemonAgent::ending` returns above the watchdog,
   the game mode and any poll for the whole ceremony, during which `wCurMap` still reads the room; it
   clears on `wPlayerID` going zero and then non-zero, the only signal separating a reset from a
@@ -198,6 +201,11 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   toggle, called before the driver's press and gated on `MessageBox`, because an in-battle bag list
   is drawn in the rows a message-box reader reads. A battle sub-state's reader is carried out of it,
   never rebuilt.
+- A and B are held while the page changes and let go or pressed again only once it has read the same
+  for `STILL_READS` (`update_with`): the screen trails the tile map by three frames, and a finished
+  text closes on A's release or a fresh press, before its last letters are ever drawn.
+- A menu read from memory takes over before the text above it reaches the screen, so the mart's
+  last read of its greeting is `wTileMap`'s (`assert_pokemart_state`); waiting would move its presses.
 
 ## The native agent
 

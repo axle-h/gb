@@ -18,9 +18,8 @@
 //! text prints a letter at a time. "What?" and "Choose a <PKMN> BOX." print with the background
 //! transfer off, so they spend their letter delays unseen and appear whole with the menu under them.
 
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
+use poke_core::rom_gfx::TILE_BYTES;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::pokered_symbols as sym;
 use poke_core::text_script::TextBuffer;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
@@ -170,13 +169,13 @@ impl BillsPc {
     fn menu(&mut self, ctx: &mut Ctx) -> Transition {
         let shown = ctx.screen.ui.clone();
         // `CopyVideoData`'s frames are loading.
-        ctx.screen.tiles.load(V_CHARS2 + BALL as usize, &rom_slice(sym::PokeballTileGraphics)[..TILE_BYTES]);
+        ctx.screen.tiles.load(V_CHARS2 + BALL as usize, &poke_core::gfx::battle::BALLS[..TILE_BYTES]);
         if let Some(saved) = &self.saved {
             ctx.screen.ui = saved.clone();
         }
         let ui = &mut ctx.screen.ui;
         ui.text_box_border(0, 0, 12, 10);
-        place_lines(ui, 2 * SCREEN_TILES_X + 2, rom_slice(sym::BillsPCMenuText), false);
+        place_lines(ui, 2 * SCREEN_TILES_X + 2, &poke_core::tables::db_string("BillsPCMenuText"), false);
         ctx.menu.last_item = 0;
         ctx.menu.party_and_bills = 0;
         ctx.menu.list_scroll = 0;
@@ -219,9 +218,9 @@ impl BillsPc {
     fn deposit_withdraw_menu(&mut self, ctx: &mut Ctx) -> Transition {
         let ui = &mut ctx.screen.ui;
         ui.text_box_border(9, 10, 9, 6);
-        let label = if self.parent == WITHDRAW { sym::WithdrawPCText } else { sym::DepositPCText };
-        place_lines(ui, 12 * SCREEN_TILES_X + 11, rom_slice(label), false);
-        place_lines(ui, 14 * SCREEN_TILES_X + 11, rom_slice(sym::StatsCancelPCText), false);
+        let label = if self.parent == WITHDRAW { "WithdrawPCText" } else { "DepositPCText" };
+        place_lines(ui, 12 * SCREEN_TILES_X + 11, &poke_core::tables::db_string(label), false);
+        place_lines(ui, 14 * SCREEN_TILES_X + 11, &poke_core::tables::db_string("StatsCancelPCText"), false);
         ctx.menu.last_item = 0;
         ctx.menu.list_scroll = 0;
         ctx.menu.party_and_bills = 0;
@@ -289,9 +288,9 @@ impl BillsPc {
         let current = ctx.world.current_box;
         let ui = &mut ctx.screen.ui;
         ui.text_box_border(11, 0, 7, 12);
-        place_lines(ui, SCREEN_TILES_X + 13, rom_slice(sym::BoxNames), true);
+        place_lines(ui, SCREEN_TILES_X + 13, &poke_core::tables::db_string("BoxNames"), true);
         place_box_number(ui, 1, 2, current);
-        place_lines(ui, 2 * SCREEN_TILES_X + 1, rom_slice(sym::BoxNoText), false);
+        place_lines(ui, 2 * SCREEN_TILES_X + 1, &poke_core::tables::db_string("BoxNoText"), false);
         for i in 0..NUM_BOXES as usize {
             if ctx.world.boxes.get(i).is_some_and(|mons| !mons.is_empty()) {
                 ui.set(18, 1 + i, BALL);
@@ -390,7 +389,7 @@ impl ModeUpdate for BillsPc {
                 let ui = &mut ctx.screen.ui;
                 ui.text_box_border(9, 14, 9, 2);
                 place_box_number(ui, 10, 16, ctx.world.current_box);
-                place_lines(ui, 16 * SCREEN_TILES_X + 10, rom_slice(sym::BoxNoPCText), false);
+                place_lines(ui, 16 * SCREEN_TILES_X + 10, &poke_core::tables::db_string("BoxNoPCText"), false);
                 // The `Delay3` before the menu is loading.
                 self.phase = Phase::Child(After::Menu);
                 Transition::Push(Mode::CursorMenu(CursorMenu::new(self.parent, SEE_YA, TOP)))

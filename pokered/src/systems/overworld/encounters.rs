@@ -6,18 +6,18 @@ use poke_core::map_gfx::tileset_entry;
 use poke_core::map_header::TileSetId;
 use poke_core::map_objects::FIRST_INDOOR_MAP;
 use poke_core::species::PokemonSpecies;
+use poke_core::tables::WILD_MON_ENCOUNTER_SLOT_CHANCES;
 use poke_core::wild::encounters;
 use serde::{Deserialize, Serialize};
 use crate::rng::Rng;
 use super::collision;
 
-/// `WildMonEncounterSlotChances`: the cumulative chance of each of the ten slots, less one.
-const WILD_MON_ENCOUNTER_SLOT_CHANCES: [u8; 10] = [50, 101, 140, 165, 190, 215, 228, 241, 252, 255];
 /// The water tile, in every tileset that has one.
 const WATER_TILE: u8 = 0x14;
 
 /// `wGrassRate`, `wGrassMons`, `wWaterRate` and `wWaterMons`: `(level, species)` a slot. A map
-/// without one of the two keeps what the last map with it loaded, and a left shore can read it.
+/// without one of the two keeps what the last map with it loaded, and a left shore reads the grass
+/// list at the water rate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WildMons {
     pub grass_rate: u8,
@@ -28,12 +28,15 @@ pub struct WildMons {
 
 impl WildMons {
     /// `LoadWildData`.
-    pub fn load(&mut self, map: Map) {
+    pub fn load(&mut self, map: Map, cartridge_bugs: bool) {
         let wild = encounters(map);
         let slots = |slots: &[(u8, PokemonSpecies)]| std::array::from_fn(|i| (slots[i].0, slots[i].1 as u8));
         self.grass_rate = wild.as_ref().map_or(0, |wild| wild.grass_rate);
         if let Some(wild) = wild.as_ref().filter(|wild| wild.grass_rate != 0) {
             self.grass = slots(&wild.grass);
+        } else if !cartridge_bugs {
+            // The cartridge keeps the last grass list, which a left shore here would meet.
+            self.grass = [(0, 0); 10];
         }
         self.water_rate = wild.as_ref().map_or(0, |wild| wild.water_rate);
         if let Some(wild) = wild.as_ref().filter(|wild| wild.water_rate != 0) {
@@ -105,7 +108,11 @@ pub fn try_do_wild_encounter(input: &EncounterInput, rng: &mut impl Rng) -> Enco
     if add >= rate {
         return out;
     }
-    let slot = WILD_MON_ENCOUNTER_SLOT_CHANCES.iter().position(|&chance| chance >= sub).expect("the last chance is 255");
+    // The first slot whose running total, less one, reaches the roll; the totals end at 256.
+    let mut total = 0;
+    let slot = WILD_MON_ENCOUNTER_SLOT_CHANCES.iter()
+        .position(|&chance| { total += u16::from(chance); total - 1 >= u16::from(sub) })
+        .expect("the chances sum to 256");
     // A left shore's bottom right is water and its bottom left is not, so it finds grass mons.
     let mons = if input.bottom_left == WATER_TILE { &wild.water } else { &wild.grass };
     let (level, species) = mons[slot];
@@ -131,5 +138,21 @@ mod tests {
             assert_eq!(try_do_wild_encounter(&input, &mut tape), output, "{input:?} {rng:?}");
             assert!(matches!(tape, GameRng::Tape { cursor, .. } if cursor == rng.len()), "every random byte taken: {input:?}");
         }
+    }
+
+    #[test]
+    fn a_left_shore_on_a_map_without_grass_meets_no_stale_grass_mon() {
+        let shore = |cartridge_bugs: bool| {
+            let mut wild = WildMons::default();
+            wild.load(Map::Route21, cartridge_bugs);
+            wild.load(Map::Route20, cartridge_bugs);
+            let input = EncounterInput {
+                map: Map::Route20, tileset: TileSetId::Overworld, bottom_left: 0, bottom_right: WATER_TILE,
+                x: 10, y: 10, width: 50, height: 9, repel_steps: 0, lead_level: 50, wild,
+            };
+            try_do_wild_encounter(&input, &mut GameRng::tape(vec![0, 0])).mon
+        };
+        assert_eq!(shore(false), None);
+        assert!(shore(true).is_some(), "the cartridge meets Route 21's grass list");
     }
 }

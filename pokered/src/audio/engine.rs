@@ -251,6 +251,14 @@ pub struct AudioEngine {
     /// fixes.
     #[serde(default)]
     pub cartridge_bugs: bool,
+    /// Set in a save whose channel pointers are the cartridge's addresses rather than the source
+    /// data's, which differ past the engine's code; `restart_saved_music` puts it right.
+    #[serde(default = "cartridge_addresses")]
+    cartridge_addresses: bool,
+}
+
+fn cartridge_addresses() -> bool {
+    true
 }
 
 impl Default for AudioBank {
@@ -293,6 +301,20 @@ impl AudioEngine {
         std::iter::once(Write::WaveDac(false))
             .chain(registers.filter_map(|address| Write::decode(address, self.registers.get(address))))
             .collect()
+    }
+
+    /// A save whose pointers are the cartridge's: every channel stopped and the song that was
+    /// playing started again from the top, since where it was is an address that means nothing here.
+    pub fn restart_saved_music(&mut self) {
+        if !std::mem::take(&mut self.cartridge_addresses) {
+            return;
+        }
+        let music = self.channels[..CHAN5].iter().map(|channel| channel.sound_id).find(|&id| id != 0);
+        self.audio_fade_out_control = 0;
+        self.engine_play_sound(SoundId::STOP_ALL_MUSIC);
+        if let Some(id) = music.filter(|&id| id > self.bank.max_sfx_id().0) {
+            self.engine_play_sound(SoundId(id));
+        }
     }
 
     /// Everything written since the last take, which is what a sound started between two frames
@@ -508,9 +530,10 @@ impl AudioEngine {
     }
 
     /// `AudioN_OverwriteChannelPointer`: `Music_RivalAlternateStart` and the Poké Flute start a
-    /// song and then move a channel to different data. Nothing else in the game edits a pointer.
-    pub fn overwrite_channel_pointer(&mut self, channel: usize, address: u16) {
-        self.channels[channel].command_pointer = address;
+    /// song and then move a channel to different data, named by its label in the running bank.
+    /// Nothing else in the game edits a pointer.
+    pub fn overwrite_channel_pointer(&mut self, channel: usize, label: &str) {
+        self.channels[channel].command_pointer = self.bank.label(label);
     }
 
     /// `.playChannel`: a channel back to nothing but its three counters. The fractional part of the
@@ -1027,7 +1050,7 @@ impl AudioEngine {
     fn apply_wave_pattern_and_frequency(&mut self, c: usize, d: u8, e: u8) {
         if c == CHAN3 || c == CHAN7 {
             let instrument = if c == CHAN3 { self.music_wave_instrument } else { self.sfx_wave_instrument };
-            let samples = self.bank.wave_sample(instrument);
+            let samples = self.bank.wave_sample(instrument, self.cartridge_bugs);
             self.write_register(R_AUD3ENA, 0);
             for (i, byte) in samples.into_iter().enumerate() {
                 self.write_register(AUD3WAVERAM + i as u16, byte);
@@ -1309,12 +1332,7 @@ impl AudioEngine {
 
     /// `AudioN_CryRet`: the one byte in the bank that is nothing but a `sound_ret`.
     fn cry_ret(&self) -> u16 {
-        use poke_core::symbols::pokered_symbols;
-        match self.bank {
-            AudioBank::One => pokered_symbols::Audio1_CryRet.address,
-            AudioBank::Two => pokered_symbols::Audio2_CryRet.address,
-            AudioBank::Three => pokered_symbols::Audio3_CryRet.address,
-        }
+        self.bank.label(["Audio1_CryRet", "Audio2_CryRet", "Audio3_CryRet"][self.bank as usize])
     }
 
     /// `AudioN_PlaySound.stopAllAudio`.
@@ -1574,7 +1592,7 @@ mod tests {
     #[test]
     fn starting_a_song_points_its_channels_at_its_commands() {
         let engine = playing(sounds::MUSIC_PALLET_TOWN);
-        assert_eq!(engine.channels[0].command_pointer, 0x67C5);
+        assert_eq!(engine.channels[0].command_pointer, AudioBank::One.label("Music_PalletTown_Ch1"));
         assert_eq!(engine.channels[0].sound_id, sounds::MUSIC_PALLET_TOWN.id.0);
         assert_eq!(engine.channels[3].sound_id, 0, "Pallet Town has three channels");
         assert_eq!(engine.registers.get(R_AUDVOL), 0x77);
@@ -1719,6 +1737,21 @@ mod tests {
         assert_eq!(length(true), 0);
     }
 
+    /// The Pokémon Tower's wave channel plays the instrument Lavender Town does; the cartridge's
+    /// third bank reads a different sound effect's bytes for it.
+    #[test]
+    fn the_pokemon_tower_plays_lavender_towns_wave() {
+        let waves = |cartridge_bugs: bool| {
+            let mut engine = AudioEngine { cartridge_bugs, ..playing(sounds::MUSIC_POKEMON_TOWER) };
+            let samples: Vec<u8> = (0..10_000).flat_map(|_| engine.frame())
+                .filter_map(|w| match w { Write::WaveRam { samples, .. } => Some(samples), _ => None }).collect();
+            samples.chunks_exact(16).map(|wave| <[u8; 16]>::try_from(wave).unwrap()).collect::<std::collections::BTreeSet<_>>()
+        };
+        let third = AudioBank::Three.wave_sample(3, false);
+        assert_eq!(waves(false), [third, super::super::data::LAVENDER_WAVE].into());
+        assert_eq!(waves(true), [third, AudioBank::Three.wave_sample(5, true)].into());
+    }
+
     /// Every sound in the cartridge, in all three copies of the engine, against the registers the
     /// cartridge's own engine wrote: 362 traces of 120 frames each.
     #[test]
@@ -1850,6 +1883,30 @@ mod tests {
         let mut restored: AudioEngine = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(restored, engine);
         assert_eq!(restored.frame(), engine.frame());
+    }
+
+    /// A save from before the data was assembled from source holds the cartridge's addresses, which
+    /// past the engine's code name something else here: the song starts again from the top.
+    #[test]
+    fn a_save_holding_the_cartridge_s_addresses_starts_its_song_again() {
+        let mut engine = playing(sounds::MUSIC_CITIES1);
+        for _ in 0..100 {
+            engine.frame();
+        }
+        let mut kept = engine.clone();
+        kept.restart_saved_music();
+        assert_eq!(kept, engine, "a save of its own is left alone");
+
+        let mut saved = serde_json::to_value(&engine).unwrap();
+        saved.as_object_mut().unwrap().remove("cartridge_addresses");
+        let mut restored: AudioEngine = serde_json::from_value(saved).unwrap();
+        assert_ne!(restored, engine);
+        restored.restart_saved_music();
+        let header = SoundHeader::read(AudioBank::One, sounds::MUSIC_CITIES1.id);
+        for entry in header.channels {
+            assert_eq!(restored.channels[entry.channel].command_pointer, entry.address, "{entry:?}");
+        }
+        assert!(!restored.cartridge_addresses);
     }
 
     /// A sound started between two frames goes out with the next, whether or not the engine was

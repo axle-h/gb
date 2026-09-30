@@ -5,7 +5,7 @@
 use poke_core::base_stats::BaseStats;
 use poke_core::battle_data::high_critical_moves;
 use poke_core::move_name::PokemonMoveName;
-use poke_core::types::matchups;
+use poke_core::types::{self, NO_EFFECT, SUPER_EFFECTIVE};
 use serde::{Deserialize, Serialize};
 use crate::party::PartyMon;
 use crate::rng::Rng;
@@ -58,6 +58,17 @@ pub enum Counter {
 
 pub(super) const NORMAL: u8 = 0;
 pub(super) const FIGHTING: u8 = 1;
+const GHOST: u8 = 8;
+const PSYCHIC: u8 = 0x18;
+
+/// `TypeEffects` as the battle plays it, in the table's order.
+fn matchups(cartridge_bugs: bool) -> impl Iterator<Item = (u8, u8, u8)> {
+    types::matchups().into_iter().map(move |row| match row {
+        // The cartridge's chart gives Ghost no effect on Psychic.
+        (GHOST, PSYCHIC, NO_EFFECT) if !cartridge_bugs => (GHOST, PSYCHIC, SUPER_EFFECTIVE),
+        row => row,
+    })
+}
 
 /// `HandleCounterMove`: twice the damage the target's Normal or Fighting move did to the Counter
 /// user this turn, and then the usual hit test.
@@ -235,7 +246,7 @@ pub fn adjust_damage_for_move_type(battle: &mut Battle, attacker: Side) {
         battle.damage = battle.damage.wrapping_add(battle.damage >> 1);
         battle.damage_multipliers |= STAB_DAMAGE;
     }
-    for (attacking, defending, multiplier) in matchups() {
+    for (attacking, defending, multiplier) in matchups(battle.cartridge_bugs) {
         if attacking != move_type || !target_types.contains(&defending) {
             continue;
         }
@@ -257,7 +268,7 @@ const EFFECTIVE: u16 = 10;
 pub fn ai_get_type_effectiveness(battle: &Battle) -> u8 {
     let move_type = battle.enemy.current_move.move_type;
     let types = battle.player.mon.types;
-    let mut rows = matchups().into_iter()
+    let mut rows = matchups(battle.cartridge_bugs)
         .filter(move |&(attacking, defending, _)| attacking == move_type && types.contains(&defending));
     if battle.cartridge_bugs {
         // The cartridge answers the first matching row alone, so a dual type is misread.
@@ -411,6 +422,21 @@ mod tests {
         assert_eq!(ai_get_type_effectiveness(&arena.battle), AI_NEUTRAL);
         arena.battle.player.mon.types = [NORMAL, NORMAL];
         assert_eq!(ai_get_type_effectiveness(&arena.battle), 20);
+    }
+
+    #[test]
+    fn ghost_is_super_effective_on_psychic() {
+        let lick = |cartridge_bugs| {
+            let mut arena = arena(PokemonMoveName::Lick, PokemonMoveName::Lick);
+            arena.battle.cartridge_bugs = cartridge_bugs;
+            arena.battle.enemy.mon.types = [PSYCHIC, PSYCHIC];
+            arena.battle.player.mon.types = [PSYCHIC, PSYCHIC];
+            arena.battle.damage = 100;
+            adjust_damage_for_move_type(&mut arena.battle, Side::Player);
+            (arena.battle.damage, arena.battle.move_missed, ai_get_type_effectiveness(&arena.battle))
+        };
+        assert_eq!(lick(false), (200, false, SUPER_EFFECTIVE));
+        assert_eq!(lick(true), (0, true, NO_EFFECT));
     }
 
     /// Counter against what `enemy`'s move just did to the player, after `setup`.

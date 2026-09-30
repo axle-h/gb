@@ -7,7 +7,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gb::mmu::MMU;
-use poke_core::map_objects::MapObjects;
+use poke_core::map_objects::{MapObjects, ObjectKind};
 use poke_core::pointer::DmgPointer;
 use gb::ram::ROM;
 use strum::IntoEnumIterator;
@@ -15,7 +15,7 @@ use strum::IntoEnumIterator;
 use crate::pokemon::GameState;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::Map;
-use crate::pokemon::map_header::{MapConnectionDirection, MapHeader, MapHeaderReader};
+use crate::pokemon::map_header::{MapConnectionDirection, MapHeader};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::symbols::{pokered_events, pokered_symbols, pokered_toggles, DmgPointerRead};
 
@@ -174,31 +174,14 @@ pub(crate) struct MapObject {
     pub trainer: bool,
 }
 
-/// Every object on `map`, from the objects table its header points at.
-pub(crate) fn map_objects(mmu: &MMU, map: Map) -> Vec<MapObject> {
-    let Ok(header) = mmu.read_map_header(map) else { return Vec::new() };
-    let objects = header.objects_pointer();
-    // Border block, then the warps (four bytes each) and the signs (three).
-    let mut at = objects + 1;
-    let warps = mmu.read_pointer(&at) as u16;
-    at = at + 1 + warps * 4;
-    let signs = mmu.read_pointer(&at) as u16;
-    at = at + 1 + signs * 3;
-    let count = mmu.read_pointer(&at);
-    at = at + 1;
-    let mut found = Vec::new();
-    for number in 1..=count {
-        let text = mmu.read_pointer(&(at + 5));
-        // `object_event`: six bytes, plus a class and set for a trainer or an item id for a ball.
-        let (item, trainer, size) = match text {
-            t if t & 0x40 != 0 => (None, true, 8),
-            t if t & 0x80 != 0 => (Some(mmu.read_pointer(&(at + 6))), false, 7),
-            _ => (None, false, 6),
-        };
-        found.push(MapObject { number, item, trainer });
-        at = at + size;
-    }
-    found
+/// Every object on `map`, in its `object_event` order.
+pub(crate) fn map_objects(map: Map) -> Vec<MapObject> {
+    let Ok(objects) = MapObjects::read(map) else { return Vec::new() };
+    (1..).zip(objects.objects).map(|(number, object)| match object.kind {
+        ObjectKind::Trainer { .. } => MapObject { number, item: None, trainer: true },
+        ObjectKind::Item(item) => MapObject { number, item: Some(item), trainer: false },
+        ObjectKind::Person => MapObject { number, item: None, trainer: false },
+    }).collect()
 }
 
 /// Every map a run could stand on, which is every header the game did not leave spare.
@@ -282,17 +265,19 @@ pub fn checklist(mmu: &MMU) -> Vec<Item> {
         }
     }
 
-    for &(name, index, header) in pokered_symbols::TRAINER_HEADERS {
-        let map = map_named(name).unwrap_or_else(|| panic!("trainer header {index} follows `{name}_Script`, no map"));
-        // `trainer`: the flag's bit, the sight range, then the byte it counts from.
-        let bit = mmu.read_pointer(&header) as u16;
-        let byte = mmu.read_pointer_u16_le(&(header + 2));
-        push(Entry::Trainer { map, index }, Check::Flag { address: byte + bit / 8, mask: 1 << (bit % 8) });
+    // A trainer whose label numbers it; the legendaries' headers are not numbered.
+    for &(name, _, trainers) in poke_core::tables::TRAINER_HEADERS {
+        let map = map_named(name).unwrap_or_else(|| panic!("trainer headers follow `{name}_Script`, no map"));
+        for trainer in trainers {
+            let Some(index) = trainer.label.rsplit_once("TrainerHeader").and_then(|(_, index)| index.parse().ok()) else { continue };
+            let (byte, bit) = (trainer.event / 8, trainer.event % 8);
+            push(Entry::Trainer { map, index }, Check::Flag { address: pokered_symbols::wEventFlags.address + byte, mask: 1 << bit });
+        }
     }
 
     let toggles = toggle_index(mmu);
     for map in reachable_maps() {
-        for object in map_objects(mmu, map) {
+        for object in map_objects(map) {
             // Two people are declared with an item of 0, and are no ball.
             let Some(item) = object.item.filter(|&item| item != 0) else { continue };
             let flag = toggles.iter().position(|&(on, number, _)| (on, number) == (map as u8, object.number))
@@ -569,7 +554,7 @@ mod tests {
 
         assert_eq!(count(&list, |e| matches!(e, Entry::Map(_))), 220, "the sweep's denominator");
         assert_eq!(count(&list, |e| matches!(e, Entry::Connection { .. })), 78, "39 edges, each declared from both sides");
-        assert_eq!(count(&list, |e| matches!(e, Entry::Trainer { .. })), pokered_symbols::TRAINER_HEADERS.len());
+        assert_eq!(count(&list, |e| matches!(e, Entry::Trainer { .. })), 310, "every numbered trainer header");
         assert_eq!(count(&list, |e| matches!(e, Entry::Machine(_))), 55, "fifty TMs and five HMs");
         assert_eq!(count(&list, |e| matches!(e, Entry::Badge(_))), 8);
 

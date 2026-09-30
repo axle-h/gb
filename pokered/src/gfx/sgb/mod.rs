@@ -22,9 +22,9 @@ mod packets;
 
 use poke_core::map::Map;
 use poke_core::map_header::TileSetId;
-use poke_core::rom_gfx::rom_slice;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::pokered_symbols;
+use poke_core::gfx::sgb_packets;
+use poke_core::tables::{MONSTER_PALETTES, SUPER_PALETTES};
 use serde::{Deserialize, Serialize};
 use crate::gfx::ui::{SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::systems::hp_bar::HpBarColour;
@@ -39,7 +39,7 @@ pub const PAL_GRAYMON: u8 = 0x19;
 pub const PAL_BLACK: u8 = 0x1E;
 pub const PAL_GREENBAR: u8 = 0x1F;
 pub const PAL_CAVE: u8 = 0x23;
-pub const NUM_SGB_PALS: u8 = 0x25;
+pub const NUM_SGB_PALS: u8 = SUPER_PALETTES.len() as u8;
 
 /// `NUM_CITY_MAPS`, `FIRST_INDOOR_MAP`: the map ids `SetPal_Overworld` divides the world on.
 const NUM_CITY_MAPS: u8 = 0x0B;
@@ -103,7 +103,7 @@ impl Default for SgbState {
         Self {
             palettes: [0; 4],
             attributes: vec![0; CELLS],
-            party_menu: packets::transfer(pokered_symbols::BlkPacket_PartyMenu),
+            party_menu: sgb_packets::BLK_PACKET_PARTY_MENU.to_vec(),
             default: Box::new(PaletteCommand::BattleBlack),
         }
     }
@@ -152,71 +152,70 @@ impl SgbState {
 
     /// Each `SetPal_*`: the pal packet it leaves in `hl` and the blk packet it leaves in `de`.
     fn set_pal(&self, command: &PaletteCommand) -> (Vec<u8>, Vec<u8>) {
-        let transfer = packets::transfer;
         match command {
             PaletteCommand::BattleBlack => (
-                transfer(pokered_symbols::PalPacket_Black),
-                transfer(pokered_symbols::BlkPacket_Battle),
+                sgb_packets::PAL_PACKET_BLACK.to_vec(),
+                sgb_packets::BLK_PACKET_BATTLE.to_vec(),
             ),
             PaletteCommand::Battle { player_hp_bar, enemy_hp_bar, player, enemy } => {
-                let mut pal = transfer(pokered_symbols::PalPacket_Empty);
+                let mut pal = sgb_packets::PAL_PACKET_EMPTY.to_vec();
                 pal[1] = PAL_GREENBAR + *player_hp_bar as u8;
                 pal[3] = PAL_GREENBAR + *enemy_hp_bar as u8;
                 pal[5] = *player;
                 pal[7] = *enemy;
-                (pal, transfer(pokered_symbols::BlkPacket_Battle))
+                (pal, sgb_packets::BLK_PACKET_BATTLE.to_vec())
             }
             PaletteCommand::TownMap => (
-                transfer(pokered_symbols::PalPacket_TownMap),
-                transfer(pokered_symbols::BlkPacket_WholeScreen),
+                sgb_packets::PAL_PACKET_TOWN_MAP.to_vec(),
+                sgb_packets::BLK_PACKET_WHOLE_SCREEN.to_vec(),
             ),
             PaletteCommand::StatusScreen { hp_bar, mon } => {
-                let mut pal = transfer(pokered_symbols::PalPacket_Empty);
+                let mut pal = sgb_packets::PAL_PACKET_EMPTY.to_vec();
                 pal[1] = PAL_GREENBAR + *hp_bar as u8;
                 pal[3] = *mon;
-                (pal, transfer(pokered_symbols::BlkPacket_StatusScreen))
+                (pal, sgb_packets::BLK_PACKET_STATUS_SCREEN.to_vec())
             }
             PaletteCommand::Pokedex { mon } => {
-                let mut pal = transfer(pokered_symbols::PalPacket_Pokedex);
+                let mut pal = sgb_packets::PAL_PACKET_POKEDEX.to_vec();
                 pal[3] = *mon;
-                (pal, transfer(pokered_symbols::BlkPacket_Pokedex))
+                (pal, sgb_packets::BLK_PACKET_POKEDEX.to_vec())
             }
             PaletteCommand::Slots => (
-                transfer(pokered_symbols::PalPacket_Slots),
-                transfer(pokered_symbols::BlkPacket_Slots),
+                sgb_packets::PAL_PACKET_SLOTS.to_vec(),
+                sgb_packets::BLK_PACKET_SLOTS.to_vec(),
             ),
             PaletteCommand::TitleScreen => (
-                transfer(pokered_symbols::PalPacket_Titlescreen),
-                transfer(pokered_symbols::BlkPacket_Titlescreen),
+                sgb_packets::PAL_PACKET_TITLESCREEN.to_vec(),
+                sgb_packets::BLK_PACKET_TITLESCREEN.to_vec(),
             ),
             PaletteCommand::NidorinoIntro => (
-                transfer(pokered_symbols::PalPacket_NidorinoIntro),
-                transfer(pokered_symbols::BlkPacket_NidorinoIntro),
+                sgb_packets::PAL_PACKET_NIDORINO_INTRO.to_vec(),
+                sgb_packets::BLK_PACKET_NIDORINO_INTRO.to_vec(),
             ),
             PaletteCommand::Generic => (
-                transfer(pokered_symbols::PalPacket_Generic),
-                transfer(pokered_symbols::BlkPacket_WholeScreen),
+                sgb_packets::PAL_PACKET_GENERIC.to_vec(),
+                sgb_packets::BLK_PACKET_WHOLE_SCREEN.to_vec(),
             ),
             PaletteCommand::Overworld(overworld) => {
-                let mut pal = transfer(pokered_symbols::PalPacket_Empty);
+                let mut pal = sgb_packets::PAL_PACKET_EMPTY.to_vec();
                 pal[1] = overworld_palette(*overworld);
-                (pal, transfer(pokered_symbols::BlkPacket_WholeScreen))
+                (pal, sgb_packets::BLK_PACKET_WHOLE_SCREEN.to_vec())
             }
             PaletteCommand::PartyMenu => (
-                transfer(pokered_symbols::PalPacket_PartyMenu),
+                sgb_packets::PAL_PACKET_PARTY_MENU.to_vec(),
                 self.party_menu.clone(),
             ),
             PaletteCommand::PokemonWholeScreen { mon, black } => {
-                let mut pal = transfer(pokered_symbols::PalPacket_Empty);
+                let mut pal = sgb_packets::PAL_PACKET_EMPTY.to_vec();
                 pal[1] = if *black { PAL_BLACK } else { *mon };
-                (pal, transfer(pokered_symbols::BlkPacket_WholeScreen))
+                (pal, sgb_packets::BLK_PACKET_WHOLE_SCREEN.to_vec())
             }
             PaletteCommand::GameFreakIntro => (
-                transfer(pokered_symbols::PalPacket_GameFreakIntro),
-                transfer(pokered_symbols::BlkPacket_GameFreakIntro),
+                sgb_packets::PAL_PACKET_GAME_FREAK_INTRO.to_vec(),
+                sgb_packets::BLK_PACKET_GAME_FREAK_INTRO.to_vec(),
             ),
             PaletteCommand::TrainerCard { badges } => (
-                transfer(pokered_symbols::PalPacket_TrainerCard),
+                sgb_packets::PAL_PACKET_TRAINER_CARD.to_vec(),
                 trainer_card_blk_packet(*badges),
             ),
             PaletteCommand::PartyMenuHpBars { .. } | PaletteCommand::Default => {
@@ -227,7 +226,7 @@ impl SgbState {
 
     /// `InitPartyMenuBlkPacket`, which the party menu runs before patching a bar a mon.
     pub fn init_party_menu_blk_packet(&mut self) {
-        self.party_menu = packets::transfer(pokered_symbols::BlkPacket_PartyMenu);
+        self.party_menu = sgb_packets::BLK_PACKET_PARTY_MENU.to_vec();
     }
 
     /// `UpdatePartyMenuBlkPacket`. Green, yellow and red are palettes 1, 2 and 3 of the party
@@ -272,15 +271,13 @@ pub fn determine_palette_id(transformed: bool, species: u8) -> u8 {
 /// entry, and so does every index no Pokémon has, because `PokedexOrder` answers 0 for those.
 pub fn determine_palette_id_out_of_battle(species: u8) -> u8 {
     let dex = PokemonSpecies::from_repr(species).map_or(0, |species| species.metadata().pokedex_number);
-    rom_slice(pokered_symbols::MonsterPalettes)[dex as usize]
+    MONSTER_PALETTES[dex as usize]
 }
 
 /// One `SuperPalettes` entry, four RGB555 colours. Colour 0 is `31,29,31` in every entry, which is
 /// why nothing here models the SGB sharing colour 0 across its four palettes.
 pub fn super_palette(id: u8) -> [u16; 4] {
-    assert!(id < NUM_SGB_PALS, "{id} is not a SuperPalettes entry");
-    let bytes = rom_slice(pokered_symbols::SuperPalettes + id as u16 * 8);
-    std::array::from_fn(|i| u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]))
+    SUPER_PALETTES[id as usize]
 }
 
 /// `SetPal_TrainerCard`: the card's packet with the blk data of every badge not won zeroed, which
@@ -288,7 +285,7 @@ pub fn super_palette(id: u8) -> [u16; 4] {
 fn trainer_card_blk_packet(badges: u8) -> Vec<u8> {
     /// `BadgeBlkDataLengths`.
     const BADGE_BLK_DATA_LENGTHS: [usize; 8] = [6, 6, 6, 6 * 3, 6, 6, 6, 6];
-    let mut packet = packets::transfer(pokered_symbols::BlkPacket_TrainerCard);
+    let mut packet = sgb_packets::BLK_PACKET_TRAINER_CARD.to_vec();
     let mut at = 2;
     for (badge, length) in BADGE_BLK_DATA_LENGTHS.iter().enumerate() {
         if badges & (1 << badge) == 0 {

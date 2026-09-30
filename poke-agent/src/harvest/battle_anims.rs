@@ -38,9 +38,9 @@ pub struct FrameBlockInput {
 /// `DrawFrameBlock` into `wShadowOAM`, as `[y, x, tile, attributes]`.
 fn draw_frame_block(oracle: &mut Oracle, input: FrameBlockInput) -> Vec<[u8; 4]> {
     let pointers = sym::FrameBlockPointers;
-    let table = poke_core::rom_gfx::rom_slice(pointers);
+    let table = crate::pokemon::rom_gfx::rom_slice(pointers);
     let at = u16::from_le_bytes([table[input.frame_block as usize * 2], table[input.frame_block as usize * 2 + 1]]);
-    let count = poke_core::rom_gfx::rom_slice(DmgPointer { bank: pointers.bank, address: at })[0] as usize;
+    let count = crate::pokemon::rom_gfx::rom_slice(DmgPointer { bank: pointers.bank, address: at })[0] as usize;
     let (y, x) = poke_core::battle_anims::base_coord(input.base_coord);
     oracle.write(sym::wSubAnimTransform, &[input.transform]);
     oracle.write(sym::wBaseCoordY, &[y]);
@@ -69,7 +69,7 @@ fn load_subanimation(oracle: &mut Oracle, input: SubanimInput) -> (u8, u8, usize
     oracle.write(sym::hWhoseTurn, &[turn_byte(input.turn)]);
     let called = oracle.call(sym::LoadSubanimation);
     assert!(called.rng.is_empty());
-    let table = poke_core::rom_gfx::rom_slice(sym::SubanimationPointers);
+    let table = crate::pokemon::rom_gfx::rom_slice(sym::SubanimationPointers);
     let start = u16::from_le_bytes([table[input.subanimation as usize * 2], table[input.subanimation as usize * 2 + 1]]);
     let entry = u16::from_le_bytes(oracle.read(sym::wSubAnimSubEntryAddr, 2).try_into().unwrap());
     let transform = oracle.read(sym::wSubAnimTransform, 1)[0];

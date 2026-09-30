@@ -1,19 +1,16 @@
 //! `SilphCo7F_Script`: the rival waiting in the middle of the floor, three Rockets and a scientist,
 //! three card key doors, and the Silph worker who parts with his Lapras.
 
+use poke_core::tables::trainers;
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_SILPH_CO_GIOVANNI, EVENT_BEAT_SILPH_CO_RIVAL,
     EVENT_SILPH_CO_7_UNLOCKED_DOOR1, EVENT_SILPH_CO_7_UNLOCKED_DOOR2, EVENT_SILPH_CO_7_UNLOCKED_DOOR3};
-use poke_core::symbols::pokered_local_labels::{SilphCo7FRivalText as rival,
-    SilphCo7FSilphWorkerM1Text as worker_m1, SilphCo7FSilphWorkerM2Text as worker_m2,
-    SilphCo7FSilphWorkerM3Text as worker_m3, SilphCo7FSilphWorkerM4Text as worker_m4};
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_SILPHCO7F_DEFAULT, SCRIPT_SILPHCO7F_RIVAL_AFTER_BATTLE,
     SCRIPT_SILPHCO7F_RIVAL_EXIT, SCRIPT_SILPHCO7F_RIVAL_START_BATTLE, TEXT_SILPHCO7F_RIVAL,
     TEXT_SILPHCO7F_RIVAL_GOOD_LUCK_TO_YOU, TEXT_SILPHCO7F_RIVAL_WAITED_HERE, TEXT_SILPHCO7F_ROCKET1,
     TEXT_SILPHCO7F_ROCKET2, TEXT_SILPHCO7F_ROCKET3, TEXT_SILPHCO7F_SCIENTIST, TEXT_SILPHCO7F_SILPH_WORKER_M1,
     TEXT_SILPHCO7F_SILPH_WORKER_M2, TEXT_SILPHCO7F_SILPH_WORKER_M3, TEXT_SILPHCO7F_SILPH_WORKER_M4};
-use poke_core::symbols::pokered_symbols as sym;
-use poke_core::symbols::pokered_symbols::SILPHCO7F_RIVAL;
+use poke_core::symbols::pokered_map_scripts::SILPHCO7F_RIVAL;
 use poke_core::symbols::pokered_toggles::TOGGLE_SILPH_CO_7F_RIVAL;
 use poke_core::trainer_headers::OPP_ID_OFFSET;
 use serde::{Deserialize, Serialize};
@@ -22,7 +19,7 @@ use crate::input::Joypad;
 use crate::modes::overworld::movement::{NPC_MOVEMENT_DOWN, NPC_MOVEMENT_LEFT, NPC_MOVEMENT_RIGHT, NPC_MOVEMENT_UP};
 use crate::systems::overworld::sprites::SPRITE_FACING_UP;
 use super::silph_co::beat_giovanni_print_de_or_print_hl as print_held_or_freed;
-use super::{text_at, Code, Flow, Script};
+use super::{text_named, Code, Flow, Script};
 
 /// `PLAYER_DIR_DOWN`.
 const PLAYER_DIR_DOWN: u8 = 4;
@@ -77,7 +74,7 @@ pub fn script(rt: &mut Script) -> Flow {
     super::silph_co::gate_callback(rt, &GATES, &DOORS, CLOSED_DOOR);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().silph_co_7f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::SilphCo7TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::SilphCo7TrainerHeaders);
     let entry: Code = match index {
         SCRIPT_SILPHCO7F_DEFAULT => Label::DefaultScript.into(),
         SCRIPT_SILPHCO7F_RIVAL_START_BATTLE => Label::RivalStartBattle.into(),
@@ -151,14 +148,14 @@ fn rival_trainer_no(rt: &mut Script) -> u8 {
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let (held, freed) = match text_id {
         TEXT_SILPHCO7F_SILPH_WORKER_M1 => return Some(silph_worker_m1(rt)),
-        TEXT_SILPHCO7F_SILPH_WORKER_M2 => (worker_m2::AfterTheMasterBallText, worker_m2::CancelledTheMasterBallText),
-        TEXT_SILPHCO7F_SILPH_WORKER_M3 => (worker_m3::ItWouldBeBadText, worker_m3::YouChasedOffTeamRocketText),
-        TEXT_SILPHCO7F_SILPH_WORKER_M4 => (worker_m4::ItsReallyDangerousHereText, worker_m4::SafeAtLastText),
-        TEXT_SILPHCO7F_ROCKET1 => return Some(rt.talk_to_trainer(sym::SilphCo7TrainerHeader0).ret()),
-        TEXT_SILPHCO7F_SCIENTIST => return Some(rt.talk_to_trainer(sym::SilphCo7TrainerHeader1).ret()),
-        TEXT_SILPHCO7F_ROCKET2 => return Some(rt.talk_to_trainer(sym::SilphCo7TrainerHeader2).ret()),
-        TEXT_SILPHCO7F_ROCKET3 => return Some(rt.talk_to_trainer(sym::SilphCo7TrainerHeader3).ret()),
-        TEXT_SILPHCO7F_RIVAL => return Some(rt.print_text(text_at(rival::Text)).ret()),
+        TEXT_SILPHCO7F_SILPH_WORKER_M2 => ("SilphCo7FSilphWorkerM2Text.AfterTheMasterBallText", "SilphCo7FSilphWorkerM2Text.CancelledTheMasterBallText"),
+        TEXT_SILPHCO7F_SILPH_WORKER_M3 => ("SilphCo7FSilphWorkerM3Text.ItWouldBeBadText", "SilphCo7FSilphWorkerM3Text.YouChasedOffTeamRocketText"),
+        TEXT_SILPHCO7F_SILPH_WORKER_M4 => ("SilphCo7FSilphWorkerM4Text.ItsReallyDangerousHereText", "SilphCo7FSilphWorkerM4Text.SafeAtLastText"),
+        TEXT_SILPHCO7F_ROCKET1 => return Some(rt.talk_to_trainer(trainers::SilphCo7TrainerHeader0).ret()),
+        TEXT_SILPHCO7F_SCIENTIST => return Some(rt.talk_to_trainer(trainers::SilphCo7TrainerHeader1).ret()),
+        TEXT_SILPHCO7F_ROCKET2 => return Some(rt.talk_to_trainer(trainers::SilphCo7TrainerHeader2).ret()),
+        TEXT_SILPHCO7F_ROCKET3 => return Some(rt.talk_to_trainer(trainers::SilphCo7TrainerHeader3).ret()),
+        TEXT_SILPHCO7F_RIVAL => return Some(rt.print_text(text_named("SilphCo7FRivalText.Text")).ret()),
         _ => return None,
     };
     Some(print_held_or_freed(rt, held, freed))
@@ -168,20 +165,20 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 /// has nothing to say about Giovanni until he has parted with it.
 fn silph_worker_m1(rt: &mut Script) -> Flow {
     if !rt.globals().got_lapras {
-        return rt.print_text(text_at(worker_m1::HaveThisPokemonText)).then(Label::LaprasOffered);
+        return rt.print_text(text_named("SilphCo7FSilphWorkerM1Text.HaveThisPokemonText")).then(Label::LaprasOffered);
     }
     let said = match rt.check_event(EVENT_BEAT_SILPH_CO_GIOVANNI) {
-        true => worker_m1::SavedText,
-        false => worker_m1::IsOurPresidentOkText,
+        true => "SilphCo7FSilphWorkerM1Text.SavedText",
+        false => "SilphCo7FSilphWorkerM1Text.IsOurPresidentOkText",
     };
-    rt.print_text(text_at(said)).ret()
+    rt.print_text(text_named(said)).ret()
 }
 
 /// The description he gives once the Lapras is the player's, whichever of the party or a box it
 /// went into.
 fn describe_lapras(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
-    rt.print_text(text_at(worker_m1::LaprasDescriptionText)).then(Label::LaprasDescribed)
+    rt.print_text(text_named("SilphCo7FSilphWorkerM1Text.LaprasDescriptionText")).then(Label::LaprasDescribed)
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -210,7 +207,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::RivalWaited => rt.delay3().then(Label::RivalWaitedDelay),
         Label::RivalWaitedDelay => {
             let set = rival_trainer_no(rt);
-            rt.start_trainer_battle(OPP_RIVAL2, set, sym::SilphCo7FRivalDefeatedText);
+            rt.start_trainer_battle(OPP_RIVAL2, set, "SilphCo7FRivalDefeatedText");
             set_script(rt, SCRIPT_SILPHCO7F_RIVAL_AFTER_BATTLE);
             Flow::Return
         }

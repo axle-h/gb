@@ -1,25 +1,12 @@
-use crate::roms::ROM_BANK_SIZE;
+use crate::gfx::font::FONT;
 
-pub const FONT_BYTES: [u8; 0x800] = {
-    use crate::roms::POKERED;
-    use crate::symbols::pokered_symbols;
-    let font_pointer = pokered_symbols::FontGraphics;
-    let end_pointer = pokered_symbols::FontGraphicsEnd;
-
-    let length = end_pointer.address as usize - font_pointer.address as usize;
-    if length != 0x400 {
-        // Compressed 1bpp
-        panic!("Font bytes length is incorrect");
-    }
-
-    let rom_address = font_pointer.address as usize - ROM_BANK_SIZE + font_pointer.bank.id() as usize * ROM_BANK_SIZE;
-
-    let mut result = [0; 0x800];
+/// `FontGraphics`, 1bpp, as `CopyVideoDataDouble` writes it: each byte serves as both planes.
+pub const FONT_BYTES: [u8; 2 * FONT.len()] = {
+    let mut result = [0; 2 * FONT.len()];
     let mut i = 0;
-    while i < 0x400 {
-        let bpp1 = POKERED[rom_address + i];
-        result[i * 2] = bpp1;
-        result[i * 2 + 1] = bpp1;
+    while i < FONT.len() {
+        result[i * 2] = FONT[i];
+        result[i * 2 + 1] = FONT[i];
         i += 1;
     }
     result

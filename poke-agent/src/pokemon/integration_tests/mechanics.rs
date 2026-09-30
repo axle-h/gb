@@ -2896,3 +2896,61 @@ fn a_duplicate_map_is_not_a_coverage_gap() {
          coverage::UNREACHABLE_DUPLICATES and the coverage report's map counts are derived from \
          that list");
 }
+
+/// A text that ends without a prompt closes on the next fresh press, so a press made while its
+/// last letters are still on their way to the screen takes them with it. Talked to at many tick
+/// phases, every reading ends where the cartridge's text does.
+#[test]
+fn a_text_is_read_to_its_last_letter() {
+    const AFTER_THE_BADGE: &[u8] = include_bytes!("../data/post-thunder-badge.bin");
+    let mut short = Vec::new();
+    for quarter_frames in 0..12u64 {
+        let mut fixture = TestFixture::new(AFTER_THE_BADGE, Duration::from_secs(60),
+            vec![PolicyStep::Interact(MapSprite::VERMILIONGYM_GYM_GUIDE); 4]);
+        fixture.gb.run(gb::cycles::MachineCycles::from_t(70_224 * quarter_frames / 4));
+        let mut read = 0;
+        while read < 4 {
+            fixture.step();
+            for event in fixture.agent.drain_events() {
+                if let AgentEvent::TextBox { message } = event {
+                    read += 1;
+                    if !message.ends_with("was electric!") {
+                        short.push((quarter_frames, message));
+                    }
+                }
+            }
+        }
+    }
+    assert!(short.is_empty(), "read short, by quarter frames of phase: {short:?}");
+}
+
+/// The mart's menu is read from memory before the greeting above it has reached the screen, and
+/// the greeting is still read whole before the shopping takes over.
+#[test]
+fn a_mart_greeting_is_read_to_its_last_letter() {
+    const STATE: &[u8] = include_bytes!("../data/viridian-city-pokemart-shopping.bin");
+    let mut short = Vec::new();
+    for quarter_frames in 0..12u64 {
+        let mut fixture = TestFixture::new(STATE, Duration::from_secs(60), vec![
+            PolicyStep::Interact(MapSprite::VIRIDIANMART_CLERK),
+            PolicyStep::BuyFromMart { map: Map::ViridianMart, item: BagItem::new(ItemId::PokeBall, 1) },
+        ]);
+        fixture.gb.run(gb::cycles::MachineCycles::from_t(70_224 * quarter_frames / 4));
+        let mut greeted = None;
+        while greeted.is_none() {
+            fixture.step();
+            for event in fixture.agent.drain_events() {
+                if let AgentEvent::TextBox { message } = event
+                    && message.contains("Hi there")
+                {
+                    greeted = Some(message);
+                }
+            }
+        }
+        let greeted = greeted.unwrap();
+        if !greeted.ends_with("May I help you?") {
+            short.push((quarter_frames, greeted));
+        }
+    }
+    assert!(short.is_empty(), "read short, by quarter frames of phase: {short:?}");
+}

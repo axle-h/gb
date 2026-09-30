@@ -1,7 +1,5 @@
-use poke_core::map_gfx::tileset_entry;
+use poke_core::map_gfx::blockset;
 use poke_core::map_header::TileSetId;
-use poke_core::rom_gfx::rom_slice;
-use poke_core::symbols::{pokered_symbols, DmgBank, DmgPointer};
 use serde::{Deserialize, Serialize};
 use crate::gfx::layers::{MapLayer, BLOCK_PX};
 use crate::gfx::ui::{SCREEN_TILES_X, SCREEN_TILES_Y};
@@ -36,11 +34,6 @@ impl MapView {
         self.width as u16 + 2 * MAP_BORDER as u16
     }
 
-    /// `wCurrentTileBlockMapViewPointer` from the address a `warp_to` or connection names.
-    pub fn view_from_address(address: u16) -> u16 {
-        address.wrapping_sub(pokered_symbols::wOverworldMap.address)
-    }
-
     /// The top-left pixel of the screen in the buffer.
     pub fn camera(&self) -> (i32, i32) {
         let stride = self.stride() as i32;
@@ -59,16 +52,14 @@ impl MapView {
         let (x, y) = (column + 2 * self.x_block as usize, row + 2 * self.y_block as usize);
         let at = self.view as usize + y / 4 * self.stride() as usize + x / 4;
         let block = self.blocks.get(at).copied().unwrap_or(0);
-        let entry = tileset_entry(self.tileset);
-        let blockset = rom_slice(DmgPointer { bank: DmgBank::ROM { bank: entry.bank }, address: entry.blocks });
+        let blockset = blockset(self.tileset);
         blockset[block as usize * 16 + y % 4 * 4 + x % 4]
     }
 
     /// `wSurroundingTiles`: the six by five blocks from the view pointer, which `LoadCurrentMapView`
     /// leaves in the bytes just past `wTileMap`.
     pub fn surrounding_tiles(&self) -> Vec<u8> {
-        let entry = tileset_entry(self.tileset);
-        let blockset = rom_slice(DmgPointer { bank: DmgBank::ROM { bank: entry.bank }, address: entry.blocks });
+        let blockset = blockset(self.tileset);
         (0..SURROUNDING_ROWS * SURROUNDING_COLUMNS).map(|i| {
             let (x, y) = (i % SURROUNDING_COLUMNS, i / SURROUNDING_COLUMNS);
             let block = self.blocks.get(self.view as usize + y / 4 * self.stride() as usize + x / 4).copied().unwrap_or(0);
@@ -124,7 +115,7 @@ mod tests {
             width: header.width,
             height: header.height,
             blocks: tile_block_map(Map::PalletTown).unwrap(),
-            view: MapView::view_from_address(warp.view),
+            view: warp.view,
             x_block: warp.x & 1,
             y_block: warp.y & 1,
             tile_overrides: Vec::new(),

@@ -3,7 +3,6 @@
 
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_events::EVENT_BEAT_CHAMPION_RIVAL;
-use poke_core::symbols::pokered_local_labels::ChampionsRoomRivalText;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_CHAMPIONSROOM_CLEANUP_SCRIPT, SCRIPT_CHAMPIONSROOM_DEFAULT,
     SCRIPT_CHAMPIONSROOM_OAK_ARRIVES, SCRIPT_CHAMPIONSROOM_OAK_COME_WITH_ME,
     SCRIPT_CHAMPIONSROOM_OAK_CONGRATULATES_PLAYER, SCRIPT_CHAMPIONSROOM_OAK_DISAPPOINTED_WITH_RIVAL,
@@ -11,15 +10,14 @@ use poke_core::symbols::pokered_map_scripts::{SCRIPT_CHAMPIONSROOM_CLEANUP_SCRIP
     SCRIPT_CHAMPIONSROOM_RIVAL_DEFEATED, SCRIPT_CHAMPIONSROOM_RIVAL_READY_TO_BATTLE, TEXT_CHAMPIONSROOM_OAK,
     TEXT_CHAMPIONSROOM_OAK_COME_WITH_ME, TEXT_CHAMPIONSROOM_OAK_CONGRATULATES_PLAYER,
     TEXT_CHAMPIONSROOM_OAK_DISAPPOINTED_WITH_RIVAL, TEXT_CHAMPIONSROOM_RIVAL};
-use poke_core::symbols::pokered_symbols as sym;
-use poke_core::symbols::pokered_symbols::{CHAMPIONSROOM_OAK, CHAMPIONSROOM_RIVAL};
+use poke_core::symbols::pokered_map_scripts::{CHAMPIONSROOM_OAK, CHAMPIONSROOM_RIVAL};
 use poke_core::symbols::pokered_toggles::TOGGLE_CHAMPIONS_ROOM_OAK;
 use poke_core::trainer_headers::OPP_ID_OFFSET;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use crate::modes::overworld::movement::NPC_MOVEMENT_UP;
 use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_LEFT, SPRITE_FACING_RIGHT};
-use super::{text_at, Code, Flow, Script};
+use super::{text_named, Code, Flow, Script};
 
 /// `OPP_RIVAL3`.
 const OPP_RIVAL3: u8 = OPP_ID_OFFSET + 43;
@@ -193,16 +191,16 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     match text_id {
         TEXT_CHAMPIONSROOM_RIVAL => {
             let words = match rt.check_event(EVENT_BEAT_CHAMPION_RIVAL) {
-                true => sym::ChampionsRoomRivalAfterBattleText,
-                false => ChampionsRoomRivalText::IntroText,
+                true => "ChampionsRoomRivalAfterBattleText",
+                false => "ChampionsRoomRivalText.IntroText",
             };
-            Some(rt.print_text(text_at(words)).ret())
+            Some(rt.print_text(text_named(words)).ret())
         }
         TEXT_CHAMPIONSROOM_OAK_CONGRATULATES_PLAYER => {
             let starter = PokemonSpecies::from_repr(rt.maps().oaks_lab.player_starter)?;
             rt.get_mon_name(starter);
-            let words = poke_core::symbols::pokered_local_labels::ChampionsRoomOakCongratulatesPlayerText::Text;
-            Some(rt.print_text(text_at(words)).ret())
+            let words = "ChampionsRoomOakCongratulatesPlayerText.Text";
+            Some(rt.print_text(text_named(words)).ret())
         }
         _ => None,
     }
@@ -236,7 +234,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::BattleArmed => {
             let set = trainer_no(rt);
-            rt.start_trainer_battle(OPP_RIVAL3, set, sym::RivalDefeatedText);
+            rt.start_trainer_battle(OPP_RIVAL3, set, "RivalDefeatedText");
             rt.clear_joy_held();
             set_script(rt, SCRIPT_CHAMPIONSROOM_RIVAL_DEFEATED);
             rt.delay3().ret()

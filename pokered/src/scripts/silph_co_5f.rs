@@ -1,12 +1,11 @@
 //! `SilphCo5F_Script`: two Rockets, a scientist and a rocker, the three card key doors this floor
 //! draws shut, and the Silph worker who recognises the player.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_events::{EVENT_SILPH_CO_5_UNLOCKED_DOOR1, EVENT_SILPH_CO_5_UNLOCKED_DOOR2,
     EVENT_SILPH_CO_5_UNLOCKED_DOOR3};
-use poke_core::symbols::pokered_local_labels::SilphCo5FSilphWorkerMText as worker;
 use poke_core::symbols::pokered_map_scripts::{TEXT_SILPHCO5F_ROCKER, TEXT_SILPHCO5F_ROCKET1,
     TEXT_SILPHCO5F_ROCKET2, TEXT_SILPHCO5F_SCIENTIST, TEXT_SILPHCO5F_SILPH_WORKER_M};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use super::silph_co::beat_giovanni_print_de_or_print_hl as print_held_or_freed;
 use super::{Flow, Script};
@@ -35,7 +34,7 @@ pub fn script(rt: &mut Script) -> Flow {
     super::silph_co::gate_callback(rt, &GATES, &DOORS, CLOSED_DOOR);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().silph_co_5f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::SilphCo5TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::SilphCo5TrainerHeaders);
     rt.trainer_script(index).then(Label::StoreCurScript)
 }
 
@@ -43,12 +42,12 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
         // `SilphCo5FSilphWorkerMText`.
         TEXT_SILPHCO5F_SILPH_WORKER_M => {
-            return Some(print_held_or_freed(rt, worker::ThatsYouRightText, worker::YoureOurHeroText));
+            return Some(print_held_or_freed(rt, "SilphCo5FSilphWorkerMText.ThatsYouRightText", "SilphCo5FSilphWorkerMText.YoureOurHeroText"));
         }
-        TEXT_SILPHCO5F_ROCKET1 => sym::SilphCo5TrainerHeader0,
-        TEXT_SILPHCO5F_SCIENTIST => sym::SilphCo5TrainerHeader1,
-        TEXT_SILPHCO5F_ROCKER => sym::SilphCo5TrainerHeader2,
-        TEXT_SILPHCO5F_ROCKET2 => sym::SilphCo5TrainerHeader3,
+        TEXT_SILPHCO5F_ROCKET1 => trainers::SilphCo5TrainerHeader0,
+        TEXT_SILPHCO5F_SCIENTIST => trainers::SilphCo5TrainerHeader1,
+        TEXT_SILPHCO5F_ROCKER => trainers::SilphCo5TrainerHeader2,
+        TEXT_SILPHCO5F_ROCKET2 => trainers::SilphCo5TrainerHeader3,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())

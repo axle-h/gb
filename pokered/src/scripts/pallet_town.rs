@@ -3,16 +3,15 @@
 use poke_core::symbols::pokered_events::{EVENT_DAISY_WALKING, EVENT_ENTERED_BLUES_HOUSE, EVENT_FOLLOWED_OAK_INTO_LAB,
     EVENT_GOT_POKEBALLS_FROM_OAK, EVENT_GOT_TOWN_MAP, EVENT_OAK_APPEARED_IN_PALLET, EVENT_PALLET_AFTER_GETTING_POKEBALLS,
     EVENT_PALLET_AFTER_GETTING_POKEBALLS_2};
-use poke_core::symbols::pokered_local_labels::PalletTownOakText;
 use poke_core::symbols::pokered_map_scripts::*;
-use poke_core::symbols::pokered_symbols::PALLETTOWN_OAK;
+use poke_core::symbols::pokered_map_scripts::PALLETTOWN_OAK;
 use poke_core::symbols::pokered_toggles::{TOGGLE_DAISY_SITTING, TOGGLE_DAISY_WALKING, TOGGLE_PALLET_TOWN_OAK};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, SoundId};
 use crate::input::Joypad;
 use crate::modes::overworld::movement::PALLET_MOVEMENT_SCRIPT;
 use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_UP};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `PLAYER_DIR_DOWN`.
 const PLAYER_DIR_DOWN: u8 = 4;
@@ -112,10 +111,10 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     Some(match text_id {
         TEXT_PALLETTOWN_OAK => {
             if rt.maps().pallet_town.oak_walked_to_player {
-                rt.print_text(text_at(PalletTownOakText::ItsUnsafeText)).ret()
+                rt.print_text(text_named("PalletTownOakText.ItsUnsafeText")).ret()
             } else {
                 rt.set_do_not_wait_for_button_press(true);
-                rt.print_text(text_at(PalletTownOakText::HeyWaitDontGoOutText)).then(Label::HeyWaitDontGoOutAsm)
+                rt.print_text(text_named("PalletTownOakText.HeyWaitDontGoOutText")).then(Label::HeyWaitDontGoOutAsm)
             }
         }
         _ => return None,

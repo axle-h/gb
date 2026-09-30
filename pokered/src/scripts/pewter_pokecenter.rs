@@ -1,12 +1,11 @@
 //! `PewterPokecenter_Script`: Jigglypuff, who stops the music, sings, and turns round on the spot for
 //! as long as the song lasts.
 
-use poke_core::symbols::pokered_local_labels::PewterPokecenterJigglypuffText;
 use poke_core::symbols::pokered_map_scripts::TEXT_PEWTERPOKECENTER_JIGGLYPUFF;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, SoundId};
 use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_LEFT, SPRITE_FACING_RIGHT, SPRITE_FACING_UP};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `wSprite03`: Jigglypuff's slot.
 const JIGGLYPUFF: u8 = 3;
@@ -38,7 +37,7 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
         return None;
     }
     rt.set_do_not_wait_for_button_press(true);
-    Some(rt.print_text(text_at(PewterPokecenterJigglypuffText::Text)).then(Label::StopMusic))
+    Some(rt.print_text(text_named("PewterPokecenterJigglypuffText.Text")).then(Label::StopMusic))
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {

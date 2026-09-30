@@ -1,10 +1,10 @@
 //! `Route15_Script`: ten trainers on the road east out of Fuchsia, and the TM20 ball
 //! `PickUpItemText` takes care of.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_map_scripts::{TEXT_ROUTE15_BEAUTY1, TEXT_ROUTE15_BEAUTY2, TEXT_ROUTE15_BIKER1,
     TEXT_ROUTE15_BIKER2, TEXT_ROUTE15_COOLTRAINER_F1, TEXT_ROUTE15_COOLTRAINER_F2, TEXT_ROUTE15_COOLTRAINER_F3,
     TEXT_ROUTE15_COOLTRAINER_F4, TEXT_ROUTE15_COOLTRAINER_M1, TEXT_ROUTE15_COOLTRAINER_M2};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use super::{Flow, Script};
 
@@ -23,22 +23,22 @@ pub enum Label {
 pub fn script(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().route15.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::Route15TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::Route15TrainerHeaders);
     rt.trainer_script(index).then(Label::StoreCurScript)
 }
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
-        TEXT_ROUTE15_COOLTRAINER_F1 => sym::Route15TrainerHeader0,
-        TEXT_ROUTE15_COOLTRAINER_F2 => sym::Route15TrainerHeader1,
-        TEXT_ROUTE15_COOLTRAINER_M1 => sym::Route15TrainerHeader2,
-        TEXT_ROUTE15_COOLTRAINER_M2 => sym::Route15TrainerHeader3,
-        TEXT_ROUTE15_BEAUTY1 => sym::Route15TrainerHeader4,
-        TEXT_ROUTE15_BEAUTY2 => sym::Route15TrainerHeader5,
-        TEXT_ROUTE15_BIKER1 => sym::Route15TrainerHeader6,
-        TEXT_ROUTE15_BIKER2 => sym::Route15TrainerHeader7,
-        TEXT_ROUTE15_COOLTRAINER_F3 => sym::Route15TrainerHeader8,
-        TEXT_ROUTE15_COOLTRAINER_F4 => sym::Route15TrainerHeader9,
+        TEXT_ROUTE15_COOLTRAINER_F1 => trainers::Route15TrainerHeader0,
+        TEXT_ROUTE15_COOLTRAINER_F2 => trainers::Route15TrainerHeader1,
+        TEXT_ROUTE15_COOLTRAINER_M1 => trainers::Route15TrainerHeader2,
+        TEXT_ROUTE15_COOLTRAINER_M2 => trainers::Route15TrainerHeader3,
+        TEXT_ROUTE15_BEAUTY1 => trainers::Route15TrainerHeader4,
+        TEXT_ROUTE15_BEAUTY2 => trainers::Route15TrainerHeader5,
+        TEXT_ROUTE15_BIKER1 => trainers::Route15TrainerHeader6,
+        TEXT_ROUTE15_BIKER2 => trainers::Route15TrainerHeader7,
+        TEXT_ROUTE15_COOLTRAINER_F3 => trainers::Route15TrainerHeader8,
+        TEXT_ROUTE15_COOLTRAINER_F4 => trainers::Route15TrainerHeader9,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())

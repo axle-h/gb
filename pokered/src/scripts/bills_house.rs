@@ -4,9 +4,8 @@
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_BILL_SAID_USE_CELL_SEPARATOR, EVENT_GOT_SS_TICKET, EVENT_MET_BILL,
     EVENT_MET_BILL_2, EVENT_USED_CELL_SEPARATOR_ON_BILL};
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::*;
-use poke_core::symbols::pokered_symbols::{BILLSHOUSE_BILL1, BILLSHOUSE_BILL_POKEMON};
+use poke_core::symbols::pokered_map_scripts::{BILLSHOUSE_BILL1, BILLSHOUSE_BILL_POKEMON};
 use poke_core::symbols::pokered_toggles::{TOGGLE_BILL_1, TOGGLE_BILL_POKEMON, TOGGLE_CERULEAN_GUARD_1,
     TOGGLE_CERULEAN_GUARD_2};
 use serde::{Deserialize, Serialize};
@@ -15,7 +14,7 @@ use crate::modes::overworld::movement::{NPC_MOVEMENT_DOWN, NPC_MOVEMENT_LEFT, NP
     NPC_MOVEMENT_UP};
 use crate::modes::overworld::script::SpritePosition;
 use crate::systems::overworld::sprites::SPRITE_FACING_DOWN;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 const END: u8 = 0xFF;
 const PAD_CTRL_PAD: Joypad = Joypad::UP.union(Joypad::DOWN).union(Joypad::LEFT).union(Joypad::RIGHT);
@@ -114,11 +113,11 @@ fn cleanup(rt: &mut Script) -> Flow {
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     Some(match text_id {
         TEXT_BILLSHOUSE_BILL_POKEMON => {
-            rt.print_text(text_at(local::BillsHouseBillPokemonText::ImNotAPokemonText)).then(Label::NotAPokemonYesNo)
+            rt.print_text(text_named("BillsHouseBillPokemonText.ImNotAPokemonText")).then(Label::NotAPokemonYesNo)
         }
         TEXT_BILLSHOUSE_BILL_SS_TICKET => ss_ticket_text(rt),
         TEXT_BILLSHOUSE_BILL_CHECK_OUT_MY_RARE_POKEMON => {
-            rt.print_text(text_at(local::BillsHouseBillCheckOutMyRarePokemonText::Text)).ret()
+            rt.print_text(text_named("BillsHouseBillCheckOutMyRarePokemonText.Text")).ret()
         }
         _ => return None,
     })
@@ -127,16 +126,16 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 /// `BillsHouseBillSSTicketText`: the ticket is handed over once, and the guard blocking Vermilion's
 /// dock is swapped for the one who lets the player past.
 fn ss_ticket_text(rt: &mut Script) -> Flow {
-    use local::BillsHouseBillSSTicketText as words;
+    
     if rt.check_event(EVENT_GOT_SS_TICKET) {
-        return rt.print_text(text_at(words::WhyDontYouGoInsteadOfMeText)).ret();
+        return rt.print_text(text_named("BillsHouseBillSSTicketText.WhyDontYouGoInsteadOfMeText")).ret();
     }
-    rt.print_text(text_at(words::ThankYouText)).then(Label::ThankYou)
+    rt.print_text(text_named("BillsHouseBillSSTicketText.ThankYouText")).then(Label::ThankYou)
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
-    use local::BillsHouseBillPokemonText as pokemon;
-    use local::BillsHouseBillSSTicketText as ticket;
+    
+    
     match label {
         Label::BillPlaced => {
             rt.move_sprite(BILLSHOUSE_BILL1, &EXIT_MACHINE);
@@ -150,25 +149,25 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::NotAPokemonYesNo => rt.yes_no_choice().then(Label::NotAPokemonAnswered),
         // No is not an answer: he asks again and takes the second silence for a yes.
         Label::NotAPokemonAnswered => match rt.chose_yes() {
-            true => rt.print_text(text_at(pokemon::UseSeparationSystemText)).then(Label::UseSeparationSystem),
-            false => rt.print_text(text_at(pokemon::NoYouGottaHelpText)).then(Label::RefusedOnce),
+            true => rt.print_text(text_named("BillsHouseBillPokemonText.UseSeparationSystemText")).then(Label::UseSeparationSystem),
+            false => rt.print_text(text_named("BillsHouseBillPokemonText.NoYouGottaHelpText")).then(Label::RefusedOnce),
         },
-        Label::RefusedOnce => rt.print_text(text_at(pokemon::UseSeparationSystemText)).then(Label::UseSeparationSystem),
+        Label::RefusedOnce => rt.print_text(text_named("BillsHouseBillPokemonText.UseSeparationSystemText")).then(Label::UseSeparationSystem),
         Label::UseSeparationSystem => {
             rt.maps().bills_house.cur_script = SCRIPT_BILLSHOUSE_POKEMON_WALK_TO_MACHINE;
             Flow::Return
         }
         Label::ThankYou => {
             if !rt.give_item(ItemId::SSTicket, 1) {
-                return rt.print_text(text_at(ticket::SSTicketNoRoomText)).ret();
+                return rt.print_text(text_named("BillsHouseBillSSTicketText.SSTicketNoRoomText")).ret();
             }
-            rt.print_text(text_at(ticket::SSTicketReceivedText)).then(Label::TicketReceived)
+            rt.print_text(text_named("BillsHouseBillSSTicketText.SSTicketReceivedText")).then(Label::TicketReceived)
         }
         Label::TicketReceived => {
             rt.set_event(EVENT_GOT_SS_TICKET);
             rt.show_object(TOGGLE_CERULEAN_GUARD_1);
             rt.hide_object(TOGGLE_CERULEAN_GUARD_2);
-            rt.print_text(text_at(ticket::WhyDontYouGoInsteadOfMeText)).then(Label::GoInsteadOfMe)
+            rt.print_text(text_named("BillsHouseBillSSTicketText.WhyDontYouGoInsteadOfMeText")).then(Label::GoInsteadOfMe)
         }
         Label::GoInsteadOfMe | Label::CheckOutMyRarePokemon => Flow::Return,
     }

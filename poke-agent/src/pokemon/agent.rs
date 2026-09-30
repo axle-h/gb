@@ -68,10 +68,10 @@ fn blackout_in_flight(api: &PokemonApi) -> bool {
 const MAX_MOVEMENT_SILENCE: Duration = Duration::from_secs(60);
 
 /// Consecutive ticks the chosen row may be missing from `actions()` before a `NoRoute` abort.
-const MAX_ROUTE_LOST_TICKS: u16 = 250;
+pub(crate) const MAX_ROUTE_LOST_TICKS: u16 = 250;
 
 /// The same bound once `MetaTileMap::row_blocked_by_people` says someone is standing on the route.
-const MAX_ROUTE_BLOCKED_TICKS: u16 = 1500;
+pub(crate) const MAX_ROUTE_BLOCKED_TICKS: u16 = 1500;
 
 /// Ticks of successful pacing in grass or on cave floor before giving up on an encounter.
 const PACING_BUDGET_TICKS: u16 = 3000;
@@ -1482,6 +1482,11 @@ impl PokemonAgent {
         if let Some(menu) = api.menu_state() {
             // `SellingToMart` drives this menu itself; `PokemartState` would answer BUY.
             if menu.is_mart_buy_sell_menu() && !matches!(self.state, AgentState::PokemartShopping(_) | AgentState::SellingToMart(_)) {
+                // The menu is read from memory, ahead of the screen, so the greeting's last letters
+                // are too: waiting for the screen instead would move every press after it.
+                if let AgentState::ReadingTextBox { reader } = &mut self.state {
+                    reader.read(api.tile_map_text(true));
+                }
                 api.release_all_buttons();
                 self.set_state(AgentState::PokemartShopping(PokemartState::AwaitingPolicy));
                 let game_state = api.game_state()?;

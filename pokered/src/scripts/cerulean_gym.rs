@@ -1,17 +1,16 @@
 //! `CeruleanGym_Script`: Misty, the Cascade Badge and TM11.
 
+use poke_core::tables::trainers;
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_CERULEAN_GYM_TRAINER_0, EVENT_BEAT_CERULEAN_GYM_TRAINER_1,
     EVENT_BEAT_MISTY, EVENT_GOT_TM11};
-use poke_core::symbols::pokered_local_labels::{CeruleanGymGymGuideText, CeruleanGymMistyText};
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_CERULEANGYM_DEFAULT, SCRIPT_CERULEANGYM_MISTY_POST_BATTLE,
     TEXT_CERULEANGYM_COOLTRAINER_F, TEXT_CERULEANGYM_GYM_GUIDE, TEXT_CERULEANGYM_MISTY,
     TEXT_CERULEANGYM_MISTY_CASCADE_BADGE_INFO, TEXT_CERULEANGYM_MISTY_RECEIVED_TM11,
     TEXT_CERULEANGYM_MISTY_TM11_NO_ROOM, TEXT_CERULEANGYM_SWIMMER};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `BIT_CASCADEBADGE`.
 const BIT_CASCADEBADGE: u8 = 1;
@@ -45,7 +44,7 @@ pub fn script(rt: &mut Script) -> Flow {
     }
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().cerulean_gym.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::CeruleanGymTrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::CeruleanGymTrainerHeaders);
     if index == SCRIPT_CERULEANGYM_MISTY_POST_BATTLE {
         return misty_post_battle(rt);
     }
@@ -77,14 +76,14 @@ fn reset_scripts(rt: &mut Script) -> Flow {
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     Some(match text_id {
         TEXT_CERULEANGYM_MISTY => misty_text(rt),
-        TEXT_CERULEANGYM_COOLTRAINER_F => rt.talk_to_trainer(sym::CeruleanGymTrainerHeader0).ret(),
-        TEXT_CERULEANGYM_SWIMMER => rt.talk_to_trainer(sym::CeruleanGymTrainerHeader1).ret(),
+        TEXT_CERULEANGYM_COOLTRAINER_F => rt.talk_to_trainer(trainers::CeruleanGymTrainerHeader0).ret(),
+        TEXT_CERULEANGYM_SWIMMER => rt.talk_to_trainer(trainers::CeruleanGymTrainerHeader1).ret(),
         TEXT_CERULEANGYM_GYM_GUIDE => {
             let words = match rt.check_event(EVENT_BEAT_MISTY) {
-                true => CeruleanGymGymGuideText::BeatMistyText,
-                false => CeruleanGymGymGuideText::ChampInMakingText,
+                true => "CeruleanGymGymGuideText.BeatMistyText",
+                false => "CeruleanGymGymGuideText.ChampInMakingText",
             };
-            rt.print_text(text_at(words)).ret()
+            rt.print_text(text_named(words)).ret()
         }
         _ => return None,
     })
@@ -93,12 +92,12 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 /// `CeruleanGymMistyText`.
 fn misty_text(rt: &mut Script) -> Flow {
     if !rt.check_event(EVENT_BEAT_MISTY) {
-        return rt.print_text(text_at(CeruleanGymMistyText::PreBattleText)).then(Label::PreBattle);
+        return rt.print_text(text_named("CeruleanGymMistyText.PreBattleText")).then(Label::PreBattle);
     }
     if !rt.check_event(EVENT_GOT_TM11) {
         return Flow::Call(Label::ReceiveTm11.into(), Label::TextDone.into());
     }
-    rt.print_text(text_at(CeruleanGymMistyText::TM11ExplanationText)).ret()
+    rt.print_text(text_named("CeruleanGymMistyText.TM11ExplanationText")).ret()
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
@@ -132,7 +131,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         // Misty's text leaves `wCurMapScript` alone, so the pass she is talked to in finishes on the
         // table entry it started on and the post-battle script runs on the next one.
         Label::PreBattle => {
-            rt.save_end_battle_text(sym::CeruleanGymMistyReceivedCascadeBadgeText);
+            rt.save_end_battle_text("CeruleanGymMistyReceivedCascadeBadgeText");
             rt.engage_map_trainer(rt.sprite_index(), MISTY);
             rt.maps().cerulean_gym.cur_script = SCRIPT_CERULEANGYM_MISTY_POST_BATTLE;
             Flow::Return

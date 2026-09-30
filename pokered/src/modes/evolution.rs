@@ -22,8 +22,7 @@
 //! here touches `rBGP`, so a DMG shows no whiteout.
 
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::{pokered_symbols, DmgPointer};
-use poke_core::text_script::{decode, TextBuffer, TextCommand};
+use poke_core::text_script::{far_text, TextBuffer, TextCommand};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, SoundId};
 use crate::gfx::sgb::{determine_palette_id_out_of_battle, PaletteCommand};
@@ -95,8 +94,8 @@ enum Phase {
     Done,
 }
 
-fn script(at: DmgPointer) -> Vec<TextCommand> {
-    decode(at).expect("the evolution texts are in the cartridge")
+fn script(at: &'static str) -> Vec<TextCommand> {
+    far_text(at).expect("the evolution texts are in the cartridge")
 }
 
 impl Evolution {
@@ -159,7 +158,7 @@ impl Evolution {
                     self.occurred = true;
                     let nick = ctx.world.party[self.slot as usize].nick.clone();
                     ctx.world.text.strings.insert(TextBuffer::StringBuffer, nick);
-                    return self.text(Phase::IsEvolving, script(pokered_symbols::IsEvolvingText));
+                    return self.text(Phase::IsEvolving, script("IsEvolvingText"));
                 }
             }
             self.next_mon();
@@ -311,9 +310,9 @@ impl ModeUpdate for Evolution {
             Phase::Settling(_) => return self.finish_evolve_mon(ctx, false),
             Phase::Cry { cancelled } if ctx.audio.sound_finished() => {
                 return if cancelled {
-                    self.text(Phase::Stopped, script(pokered_symbols::StoppedEvolvingText))
+                    self.text(Phase::Stopped, script("StoppedEvolvingText"))
                 } else {
-                    self.text(Phase::Evolved, script(pokered_symbols::EvolvedText))
+                    self.text(Phase::Evolved, script("EvolvedText"))
                 };
             }
             Phase::Into => {

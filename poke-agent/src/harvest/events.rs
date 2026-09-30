@@ -4,9 +4,10 @@
 
 use poke_core::map::Map;
 use poke_core::map_header::TileSetId;
-use poke_core::rom_gfx::rom_slice;
+use crate::pokemon::rom_gfx::rom_slice;
 use poke_core::species::PokemonSpecies;
-use poke_core::symbols::pokered_local_labels::{DaycareGentlemanText, PrintBookshelfText};
+use poke_core::tables::HiddenRoutine;
+use crate::pokemon::symbols::pokered_local_labels::{DaycareGentlemanText, PrintBookshelfText};
 use pokered::party::{BoxMon, PartyMon};
 use pokered::systems::events::day_care::Collection;
 use pokered::systems::events::hidden_events::HiddenEvent;
@@ -64,9 +65,15 @@ fn check_for_hidden_event(oracle: &mut Oracle, input: HiddenEventInput) -> Optio
         y: oracle.read(sym::wHiddenEventY, 1)[0],
         x: oracle.read(sym::wHiddenEventX, 1)[0],
         argument,
-        function: DmgPointer { bank: DmgBank::ROM { bank }, address: u16::from_be_bytes([registers.h, registers.l]) },
+        function: routine(DmgPointer { bank: DmgBank::ROM { bank }, address: u16::from_be_bytes([registers.h, registers.l]) }),
         skipped,
     })
+}
+
+/// The routine whose address `CheckForHiddenEvent` left in `hl`.
+fn routine(at: DmgPointer) -> HiddenRoutine {
+    poke_core::symbols::SavedLabel::Address(at).name().and_then(HiddenRoutine::named)
+        .unwrap_or_else(|| panic!("no hidden event routine is at {at}"))
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -220,7 +227,7 @@ fn the_oracle_answers_each_event_routine() {
     let mut oracle = oracle();
     let bush = HiddenEventInput { map: Map::ViridianForest, x: 15, y: 42, facing: SpriteFacing::Right as u8 };
     let found = check_for_hidden_event(&mut oracle, bush).expect("the Antidote's bush");
-    assert_eq!((found.x, found.y, found.function, found.skipped), (16, 42, sym::HiddenItems, 1));
+    assert_eq!((found.x, found.y, found.function, found.skipped), (16, 42, HiddenRoutine::HiddenItems, 1));
     assert_eq!(check_for_hidden_event(&mut oracle, HiddenEventInput { facing: SpriteFacing::Left as u8, ..bush }), None);
 
     let shelf = BookshelfInput { tileset: TileSetId::Pokecenter, tile: 0x54, facing: SpriteFacing::Up as u8 };

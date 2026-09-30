@@ -1,10 +1,9 @@
 //! `RocketHideoutB3F_Script`: the arrow tiles that slide the player across the floor, and the two
 //! Rockets who guard it.
 
+use poke_core::tables::trainers;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_ROCKETHIDEOUTB3F_DEFAULT, SCRIPT_ROCKETHIDEOUTB3F_PLAYER_SPINNING,
     TEXT_ROCKETHIDEOUTB3F_ROCKET1, TEXT_ROCKETHIDEOUTB3F_ROCKET2};
-use poke_core::symbols::pokered_symbols::{RocketHideout3ArrowTilePlayerMovement, RocketHideout3TrainerHeader0,
-    RocketHideout3TrainerHeader1, RocketHideout3TrainerHeaders};
 use serde::{Deserialize, Serialize};
 use crate::modes::overworld::spinners::{arrow_tile_default, player_spinning};
 use super::{Flow, Script};
@@ -24,10 +23,10 @@ pub enum Label {
 pub fn script(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().rocket_hideout_b3f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, RocketHideout3TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::RocketHideout3TrainerHeaders);
     let then = match index {
         SCRIPT_ROCKETHIDEOUTB3F_DEFAULT => {
-            arrow_tile_default(rt, RocketHideout3ArrowTilePlayerMovement, SCRIPT_ROCKETHIDEOUTB3F_PLAYER_SPINNING)
+            arrow_tile_default(rt, poke_core::tables::ROCKET_HIDEOUT_B3F_ARROWS, SCRIPT_ROCKETHIDEOUTB3F_PLAYER_SPINNING)
         }
         SCRIPT_ROCKETHIDEOUTB3F_PLAYER_SPINNING => {
             player_spinning(rt, SCRIPT_ROCKETHIDEOUTB3F_DEFAULT);
@@ -43,8 +42,8 @@ pub fn script(rt: &mut Script) -> Flow {
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
-        TEXT_ROCKETHIDEOUTB3F_ROCKET1 => RocketHideout3TrainerHeader0,
-        TEXT_ROCKETHIDEOUTB3F_ROCKET2 => RocketHideout3TrainerHeader1,
+        TEXT_ROCKETHIDEOUTB3F_ROCKET1 => trainers::RocketHideout3TrainerHeader0,
+        TEXT_ROCKETHIDEOUTB3F_ROCKET2 => trainers::RocketHideout3TrainerHeader1,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())

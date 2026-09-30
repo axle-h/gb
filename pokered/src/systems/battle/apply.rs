@@ -91,11 +91,14 @@ fn damage_hp_or_substitute(battle: &mut Battle, target: Side, turn: Side) -> Vec
 
 /// `AttackSubstitute` on `turn`'s target. Damage over a byte breaks it outright; otherwise the
 /// low byte comes off its HP, and only a borrow breaks it, so a substitute can stand at 0. A break
-/// does not touch `wDamage` and zeroes the attacker's move effect.
+/// leaves `wDamage` what the substitute had and stops the move's effect on the target, not the
+/// effects on its user.
 pub fn attack_substitute(battle: &mut Battle, turn: Side) -> Vec<BattleText> {
     let mut texts = vec![BattleText::SubstituteTookDamageText];
     let damage = battle.damage;
+    let cartridge_bugs = battle.cartridge_bugs;
     let victim = battle.side_mut(turn.other());
+    let substitute_hp = victim.substitute_hp;
     if damage >> 8 == 0 {
         let (hp, borrow) = victim.substitute_hp.overflowing_sub(damage as u8);
         victim.substitute_hp = hp;
@@ -105,9 +108,21 @@ pub fn attack_substitute(battle: &mut Battle, turn: Side) -> Vec<BattleText> {
     }
     victim.status2.remove(Status2::HAS_SUBSTITUTE_UP);
     texts.push(BattleText::SubstituteBrokeText);
-    battle.side_mut(turn).current_move.effect = 0;
+    let attacker = battle.side_mut(turn);
+    // The cartridge zeroes the whole effect, so the user's own recoil, drain, recharge and
+    // self-KO are lost too, and leaves `wDamage` the full hit.
+    if cartridge_bugs || !ATTACKERS_OWN_EFFECTS.contains(&attacker.current_move.effect) {
+        attacker.current_move.effect = 0;
+    }
+    if !cartridge_bugs {
+        battle.damage = substitute_hp as u16;
+    }
     texts
 }
+
+/// Effects that act on the move's user alone, which a substitute breaking does not stop.
+const ATTACKERS_OWN_EFFECTS: [u8; 7] = [effect::RECOIL_EFFECT, effect::DRAIN_HP_EFFECT, effect::DREAM_EATER_EFFECT,
+    effect::HYPER_BEAM_EFFECT, effect::EXPLODE_EFFECT, effect::PAY_DAY_EFFECT, effect::RAGE_EFFECT];
 
 /// `HandleBuildingRage`: a target using Rage, below +6 attack, raises it a stage as though its own
 /// move did, and is left with Rage's number and no effect.
@@ -175,6 +190,31 @@ mod tests {
         let (player, enemy) = (&arena.battle.player, &arena.battle.enemy);
         assert!(player.mon.hp < player.mon.stats[0]);
         assert_eq!((player.substitute_hp, enemy.substitute_hp), (50, 50));
+    }
+
+    /// The player's `name` doing 100 damage to an enemy substitute of 10 HP.
+    fn breaking_a_substitute(name: PokemonMoveName, cartridge_bugs: bool) -> Battle {
+        let mut arena = Arena::baseline();
+        arena.battle.cartridge_bugs = cartridge_bugs;
+        arena.battle.player.current_move = MoveData::of_move(name);
+        arena.battle.enemy.status2 |= Status2::HAS_SUBSTITUTE_UP;
+        arena.battle.enemy.substitute_hp = 10;
+        arena.battle.damage = 100;
+        apply_damage_to_pokemon(&mut arena.battle, Side::Enemy, Side::Player);
+        arena.battle
+    }
+
+    #[test]
+    fn breaking_a_substitute_keeps_the_users_own_effect_and_stops_the_targets() {
+        use PokemonMoveName::*;
+        let effect_after = |name, cartridge_bugs| breaking_a_substitute(name, cartridge_bugs).player.current_move.effect;
+        for name in [DoubleEdge, Explosion, HyperBeam] {
+            assert_eq!(effect_after(name, false), MoveData::of_move(name).effect);
+            assert_eq!(effect_after(name, true), 0);
+        }
+        assert_eq!(effect_after(Flamethrower, false), 0);
+        assert_eq!(breaking_a_substitute(DoubleEdge, false).damage, 10);
+        assert_eq!(breaking_a_substitute(DoubleEdge, true).damage, 100);
     }
 
     #[test]

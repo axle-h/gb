@@ -217,17 +217,17 @@ fn a_slot_machine_opens_for_a_player_stood_beside_it_and_gives_the_overworld_bac
     let mut game = game_corner([0x10, 0x00], true);
     press_a(&mut game);
     play_until(&mut game, 2000, &mut |_| 0, playing_slots);
-    // The machine itself is `Busy`: a press of A takes the bet and stops each wheel in turn. The
-    // yes/no that opened it is answered; the only one left is another go, refused.
-    for frame in 0..20000 {
+    // The bet is the first row, each wheel is stopped in turn, and the yes/no that opened it is
+    // answered; the only one left is another go, refused.
+    for _ in 0..20000 {
         if free(&game) && !playing_slots(&game) {
             break;
         }
         let input = match game.status() {
             Status::Waiting(Decision::TwoOption) => Input::Command(Command::ChooseOption(1)),
             Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
+            Status::Waiting(Decision::SlotWheels) => Input::Command(Command::StopWheel),
             Status::Waiting(_) => Input::Command(Command::ChooseOption(0)),
-            _ if frame % 2 == 0 => Input::Buttons(Joypad::A),
             _ => Input::None,
         };
         game.frame(input);

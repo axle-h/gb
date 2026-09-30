@@ -208,7 +208,7 @@ fn every_teleport_pad_in_the_gym_is_a_row_including_the_one_underfoot() {
     // And the room it leads to comes back.
     assert!(map.route_to(Point8 { x: 9, y: 9 }).is_some(),
         "the centre room is behind the pad underfoot and nothing else");
-    assert!(ids.iter().any(|id| id == "SaffronGym:9,17:Warp"), "and the way out: {ids:?}");
+    assert!(ids.iter().any(|id| id == "SaffronGym:8,17:Warp"), "and the way out: {ids:?}");
 }
 
 /// An intra-map warp is finished by arriving, because nothing else can say so.

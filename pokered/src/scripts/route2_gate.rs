@@ -2,11 +2,10 @@
 
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::EVENT_GOT_HM05;
-use poke_core::symbols::pokered_local_labels::Route2GateOaksAideText;
 use poke_core::symbols::pokered_map_scripts::TEXT_ROUTE2GATE_OAKS_AIDE;
 use serde::{Deserialize, Serialize};
 use crate::systems::events::tables::OaksAideResult;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 /// `hOaksAideRequirement`.
 const REQUIREMENT: u8 = 10;
@@ -37,7 +36,7 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 
 /// `.got_item`.
 fn flash_explanation(rt: &mut Script) -> Flow {
-    rt.print_text(text_at(Route2GateOaksAideText::FlashExplanationText)).ret()
+    rt.print_text(text_named("Route2GateOaksAideText.FlashExplanationText")).ret()
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {

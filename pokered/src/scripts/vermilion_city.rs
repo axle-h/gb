@@ -4,16 +4,14 @@
 use poke_core::item::ItemId;
 use poke_core::species::PokemonSpecies;
 use poke_core::symbols::pokered_events::{EVENT_SS_ANNE_LEFT, EVENT_WALKED_PAST_GUARD_AFTER_SS_ANNE_LEFT};
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_VERMILIONCITY_DEFAULT,
     SCRIPT_VERMILIONCITY_PLAYER_ALLOWED_TO_PASS, SCRIPT_VERMILIONCITY_PLAYER_EXIT_SHIP,
     SCRIPT_VERMILIONCITY_PLAYER_MOVING_UP1, SCRIPT_VERMILIONCITY_PLAYER_MOVING_UP2,
     TEXT_VERMILIONCITY_GAMBLER1, TEXT_VERMILIONCITY_MACHOP, TEXT_VERMILIONCITY_SAILOR1};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_RIGHT};
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 const PAD_BUTTONS_AND_CTRL_PAD: Joypad = Joypad::A.union(Joypad::B).union(Joypad::SELECT).union(Joypad::START)
     .union(Joypad::UP).union(Joypad::DOWN).union(Joypad::LEFT).union(Joypad::RIGHT);
@@ -117,15 +115,15 @@ fn allowed_to_pass(rt: &mut Script) -> Flow {
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     Some(match text_id {
         TEXT_VERMILIONCITY_GAMBLER1 => {
-            use local::VermilionCityGambler1Text as words;
+            
             let said = match rt.check_event(EVENT_SS_ANNE_LEFT) {
-                true => words::SSAnneDepartedText,
-                false => words::DidYouSeeText,
+                true => "VermilionCityGambler1Text.SSAnneDepartedText",
+                false => "VermilionCityGambler1Text.DidYouSeeText",
             };
-            rt.print_text(text_at(said)).ret()
+            rt.print_text(text_named(said)).ret()
         }
         TEXT_VERMILIONCITY_SAILOR1 => sailor_text(rt),
-        TEXT_VERMILIONCITY_MACHOP => rt.print_text(text_at(sym::VermilionCityMachopText)).then(Label::MachopCry),
+        TEXT_VERMILIONCITY_MACHOP => rt.print_text(text_named("VermilionCityMachopText")).then(Label::MachopCry),
         _ => return None,
     })
 }
@@ -133,18 +131,18 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
 /// `VermilionCitySailor1Text`: facing right, or in front of him or behind him, only the greeting;
 /// from anywhere else, the one that asks for the ticket.
 fn sailor_text(rt: &mut Script) -> Flow {
-    use local::VermilionCitySailor1Text as words;
+    
     if rt.check_event(EVENT_SS_ANNE_LEFT) {
-        return rt.print_text(text_at(words::ShipSetSailText)).ret();
+        return rt.print_text(text_named("VermilionCitySailor1Text.ShipSetSailText")).ret();
     }
     if rt.player_facing() == SPRITE_FACING_RIGHT || rt.are_player_coords_in_array(&GUARD_COORDS).is_some() {
-        return rt.print_text(text_at(words::WelcomeToSSAnneText)).ret();
+        return rt.print_text(text_named("VermilionCitySailor1Text.WelcomeToSSAnneText")).ret();
     }
-    rt.print_text(text_at(words::DoYouHaveATicketText)).then(Label::SailorTicket)
+    rt.print_text(text_named("VermilionCitySailor1Text.DoYouHaveATicketText")).then(Label::SailorTicket)
 }
 
 pub fn resume(rt: &mut Script, label: Label) -> Flow {
-    use local::VermilionCitySailor1Text as sailor;
+    
     match label {
         // A ticket lets the player walk on; anyone else is pushed back up the square they came from.
         Label::TicketCheck => {
@@ -161,17 +159,17 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::SailorTicket => {
             if !rt.is_item_in_bag(ItemId::SSTicket) {
-                return rt.print_text(text_at(sailor::YouNeedATicketText)).ret();
+                return rt.print_text(text_named("VermilionCitySailor1Text.YouNeedATicketText")).ret();
             }
             rt.maps().vermilion_city.cur_script = SCRIPT_VERMILIONCITY_PLAYER_ALLOWED_TO_PASS;
-            rt.print_text(text_at(sailor::FlashedTicketText)).ret()
+            rt.print_text(text_named("VermilionCitySailor1Text.FlashedTicketText")).ret()
         }
         Label::MachopCry => {
             rt.play_cry(PokemonSpecies::Machop);
             rt.wait_for_sound_to_finish().then(Label::MachopStomp)
         }
         Label::MachopStomp => {
-            rt.print_text(text_at(local::VermilionCityMachopText::StompingTheLandFlatText)).ret()
+            rt.print_text(text_named("VermilionCityMachopText.StompingTheLandFlatText")).ret()
         }
     }
 }

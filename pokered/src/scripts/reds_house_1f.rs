@@ -1,13 +1,11 @@
 //! `RedsHouse1F_Script`: Mom, who sends the player off to Oak and later heals the party, and the TV,
 //! which only shows its film from the front.
 
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::{TEXT_REDSHOUSE1F_MOM, TEXT_REDSHOUSE1F_TV};
-use poke_core::symbols::pokered_symbols as sym;
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use crate::systems::overworld::sprites::SPRITE_FACING_UP;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {}
@@ -31,16 +29,16 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     Some(match text_id {
         TEXT_REDSHOUSE1F_MOM => {
             if !rt.globals().got_starter {
-                return Some(rt.print_text(text_at(local::RedsHouse1FMomText::WakeUpText)).ret());
+                return Some(rt.print_text(text_named("RedsHouse1FMomText.WakeUpText")).ret());
             }
-            rt.print_text(text_at(sym::RedsHouse1FMomYouShouldRestText)).then(Label::HealFadeOut)
+            rt.print_text(text_named("RedsHouse1FMomYouShouldRestText")).then(Label::HealFadeOut)
         }
         TEXT_REDSHOUSE1F_TV => {
             let words = match rt.player_facing() {
-                SPRITE_FACING_UP => local::RedsHouse1FTVText::StandByMeMovieText,
-                _ => local::RedsHouse1FTVText::WrongSideText,
+                SPRITE_FACING_UP => "RedsHouse1FTVText.StandByMeMovieText",
+                _ => "RedsHouse1FTVText.WrongSideText",
             };
-            rt.print_text(text_at(words)).ret()
+            rt.print_text(text_named(words)).ret()
         }
         _ => return None,
     })
@@ -60,6 +58,6 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             rt.play_new_sound(song);
             rt.gb_fade_in_from_white().then(Label::HealFadedIn)
         }
-        Label::HealFadedIn => rt.print_text(text_at(sym::RedsHouse1FMomLookingGreatText)).ret(),
+        Label::HealFadedIn => rt.print_text(text_named("RedsHouse1FMomLookingGreatText")).ret(),
     }
 }

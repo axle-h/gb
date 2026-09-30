@@ -9,7 +9,7 @@ use pokered::mode::{Mode, Status};
 use pokered::modes::text_box::TextBox;
 use pokered::rng::GameRng;
 use poke_core::charmap::encode;
-use poke_core::text_script::{decode_slice, TextNumber};
+use poke_core::text_script::{TextCommand, TextNumber};
 use pokered::world::{TextVars, World};
 use pokered::{Game, Input, Pacing};
 use crate::pokemon::rom_gfx::rom_slice;
@@ -217,7 +217,14 @@ fn a_script_of_commands_prints_on_the_same_frames_as_the_cartridge() {
         ..TextVars::default()
     };
     let mut game = Game::new(World { text, ..World::default() }, GameRng::seeded(0), Pacing::Faithful);
-    game.push(Mode::TextBox(TextBox::script(decode_slice(&script, at).unwrap())));
+    let commands = vec![
+        TextCommand::Text(encode("Lv").unwrap()),
+        TextCommand::Number { source: TextNumber::CurEnemyLevel, bytes: 1, digits: 3 },
+        TextCommand::Text(encode("!").unwrap()),
+        TextCommand::PromptButton,
+        TextCommand::Text(encode("OK").unwrap()),
+    ];
+    game.push(Mode::TextBox(TextBox::script(commands)));
     let screens = compare_timelines(gb, game, 0, 0);
     assert!(screens > 5, "the script ended before it printed anything");
 }

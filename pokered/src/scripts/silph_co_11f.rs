@@ -1,22 +1,21 @@
 //! `SilphCo11F_Script`: Giovanni, who walks down to meet the player and takes every Rocket in the
 //! building and in Saffron with him when he loses, and the president, who hands over the Master Ball.
 
+use poke_core::tables::trainers;
 use poke_core::item::ItemId;
 use poke_core::symbols::pokered_events::{EVENT_BEAT_SILPH_CO_GIOVANNI, EVENT_GOT_MASTER_BALL,
     EVENT_SILPH_CO_11_UNLOCKED_DOOR};
-use poke_core::symbols::pokered_local_labels::SilphCo11FSilphPresidentText as president;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_SILPHCO11F_DEFAULT, SCRIPT_SILPHCO11F_GIOVANNI_AFTER_BATTLE,
     SCRIPT_SILPHCO11F_GIOVANNI_FACING, SCRIPT_SILPHCO11F_GIOVANNI_START_BATTLE, TEXT_SILPHCO11F_GIOVANNI,
     TEXT_SILPHCO11F_GIOVANNI_YOU_RUINED_OUR_PLANS, TEXT_SILPHCO11F_ROCKET1, TEXT_SILPHCO11F_ROCKET2,
     TEXT_SILPHCO11F_SILPH_PRESIDENT};
-use poke_core::symbols::pokered_symbols as sym;
-use poke_core::symbols::pokered_symbols::SILPHCO11F_GIOVANNI;
+use poke_core::symbols::pokered_map_scripts::SILPHCO11F_GIOVANNI;
 use poke_core::symbols::pokered_toggles::*;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use crate::modes::overworld::movement::NPC_MOVEMENT_DOWN;
 use crate::systems::overworld::sprites::{SPRITE_FACING_DOWN, SPRITE_FACING_RIGHT};
-use super::{text_at, Code, Flow, Script};
+use super::{text_named, Code, Flow, Script};
 
 /// `PLAYER_DIR_UP` and `PLAYER_DIR_LEFT`.
 const PLAYER_DIR_UP: u8 = 8;
@@ -86,7 +85,7 @@ pub fn script(rt: &mut Script) -> Flow {
     super::silph_co::gate_callback(rt, &GATES, &DOORS, CLOSED_DOOR);
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().silph_co_11f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::SilphCo11TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::SilphCo11TrainerHeaders);
     let entry: Code = match index {
         SCRIPT_SILPHCO11F_DEFAULT => Label::DefaultScript.into(),
         SCRIPT_SILPHCO11F_GIOVANNI_FACING => Label::GiovanniFacing.into(),
@@ -149,12 +148,12 @@ pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
         TEXT_SILPHCO11F_SILPH_PRESIDENT => {
             return Some(match rt.check_event(EVENT_GOT_MASTER_BALL) {
-                true => rt.print_text(text_at(president::MasterBallDescriptionText)).ret(),
-                false => rt.print_text(text_at(president::Text)).then(Label::PresidentOffered),
+                true => rt.print_text(text_named("SilphCo11FSilphPresidentText.MasterBallDescriptionText")).ret(),
+                false => rt.print_text(text_named("SilphCo11FSilphPresidentText.Text")).then(Label::PresidentOffered),
             });
         }
-        TEXT_SILPHCO11F_ROCKET1 => sym::SilphCo11TrainerHeader0,
-        TEXT_SILPHCO11F_ROCKET2 => sym::SilphCo11TrainerHeader1,
+        TEXT_SILPHCO11F_ROCKET1 => trainers::SilphCo11TrainerHeader0,
+        TEXT_SILPHCO11F_ROCKET2 => trainers::SilphCo11TrainerHeader1,
         _ => return None,
     };
     Some(rt.talk_to_trainer(header).ret())
@@ -189,7 +188,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         // `SilphCo11FGiovanniStartBattleScript`.
         Label::GiovanniStartBattle => {
-            rt.save_end_battle_text(sym::SilphCo11FGiovanniILostAgainText);
+            rt.save_end_battle_text("SilphCo11FGiovanniILostAgainText");
             rt.engage_map_trainer(SILPHCO11F_GIOVANNI, 0);
             rt.joy_ignore(Joypad::empty());
             set_script(rt, SCRIPT_SILPHCO11F_GIOVANNI_AFTER_BATTLE);
@@ -217,10 +216,10 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         }
         Label::PresidentOffered => {
             if !rt.give_item(ItemId::MasterBall, 1) {
-                return rt.print_text(text_at(president::NoRoomText)).ret();
+                return rt.print_text(text_named("SilphCo11FSilphPresidentText.NoRoomText")).ret();
             }
             rt.set_event(EVENT_GOT_MASTER_BALL);
-            rt.print_text(text_at(president::ReceivedMasterBallText)).ret()
+            rt.print_text(text_named("SilphCo11FSilphPresidentText.ReceivedMasterBallText")).ret()
         }
     }
 }

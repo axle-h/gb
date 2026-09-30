@@ -1,24 +1,19 @@
 //! `PokemonTower7F_Script`: the three Rockets holding Mr Fuji, each of whom walks out of the room
 //! when beaten, and Mr Fuji taking the player home with him.
 
+use poke_core::tables::trainers;
 use poke_core::map::Map;
-use poke_core::pointer::{DmgBank, DmgPointer};
-use poke_core::rom_gfx::rom_slice;
 use poke_core::symbols::pokered_events::{EVENT_RESCUED_MR_FUJI, EVENT_RESCUED_MR_FUJI_2};
-use poke_core::symbols::pokered_local_labels as local;
 use poke_core::symbols::pokered_map_scripts::{SCRIPT_POKEMONTOWER7F_DEFAULT, SCRIPT_POKEMONTOWER7F_HIDE_NPC,
     SCRIPT_POKEMONTOWER7F_WARP_TO_MR_FUJI_HOUSE, TEXT_POKEMONTOWER7F_MR_FUJI, TEXT_POKEMONTOWER7F_ROCKET1,
     TEXT_POKEMONTOWER7F_ROCKET2, TEXT_POKEMONTOWER7F_ROCKET3};
-use poke_core::symbols::pokered_symbols as sym;
 use poke_core::symbols::pokered_toggles::{TOGGLE_MR_FUJIS_HOUSE_MR_FUJI, TOGGLE_POKEMON_TOWER_7F_MR_FUJI,
     TOGGLE_SAFFRON_CITY_E, TOGGLE_SAFFRON_CITY_F};
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
 use crate::systems::overworld::sprites::SPRITE_FACING_UP;
-use super::{text_at, Flow, Script};
+use super::{text_named, Flow, Script};
 
-/// A movement list's end.
-const END: u8 = 0xFF;
 const PAD_CTRL_PAD: Joypad = Joypad::UP.union(Joypad::DOWN).union(Joypad::LEFT).union(Joypad::RIGHT);
 const PAD_BUTTONS: Joypad = Joypad::A.union(Joypad::B).union(Joypad::SELECT).union(Joypad::START);
 /// `MR_FUJIS_HOUSE`'s first warp, and the map the house is entered from.
@@ -42,7 +37,7 @@ pub enum Label {
 pub fn script(rt: &mut Script) -> Flow {
     rt.enable_auto_text_box_drawing();
     let index = rt.maps().pokemon_tower_7f.cur_script;
-    let index = rt.execute_cur_map_script_in_table(index, sym::PokemonTower7TrainerHeaders);
+    let index = rt.execute_cur_map_script_in_table(index, trainers::PokemonTower7TrainerHeaders);
     match index {
         SCRIPT_POKEMONTOWER7F_HIDE_NPC => hide_npc(rt),
         SCRIPT_POKEMONTOWER7F_WARP_TO_MR_FUJI_HOUSE => warp_to_mr_fujis_house(rt),
@@ -99,31 +94,21 @@ fn rocket_leave_movement(rt: &mut Script) {
     }
 }
 
-/// `PokemonTower7FNPCCoordMovementTable` searched from the Rocket in `slot`'s own four rows for the
-/// square the player stands on. The loop has no end, so a square none of his rows names runs on into
-/// the next Rocket's and walks him out their way; one found nowhere before the bank ends leaves him
-/// standing, where the cartridge would read on past the ROM.
+/// `PokemonTower7FNPCCoordMovementTable` searched from the Rocket in `slot`'s own four rows to the
+/// end of the table for the square the player stands on, so a later Rocket's square walks him out
+/// that Rocket's way, and one no row names leaves him standing.
 pub(super) fn leave_movement(slot: u8, x: u8, y: u8) -> Option<&'static [u8]> {
-    let table = sym::PokemonTower7FNPCCoordMovementTable + (slot.wrapping_sub(1) << 4) as u16;
-    let row = rom_slice(table).chunks_exact(4).find(|row| row[0] == y && row[1] == x)?;
-    let address = u16::from_le_bytes([row[2], row[3]]);
-    let bank = match address {
-        0..0x4000 => DmgBank::ROM { bank: 0 },
-        0x4000..0x8000 => table.bank,
-        _ => return None,
-    };
-    let bytes = rom_slice(DmgPointer { bank, address });
-    let end = bytes.iter().position(|&b| b == END).map_or(bytes.len(), |i| i + 1);
-    Some(&bytes[..end])
+    let table = &poke_core::tables::POKEMON_TOWER_7F_NPC_COORD_MOVEMENT_TABLE;
+    table.get(4 * slot.checked_sub(1)? as usize..)?.iter().find(|(at, _)| *at == (x, y)).map(|&(_, path)| path)
 }
 
 pub fn text(rt: &mut Script, text_id: u8) -> Option<Flow> {
     let header = match text_id {
-        TEXT_POKEMONTOWER7F_ROCKET1 => sym::PokemonTower7TrainerHeader0,
-        TEXT_POKEMONTOWER7F_ROCKET2 => sym::PokemonTower7TrainerHeader1,
-        TEXT_POKEMONTOWER7F_ROCKET3 => sym::PokemonTower7TrainerHeader2,
+        TEXT_POKEMONTOWER7F_ROCKET1 => trainers::PokemonTower7TrainerHeader0,
+        TEXT_POKEMONTOWER7F_ROCKET2 => trainers::PokemonTower7TrainerHeader1,
+        TEXT_POKEMONTOWER7F_ROCKET3 => trainers::PokemonTower7TrainerHeader2,
         TEXT_POKEMONTOWER7F_MR_FUJI => {
-            return Some(rt.print_text(text_at(local::PokemonTower7FMrFujiText::RescueText)).then(Label::Rescued));
+            return Some(rt.print_text(text_named("PokemonTower7FMrFujiText.RescueText")).then(Label::Rescued));
         }
         _ => return None,
     };

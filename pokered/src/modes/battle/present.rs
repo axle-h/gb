@@ -432,8 +432,6 @@ impl BattleMode {
     /// `AnimateSendingOutMon`: the ball, three frames; the 3x3 up and left of it, four; the 5x5 up and
     /// left again, five; then the whole picture.
     fn sending_out(&mut self, stage: u8, ball: u8, at: (usize, usize), base: u8, ctx: &mut Ctx) -> Option<Transition> {
-        use poke_core::rom_gfx::rom_slice;
-        use poke_core::symbols::pokered_symbols;
         let ui = &mut ctx.screen.ui;
         let (x, y) = at;
         let (frames, next) = match stage {
@@ -442,11 +440,11 @@ impl BattleMode {
                 (3, Some(1))
             }
             1 => {
-                copy_tile_ids(ui, x - 1, y - 2, 3, base, rom_slice(pokered_symbols::DownscaledMonTiles_3x3));
+                copy_tile_ids(ui, x - 1, y - 2, 3, base, poke_core::gfx::pokemon::DOWNSCALED_3X3_TILEMAP);
                 (4, Some(2))
             }
             2 => {
-                copy_tile_ids(ui, x - 2, y - 4, 5, base, rom_slice(pokered_symbols::DownscaledMonTiles_5x5));
+                copy_tile_ids(ui, x - 2, y - 4, 5, base, poke_core::gfx::pokemon::DOWNSCALED_5X5_TILEMAP);
                 (5, Some(3))
             }
             _ => {
@@ -467,17 +465,15 @@ impl BattleMode {
     /// `AnimateRetreatingPlayerMon`: the 5x5, four frames; the 3x3, three; then a ball at `(5, 11)`
     /// and the picture's area cleared under it.
     fn retreating(&mut self, stage: u8, ctx: &mut Ctx) -> Option<Transition> {
-        use poke_core::rom_gfx::rom_slice;
-        use poke_core::symbols::pokered_symbols;
         let ui = &mut ctx.screen.ui;
         hud::clear_area(ui, 1, 5, 7, 7);
         let frames = match stage {
             0 => {
-                copy_tile_ids(ui, 3, 7, 5, 0, rom_slice(pokered_symbols::DownscaledMonTiles_5x5));
+                copy_tile_ids(ui, 3, 7, 5, 0, poke_core::gfx::pokemon::DOWNSCALED_5X5_TILEMAP);
                 4
             }
             1 => {
-                copy_tile_ids(ui, 4, 9, 3, 0, rom_slice(pokered_symbols::DownscaledMonTiles_3x3));
+                copy_tile_ids(ui, 4, 9, 3, 0, poke_core::gfx::pokemon::DOWNSCALED_3X3_TILEMAP);
                 3
             }
             _ => {
@@ -550,10 +546,9 @@ impl BattleMode {
                         return Some(Transition::Stay);
                     }
                     *started = true;
-                    use poke_core::symbols::pokered_symbols as sym;
                     ctx.audio.play_sound(crate::audio::data::sounds::SFX_CAUGHT_MON);
-                    for (channel, pointer) in [(4, sym::SFX_Pokeflute_Ch5), (5, sym::SFX_Pokeflute_Ch6), (6, sym::SFX_Pokeflute_Ch7)] {
-                        ctx.audio.overwrite_channel_pointer(channel, pointer.address);
+                    for (channel, label) in [(4, "SFX_Pokeflute_Ch5"), (5, "SFX_Pokeflute_Ch6"), (6, "SFX_Pokeflute_Ch7")] {
+                        ctx.audio.overwrite_channel_pointer(channel, label);
                     }
                 }
                 if ctx.pacing != crate::Pacing::Instant && ctx.audio.channel_sound_id(6) != 0 {

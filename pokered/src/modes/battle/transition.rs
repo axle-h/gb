@@ -7,8 +7,7 @@
 //! `BattleTransition` keeps for the enemy trainer is the caller's to name.
 
 use poke_core::map::Map;
-use poke_core::rom_gfx::{rom_slice, TILE_BYTES};
-use poke_core::symbols::pokered_symbols as sym;
+use poke_core::tables::{DUNGEON_MAPS_1, DUNGEON_MAPS_2};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use crate::gfx::layers::{Object, TileMap};
@@ -60,15 +59,10 @@ impl Choice {
 /// `GetBattleTransitionID_IsDungeonMap`: `DungeonMaps1`, then `DungeonMaps2`'s ranges.
 pub fn is_dungeon_map(map: Map) -> bool {
     let map = map as u8;
-    let singles = rom_slice(sym::DungeonMaps1);
-    if singles.iter().take_while(|&&m| m != 0xFF).any(|&m| m == map) {
+    if DUNGEON_MAPS_1.contains(&map) {
         return true;
     }
-    let ranges = rom_slice(sym::DungeonMaps2);
-    let mut at = 0;
-    while ranges[at] != 0xFF {
-        let (low, high) = (ranges[at], ranges[at + 1]);
-        at += 2;
+    for &(low, high) in DUNGEON_MAPS_2 {
         if map <= high {
             return map >= low;
         }
@@ -108,14 +102,14 @@ impl BattleTransition {
             let at = block as usize * OBJECTS_PER_BLOCK;
             screen.sprites[at..at + OBJECTS_PER_BLOCK].fill(Object::default());
         }
-        screen.tiles.load(V_CHARS1 + 0x7F, &rom_slice(sym::BattleTransitionTile)[..TILE_BYTES]);
+        screen.tiles.load(V_CHARS1 + 0x7F, poke_core::gfx::overworld::BATTLE_TRANSITION);
 
         let mut ops = VecDeque::new();
         let (kind, inward) = choice.kind();
         match kind {
             Kind::DoubleCircle => {
                 flash_screen(&mut ops);
-                let (first, second) = (half_circle(sym::BattleTransition_HalfCircle1), half_circle(sym::BattleTransition_HalfCircle2));
+                let (first, second) = (half_circle(0), half_circle(1));
                 for (a, b) in first.iter().zip(&second) {
                     ops.extend(a.iter().chain(b).map(|&(x, y)| Op::Black(x, y)));
                     ops.push_back(Op::Wait(3));
@@ -123,7 +117,7 @@ impl BattleTransition {
             }
             Kind::Circle => {
                 flash_screen(&mut ops);
-                for half in [sym::BattleTransition_HalfCircle1, sym::BattleTransition_HalfCircle2] {
+                for half in 0..2 {
                     for cells in half_circle(half) {
                         ops.extend(cells.into_iter().map(|(x, y)| Op::Black(x, y)));
                         ops.push_back(Op::Wait(3));
@@ -209,42 +203,32 @@ fn materialize_map(screen: &mut Screen) {
 
 /// `BattleTransition_FlashScreen`: `BattleTransition_FlashScreenPalettes` three times, two frames each.
 fn flash_screen(ops: &mut VecDeque<Op>) {
-    let palettes: Vec<u8> = rom_slice(sym::BattleTransition_FlashScreenPalettes).iter().copied().take_while(|&p| p != 1).collect();
     for _ in 0..3 {
-        for &bgp in &palettes {
+        for &bgp in poke_core::tables::BATTLE_TRANSITION_FLASH_SCREEN_PALETTES {
             ops.extend([Op::Bgp(bgp), Op::Wait(2)]);
         }
     }
 }
 
-/// `BattleTransition_Circle_Sub1`'s ten steps of one half: the cells `BattleTransition_Circle_Sub3`
-/// blackens for each `half_circle` entry.
-fn half_circle(table: poke_core::symbols::DmgPointer) -> Vec<Vec<(usize, usize)>> {
-    let entries = rom_slice(table);
-    let bank = table.bank;
-    (0..10).map(|step| {
-        let entry = &entries[step * 5..step * 5 + 5];
-        let right = entry[0] != 0;
-        let data = rom_slice(poke_core::symbols::DmgPointer { bank, address: u16::from_le_bytes([entry[1], entry[2]]) });
-        let target = u16::from_le_bytes([entry[3], entry[4]]) - sym::wTileMap.address;
-        // The first half runs down the screen and the second up it, `wBattleTransitionCircleScreenQuadrantY`.
-        let upward = table == sym::BattleTransition_HalfCircle2;
-        let mut at = target as i32;
+/// `BattleTransition_Circle_Sub1`'s ten steps of `BattleTransition_HalfCircle1` or `2`: the cells
+/// `BattleTransition_Circle_Sub3` blackens for each `half_circle` entry.
+fn half_circle(half: usize) -> Vec<Vec<(usize, usize)>> {
+    // The first half runs down the screen and the second up it, `wBattleTransitionCircleScreenQuadrantY`.
+    let upward = half == 1;
+    let width = SCREEN_TILES_X as i32;
+    poke_core::tables::BATTLE_TRANSITION_HALF_CIRCLES[half].iter().map(|step| {
+        let mut at = step.y as i32 * width + step.x as i32;
         let mut cells = vec![];
-        let mut data = data.iter();
-        loop {
-            let run = *data.next().expect("circle data");
+        let mut runs = step.runs.iter();
+        while let Some(&run) = runs.next() {
             let row_start = at;
             for _ in 0..run {
-                cells.push(((at.rem_euclid(20)) as usize, (at.div_euclid(20)) as usize));
-                at += if right { 1 } else { -1 };
+                cells.push((at.rem_euclid(width) as usize, at.div_euclid(width) as usize));
+                at += if step.right { 1 } else { -1 };
             }
-            at = row_start + if upward { -20 } else { 20 };
-            let back = *data.next().expect("circle data");
-            if back == 0xFF {
-                break;
-            }
-            at += if right { -(back as i32) } else { back as i32 };
+            at = row_start + if upward { -width } else { width };
+            let Some(&back) = runs.next() else { break };
+            at += if step.right { -(back as i32) } else { back as i32 };
         }
         cells
     }).collect()
@@ -498,7 +482,7 @@ mod tests {
 
     #[test]
     fn each_half_circle_step_blackens_cells_on_the_screen() {
-        for half in [sym::BattleTransition_HalfCircle1, sym::BattleTransition_HalfCircle2] {
+        for half in 0..2 {
             let steps = half_circle(half);
             assert_eq!(steps.len(), 10);
             assert!(steps.iter().all(|cells| !cells.is_empty() && cells.iter().all(|&(x, y)| x < 20 && y < 18)));
