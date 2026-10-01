@@ -55,6 +55,7 @@ impl BattleMode {
             mons: self.mon_palettes(),
             // The bars as the HUDs last drew them are filled in when the animation starts.
             hp_bar_colours: Default::default(),
+            ruleset: battle.ruleset,
         }
     }
 

@@ -17,7 +17,7 @@ use pokered::party::{BoxMon, Named, PartyMon};
 use pokered::rng::GameRng;
 use pokered::systems::pokedex::front_pic_tiles;
 use pokered::systems::stats::Dvs;
-use pokered::world::{BattleStyle, Options, TextSpeed, World, NUM_EVENTS};
+use pokered::world::{BattleStyle, NUM_EVENTS, Options, Ruleset, TextSpeed, World};
 use pokered::{Game, Input, Pacing};
 use crate::pokemon::options::{self, GameOptionsReader};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
@@ -88,7 +88,7 @@ pub(super) fn the_world(gb: &GameBoy) -> World {
         player_name: name_at(gb, pokered_symbols::wPlayerName.address),
         party: the_party(gb),
         options,
-        cartridge_bugs: true,
+        ruleset: Ruleset::Gen1,
         ..World::default()
     };
     let events = pokered_symbols::wEventFlags.address;

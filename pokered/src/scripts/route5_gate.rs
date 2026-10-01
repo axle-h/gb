@@ -79,7 +79,7 @@ pub fn guard_text(rt: &mut Script, thirsty: impl Into<Code>) -> Flow {
         None => {
             let flow = rt.print_text(text_named("SaffronGateGuardGeeImThirstyText"));
             // The cartridge walks the player up and arms Route 5's gate script from every gate.
-            if rt.cartridge_bugs() { flow.then(Label::SharedThirsty) } else { flow.then(thirsty) }
+            if rt.ruleset().is_gen1() { flow.then(Label::SharedThirsty) } else { flow.then(thirsty) }
         }
     }
 }

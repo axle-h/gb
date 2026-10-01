@@ -19,12 +19,12 @@ const ELECTRIC: u8 = 23;
 /// affect". Sleep ends the target's recharge and lasts 1 to 7 turns, a random byte's low three bits
 /// drawn again until they are not 0.
 pub fn sleep_effect(battle: &mut Battle, user: Side, rng: &mut impl Rng) -> Vec<BattleText> {
-    let cartridge_bugs = battle.cartridge_bugs;
+    let gen1 = battle.ruleset.is_gen1();
     let target = battle.side_mut(user.other());
     // The cartridge ends the recharge before any check, and puts a recharging target to sleep with
     // no check at all, over any status it had.
-    let unchecked = cartridge_bugs && target.status2.contains(Status2::NEEDS_TO_RECHARGE);
-    if cartridge_bugs {
+    let unchecked = gen1 && target.status2.contains(Status2::NEEDS_TO_RECHARGE);
+    if gen1 {
         target.status2.remove(Status2::NEEDS_TO_RECHARGE);
     }
     if !unchecked {
@@ -129,7 +129,7 @@ pub fn freeze_burn_paralyze_effect(battle: &mut Battle, party: &mut [PartyMon], 
         }
         effect::FREEZE_SIDE_EFFECT1 => {
             // The cartridge forgets the player's recharge when the enemy freezes it.
-            if user == Side::Player || !battle.cartridge_bugs {
+            if user == Side::Player || !battle.ruleset.is_gen1() {
                 clear_hyper_beam(battle, user);
             }
             battle.side_mut(user.other()).mon.status = status::FRZ;

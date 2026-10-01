@@ -105,6 +105,7 @@ pub fn evolve(named: &mut Named<PartyMon>, into: PokemonSpecies, pokedex: &mut P
 
 #[cfg(test)]
 mod tests {
+    use crate::world::Ruleset;
     use poke_core::item::ItemId;
     use crate::fixtures::cases;
     use super::*;
@@ -163,8 +164,8 @@ mod tests {
         use crate::rng::GameRng;
         use crate::world::World;
         use crate::{Game, Input, Pacing};
-        let evolving = |cartridge_bugs| {
-            let world = World { party: vec![charmander(vec![])], cartridge_bugs, ..World::default() };
+        let evolving = |ruleset| {
+            let world = World { party: vec![charmander(vec![])], ruleset, ..World::default() };
             let mut game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
             game.world_mut().party[0].mon.mon.species = Pikachu;
             game.push(Mode::Evolution(Evolution::after_battle(1, Growlithe as u8)));
@@ -173,8 +174,8 @@ mod tests {
             }
             game.modes().iter().any(|mode| matches!(mode, Mode::Evolution(evolution) if evolution.occurred()))
         };
-        assert!(!evolving(false));
-        assert!(evolving(true), "the cartridge reads the Growlithe as a Thunder Stone");
+        assert!(!evolving(Ruleset::Modern));
+        assert!(evolving(Ruleset::Gen1), "the cartridge reads the Growlithe as a Thunder Stone");
     }
 
     fn charmander(nick: Vec<u8>) -> Named<PartyMon> {

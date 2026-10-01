@@ -1,6 +1,8 @@
 use crate::battle::{BattleAction, BattleState};
 use crate::move_name::{PokemonMoveEffect, PokemonMoveName};
-use crate::pokemon::{MoveEffectiveness, PokemonSummary, PokemonTypeCategory};
+use crate::pokemon::{PokemonSummary, PokemonType, PokemonTypeCategory};
+use crate::ruleset::Ruleset;
+use crate::types;
 
 fn expected_psywave_damage(level: u8) -> u16 {
     // Uniform in [1, floor(1.5 × level)].
@@ -20,8 +22,18 @@ pub fn is_damaging_move(name: PokemonMoveName) -> bool {
     ) || name.metadata().power.is_some()
 }
 
+/// The multipliers, in tenths and in the cartridge's order, that a move of `move_type` takes
+/// against `defender`: one per chart row naming either of its types (`AdjustDamageForMoveType`).
+fn multipliers(move_type: PokemonType, defender: &PokemonSummary, ruleset: Ruleset) -> impl Iterator<Item = u32> + '_ {
+    types::chart(ruleset)
+        .filter(move |&(attacking, defending, _)| {
+            attacking == move_type as u8 && defender.types.iter().any(|&t| t as u8 == defending)
+        })
+        .map(|(_, _, tenths)| tenths as u32)
+}
+
 /// Approximate damage, with no crit and no stat stages, or `None` when the move cannot deal any.
-pub fn expected_damage(attacker: &PokemonSummary, move_name: PokemonMoveName, defender: &PokemonSummary) -> Option<u16> {
+pub fn expected_damage(attacker: &PokemonSummary, move_name: PokemonMoveName, defender: &PokemonSummary, ruleset: Ruleset) -> Option<u16> {
 
     match move_name {
         PokemonMoveName::SeismicToss | PokemonMoveName::NightShade => return Some(attacker.level as u16),
@@ -49,8 +61,13 @@ pub fn expected_damage(attacker: &PokemonSummary, move_name: PokemonMoveName, de
         if a == 0 { a = 1; }
     }
 
-    // The cartridge divides by zero here.
-    if d == 0 { return None; }
+    // The cartridge divides by zero here; Modern floors the defense at 1.
+    if d == 0 {
+        match ruleset {
+            Ruleset::Gen1 => return None,
+            Ruleset::Modern => d = 1,
+        }
+    }
 
     let l = attacker.level as u32;
 
@@ -64,13 +81,8 @@ pub fn expected_damage(attacker: &PokemonSummary, move_name: PokemonMoveName, de
         damage += base / 2;
     }
 
-    for &def_type in &defender.types {
-        damage = match metadata.move_type.attack_effectiveness(def_type) {
-            MoveEffectiveness::Double => damage * 20 / 10,
-            MoveEffectiveness::Base   => damage,
-            MoveEffectiveness::Half   => damage * 5 / 10,
-            MoveEffectiveness::None   => return None,
-        };
+    for tenths in multipliers(metadata.move_type, defender, ruleset) {
+        damage = damage * tenths / 10;
     }
 
     // Damage that rounds down to 0 misses.
@@ -90,7 +102,7 @@ pub fn pick_best_move(battle_state: &BattleState, actions: &[BattleAction], catc
     actions.iter()
         .filter_map(|a| match a {
             BattleAction::Fight { battle_move, .. } => {
-                let dmg = expected_damage(&battle_state.player, battle_move.name, &battle_state.enemy)?;
+                let dmg = expected_damage(&battle_state.player, battle_move.name, &battle_state.enemy, battle_state.ruleset)?;
                 if dmg > 0 && (!catching_pokemon || dmg < battle_state.enemy.current_hp) {
                     // The catching guard stays on raw damage: a charge move lands it all when it goes off.
                     Some((damage_per_turn(battle_move.name, dmg), *a))
@@ -142,25 +154,69 @@ mod test {
 
     #[test]
     fn test_alakazam() {
-        assert_eq!(expected_damage(&alakazam(), PokemonMoveName::Psychic, &arcanine()), Some(165)); // psychic
-        assert_eq!(expected_damage(&alakazam(), PokemonMoveName::SeismicToss, &arcanine()), Some(100)); // seismic toss
-        assert_eq!(expected_damage(&alakazam(), PokemonMoveName::Recover, &arcanine()), None); // recover
-        assert_eq!(expected_damage(&alakazam(), PokemonMoveName::ThunderWave, &arcanine()), None); // thunder wave
+        assert_eq!(expected_damage(&alakazam(), PokemonMoveName::Psychic, &arcanine(), Ruleset::Gen1), Some(165)); // psychic
+        assert_eq!(expected_damage(&alakazam(), PokemonMoveName::SeismicToss, &arcanine(), Ruleset::Gen1), Some(100)); // seismic toss
+        assert_eq!(expected_damage(&alakazam(), PokemonMoveName::Recover, &arcanine(), Ruleset::Gen1), None); // recover
+        assert_eq!(expected_damage(&alakazam(), PokemonMoveName::ThunderWave, &arcanine(), Ruleset::Gen1), None); // thunder wave
+    }
+
+    fn summary(species: PokemonSpecies, name: &str) -> PokemonSummary {
+        Pokemon::maxed(species, name, [PokemonMoveName::Tackle; 4], "TEST", 1).summary()
+    }
+
+    /// A single type is stored in both slots and the cartridge counts it once.
+    #[test]
+    fn water_on_charmander_is_double_not_quadruple() {
+        let blastoise = summary(PokemonSpecies::Blastoise, "BLASTOISE");
+        let charmander = summary(PokemonSpecies::Charmander, "CHARMANDER");
+        let normal = PokemonSummary { types: [PokemonType::Normal; 2], ..charmander };
+        for ruleset in [Ruleset::Gen1, Ruleset::Modern] {
+            assert_eq!(type_multiplier(PokemonMoveName::Surf, &charmander, ruleset), 2.0);
+            assert_eq!(effectiveness_phrase(type_multiplier(PokemonMoveName::Surf, &charmander, ruleset)), Some("super effective"));
+            let surf = |defender| expected_damage(&blastoise, PokemonMoveName::Surf, defender, ruleset).unwrap();
+            assert_eq!(surf(&charmander), surf(&normal) * 2);
+        }
+    }
+
+    #[test]
+    fn ice_on_dragon_flying_is_quadruple() {
+        let dragonite = summary(PokemonSpecies::Dragonite, "DRAGONITE");
+        for ruleset in [Ruleset::Gen1, Ruleset::Modern] {
+            assert_eq!(type_multiplier(PokemonMoveName::IceBeam, &dragonite, ruleset), 4.0);
+            assert_eq!(effectiveness_phrase(type_multiplier(PokemonMoveName::IceBeam, &dragonite, ruleset)), Some("doubly super effective"));
+        }
+    }
+
+    #[test]
+    fn a_single_type_immunity_is_no_damage() {
+        let gengar = summary(PokemonSpecies::Gengar, "GENGAR");
+        let diglett = summary(PokemonSpecies::Diglett, "DIGLETT");
+        let pikachu = summary(PokemonSpecies::Pikachu, "PIKACHU");
+        for ruleset in [Ruleset::Gen1, Ruleset::Modern] {
+            assert_eq!(type_multiplier(PokemonMoveName::Thunderbolt, &diglett, ruleset), 0.0);
+            assert_eq!(expected_damage(&pikachu, PokemonMoveName::Thunderbolt, &diglett, ruleset), None);
+            assert_eq!(expected_damage(&pikachu, PokemonMoveName::Tackle, &gengar, ruleset), None);
+        }
+    }
+
+    /// The recreation's Modern ruleset doubles Ghost on Psychic where the cartridge's chart says no
+    /// effect, and the estimate follows whichever is being played.
+    #[test]
+    fn lick_on_a_psychic_type_follows_the_ruleset() {
+        let gengar = Pokemon::maxed(PokemonSpecies::Gengar, "GENGAR", [PokemonMoveName::Lick; 4], "TEST", 1).summary();
+        let slowbro = Pokemon::maxed(PokemonSpecies::Slowbro, "SLOWBRO", [PokemonMoveName::Surf; 4], "TEST", 1).summary();
+        let lick = |ruleset| (expected_damage(&gengar, PokemonMoveName::Lick, &slowbro, ruleset),
+                              type_multiplier(PokemonMoveName::Lick, &slowbro, ruleset));
+        assert_eq!(lick(Ruleset::Gen1), (None, 0.0));
+        let (damage, multiplier) = lick(Ruleset::Modern);
+        assert!(damage.is_some_and(|damage| damage > 0), "{damage:?}");
+        assert_eq!(multiplier, 2.0);
     }
 }
 
 /// The multiplier `move_name` gets against both of `defender`'s types together.
-pub fn type_multiplier(move_name: PokemonMoveName, defender: &PokemonSummary) -> f64 {
-    let move_type = move_name.metadata().move_type;
-    defender.types.iter().fold(1.0, |total, &against| {
-        total
-            * match move_type.attack_effectiveness(against) {
-                MoveEffectiveness::Double => 2.0,
-                MoveEffectiveness::Base => 1.0,
-                MoveEffectiveness::Half => 0.5,
-                MoveEffectiveness::None => 0.0,
-            }
-    })
+pub fn type_multiplier(move_name: PokemonMoveName, defender: &PokemonSummary, ruleset: Ruleset) -> f64 {
+    multipliers(move_name.metadata().move_type, defender, ruleset).fold(1.0, |total, tenths| total * tenths as f64 / 10.0)
 }
 
 /// [`type_multiplier`] in the cartridge's own words, or `None` at 1.0 where the game says nothing.

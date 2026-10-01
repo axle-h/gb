@@ -28,6 +28,7 @@ use poke_core::species::PokemonSpecies;
 use serde::{Deserialize, Serialize};
 use crate::party::{PartyMon, NUM_MOVES, NUM_STATS};
 use crate::systems::stats::Dvs;
+use crate::world::Ruleset;
 
 /// `hWhoseTurn`: 0 for the player, 1 for the enemy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,9 +255,8 @@ pub struct Combatant {
     pub minimized: u8,
     /// `wPlayerMoveNum` to `wPlayerMoveMaxPP`: the move being used, as the routines have left it.
     pub current_move: MoveData,
-    /// What this side's move did to the other this turn, if Counter can strike it back: 0 unless
-    /// it was a Normal or Fighting move with power other than Counter. Kept only with the
-    /// cartridge's bugs off.
+    /// What this side's move did to the other's HP this turn, if Counter can strike it back: 0
+    /// unless it was a Normal or Fighting move with power other than Counter. Kept only under Modern.
     #[serde(default)]
     pub counter_damage: u16,
 }
@@ -341,9 +341,9 @@ pub struct Battle {
     pub safari_bait_factor: u8,
     #[serde(default)]
     pub safari_escape_factor: u8,
-    /// `World::cartridge_bugs`, as the battle began.
-    #[serde(default)]
-    pub cartridge_bugs: bool,
+    /// `World::ruleset`, as the battle began.
+    #[serde(default, alias = "cartridge_bugs", deserialize_with = "crate::world::ruleset_or_cartridge_bugs")]
+    pub ruleset: Ruleset,
 }
 
 impl Battle {
@@ -374,7 +374,7 @@ impl Battle {
             transformed_enemy_original_dvs: Dvs::default(),
             safari_bait_factor: 0,
             safari_escape_factor: 0,
-            cartridge_bugs: false,
+            ruleset: Ruleset::Modern,
         }
     }
 
@@ -453,7 +453,7 @@ impl Combatant {
 
 impl Arena {
     /// What a battle fixture's input is laid over: the player's level 50 Tauros against a wild
-    /// level 50 Rattata, both at full health with nothing volatile, playing the cartridge's bugs.
+    /// level 50 Rattata, both at full health with nothing volatile, playing Gen 1.
     /// Changing it invalidates every battle fixture.
     pub fn baseline() -> Arena {
         use crate::rng::GameRng;
@@ -462,7 +462,7 @@ impl Arena {
         let (player, enemy) = (mon(PokemonSpecies::Tauros), mon(PokemonSpecies::Rattata));
         let mut battle = Battle::new(BattleKind::Wild, &player, vec![enemy.clone()]);
         battle.enemy = Combatant::new(BattleMon::from_party(&enemy));
-        battle.cartridge_bugs = true;
+        battle.ruleset = Ruleset::Gen1;
         Arena {
             battle,
             party: vec![player],

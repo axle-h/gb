@@ -1,4 +1,5 @@
 use crate::pokemon::PokemonType;
+use crate::ruleset::Ruleset;
 use PokemonType::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -448,8 +449,22 @@ pub enum PokemonMoveEffect {
     Disable = 0x56,
 }
 
+/// What Gen 1's descriptions of the stat-lowering moves add, which Modern does not play.
+const ENEMY_STAT_DOWN_MISS: &str = " In single-player, has an extra ~25% miss chance.";
+
 impl PokemonMoveEffect {
-    pub fn description(&self) -> &'static str {
+    pub fn description(&self, ruleset: Ruleset) -> &'static str {
+        let gen1 = self.gen1_description();
+        match (self, ruleset) {
+            (_, Ruleset::Gen1) => gen1,
+            (Self::HyperBeam, _) => "User must skip its next turn to recharge.",
+            (Self::FocusEnergy, _) => "Doubles the user's critical-hit rate.",
+            (Self::JumpKick, _) => "If the move misses, the user takes 1/8 of the damage it would have dealt; none if the opponent is immune.",
+            _ => gen1.strip_suffix(ENEMY_STAT_DOWN_MISS).unwrap_or(gen1),
+        }
+    }
+
+    fn gen1_description(&self) -> &'static str {
         match self {
             Self::NoAdditionalEffect    => "No additional effect.",
             Self::PoisonSideEffect1     => "20% chance of poisoning the opponent. Cannot poison Poison-types, already-statused Pokémon, or those behind a substitute.",
@@ -722,7 +737,17 @@ impl PokemonMoveMetadata {
 #[cfg(test)]
 mod tests {
     use crate::charmap::encode;
+    use crate::ruleset::Ruleset;
+    use super::PokemonMoveEffect;
     use super::PokemonMoveName::*;
+
+    #[test]
+    fn hyper_beam_is_described_as_the_ruleset_plays_it() {
+        let hyper_beam = |ruleset| PokemonMoveEffect::HyperBeam.description(ruleset);
+        assert!(hyper_beam(Ruleset::Gen1).contains("unless the opponent faints"));
+        assert!(!hyper_beam(Ruleset::Modern).contains("faints"));
+        assert!(!PokemonMoveEffect::SpeedDown1.description(Ruleset::Modern).contains("miss"));
+    }
 
     #[test]
     fn a_move_name_is_the_cartridges() {

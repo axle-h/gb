@@ -12,6 +12,7 @@ use pokered::systems::map_data::tile_block_map;
 use pokered::systems::overworld::collision::{self, ExtraWarp};
 use pokered::systems::overworld::map_view::MapView;
 use pokered::systems::overworld::sprites::{self, SpriteEnv, SpriteSet, SpriteState, Sprites};
+use pokered::world::Ruleset;
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgBank, DmgPointer};
 use super::Oracle;
 
@@ -437,7 +438,7 @@ fn recreated_npc(input: &NpcInput, rng: &[u8]) -> Vec<SpriteState> {
         spinning: false,
         simulating: false,
         beyond: None,
-        cartridge_bugs: true,
+        ruleset: Ruleset::Gen1,
     };
     sprites::update_npc_sprite(&mut sprites, 1, &env, &mut sprites::NpcPaths::default(), &mut GameRng::tape(rng.to_vec()));
     sprites[..3].to_vec()

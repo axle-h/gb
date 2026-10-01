@@ -60,6 +60,8 @@ pub struct MetaTileMap {
     pub can_strength: bool,
     /// Is Bill waiting inside his own machine?
     pub bill_cell_separator: bool,
+    /// Coins the slots can be played with: none without a Coin Case (`AbleToPlaySlotsCheck`).
+    pub slot_coins: u32,
     /// Strength switch tiles from the ROM map scripts, so no policy hard-codes where to push.
     pub strength_switches: Vec<Point8>,
     /// Floor holes: the player and a pushed boulder both fall through. Routed as `MetaTile::Warp`
@@ -275,6 +277,7 @@ impl MetaTileMap {
             can_cut: false,
             can_strength: false,
             bill_cell_separator: false,
+            slot_coins: 0,
             strength_switches: strength_switch_table(map.metadata.map).iter()
                 .map(|&(x, y)| Point8 { x: x + dimensions.west_extra as u8, y: y + dimensions.north_extra as u8 })
                 .collect(),
@@ -1208,29 +1211,17 @@ impl MetaTileMap {
             actions.push(OverworldAction { map: self.map, key: dest, destination: dest, tile: MetaTile::Pc, route });
         }
 
-        for (index, site) in self.hidden_objects().iter().enumerate() {
-            if site.object == HiddenObject::CellSeparator && !self.bill_cell_separator { continue }
-            // Numbered over the whole table, so a bin's ordinal is `wGymTrashCanIndex` plus one.
-            let ordinal = index as u8 + 1;
-            // Below/above/left/right, each with the button that ends up facing the object.
-            let approaches: [(Option<Point8>, JoypadButton, PlayerFacingDirection); 4] = [
-                (site.at.y.checked_add(1).map(|y| Point8 { x: site.at.x, y }), JoypadButton::Up,    PlayerFacingDirection::Up),
-                (site.at.y.checked_sub(1).map(|y| Point8 { x: site.at.x, y }), JoypadButton::Down,  PlayerFacingDirection::Down),
-                (site.at.x.checked_add(1).map(|x| Point8 { x, y: site.at.y }), JoypadButton::Left,  PlayerFacingDirection::Left),
-                (site.at.x.checked_sub(1).map(|x| Point8 { x, y: site.at.y }), JoypadButton::Right, PlayerFacingDirection::Right),
-            ];
-            let best = approaches
-                .into_iter()
-                .filter(|(_, _, dir)| site.facing.is_none_or(|required| required == *dir))
+        // The nearest free square facing something from one of `approaches`, and the route that
+        // walks there, turns to it and presses A.
+        let press_from = |approaches: &mut dyn Iterator<Item = (Point8, JoypadButton, PlayerFacingDirection)>| {
+            let (_, dest, face_button, face_dir, came_from) = approaches
                 .filter_map(|(dest, button, dir)| {
-                    let dest = dest?;
                     if (dest.x as usize) >= self.width || (dest.y as usize) >= self.height { return None }
                     if !matches!(self.meta_tiles[dest.x as usize + dest.y as usize * self.width], MetaTile::Empty) { return None }
                     let (distances, came_from) = best_dist_from(&dest)?;
                     Some((*distances.get(&dest)?, dest, button, dir, came_from))
                 })
-                .min_by_key(|(distance, dest, ..)| (*distance, dest.y, dest.x));
-            let Some((_, dest, face_button, face_dir, came_from)) = best else { continue };
+                .min_by_key(|(distance, dest, ..)| (*distance, dest.y, dest.x))?;
             let mut route = reconstruct(dest, came_from);
             if route.is_empty() {
                 if face_dir != self.player_direction { route.push(face_button); }
@@ -1238,7 +1229,27 @@ impl MetaTileMap {
                 route.push(face_button);
             }
             route.push(JoypadButton::A);
+            Some((dest, route))
+        };
+
+        for (index, site) in self.hidden_objects().iter().enumerate() {
+            if site.object == HiddenObject::CellSeparator && !self.bill_cell_separator { continue }
+            // Numbered over the whole table, so a bin's ordinal is `wGymTrashCanIndex` plus one.
+            let ordinal = index as u8 + 1;
+            let mut approaches = approaches_to(site.at).into_iter()
+                .filter(|(_, _, dir)| site.facing.is_none_or(|required| required == *dir));
+            let Some((dest, route)) = press_from(&mut approaches) else { continue };
             actions.push(OverworldAction { map: self.map, key: dest, destination: dest, tile: MetaTile::Switch { object: site.object, ordinal }, route });
+        }
+
+        // `AbleToPlaySlotsCheck` plays only for a player beside the machine, facing left or right.
+        if self.map == Map::GameCorner && self.slot_coins > 0 {
+            let mut approaches = crate::pokemon::postgame::game_corner::slot_machines()
+                .flat_map(approaches_to)
+                .filter(|(_, _, dir)| matches!(dir, PlayerFacingDirection::Left | PlayerFacingDirection::Right));
+            if let Some((dest, route)) = press_from(&mut approaches) {
+                actions.push(OverworldAction { map: self.map, key: dest, destination: dest, tile: MetaTile::Slots, route });
+            }
         }
 
         let cut_trees: Vec<Point8> = match self.can_cut {
@@ -1767,7 +1778,7 @@ impl Display for MetaTileMap {
                     MetaTile::CutTree => write!(f, "t")?,
                     // Never in `meta_tiles`: an action on the floor beside a thing drawn as itself.
                     MetaTile::Cut { .. } | MetaTile::BoulderGoal { .. } | MetaTile::BoulderPush { .. }
-                    | MetaTile::Pace { .. } => write!(f, "_")?,
+                    | MetaTile::Pace { .. } | MetaTile::Slots => write!(f, "_")?,
                     MetaTile::Pc      => write!(f, "p")?,
                     MetaTile::Grass   => write!(f, "g")?,
                     // Never in `meta_tiles` — a fishing spot is an action on ordinary ground.
@@ -1944,6 +1955,16 @@ pub(crate) fn push_word(dir: JoypadButton) -> &'static str {
     }
 }
 
+/// The squares beside `at`, each with the button that turns to face it from there.
+fn approaches_to(at: Point8) -> Vec<(Point8, JoypadButton, PlayerFacingDirection)> {
+    [
+        (at.y.checked_add(1).map(|y| Point8 { x: at.x, y }), JoypadButton::Up,    PlayerFacingDirection::Up),
+        (at.y.checked_sub(1).map(|y| Point8 { x: at.x, y }), JoypadButton::Down,  PlayerFacingDirection::Down),
+        (at.x.checked_add(1).map(|x| Point8 { x, y: at.y }), JoypadButton::Left,  PlayerFacingDirection::Left),
+        (at.x.checked_sub(1).map(|x| Point8 { x, y: at.y }), JoypadButton::Right, PlayerFacingDirection::Right),
+    ].into_iter().filter_map(|(square, button, dir)| Some((square?, button, dir))).collect()
+}
+
 fn opposite_dir(dir: JoypadButton) -> JoypadButton {
     match dir {
         JoypadButton::Left  => JoypadButton::Right,
@@ -2102,7 +2123,7 @@ mod boulder_solver_tests {
             warp_targets: HashSet::new(), connection_targets: HashSet::new(),
             spinners: HashMap::new(), script_cancelled_warps: vec![], standing_on_warp: true,
             can_surf: false, best_rod: None, can_cut: false,
-            can_strength: false, bill_cell_separator: false,
+            can_strength: false, bill_cell_separator: false, slot_coins: 0,
             strength_switches: vec![switch], holes: vec![], no_surf_mount: HashSet::new(),
             has_grass_encounters: false, floor_encounters: false, has_water_encounters: false,
             // No ROM map behind it.

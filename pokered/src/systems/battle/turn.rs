@@ -39,8 +39,8 @@ const FULLY_PARALYZED_BELOW: u8 = 63;
 /// disabled move counts down; confusion counts down, and otherwise half of random bytes hurt the
 /// mon, clearing every other flag in its first status byte; a disabled move chosen before it was
 /// disabled; a quarter of random bytes fully paralyse. Hurt or paralysed, Bide, Thrash, charging
-/// and trapping end. Then Bide stores the damage just taken and unleashes it doubled after its
-/// turns; Thrash counts down into 2 to 5 turns of confusion; a trapping move counts down; Rage
+/// and trapping end. Then Bide stores the damage just taken (outside Gen 1 it was stored as it
+/// landed) and unleashes it doubled after its turns; Thrash counts down into 2 to 5 turns of confusion; a trapping move counts down; Rage
 /// goes on without its effect.
 pub fn check_status_conditions(battle: &mut Battle, party: &[PartyMon], side: Side, rng: &mut impl Rng)
                                -> (Continuation, Vec<BattleText>) {
@@ -104,7 +104,7 @@ pub fn check_status_conditions(battle: &mut Battle, party: &[PartyMon], side: Si
             stopped = true;
         }
     }
-    let damage = battle.damage;
+    let (damage, gen1) = (battle.damage, battle.ruleset.is_gen1());
     let me = battle.side_mut(side);
     if stopped {
         me.status1.remove(Status1::STORING_ENERGY | Status1::THRASHING_ABOUT | Status1::CHARGING_UP | Status1::USING_TRAPPING_MOVE);
@@ -112,7 +112,9 @@ pub fn check_status_conditions(battle: &mut Battle, party: &[PartyMon], side: Si
     }
     if me.status1.contains(Status1::STORING_ENERGY) {
         me.current_move.animation = 0;
-        me.bide_accumulated_damage = me.bide_accumulated_damage.wrapping_add(damage);
+        if gen1 {
+            me.bide_accumulated_damage = me.bide_accumulated_damage.wrapping_add(damage);
+        }
         me.num_attacks_left = me.num_attacks_left.wrapping_sub(1);
         if me.num_attacks_left != 0 {
             return (Continuation::MoveDone, texts);
@@ -157,12 +159,12 @@ pub fn check_status_conditions(battle: &mut Battle, party: &[PartyMon], side: Si
 /// calculation. It never crits, is not randomised, and lands on the mon itself.
 pub fn handle_self_confusion_damage(battle: &mut Battle, party: &[PartyMon], side: Side) -> Vec<BattleText> {
     let mut texts = vec![BattleText::HurtItselfText];
-    let bugs = battle.cartridge_bugs;
+    let gen1 = battle.ruleset.is_gen1();
     let target_defense = battle.side(side.other()).mon.stats[stat::DEFENSE];
     let target_status3 = battle.side(side.other()).status3;
     battle.side_mut(side.other()).mon.stats[stat::DEFENSE] = battle.side(side).mon.stats[stat::DEFENSE];
     // The cartridge leaves the target's Reflect in play.
-    if !bugs {
+    if !gen1 {
         let own_reflect = battle.side(side).status3 & Status3::HAS_REFLECT_UP;
         let target = &mut battle.side_mut(side.other()).status3;
         *target = *target - Status3::HAS_REFLECT_UP | own_reflect;
@@ -178,7 +180,7 @@ pub fn handle_self_confusion_damage(battle: &mut Battle, party: &[PartyMon], sid
     let me = battle.side_mut(side);
     me.current_move.effect = saved.effect;
     // The cartridge leaves power 40 and Normal type behind, which Counter reads.
-    if !bugs {
+    if !gen1 {
         (me.current_move.power, me.current_move.move_type) = (saved.power, saved.move_type);
     }
     let target = battle.side_mut(side.other());
@@ -210,19 +212,19 @@ pub fn handle_poison_burn_leech_seed(battle: &mut Battle, side: Side) -> (bool, 
 /// of it was left to take.
 pub fn decrease_own_hp(battle: &mut Battle, side: Side) -> u16 {
     // The cartridge multiplies a burn by the toxic counter too, when the flag outlived the poison.
-    let toxic = battle.cartridge_bugs || battle.side(side).mon.status & status::PSN != 0;
+    let toxic = battle.ruleset.is_gen1() || battle.side(side).mon.status & status::PSN != 0;
     lose_residual_hp(battle, side, toxic)
 }
 
 /// `HandlePoisonBurnLeechSeed_DecreaseOwnHP` and `_IncreaseEnemyHP` for Leech Seed: the drain onto
 /// the other mon, up to its max.
 pub fn drain_leech_seed(battle: &mut Battle, side: Side) {
-    let cartridge_bugs = battle.cartridge_bugs;
+    let gen1 = battle.ruleset.is_gen1();
     let before = battle.side(side).mon.hp;
     // The cartridge multiplies the drain by the toxic counter, and heals all of it even when less
     // was left.
-    let damage = lose_residual_hp(battle, side, cartridge_bugs);
-    let drained = if cartridge_bugs { damage } else { before - battle.side(side).mon.hp };
+    let damage = lose_residual_hp(battle, side, gen1);
+    let drained = if gen1 { damage } else { before - battle.side(side).mon.hp };
     let other = &mut battle.side_mut(side.other()).mon;
     other.hp = other.hp.wrapping_add(drained);
     if other.hp >= other.stats[0] {
@@ -424,6 +426,7 @@ fn does_nothing(random: u8) -> BattleText {
 
 #[cfg(test)]
 mod tests {
+    use crate::world::Ruleset;
     use serde_json::{json, Value};
     use super::super::fixture::{each_case, side};
     use super::*;
@@ -448,7 +451,7 @@ mod tests {
     fn seeded(status: u8, hp: u16) -> (u16, u16, u8) {
         let mut arena = super::super::Arena::baseline();
         let battle = &mut arena.battle;
-        battle.cartridge_bugs = false;
+        battle.ruleset = Ruleset::Modern;
         battle.player.mon.hp = 1;
         let enemy = &mut battle.enemy;
         enemy.mon.status = status;

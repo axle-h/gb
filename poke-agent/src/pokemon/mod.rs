@@ -409,6 +409,11 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         // Likewise no fishing row without a rod.
         let bag = mmu.read_bag();
         map.best_rod = postgame::fishing::Rod::best_in_bag(&bag);
+        // Nor a slots row without a Coin Case and a coin.
+        map.slot_coins = match bag.iter().any(|item| item.id == ItemId::CoinCase) {
+            true => encoding::reverse_bcd(mmu.read_pointer_u16_be(&pokered_symbols::wPlayerCoins) as u32),
+            false => 0,
+        };
         // Bill's cell separator, while pressing it would do something.
         map.bill_cell_separator = map.map == Map::BillsHouse && {
             let flags = mmu.read(pokered_symbols::wEventFlags.address + 171);

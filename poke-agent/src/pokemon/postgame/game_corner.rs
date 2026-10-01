@@ -1,4 +1,4 @@
-//! The Game Corner economy: the Coin Case, coins, selling to a mart, and the prize room.
+//! The Game Corner economy: the Coin Case, coins, selling to a mart, the prize room and the slots.
 
 use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
@@ -392,7 +392,7 @@ impl PrizeState {
     }
 }
 
-fn read_coins(api: &PokemonApi<'_>) -> u16 {
+pub(crate) fn read_coins(api: &PokemonApi<'_>) -> u16 {
     crate::pokemon::encoding::reverse_bcd(
         api.mmu().read_pointer_u16_be(&pokered_symbols::wPlayerCoins) as u32) as u16
 }
@@ -509,6 +509,55 @@ pub fn prize_tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PrizeSt
     api.press_button(button);
     agent.set_state(AgentState::RedeemingPrize(PrizeState { press: false, ..s }));
     Ok(())
+}
+
+// ---- The slot machines ----
+
+/// Spins one slots row plays: one decision is a bounded outlay, and a chain of the row plays more.
+pub const SLOT_SPINS: u8 = 10;
+
+/// What the agent says on leaving a machine at the bet that no row chose to play.
+pub const SLOTS_LEFT_UNPLAYED: &str = "left a slot machine at the bet, as nothing chose to play it";
+
+/// Every Game Corner machine that plays: the `StartSlotMachine` rows but the three whose argument
+/// prints a line instead (`SLOTS_OUTOFORDER` and the two after it).
+pub fn slot_machines() -> impl Iterator<Item = Point8> {
+    const BROKEN: u8 = 0xFD;
+    poke_core::tables::HIDDEN_EVENTS.iter()
+        .filter(|&&(map, _)| map == Map::GameCorner as u8)
+        .flat_map(|&(_, rows)| rows.iter())
+        .filter(|row| row.routine == poke_core::tables::HiddenRoutine::StartSlotMachine && row.argument < BROKEN)
+        .map(|row| Point8 { x: row.x, y: row.y })
+}
+
+/// A slots row being played. Only a session bets: a machine the agent finds itself in any other
+/// way is left at the bet, where B ends it with nothing spent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SlotSession {
+    played: u8,
+    /// The coins held at the first bet.
+    coins_before: Option<u32>,
+}
+
+impl SlotSession {
+    /// The bet menu's answer, asked once each time it comes up: the row of the largest bet the
+    /// coins allow, `×3` being row 0, or `None` to leave. A bet above the coins held is refused and
+    /// asked again for ever (`NotEnoughCoinsSlotMachineText`), so it is never made.
+    pub fn bet(&mut self, coins: u32) -> Option<u8> {
+        if self.played >= SLOT_SPINS || coins == 0 {
+            return None;
+        }
+        self.played += 1;
+        self.coins_before.get_or_insert(coins);
+        Some(3 - coins.min(3) as u8)
+    }
+
+    /// What the agent says once the machine is left, if a spin was played.
+    pub fn report(&self, coins: u32) -> Option<String> {
+        let (played, before) = (self.played, self.coins_before?);
+        Some(format!("played {played} spin{} at the slot machine: {before} coins became {coins}",
+            if played == 1 { "" } else { "s" }))
+    }
 }
 
 #[cfg(test)]

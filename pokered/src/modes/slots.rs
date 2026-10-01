@@ -452,8 +452,8 @@ impl ModeUpdate for SlotMachine {
                     ctx.audio.play_sound(sounds::SFX_SLOTS_STOP_WHEEL);
                 }
                 let (stopping, flags) = (self.stopping, self.flags);
-                let cartridge_bugs = ctx.world.cartridge_bugs;
-                let stopped = self.step_wheels(ctx, |wheels| wheels.stop_or_anim(stopping, flags, cartridge_bugs));
+                let ruleset = ctx.world.ruleset;
+                let stopped = self.step_wheels(ctx, |wheels| wheels.stop_or_anim(stopping, flags, ruleset));
                 if stopped {
                     return self.check_for_matches(ctx);
                 }

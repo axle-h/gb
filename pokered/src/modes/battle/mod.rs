@@ -469,6 +469,7 @@ impl BattleDriver {
 
 #[cfg(test)]
 mod tests {
+    use crate::world::Ruleset;
     use poke_core::charmap::encode;
     use crate::command::Reply;
     use crate::party::Named;
@@ -854,7 +855,7 @@ mod tests {
         let mut world = game(BattleMode::wild(PokemonSpecies::Magikarp, 5)).world().clone();
         world.party[0].mon.mon.pp = pp;
         world.bag = crate::systems::inventory::Inventory::bag(vec![BagItem::new(item, 1)]);
-        world.cartridge_bugs = true;
+        world.ruleset = Ruleset::Gen1;
         let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
         game.push(Mode::Battle(BattleMode::wild(PokemonSpecies::Magikarp, 5)));
         assert_eq!(settle(&mut game), Some(Decision::Text));

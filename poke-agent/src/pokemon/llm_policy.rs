@@ -2796,9 +2796,9 @@ mod tests {
         }
 
         let published: Vec<(Option<String>, bool, bool)> = rig
-            .events
-            .try_iter()
-            .filter_map(|event| match event.body {
+            .events_until(Duration::from_secs(5), |body| matches!(body, UiEventBody::BattleScript { armed: true, .. }))
+            .into_iter()
+            .filter_map(|body| match body {
                 UiEventBody::BattleScript { source, armed, is_default, .. } => Some((source, armed, is_default)),
                 _ => None,
             })

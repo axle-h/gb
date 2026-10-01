@@ -33,6 +33,8 @@ pub enum MetaTile {
     /// One shove of the boulder at `boulder`, one square in `dir`. Offered only where the map has
     /// no switch and no hole to aim at, so getting it out of the way is the whole action.
     BoulderPush { boulder: Point8, dir: JoypadButton },
+    /// The nearest Game Corner slot machine with a free side, to play a bounded session at.
+    Slots,
 }
 
 impl MetaTile {
@@ -102,6 +104,7 @@ impl Display for MetaTile {
             Self::BoulderPush { boulder, dir } => write!(
                 f, "the boulder at ({}, {}), to push it {} out of the way",
                 boulder.x, boulder.y, crate::pokemon::tile_map::push_word(*dir)),
+            Self::Slots => write!(f, "a slot machine"),
         }
     }
 }

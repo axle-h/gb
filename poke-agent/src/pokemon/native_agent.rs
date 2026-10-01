@@ -37,7 +37,7 @@ use crate::pokemon::postgame::item_storage::PcItemOp;
 use crate::pokemon::postgame::items::{Effect, UseTarget};
 use crate::pokemon::postgame::pc_box::PcBoxOp;
 use crate::pokemon::postgame::fishing::Rod;
-use crate::pokemon::postgame::game_corner::Prize;
+use crate::pokemon::postgame::game_corner::{Prize, SlotSession, SLOTS_LEFT_UNPLAYED};
 use crate::pokemon::postgame::gifts::PartyScript;
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::tile::{HiddenObject, MetaTile};
@@ -337,6 +337,10 @@ pub struct NativeAgent {
     /// The row the next cursor menu is answered with: a vending machine's drink, or a
     /// [`FIRST_ROW_TALKS`] menu's first row.
     menu_pick: Option<u8>,
+    /// A slots row is being played; `None` leaves any slot machine at the bet.
+    slots: Option<SlotSession>,
+    /// The bet menu waiting and what was decided when it came up: a row, or `None` to leave.
+    slot_bet: Option<Option<u8>>,
     /// The boulder goal being worked, between its shoves.
     boulder_goal: Option<BoulderGoal>,
     /// Frames ticked, which is game time under any pacing.
@@ -408,6 +412,8 @@ impl NativeAgent {
             forget: None,
             answer_no: false,
             menu_pick: None,
+            slots: None,
+            slot_bet: None,
             boulder_goal: None,
             frames: 0,
             running: None,
@@ -479,12 +485,16 @@ impl NativeAgent {
     }
 
     fn play(&mut self, input: Input) -> pokered::Frame {
+        // A slot machine's texts are its commentary, which the session's report sums up.
+        let slots = self.at_the_slots();
         let mut frame = self.native.game_mut().frame(input);
-        for printed in &frame.printed {
-            self.text.read(Some(crate::pokemon::native::message_box_text(printed)));
-        }
-        if self.printing() {
-            self.text.read(self.native.message_box_text());
+        if !slots && !self.at_the_slots() {
+            for printed in &frame.printed {
+                self.text.read(Some(crate::pokemon::native::message_box_text(printed)));
+            }
+            if self.printing() {
+                self.text.read(self.native.message_box_text());
+            }
         }
         let battle_up = self.battle_is_up();
         if battle_up && !self.battle_was_up {
@@ -498,6 +508,10 @@ impl NativeAgent {
             }
         }
         frame
+    }
+
+    fn at_the_slots(&self) -> bool {
+        self.native.game().modes().iter().any(|mode| matches!(mode, Mode::SlotMachine(_)))
     }
 
     /// A menu, the naming grid, a battle's own boxes and an animation's tiles are each drawn by a
@@ -729,13 +743,19 @@ impl NativeAgent {
             self.turn_back_watch = None;
             self.event(AgentEvent::BattleStarted);
         }
+        if status != Status::Waiting(Decision::CursorMenu) {
+            self.slot_bet = None;
+        }
         let command = match status {
             Status::Busy | Status::Idle => None,
             Status::Waiting(Decision::Text) => Some(Command::Advance),
             Status::Waiting(Decision::TwoOption | Decision::ForgetMove) if self.learning().is_some() => self.learn_answer(&status)?,
             Status::Waiting(Decision::TwoOption) => Some(Command::ChooseOption(std::mem::take(&mut self.answer_no) as u8)),
             Status::Waiting(Decision::NamingScreen) => self.name_answer()?,
-            Status::Waiting(Decision::CursorMenu) if let Some(row) = self.slot_bet() => Some(Command::ChooseOption(row)),
+            Status::Waiting(Decision::CursorMenu) if let Some(bet) = self.slot_bet() => Some(match bet {
+                Some(row) => Command::ChooseOption(row),
+                None => Command::CancelOption,
+            }),
             Status::Waiting(Decision::SlotWheels) => Some(Command::StopWheel),
             Status::Waiting(Decision::CursorMenu) => Some(match self.menu_pick.take() {
                 Some(row) => Command::ChooseOption(row),
@@ -769,14 +789,22 @@ impl NativeAgent {
         self.issue_or_wait(command)
     }
 
-    /// The slot machine's bet row, when its bet menu is up. The emulated agent reads the machine as
-    /// text and its A takes the row the cursor starts on, three coins, and every "One more go?";
-    /// with fewer coins than that the cartridge refuses it for ever, so this bets what is left.
-    fn slot_bet(&self) -> Option<u8> {
+    /// The slot machine's bet, when its bet menu is up: decided once each time it comes up, by the
+    /// row being played or, with none, to leave, as the emulated agent decides it.
+    fn slot_bet(&mut self) -> Option<Option<u8>> {
         let modes = self.native.game().modes();
         let under = modes.len().checked_sub(2).map(|below| &modes[below]);
+        if !matches!(under, Some(Mode::SlotMachine(_))) {
+            return None;
+        }
+        if let Some(bet) = self.slot_bet {
+            return Some(bet);
+        }
         let coins = bcd(&self.native.game().world().coins);
-        matches!(under, Some(Mode::SlotMachine(_))).then(|| 3 - coins.min(3) as u8)
+        if self.slots.is_none() {
+            self.say(SLOTS_LEFT_UNPLAYED);
+        }
+        Some(*self.slot_bet.insert(self.slots.as_mut().and_then(|session| session.bet(coins))))
     }
 
     /// What a frame with nothing to press holds. `JoypadOverworld` coasts a rider on Route 17 south
@@ -954,6 +982,10 @@ impl NativeAgent {
         }
         // Armed for a talk that asked nothing.
         self.menu_pick = None;
+        let coins = bcd(&self.native.game().world().coins);
+        if let Some(report) = self.slots.take().and_then(|session| session.report(coins)) {
+            self.say(&report);
+        }
         self.asked();
         if let Some(field_move) = self.policy.pick_field_move(&state) {
             return self.field_move(field_move, &state);
@@ -964,6 +996,7 @@ impl NativeAgent {
             MetaTile::Switch { object: HiddenObject::VendingMachine, ordinal } => Some(ordinal - 1),
             _ => None,
         };
+        self.slots = (action.tile == MetaTile::Slots).then(SlotSession::default);
         self.event(AgentEvent::StartedOverworldAction { destination: action.tile, id: action.id() });
         let walk = Walk {
             destination: action.tile, map: action.map, pressed_a: false, route_lost: 0, route_lost_to_people: false, came_from: None,
@@ -1249,6 +1282,8 @@ impl NativeAgent {
     }
 
     fn abort(&mut self, reason: OverworldActionAbortedReason, at: Option<Point8>) {
+        // A slots row given up on plays nothing, whatever machine is later pressed.
+        self.slots = None;
         if let Some(walk) = self.walk.take() {
             self.event(AgentEvent::OverworldActionAborted { destination: walk.destination, reason, at });
         }
@@ -2503,25 +2538,79 @@ mod tests {
         game_at(Map::PalletTown, 5, 6, |_| {})
     }
 
-    /// A slot machine the player was put in front of is played as the emulated agent's A plays it:
-    /// three coins a spin, every wheel stopped, every win taken and "One more go?" answered YES, and
-    /// with fewer than three coins left what is left, until the machine says the coins are gone.
-    #[test]
-    fn a_slot_machine_is_played_until_the_coins_run_out() {
-        let mut game = game_at(Map::GameCorner, 17, 12, |world| {
+    /// The Game Corner with `coins` and, with `case`, a Coin Case, the player at `(x, y)`.
+    fn game_corner(x: u8, y: u8, coins: [u8; 2], case: bool) -> Game {
+        game_at(Map::GameCorner, x, y, |world| {
             world.location.facing = poke_core::sprite::SpriteFacing::Right;
-            world.coins = [0x00, 0x10];
-            world.bag.add(ItemId::CoinCase, 1);
+            world.coins = coins;
+            if case {
+                world.bag.add(ItemId::CoinCase, 1);
+            }
+        })
+    }
+
+    fn at_a_machine(agent: &NativeAgent) -> bool {
+        agent.game().modes().iter().any(|mode| matches!(mode, Mode::SlotMachine(_)))
+    }
+
+    /// The slots are a row only when `AbleToPlaySlotsCheck` would let them be played, and one row
+    /// for the whole floor, whichever machine is nearest.
+    #[test]
+    fn the_slots_are_one_row_offered_only_with_a_coin_case_and_a_coin() {
+        let slots = |game: Game| NativeGame::new(game).unwrap().game_state().unwrap().map.actions().into_iter()
+            .filter(|row| row.tile == MetaTile::Slots).map(|row| row.id()).collect::<Vec<_>>();
+        assert_eq!(slots(game_corner(15, 15, [0x00, 0x50], true)), ["GameCorner:Slots"]);
+        assert!(slots(game_corner(15, 15, [0x00, 0x50], false)).is_empty(), "no Coin Case");
+        assert!(slots(game_corner(15, 15, [0x00, 0x00], true)).is_empty(), "no coins");
+    }
+
+    /// The row walks to a machine, bets three coins a spin, stops the wheels, takes every win and
+    /// leaves after its spins, saying what it did.
+    #[test]
+    fn a_slots_row_plays_its_spins_and_leaves_the_machine() {
+        let (mut agent, log) = agent(game_corner(15, 15, [0x01, 0x00], true), vec![Goal::Row(|tile| *tile == MetaTile::Slots)]);
+        let reported = |log: &Log| log.events.iter().any(|event| event.contains("at the slot machine"));
+        run(&mut agent, &log, |agent, log| settled(agent, log) && reported(log));
+        let events = log.borrow().events.clone();
+        assert!(!at_a_machine(&agent), "{events:#?}");
+        let coins = bcd(&agent.game().world().coins);
+        let spins = crate::pokemon::postgame::game_corner::SLOT_SPINS;
+        assert!(says(&events, &format!("played {spins} spins at the slot machine: 100 coins became {coins}")), "{events:#?}");
+        assert!(!says(&events, crate::pokemon::postgame::game_corner::SLOTS_LEFT_UNPLAYED), "{events:#?}");
+    }
+
+    /// Two coins bet two: the `×3` the cursor starts on would be refused for ever.
+    #[test]
+    fn a_slots_row_bets_what_fewer_than_three_coins_allow() {
+        let (mut agent, log) = agent(game_corner(15, 15, [0x00, 0x02], true), vec![Goal::Row(|tile| *tile == MetaTile::Slots)]);
+        let held = RefCell::new(vec![2]);
+        run(&mut agent, &log, |agent, log| {
+            let coins = bcd(&agent.game().world().coins);
+            let mut held = held.borrow_mut();
+            if held.last() != Some(&coins) {
+                held.push(coins);
+            }
+            settled(agent, log) && !at_a_machine(agent)
         });
+        assert_eq!(held.borrow()[..2], [2, 0], "the first bet is both coins");
+        let said = messages(&log.borrow().events).join(" | ");
+        assert!(!said.contains("Not enough coins"), "{said}");
+    }
+
+    /// A machine the agent finds itself in without a slots row, as a stray A leaves it, is left at
+    /// the bet with nothing spent, rather than played until the coins run out.
+    #[test]
+    fn a_slot_machine_nobody_chose_is_left_at_the_bet() {
+        let mut game = game_corner(17, 12, [0x00, 0x10], true);
         while game.status() != Status::Waiting(Decision::Overworld) {
             game.frame(Input::None);
         }
         assert_eq!(game.frame(Input::Command(Command::Interact)).reply, Some(Reply::Accepted));
-        let playing = |agent: &NativeAgent| agent.game().modes().iter().any(|mode| matches!(mode, Mode::SlotMachine(_)));
         let (mut agent, log) = agent(game, vec![]);
-        run(&mut agent, &log, |agent, _| playing(agent));
-        run(&mut agent, &log, |agent, _| !playing(agent) && agent.game().status() == Status::Waiting(Decision::Overworld));
-        assert_eq!(agent.game().world().coins, [0, 0]);
+        run(&mut agent, &log, |agent, _| at_a_machine(agent));
+        run(&mut agent, &log, |agent, _| !at_a_machine(agent) && agent.game().status() == Status::Waiting(Decision::Overworld));
+        assert_eq!(agent.game().world().coins, [0x00, 0x10], "{:#?}", log.borrow().events);
+        assert!(says(&log.borrow().events, crate::pokemon::postgame::game_corner::SLOTS_LEFT_UNPLAYED), "{:#?}", log.borrow().events);
     }
 
     /// The ceremony's count going up is the win, said once, whoever is driving the frame; a game

@@ -802,7 +802,7 @@ fn gym_trash(s: &mut Script, event: HiddenEvent) -> Flow {
     s.set_event(EVENT_1ST_LOCK_OPENED);
     let (mask, neighbours) = poke_core::tables::GYM_TRASH_CANS[can as usize];
     let draw = s.ctx.rng.random().rotate_left(4);
-    s.ctx.world.scripts.trash_cans[1] = if s.ctx.world.cartridge_bugs {
+    s.ctx.world.scripts.trash_cans[1] = if s.ctx.world.ruleset.is_gen1() {
         // The cartridge ANDs the mask with the draw and subtracts one, so no common bit reads the
         // bank's zero padding 255 bytes on and can 0 holds the second lock from anywhere.
         match (mask & draw).checked_sub(1) {

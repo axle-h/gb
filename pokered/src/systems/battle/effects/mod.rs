@@ -123,7 +123,7 @@ pub fn jump_move_effect(battle: &mut Battle, party: &mut [PartyMon], user: Side,
         | ATTACK_DOWN_SIDE_EFFECT..=0x4B => stat_modifier_down_effect(battle, user, badges, rng),
         PAY_DAY_EFFECT => pay_day_effect(battle, user),
         CONVERSION_EFFECT => conversion_effect(battle, user),
-        HAZE_EFFECT => haze_effect(battle, user, badges, rng),
+        HAZE_EFFECT => haze_effect(battle, user, badges),
         BIDE_EFFECT => bide_effect(battle, user, rng),
         THRASH_PETAL_DANCE_EFFECT => thrash_petal_dance_effect(battle, user, rng),
         SWITCH_AND_TELEPORT_EFFECT => switch_and_teleport_effect(battle, party, user, rng),
@@ -190,6 +190,7 @@ pub fn read_player_mon_cur_hp_and_status(battle: &Battle, party: &mut [PartyMon]
 
 #[cfg(test)]
 mod tests {
+    use crate::world::Ruleset;
     use poke_core::move_name::PokemonMoveName;
     use poke_core::moves::MoveData;
     use serde_json::json;
@@ -200,7 +201,7 @@ mod tests {
     /// The baseline battle playing the fixes, `user` about to use `name`.
     pub(super) fn using(user: Side, name: PokemonMoveName) -> Arena {
         let mut arena = Arena::baseline();
-        arena.battle.cartridge_bugs = false;
+        arena.battle.ruleset = Ruleset::Modern;
         arena.battle.side_mut(user).current_move = MoveData::of_move(name);
         arena
     }

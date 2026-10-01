@@ -10,14 +10,14 @@ use super::{effect, stat_mod, status, Battle, Side, Status1, Status2};
 /// stat-lowering effects, and X Accuracy skips the roll. Otherwise a random byte below the scaled
 /// accuracy hits, and 255 always does.
 pub fn move_hit_test(battle: &mut Battle, attacker: Side, rng: &mut impl Rng) {
-    let bugs = battle.cartridge_bugs;
+    let gen1 = battle.ruleset.is_gen1();
     let move_effect = battle.side(attacker).current_move.effect;
     let target = battle.side(attacker.other());
     let missed = if move_effect == effect::DREAM_EATER_EFFECT && target.mon.status & status::SLP_MASK == 0 {
         true
     } else if move_effect == effect::SWIFT_EFFECT {
         return;
-    } else if !bugs && target.status2.contains(Status2::HAS_SUBSTITUTE_UP)
+    } else if !gen1 && target.status2.contains(Status2::HAS_SUBSTITUTE_UP)
         && matches!(move_effect, effect::DRAIN_HP_EFFECT | effect::DREAM_EATER_EFFECT) {
         // The cartridge compares the substitute check's answer instead of the effect, so never.
         true
@@ -31,7 +31,7 @@ pub fn move_hit_test(battle: &mut Battle, attacker: Side, rng: &mut impl Rng) {
         calc_hit_chance(battle, attacker);
         let accuracy = battle.side(attacker).current_move.accuracy;
         // The cartridge rolls against 255 too, so a sure hit misses one time in 256.
-        if !bugs && accuracy == 0xFF {
+        if !gen1 && accuracy == 0xFF {
             return;
         }
         rng.random() >= accuracy
@@ -71,6 +71,7 @@ pub fn calc_hit_chance(battle: &mut Battle, attacker: Side) {
 
 #[cfg(test)]
 mod tests {
+    use crate::world::Ruleset;
     use poke_core::move_name::PokemonMoveName;
     use poke_core::moves::MoveData;
     use serde_json::Value;
@@ -89,7 +90,7 @@ mod tests {
 
     fn using(name: PokemonMoveName) -> Arena {
         let mut arena = Arena::baseline();
-        arena.battle.cartridge_bugs = false;
+        arena.battle.ruleset = Ruleset::Modern;
         arena.battle.player.current_move = MoveData::of_move(name);
         arena
     }

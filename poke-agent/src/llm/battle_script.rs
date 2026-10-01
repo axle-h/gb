@@ -257,7 +257,7 @@ fn move_map(slot: usize, battle_move: &crate::pokemon::move_name::PokemonMove, m
     map.insert("damage".into(), Dynamic::from(turn.damage(me, battle_move.name) as i64));
     map.insert("effectiveness".into(), Dynamic::from(match turn.ghost {
         true => 0.0,
-        false => crate::pokemon::damage::type_multiplier(battle_move.name, turn.foe),
+        false => crate::pokemon::damage::type_multiplier(battle_move.name, turn.foe, turn.ruleset),
     }));
     map.insert("usable".into(), Dynamic::from(usable));
     map
@@ -268,6 +268,7 @@ fn move_map(slot: usize, battle_move: &crate::pokemon::move_name::PokemonMove, m
 struct Turn<'a> {
     foe: &'a PokemonSummary,
     ghost: bool,
+    ruleset: poke_core::ruleset::Ruleset,
 }
 
 impl Turn<'_> {
@@ -275,7 +276,7 @@ impl Turn<'_> {
     fn damage(&self, me: &PokemonSummary, battle_move: crate::pokemon::move_name::PokemonMoveName) -> u16 {
         match self.ghost {
             true => 0,
-            false => expected_damage(me, battle_move, self.foe).unwrap_or(0),
+            false => expected_damage(me, battle_move, self.foe, self.ruleset).unwrap_or(0),
         }
     }
 }
@@ -340,7 +341,7 @@ fn facts(state: &GameState, turn: u32, options: &[BattleAction]) -> Option<Map> 
     let me = &battle.player;
     let foe = &battle.enemy;
     let ghost = is_ghost_battle(state.map.map, &state.bag, battle.battle_type);
-    let against_foe = Turn { foe, ghost };
+    let against_foe = Turn { foe, ghost, ruleset: battle.ruleset };
     let fight_slots: Vec<usize> = options
         .iter()
         .filter_map(|action| match action {
@@ -373,7 +374,7 @@ fn facts(state: &GameState, turn: u32, options: &[BattleAction]) -> Option<Map> 
     let my_moves = me_map.get("moves").cloned().unwrap_or(Dynamic::UNIT);
     map.insert("me".into(), Dynamic::from(me_map));
     // The foe's `damage` is scored against itself and meaningless, but must exist to be ignored.
-    map.insert("foe".into(), Dynamic::from(pokemon_map(usize::MAX, &foe.species.to_string(), foe, Turn { foe: me, ghost }, None)));
+    map.insert("foe".into(), Dynamic::from(pokemon_map(usize::MAX, &foe.species.to_string(), foe, Turn { foe: me, ..against_foe }, None)));
     map.insert("moves".into(), my_moves);
 
     let party: Array = state
@@ -977,6 +978,7 @@ pub(crate) mod scenarios {
             active_party_slot: active,
             enemy_trapping: false,
             enemy_catch_rate: 255,
+            ruleset: poke_core::ruleset::Ruleset::Gen1,
         });
         state
     }

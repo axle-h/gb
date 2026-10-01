@@ -5,6 +5,7 @@ use poke_core::move_name::PokemonMoveName;
 use poke_core::moves::MoveData;
 use serde::{Deserialize, Serialize};
 use super::math::divide;
+use crate::world::Ruleset;
 
 /// A move's PP byte: PP left in the low six bits, PP Ups used in the top two.
 pub const PP_MASK: u8 = 0b0011_1111;
@@ -40,11 +41,11 @@ pub fn max_pp(mv: PokemonMoveName, pp: u8) -> u8 {
 
 /// `.restorePP`: the new PP byte, or `None` where the item would do nothing. `full` is a Max Ether
 /// or Max Elixir.
-pub fn restore_pp(pp: u8, mv: PokemonMoveName, full: bool, cartridge_bugs: bool) -> Option<u8> {
+pub fn restore_pp(pp: u8, mv: PokemonMoveName, full: bool, ruleset: Ruleset) -> Option<u8> {
     let max = max_pp(mv, pp);
     let restored = if full {
         // The cartridge leaves the PP Up count in the compare, so a full move with PP Ups is never full.
-        let left = if cartridge_bugs { pp } else { pp_left(pp) };
+        let left = if ruleset.is_gen1() { pp } else { pp_left(pp) };
         (left != max).then_some(max)?
     } else {
         let left = pp_left(pp);
@@ -81,7 +82,7 @@ mod tests {
     #[test]
     fn every_harvested_ether_matches() {
         for (input, output, _) in cases::<PpInput, Option<u8>>(include_str!("../../fixtures/items/restore_pp.jsonl")) {
-            assert_eq!(restore_pp(input.pp, input.mv, input.full, true), output, "{input:?}");
+            assert_eq!(restore_pp(input.pp, input.mv, input.full, Ruleset::Gen1), output, "{input:?}");
         }
     }
 
@@ -108,25 +109,25 @@ mod tests {
 
     #[test]
     fn an_ether_adds_ten_and_stops_at_the_max() {
-        assert_eq!(restore_pp(20, Tackle, false, false), Some(30));
-        assert_eq!(restore_pp(30, Tackle, false, false), Some(35), "capped, not 40");
-        assert_eq!(restore_pp(35, Tackle, false, false), None, "already full");
+        assert_eq!(restore_pp(20, Tackle, false, Ruleset::Modern), Some(30));
+        assert_eq!(restore_pp(30, Tackle, false, Ruleset::Modern), Some(35), "capped, not 40");
+        assert_eq!(restore_pp(35, Tackle, false, Ruleset::Modern), None, "already full");
     }
 
     #[test]
     fn a_max_ether_fills_it_and_leaves_a_full_move_with_pp_ups_alone() {
-        assert_eq!(restore_pp(0, Tackle, true, false), Some(35));
-        assert_eq!(restore_pp(35, Tackle, true, false), None);
+        assert_eq!(restore_pp(0, Tackle, true, Ruleset::Modern), Some(35));
+        assert_eq!(restore_pp(35, Tackle, true, Ruleset::Modern), None);
         let full = 1 << 6 | 42;
         assert_eq!(max_pp(Tackle, full), 42, "35 and one PP Up");
-        assert_eq!(restore_pp(full, Tackle, true, false), None);
-        assert_eq!(restore_pp(1 << 6 | 3, Tackle, true, false), Some(full), "the PP Up is kept");
+        assert_eq!(restore_pp(full, Tackle, true, Ruleset::Modern), None);
+        assert_eq!(restore_pp(1 << 6 | 3, Tackle, true, Ruleset::Modern), Some(full), "the PP Up is kept");
     }
 
     #[test]
     fn the_cartridges_max_ether_misreads_a_full_move_with_pp_ups() {
         let full = 1 << 6 | 42;
-        assert_eq!(restore_pp(full, Tackle, true, true), Some(full),
+        assert_eq!(restore_pp(full, Tackle, true, Ruleset::Gen1), Some(full),
             "the byte is 106 and the max is 42, so a full move still takes the Max Ether");
     }
 

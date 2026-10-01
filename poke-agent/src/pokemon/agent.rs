@@ -731,6 +731,13 @@ pub struct PokemonAgent {
     answer_no: bool,
     /// A vending row chose this drink, by its row in the machine's menu.
     vending_pick: Option<u8>,
+    /// A slots row is being played; `None` leaves any slot machine at the bet.
+    slots: Option<crate::pokemon::postgame::game_corner::SlotSession>,
+    /// The bet menu on screen and what was decided when it came up: a row, or `None` to leave.
+    slot_bet: Option<Option<u8>>,
+    /// A slot machine has been open since the last decision point: its close draws the cabinet
+    /// under a text display for a moment after the machine has let go.
+    slots_open: bool,
 
     /// Ticks in which a newly opened text box may still be a menu the agent inherited.
     menu_handover_ticks: u16,
@@ -814,6 +821,9 @@ impl PokemonAgent {
             escaping_menus: false,
             answer_no: false,
             vending_pick: None,
+            slots: None,
+            slot_bet: None,
+            slots_open: false,
             menu_handover_ticks: 0,
             forget_choice: None,
             forget_b_ticks: 0,
@@ -843,6 +853,9 @@ impl PokemonAgent {
         self.door_open_attempts = 0;
         self.manual_input.clear();
         self.manual_input_held = 0;
+        self.slots = None;
+        self.slot_bet = None;
+        self.slots_open = false;
         self.cycles_since_poll = MachineCycles::ZERO;
         self.cycles_since_driver_answer = MachineCycles::ZERO;
         self.stuck_reported_at = MachineCycles::ZERO;
@@ -1282,6 +1295,8 @@ impl PokemonAgent {
         at: Option<Point8>,
     ) {
         self.event(AgentEvent::OverworldActionAborted { destination, reason, at });
+        // A slots row given up on plays nothing, whatever machine is later pressed.
+        self.slots = None;
         self.set_state(AgentState::Idle);
     }
 
@@ -1300,6 +1315,7 @@ impl PokemonAgent {
             MetaTile::Switch { object: crate::pokemon::tile::HiddenObject::VendingMachine, ordinal } => Some(ordinal - 1),
             _ => None,
         };
+        self.slots = (action.tile == MetaTile::Slots).then(Default::default);
         self.event(AgentEvent::StartedOverworldAction {
             destination: action.tile.clone(),
             id: action.id(),
@@ -1499,7 +1515,7 @@ impl PokemonAgent {
 
     /// Whether the new text box answers the walk's interaction rather than interrupting it.
     fn interaction_landed(&self, destination: MetaTile, api: &PokemonApi) -> bool {
-        if !matches!(destination, MetaTile::Sprite(_) | MetaTile::Pc | MetaTile::Switch { .. }) {
+        if !matches!(destination, MetaTile::Sprite(_) | MetaTile::Pc | MetaTile::Switch { .. } | MetaTile::Slots) {
             return false;
         }
         let Ok(state) = self.observe_state(api) else { return false };
@@ -1513,6 +1529,7 @@ impl PokemonAgent {
                 .iter()
                 .enumerate()
                 .any(|(index, site)| site.at == at && site.object == object && index as u8 + 1 == ordinal),
+            MetaTile::Slots => crate::pokemon::postgame::game_corner::slot_machines().any(|machine| machine == at),
             _ => false,
         }
     }
@@ -1839,6 +1856,12 @@ impl PokemonAgent {
                     } else {
                         self.world_graph.refresh(&game_state.map, api.raw_player_coords());
                     }
+                    // Said once the machine has closed for good: its close reads as the overworld for
+                    // a moment before the text display is done with.
+                    if let Some(report) = self.slots.take().and_then(|session| session.report(game_state.coins as u32)) {
+                        self.event(AgentEvent::TextBox { message: report });
+                    }
+                    self.slots_open = false;
                     self.poll_policy(&game_state, api);
                     // A non-walking field action takes priority over walking.
                     match self.policy.pick_field_move(&game_state) {
@@ -2222,6 +2245,55 @@ CascadeBadge; not cutting".to_string(),
                     }
                     self.escaping_menus = true;
                     self.menu_handover_ticks = 0;
+                }
+                // A slot machine is pressed through unread, its commentary being what the session's
+                // report sums up, and its bet is decided once each time it comes up: by the row being
+                // played or, with none, B, which leaves the machine with nothing spent.
+                let open = self.last_map == Some(Map::GameCorner) && at_the_slots(api);
+                let bet_menu = open && slot_bet_menu_is_up(api);
+                if !bet_menu {
+                    self.slot_bet = None;
+                }
+                if open && !self.slots_open {
+                    self.slots_open = true;
+                    new_events.push(AgentEvent::TextBox { message: reader.take() });
+                }
+                if self.slots_open {
+                    let button = match (open, bet_menu) {
+                        // Closing: nothing to read, and an A would open it again.
+                        (false, _) => None,
+                        (true, false) => Some(JoypadButton::A),
+                        (true, true) => {
+                            let coins = crate::pokemon::postgame::game_corner::read_coins(api) as u32;
+                            let bet = match self.slot_bet {
+                                Some(bet) => bet,
+                                None => {
+                                    if self.slots.is_none() {
+                                        new_events.push(AgentEvent::TextBox {
+                                            message: crate::pokemon::postgame::game_corner::SLOTS_LEFT_UNPLAYED.to_string() });
+                                    }
+                                    *self.slot_bet.insert(self.slots.as_mut().and_then(|session| session.bet(coins)))
+                                }
+                            };
+                            let (_, _, cursor, _) = api.menu_geometry();
+                            Some(match bet {
+                                None => JoypadButton::B,
+                                Some(row) => match cursor.cmp(&row) {
+                                    std::cmp::Ordering::Less => JoypadButton::Down,
+                                    std::cmp::Ordering::Greater => JoypadButton::Up,
+                                    std::cmp::Ordering::Equal => JoypadButton::A,
+                                },
+                            })
+                        }
+                    };
+                    match button {
+                        Some(button) => api.toggle_button(button),
+                        None => api.release_all_buttons(),
+                    }
+                    for event in new_events {
+                        self.event(event);
+                    }
+                    return Ok(());
                 }
                 // A party menu a conversation opened is answered here rather than A-mashed.
                 if !in_battle
@@ -3748,6 +3820,19 @@ enum MenuEvidence {
     OnScreen,
     /// The lingering RAM ids as well.
     OrTheLingeringIds,
+}
+
+/// Between `PromptUserToPlaySlots`' YES and the machine's close, the wheels being objects nothing
+/// else may draw over (`wUpdateSpritesEnabled` of `$ff`).
+fn at_the_slots(api: &PokemonApi<'_>) -> bool {
+    api.mmu().read_pointer(&pokered_symbols::wUpdateSpritesEnabled) == 0xFF
+}
+
+/// `MainSlotMachineLoop`'s bet menu, by its cursor and its `×3` row; the screen is restored over it
+/// once a bet is placed.
+fn slot_bet_menu_is_up(api: &PokemonApi<'_>) -> bool {
+    let (top_x, top_y, ..) = api.menu_geometry();
+    (top_x, top_y) == (15, 12) && api.on_screen_text(false).is_some_and(|text| text.contains("⨯3"))
 }
 
 /// True when the screen shows a menu the agent can leave with B, rather than a conversation to

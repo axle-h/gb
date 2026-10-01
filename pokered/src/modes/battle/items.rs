@@ -208,7 +208,7 @@ impl BattleMode {
                     // stat penalty it caused and Toxic's flag.
                     let cured = battle.player.mon.status != 0;
                     battle.player.mon.status = 0;
-                    if cured && !battle.cartridge_bugs {
+                    if cured && !battle.ruleset.is_gen1() {
                         battle.player.status3.remove(Status3::BADLY_POISONED);
                         calculate_modified_stats(battle, Side::Player);
                         apply_badge_stat_boosts(battle, badges);
@@ -219,7 +219,7 @@ impl BattleMode {
                 battle.player.mon.status = 0;
                 battle.player.status3.remove(Status3::BADLY_POISONED);
                 // The cartridge copies the party's stats over the battle mon's, stages, badge boosts and all.
-                if battle.cartridge_bugs {
+                if battle.ruleset.is_gen1() {
                     battle.player.mon.stats = named.mon.stats;
                 } else {
                     calculate_modified_stats(battle, Side::Player);
@@ -365,7 +365,7 @@ impl BattleMode {
         let species = if battle.enemy.status3.contains(Status3::TRANSFORMED) {
             // The cartridge takes a transformed mon for a Ditto, though Mirror Move can transform anything.
             match self.opponent {
-                Opponent::Wild { species, .. } if !battle.cartridge_bugs => species,
+                Opponent::Wild { species, .. } if !battle.ruleset.is_gen1() => species,
                 _ => PokemonSpecies::Ditto,
             }
         } else {
@@ -462,6 +462,7 @@ impl BattleMode {
 
 #[cfg(test)]
 mod tests {
+    use crate::world::Ruleset;
     use crate::systems::battle::effects::volatile::transform_effect;
     use crate::systems::battle::{stat, stat_mod};
     use super::super::flow::tests::{battle_mode, with_ctx};
@@ -469,8 +470,8 @@ mod tests {
 
     #[test]
     fn curing_the_mon_out_keeps_its_stat_stages_and_badge_boosts() {
-        let after_a_cure = |cartridge_bugs| {
-            let (mut mode, mut world) = battle_mode(cartridge_bugs);
+        let after_a_cure = |ruleset| {
+            let (mut mode, mut world) = battle_mode(ruleset);
             world.badges = 1;
             let player = &mut mode.battle_mut().player;
             let unmodified = player.unmodified_stats;
@@ -485,18 +486,18 @@ mod tests {
             assert_eq!(player.mon.status, 0);
             (unmodified, world.party[0].mon.stats, player.mon.stats)
         };
-        let (unmodified, _, stats) = after_a_cure(false);
+        let (unmodified, _, stats) = after_a_cure(Ruleset::Modern);
         let doubled = unmodified[stat::ATTACK] * 2;
         assert_eq!(stats[stat::ATTACK], doubled + doubled / 8, "+2, and the Boulder Badge's eighth");
         assert_eq!(stats[stat::SPEED], unmodified[stat::SPEED], "the paralysis penalty lifted");
-        let (_, party, stats) = after_a_cure(true);
+        let (_, party, stats) = after_a_cure(Ruleset::Gen1);
         assert_eq!(stats, party, "the cartridge's copy of the party's stats wipes the stage and the boost");
     }
 
     #[test]
     fn a_full_restore_on_a_hurt_mon_lifts_the_penalty_and_toxic_with_the_status() {
-        let after_a_full_restore = |cartridge_bugs, status_byte| {
-            let (mut mode, mut world) = battle_mode(cartridge_bugs);
+        let after_a_full_restore = |ruleset, status_byte| {
+            let (mut mode, mut world) = battle_mode(ruleset);
             world.badges = 1;
             let player = &mut mode.battle_mut().player;
             let unmodified = player.unmodified_stats;
@@ -514,20 +515,20 @@ mod tests {
             assert_eq!((player.mon.status, player.mon.hp), (0, world.party[0].mon.mon.hp));
             (unmodified, player.mon.stats, player.status3.contains(Status3::BADLY_POISONED))
         };
-        let (unmodified, stats, _) = after_a_full_restore(false, status::PAR);
+        let (unmodified, stats, _) = after_a_full_restore(Ruleset::Modern, status::PAR);
         let doubled = unmodified[stat::ATTACK] * 2;
         assert_eq!(stats[stat::ATTACK], doubled + doubled / 8, "+2, and the Boulder Badge's eighth");
         assert_eq!(stats[stat::SPEED], unmodified[stat::SPEED], "the paralysis penalty lifted");
-        assert!(!after_a_full_restore(false, status::PSN).2, "Toxic's flag cleared");
-        let (unmodified, stats, _) = after_a_full_restore(true, status::PAR);
+        assert!(!after_a_full_restore(Ruleset::Modern, status::PSN).2, "Toxic's flag cleared");
+        let (unmodified, stats, _) = after_a_full_restore(Ruleset::Gen1, status::PAR);
         assert_eq!(stats[stat::SPEED], unmodified[stat::SPEED] / 4, "the cartridge leaves the speed quartered");
-        assert!(after_a_full_restore(true, status::PSN).2, "and Toxic's flag set");
+        assert!(after_a_full_restore(Ruleset::Gen1, status::PSN).2, "and Toxic's flag set");
     }
 
     #[test]
     fn a_caught_mon_that_had_transformed_is_the_species_it_was() {
-        let caught = |cartridge_bugs| {
-            let (mut mode, mut world) = battle_mode(cartridge_bugs);
+        let caught = |ruleset| {
+            let (mut mode, mut world) = battle_mode(ruleset);
             let dvs = mode.b().enemy.mon.dvs;
             transform_effect(mode.battle_mut(), Side::Enemy);
             assert_eq!(mode.b().enemy.mon.species, PokemonSpecies::Tauros);
@@ -535,7 +536,7 @@ mod tests {
             assert_eq!(mode.b().enemy.mon.dvs, dvs, "its own DVs, either way");
             mode.b().enemy.mon.species
         };
-        assert_eq!(caught(false), PokemonSpecies::Rattata);
-        assert_eq!(caught(true), PokemonSpecies::Ditto, "the cartridge takes any transformed mon for a Ditto");
+        assert_eq!(caught(Ruleset::Modern), PokemonSpecies::Rattata);
+        assert_eq!(caught(Ruleset::Gen1), PokemonSpecies::Ditto, "the cartridge takes any transformed mon for a Ditto");
     }
 }

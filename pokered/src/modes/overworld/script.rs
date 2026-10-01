@@ -28,6 +28,7 @@ use crate::systems::print_num::{print_bcd, BcdFormat};
 use crate::systems::overworld::sprites::{NpcPaths, SpriteState, NUM_SPRITES};
 use crate::audio::data::{sounds, Sound, SoundId};
 use super::{Overworld, Phase, TEXT_POLL_TIMER};
+use crate::world::Ruleset;
 
 /// `TEXT_MON_FAINTED` to `TEXT_SAFARI_GAME_OVER`: the text ids `DisplayTextID` answers before the map's.
 pub const TEXT_MON_FAINTED: u8 = 0xD0;
@@ -1322,9 +1323,8 @@ impl Script<'_, '_> {
         self.ctx.world.badges |= 1 << bit;
     }
 
-    /// `World::cartridge_bugs`.
-    pub fn cartridge_bugs(&self) -> bool {
-        self.ctx.world.cartridge_bugs
+    pub fn ruleset(&self) -> Ruleset {
+        self.ctx.world.ruleset
     }
 
     /// `BIT_GAVE_SAFFRON_GUARDS_DRINK`.

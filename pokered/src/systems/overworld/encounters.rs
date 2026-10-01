@@ -11,6 +11,7 @@ use poke_core::wild::encounters;
 use serde::{Deserialize, Serialize};
 use crate::rng::Rng;
 use super::collision;
+use crate::world::Ruleset;
 
 /// The water tile, in every tileset that has one.
 const WATER_TILE: u8 = 0x14;
@@ -28,13 +29,13 @@ pub struct WildMons {
 
 impl WildMons {
     /// `LoadWildData`.
-    pub fn load(&mut self, map: Map, cartridge_bugs: bool) {
+    pub fn load(&mut self, map: Map, ruleset: Ruleset) {
         let wild = encounters(map);
         let slots = |slots: &[(u8, PokemonSpecies)]| std::array::from_fn(|i| (slots[i].0, slots[i].1 as u8));
         self.grass_rate = wild.as_ref().map_or(0, |wild| wild.grass_rate);
         if let Some(wild) = wild.as_ref().filter(|wild| wild.grass_rate != 0) {
             self.grass = slots(&wild.grass);
-        } else if !cartridge_bugs {
+        } else if !ruleset.is_gen1() {
             // The cartridge keeps the last grass list, which a left shore here would meet.
             self.grass = [(0, 0); 10];
         }
@@ -142,17 +143,17 @@ mod tests {
 
     #[test]
     fn a_left_shore_on_a_map_without_grass_meets_no_stale_grass_mon() {
-        let shore = |cartridge_bugs: bool| {
+        let shore = |ruleset: Ruleset| {
             let mut wild = WildMons::default();
-            wild.load(Map::Route21, cartridge_bugs);
-            wild.load(Map::Route20, cartridge_bugs);
+            wild.load(Map::Route21, ruleset);
+            wild.load(Map::Route20, ruleset);
             let input = EncounterInput {
                 map: Map::Route20, tileset: TileSetId::Overworld, bottom_left: 0, bottom_right: WATER_TILE,
                 x: 10, y: 10, width: 50, height: 9, repel_steps: 0, lead_level: 50, wild,
             };
             try_do_wild_encounter(&input, &mut GameRng::tape(vec![0, 0])).mon
         };
-        assert_eq!(shore(false), None);
-        assert!(shore(true).is_some(), "the cartridge meets Route 21's grass list");
+        assert_eq!(shore(Ruleset::Modern), None);
+        assert!(shore(Ruleset::Gen1).is_some(), "the cartridge meets Route 21's grass list");
     }
 }

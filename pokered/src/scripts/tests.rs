@@ -15,7 +15,7 @@ use crate::party::Named;
 use crate::rng::GameRng;
 use crate::systems::add_mon::{new_party_mon, Origin};
 use crate::systems::overworld::{Direction, Location};
-use crate::world::World;
+use crate::world::{Ruleset, World};
 use crate::{Game, Input, Pacing};
 
 fn mon(species: PokemonSpecies, level: u8) -> Named<crate::party::PartyMon> {
@@ -1165,7 +1165,7 @@ fn the_route_6_gate_turns_a_thirsty_player_back_south() {
 #[test]
 fn talking_to_the_route_6_gate_guard_runs_the_route_5_gate_s_code() {
     use poke_core::symbols::pokered_map_scripts::SCRIPT_ROUTE5GATE_PLAYER_MOVING;
-    let mut game = game(Map::Route6Gate, 5, 2, SpriteFacing::Right, 5, |world| world.cartridge_bugs = true);
+    let mut game = game(Map::Route6Gate, 5, 2, SpriteFacing::Right, 5, |world| world.ruleset = Ruleset::Gen1);
     play_until(&mut game, 600, free);
     command(&mut game, Command::Interact);
     play_until(&mut game, 20_000, |game| {

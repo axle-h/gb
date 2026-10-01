@@ -243,6 +243,10 @@ impl NativeGame {
         map.can_cut = can_use_cut;
         map.can_strength = badges.contains(Badge::RainbowBadge) && has_move(PokemonMoveName::Strength);
         map.best_rod = postgame::fishing::Rod::best_in_bag(&bag);
+        map.slot_coins = match bag.iter().any(|item| item.id == ItemId::CoinCase) {
+            true => bcd(&world.coins),
+            false => 0,
+        };
 
         let gates = NativeGates(world);
         // Bill's cell separator, while pressing it would do something: the emulated reader's bits.
@@ -450,6 +454,7 @@ pub(crate) fn battle_state(game: &Game) -> Option<BattleState> {
         active_party_slot: battle.player_mon_number,
         enemy_trapping: battle.enemy.status1.contains(Status1::USING_TRAPPING_MOVE),
         enemy_catch_rate: battle.enemy_exp.catch_rate,
+        ruleset: battle.ruleset,
     })
 }
 

@@ -11,9 +11,11 @@ cargo test --release --workspace                        # the default tier, ~30 
 cargo test --workspace                                  # the same, dev profile, ~95 s
 cargo test --release --workspace --features slow-tests   # everything, about an hour
 
-# The two pre-push gates. Run both after every major work item.
+# The pre-push gates. Run all four after every major work item.
 cargo test --release -p poke-agent --features slow-tests --lib -- full_playthrough
 cargo test --release -p poke-agent --features slow-tests --lib -- grand_tour --nocapture
+cargo test --release -p pokered --features slow-tests
+cargo test --release -p poke-agent --features slow-tests --lib -- lockstep:: harvest::
 
 cargo test --release -p poke-agent --features slow-tests --lib -- hall_of_fame
 cargo test --release -p poke-agent --features slow-tests --lib -- soak --nocapture
@@ -28,7 +30,7 @@ cargo test --release --workspace --features slow-tests -- probe_ --ignored --noc
 - Agent and policy tracing goes to stdout, so add `--nocapture` when you want it.
 - A filter that matches nothing prints `0 passed` and exits 0. Check the count.
 
-## The two gates
+## The gates
 
 - `full_playthrough` (~235 s) is the scripted route walking the whole of Kanto to eight badges. It
   is the only test that proves the `PolicyStep` legs compose, and it is what keeps
@@ -37,8 +39,14 @@ cargo test --release --workspace --features slow-tests -- probe_ --ignored --noc
   `LlmPolicy`, the worker and the wire, against an in-process mock endpoint, with every story gate
   live, a god party and a battle script so no battle costs a request. It asserts the completion
   ledger, every door and every map edge included, and never touches `PolicyStep`.
-- Neither replaces the other: they gate different halves, and the leg tier is not a substitute for
-  either.
+- `pokered --features slow-tests` (~15 s) is the recreation's own suite plus every harvested audio
+  trace.
+- `lockstep:: harvest::` (~7 min, bounded by `lockstep::synth::every_harvested_trace_matches_the_apu`)
+  runs the recreation beside the cartridge: a lockstep feeds both the same buttons and compares, a
+  harvest check calls a cartridge routine and compares answers. The filter takes both modules whole;
+  their `#[ignore]`d harvesters, probes and cutters are not gates. `action_for_action_tour` is a
+  lockstep outside the filter and in no gate.
+- None replaces another, and the leg tier is not a substitute for any of them.
 - `full_playthrough` also matches an animated twin, `full_playthrough_animated` (the route to Brock,
   ~25 s): battle animations on is what is served, and it spends the RNG differently.
 - `native_full_playthrough` (~3 s, default tier) is `full_playthrough`'s route on the recreation,
@@ -94,7 +102,7 @@ cargo test --release --workspace --features slow-tests -- probe_ --ignored --noc
 - Every `#[ignore]` names its reason in a few words. The probes, the fixture cutters and the
   benchmarks are all `#[ignore]`d under `slow-tests`, because their pass/fail is not a signal.
 - A test whose pass/fail *is* a signal must never be `#[ignore]`d, whatever it costs: the attribute
-  hides it from the slow tier as well as the default one, and from both pre-push gates, which are
+  hides it from the slow tier as well as the default one, and from the pre-push gates, which are
   name filters. The thirteen `completion_phase_*` tests were ignored on the grounds that they are
   slow, and three of them sat red on main for days with every gate green. Gate on the module's
   feature instead, as `completion_run` and `soak` do.

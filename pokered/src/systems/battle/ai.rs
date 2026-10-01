@@ -242,7 +242,7 @@ pub fn trainer_ai(battle: &mut Battle, badges: u8, rng: &mut impl Rng) -> (Optio
         Giovanni => (random < PERCENT_25_PLUS_1).then_some(Use::Item(ItemId::GuardSpec)),
         CooltrainerM | Koga => (random < PERCENT_25_PLUS_1).then_some(Use::Item(ItemId::XAttack)),
         // The cartridge compares the 25% gate and never tests it.
-        CooltrainerF if random >= PERCENT_25_PLUS_1 && !battle.cartridge_bugs => None,
+        CooltrainerF if random >= PERCENT_25_PLUS_1 && !battle.ruleset.is_gen1() => None,
         CooltrainerF => if below(10, battle) { item(ItemId::HyperPotion) }
             else if below(5, battle) { Some(Use::Switch) } else { None },
         Brock => (battle.enemy.mon.status != 0).then_some(Use::Item(ItemId::FullHeal)),
@@ -250,7 +250,7 @@ pub fn trainer_ai(battle: &mut Battle, badges: u8, rng: &mut impl Rng) -> (Optio
         LtSurge => (random < PERCENT_25_PLUS_1).then_some(Use::Item(ItemId::XSpeed)),
         Erika => (random < PERCENT_50_PLUS_1 && below(10, battle)).then_some(Use::Item(ItemId::SuperPotion)),
         // The cartridge's Blaine never tests his HP, so he heals a mon at full health.
-        Blaine => (random < PERCENT_25_PLUS_1 && (battle.cartridge_bugs || below(10, battle)))
+        Blaine => (random < PERCENT_25_PLUS_1 && (battle.ruleset.is_gen1() || below(10, battle)))
             .then_some(Use::Item(ItemId::SuperPotion)),
         Sabrina => (random < PERCENT_25_PLUS_1 && below(10, battle)).then_some(Use::Item(ItemId::HyperPotion)),
         Rival2 => (random < PERCENT_13_LESS_1 && below(5, battle)).then_some(Use::Item(ItemId::Potion)),
@@ -333,7 +333,7 @@ fn ai_cure_status(battle: &mut Battle) {
     battle.enemy.mon.status = 0;
     battle.enemy.status3.remove(Status3::BADLY_POISONED);
     // The cartridge leaves the speed quartered or the attack halved.
-    if battle.cartridge_bugs {
+    if battle.ruleset.is_gen1() {
         return;
     }
     for (penalty, index) in [(status::PAR, stat::SPEED), (status::BRN, stat::ATTACK)] {
@@ -361,6 +361,7 @@ fn ai_switch_if_enough_mons(battle: &mut Battle) -> (Option<AiAction>, Vec<Battl
 
 #[cfg(test)]
 mod tests {
+    use crate::world::Ruleset;
     use serde_json::{json, Value};
     use crate::rng::GameRng;
     use super::super::fixture::each_case;
@@ -386,7 +387,7 @@ mod tests {
     /// The baseline battle playing the fixes, against a trainer whose class has `routine`.
     fn against(routine: AiRoutine) -> super::super::Arena {
         let mut arena = super::super::Arena::baseline();
-        arena.battle.cartridge_bugs = false;
+        arena.battle.ruleset = Ruleset::Modern;
         arena.battle.kind = BattleKind::Trainer;
         arena.battle.ai_count = 0xFF;
         arena.battle.trainer_class = (1..).find(|&class| AiRoutine::of(ai_pointer(class).1) == routine).unwrap();
@@ -404,12 +405,12 @@ mod tests {
 
     #[test]
     fn blaine_heals_only_a_mon_below_a_tenth_of_its_hp() {
-        for (cartridge_bugs, hp, action) in [(false, 999, None), (false, 1, Some(AiAction::UseItem(ItemId::SuperPotion))),
-                                             (true, 999, Some(AiAction::UseItem(ItemId::SuperPotion)))] {
+        for (ruleset, hp, action) in [(Ruleset::Modern, 999, None), (Ruleset::Modern, 1, Some(AiAction::UseItem(ItemId::SuperPotion))),
+                                    (Ruleset::Gen1, 999, Some(AiAction::UseItem(ItemId::SuperPotion)))] {
             let mut arena = against(AiRoutine::Blaine);
-            arena.battle.cartridge_bugs = cartridge_bugs;
+            arena.battle.ruleset = ruleset;
             arena.battle.enemy.mon.hp = hp.min(arena.battle.enemy.mon.stats[0]);
-            assert_eq!(trainer_ai(&mut arena.battle, 0, &mut GameRng::tape(vec![0])).0, action, "{cartridge_bugs} {hp}");
+            assert_eq!(trainer_ai(&mut arena.battle, 0, &mut GameRng::tape(vec![0])).0, action, "{ruleset:?} {hp}");
         }
     }
 

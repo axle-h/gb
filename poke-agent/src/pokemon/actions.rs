@@ -17,7 +17,7 @@ pub struct OverworldAction {
 
 /// The kinds a map offers one row of, keyed `map:kind`: the square such a row walks to is only the
 /// nearest of many, and moves with every step.
-pub const ONE_PER_MAP: [&str; 4] = ["Grass", "Pace", "PaceOnWater", "Fish"];
+pub const ONE_PER_MAP: [&str; 5] = ["Grass", "Pace", "PaceOnWater", "Fish", "Slots"];
 
 impl OverworldAction {
     /// Stable across a re-sort, unique within a map, and plainly the right row when quoted back.
@@ -71,6 +71,7 @@ impl Display for OverworldAction {
             MetaTile::CutTree       => write!(f, "Cut the tree"),
             MetaTile::Cut { at }    => write!(f, "Cut the tree at {at}"),
             MetaTile::Fish { rod }  => write!(f, "Fish with the {}", rod.name()),
+            MetaTile::Slots         => write!(f, "Play the slots"),
             other                   => write!(f, "{other}"),
         }
     }

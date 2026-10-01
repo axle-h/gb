@@ -212,7 +212,7 @@ impl Game {
 
         self.pad.input = buttons;
         self.screen.tiles.update_moving_bg_tiles();
-        self.audio.cartridge_bugs = self.world.cartridge_bugs;
+        self.audio.ruleset = self.world.ruleset;
         let audio = self.audio.frame();
         self.world.play_time.track();
         self.frame_counter = self.frame_counter.saturating_sub(1);
@@ -258,7 +258,7 @@ impl Game {
     /// Runs `f`, and answers whether the game asked to be saved and what its text boxes printed.
     fn with_ctx(&mut self, events: &mut Vec<Event>, f: impl FnOnce(&mut Vec<Mode>, &mut Ctx)) -> (bool, Vec<UiSurface>) {
         let Self { world, modes, rng, pad, frame_counter, screen, menu, audio, pacing, saved_player_id, .. } = self;
-        audio.cartridge_bugs = world.cartridge_bugs;
+        audio.ruleset = world.ruleset;
         let mut ctx = Ctx { world, pad, rng, screen, menu, audio, frame_counter, events, pacing: *pacing,
                             update_sprites: false, menu_key_pressed: false, save_game: false, saved_player_id: *saved_player_id,
                             printed: Vec::new() };
@@ -359,6 +359,33 @@ mod tests {
     }
 
     #[test]
+    fn a_gen_1_save_loads_as_gen_1() {
+        let world = World { ruleset: Ruleset::Gen1, ..World::default() };
+        let game = Game::new(world, GameRng::seeded(1), Pacing::Faithful);
+        assert_eq!(Game::load(&game.save(), Pacing::Faithful).unwrap().world().ruleset, Ruleset::Gen1);
+    }
+
+    /// A save from before the ruleset holds `cartridge_bugs`, or nothing at all.
+    #[test]
+    fn a_save_with_the_old_switch_loads_as_its_ruleset() {
+        for (bugs, ruleset) in [(Some(true), Ruleset::Gen1), (Some(false), Ruleset::Modern), (None, Ruleset::Modern)] {
+            let mut world = serde_json::to_value(World::default()).unwrap();
+            let fields = world.as_object_mut().unwrap();
+            fields.remove("ruleset");
+            if let Some(bugs) = bugs {
+                fields.insert("cartridge_bugs".into(), bugs.into());
+            }
+            let body = rmp_serde::to_vec_named(&world).unwrap();
+            assert_eq!(rmp_serde::from_slice::<World>(&body).unwrap().ruleset, ruleset, "{bugs:?}");
+        }
+    }
+
+    #[test]
+    fn a_new_game_plays_modern() {
+        assert_eq!(Game::power_on(None, GameRng::seeded(1), Pacing::Faithful).world().ruleset, Ruleset::Modern);
+    }
+
+    #[test]
     fn a_save_from_something_else_is_an_error() {
         assert!(Game::load(b"GBST\x01\x00", Pacing::Faithful).is_err());
         let mut save = Game::new(World::default(), GameRng::seeded(1), Pacing::Faithful).save();
@@ -375,6 +402,7 @@ mod tests {
     use crate::modes::slots::SlotMachine;
     use crate::party::Named;
     use crate::systems::add_mon::{new_party_mon, Origin};
+    use crate::world::Ruleset;
 
     /// What one frame is fed, kept so a loaded copy can be fed it again.
     #[derive(Clone)]

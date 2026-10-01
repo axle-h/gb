@@ -22,7 +22,7 @@ use pokered::systems::overworld::Location;
 use pokered::systems::overworld::encounters::WildMons;
 use pokered::systems::play_time::PlayTime;
 use pokered::systems::stats::Dvs;
-use pokered::world::{BattleStyle, TextSpeed, World};
+use pokered::world::{BattleStyle, Ruleset, TextSpeed, World};
 use pokered::{Game, Pacing};
 use crate::pokemon::item::ItemId;
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointerRead};
@@ -321,7 +321,7 @@ pub(super) fn world(gb: &GameBoy) -> World {
         safari_steps: mmu.read_u16_be(sym::wSafariSteps.address),
         no_text_delay: flag(&sym::wStatusFlags5, BIT_NO_TEXT_DELAY),
         location: location(gb),
-        cartridge_bugs: true,
+        ruleset: Ruleset::Gen1,
         ..World::default()
     };
 

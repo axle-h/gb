@@ -1,3 +1,5 @@
+use crate::pokemon::PokemonType;
+use crate::ruleset::Ruleset;
 use crate::tables::TYPE_EFFECTS;
 
 pub const SUPER_EFFECTIVE: u8 = 20;
@@ -10,9 +12,22 @@ pub fn matchups() -> Vec<(u8, u8, u8)> {
     TYPE_EFFECTS.to_vec()
 }
 
+const GHOST: u8 = PokemonType::Ghost as u8;
+const PSYCHIC: u8 = PokemonType::Psychic as u8;
+
+/// [`matchups`] as `ruleset` plays them. A move takes each row for its type once when either of
+/// the defender's types is the row's, so a single type stored in both slots counts once.
+pub fn chart(ruleset: Ruleset) -> impl Iterator<Item = (u8, u8, u8)> {
+    TYPE_EFFECTS.iter().map(move |&row| match row {
+        // The cartridge's chart gives Ghost no effect on Psychic.
+        (GHOST, PSYCHIC, NO_EFFECT) if !ruleset.is_gen1() => (GHOST, PSYCHIC, SUPER_EFFECTIVE),
+        row => row,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::pokemon::{MoveEffectiveness, PokemonType};
+    use crate::pokemon::MoveEffectiveness;
     use super::*;
 
     #[test]

@@ -8,7 +8,7 @@ use pokered::mode::{Mode, Status};
 use pokered::modes::menu_input::CursorMemory;
 use pokered::modes::start_menu::StartMenu;
 use pokered::rng::GameRng;
-use pokered::world::{BattleStyle, Options, TextSpeed, World, NUM_EVENTS};
+use pokered::world::{BattleStyle, NUM_EVENTS, Options, Ruleset, TextSpeed, World};
 use pokered::{Game, Input, Pacing};
 use crate::pokemon::options::{self, GameOptionsReader};
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
@@ -38,7 +38,7 @@ fn the_world(gb: &GameBoy) -> World {
             options::BattleStyle::Shift => BattleStyle::Shift,
         },
     };
-    let mut world = World { player_name, options, cartridge_bugs: true, ..World::default() };
+    let mut world = World { player_name, options, ruleset: Ruleset::Gen1, ..World::default() };
     let events = pokered_symbols::wEventFlags.address;
     for event in 0..NUM_EVENTS as u16 {
         if mmu.read(events + event / 8) & 1 << (event % 8) != 0 {
@@ -97,7 +97,8 @@ fn the_start_menu_wraps_where_the_cartridge_wraps() {
     compare(&[Joypad::UP, Joypad::DOWN, Joypad::DOWN]);
 }
 
-/// The option screen covers the whole width, so this compares every column of it.
+/// The option screen covers the whole width, so this compares every column of it, down to the
+/// ruleset's box, which the cartridge has none of.
 #[test]
 fn the_option_screen_matches_the_cartridge() {
     let mut gb = open_the_start_menu();
@@ -130,7 +131,7 @@ fn the_option_screen_matches_the_cartridge() {
     let cartridge = cartridge_until_polling(&mut gb);
     let recreation = recreation_until_polling(&mut game, Decision::Options);
     assert!(matches!(game.modes().last(), Some(Mode::OptionMenu(_))), "the recreation opened it too");
-    let whole = |rows: &dyn Fn(usize) -> Vec<u8>| (0..18).map(rows).collect::<Vec<_>>();
+    let whole = |rows: &dyn Fn(usize) -> Vec<u8>| (0..pokered::modes::option_menu::CARTRIDGE_ROWS).map(rows).collect::<Vec<_>>();
     assert_eq!(whole(&|y| tile_row(&gb, y as u16)), whole(&|y| game.ui().row(y).to_vec()),
         "the option screen as drawn, cartridge {cartridge} frames against {recreation}");
     assert_eq!(game.status(), Status::Waiting(Decision::Options));

@@ -119,3 +119,96 @@ fn can_redeem_a_prize_tm() {
     assert_eq!(100_000 - state.money, 66 * 1_000, "66 trips through the counter at ¥1000 each");
     println!("TM23 Dragon Rage in the bag · {} coins · ¥{}", state.coins, state.money);
 }
+
+/// Walks into the Game Corner and takes the slots row, once.
+struct Gambler {
+    played: bool,
+}
+
+impl crate::pokemon::policy::Policy for Gambler {
+    fn name(&self) -> &'static str { "gambler" }
+
+    fn pick_overworld_action(&mut self, state: &GameState, _: &crate::pokemon::world_graph::WorldGraph)
+        -> Option<crate::pokemon::actions::OverworldAction>
+    {
+        let rows = state.map.actions();
+        if state.map.map != Map::GameCorner {
+            return rows.into_iter().find(|row| matches!(row.tile, MetaTile::Warp { to_map: Map::GameCorner, .. }));
+        }
+        let row = rows.into_iter().find(|row| row.tile == MetaTile::Slots).filter(|_| !self.played)?;
+        self.played = true;
+        Some(row)
+    }
+
+    fn pick_battle_action(&mut self, _: &GameState) -> Option<crate::pokemon::battle::BattleAction> { None }
+}
+
+/// `COINS` with this many coins, walked into the Game Corner by a [`Gambler`].
+fn gambling_with(coins: u16) -> TestFixture {
+    let mut fixture = TestFixture::with_policy(COINS, Duration::from_mins(10), Box::new(Gambler { played: false }));
+    fixture.api().debug_set_coins(coins);
+    fixture
+}
+
+/// Steps until `done`, keeping every event the agent said as prose.
+fn step_until(fixture: &mut TestFixture, said: &mut Vec<String>, done: impl Fn(&mut TestFixture, &[String]) -> bool) {
+    while !done(fixture, said) {
+        fixture.step();
+        said.extend(fixture.agent.drain_events().iter().map(|event| event.to_string()));
+    }
+}
+
+fn back_on_the_overworld(fixture: &mut TestFixture) -> bool {
+    fixture.api().game_mode() == Some(crate::pokemon::encoding::GameMode::Overworld)
+}
+
+/// The slots are a row only with a Coin Case and a coin, as `AbleToPlaySlotsCheck` plays only then.
+#[test]
+fn the_slots_row_is_offered_only_with_a_coin_case_and_a_coin() {
+    let mut fixture = gambling_with(100);
+    let slots = |fixture: &mut TestFixture| fixture.game_state().map.actions().iter()
+        .filter(|row| row.tile == MetaTile::Slots).map(|row| row.id()).collect::<Vec<_>>();
+    // Once the floor is drawn, which the door back out says.
+    fixture.run_until(|state| state.map.map == Map::GameCorner
+        && state.map.actions().iter().any(|row| matches!(row.tile, MetaTile::Warp { .. })));
+    assert_eq!(slots(&mut fixture), ["GameCorner:Slots"]);
+    fixture.api().debug_set_coins(0);
+    assert!(slots(&mut fixture).is_empty(), "no coins");
+    fixture.api().debug_set_coins(100);
+    fixture.api().debug_take_item(ItemId::CoinCase).unwrap();
+    assert!(slots(&mut fixture).is_empty(), "no Coin Case");
+}
+
+/// The row walks to a machine, bets three coins a spin, lets the wheels be stopped, takes every win
+/// and leaves after its spins, saying what it did; an A pressed at the machine afterwards, which no
+/// row chose, is left at the bet with nothing spent.
+#[test]
+fn a_slots_row_plays_its_spins_and_a_stray_press_is_left_at_the_bet() {
+    use crate::pokemon::postgame::game_corner::{SLOTS_LEFT_UNPLAYED, SLOT_SPINS};
+    let mut fixture = gambling_with(100);
+    let mut said = Vec::new();
+    step_until(&mut fixture, &mut said, |fixture, said|
+        back_on_the_overworld(fixture) && said.iter().any(|line| line.contains("at the slot machine")));
+    let coins = fixture.game_state().coins;
+    let report = format!("📖 played {SLOT_SPINS} spins at the slot machine: 100 coins became {coins}");
+    assert!(said.contains(&report), "{said:#?}");
+    assert!(!said.iter().any(|line| line.contains(SLOTS_LEFT_UNPLAYED)), "{said:#?}");
+
+    let mut said = Vec::new();
+    fixture.agent.queue_manual_input([JoypadButton::A]);
+    step_until(&mut fixture, &mut said, |fixture, said|
+        back_on_the_overworld(fixture) && said.iter().any(|line| line.contains(SLOTS_LEFT_UNPLAYED)));
+    assert_eq!(fixture.game_state().coins, coins, "{said:#?}");
+    assert!(said.iter().any(|line| line.contains("A slot machine!")), "{said:#?}");
+}
+
+/// Two coins bet two: the `×3` the cursor starts on would be refused for ever.
+#[test]
+fn a_slots_row_bets_what_fewer_than_three_coins_allow() {
+    let mut fixture = gambling_with(2);
+    let mut said = Vec::new();
+    step_until(&mut fixture, &mut said, |fixture, _| fixture.api().game_state().is_ok_and(|state| state.coins < 2));
+    assert_eq!(fixture.game_state().coins, 0, "the first bet is both coins");
+    step_until(&mut fixture, &mut said, |fixture, _| back_on_the_overworld(fixture));
+    assert!(!said.iter().any(|line| line.contains("Not enough")), "{said:#?}");
+}

@@ -29,6 +29,7 @@ pub mod party;
 pub mod pointer;
 pub mod pokemon;
 pub mod rom_gfx;
+pub mod ruleset;
 pub mod saved_addresses;
 pub mod species;
 pub mod sprite;

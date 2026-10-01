@@ -74,6 +74,8 @@ fn tint_for(tile: MetaTile) -> Option<Tint> {
         MetaTile::Cut { .. } | MetaTile::BoulderGoal { .. } | MetaTile::BoulderPush { .. } => return None,
         // Nor `Fish` or `Pace`: actions on floor or water that is already drawn as itself.
         MetaTile::Fish { .. } | MetaTile::Pace { .. } => return None,
+        // Nor the slots: the machines are drawn as themselves.
+        MetaTile::Slots => return None,
         MetaTile::Empty | MetaTile::Obstacle | MetaTile::Sprite(_) => return None,
     })
 }

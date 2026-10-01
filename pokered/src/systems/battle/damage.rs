@@ -5,15 +5,16 @@
 use poke_core::base_stats::BaseStats;
 use poke_core::battle_data::high_critical_moves;
 use poke_core::move_name::PokemonMoveName;
-use poke_core::types::{self, NO_EFFECT, SUPER_EFFECTIVE};
+use poke_core::types;
 use serde::{Deserialize, Serialize};
 use crate::party::PartyMon;
 use crate::rng::Rng;
 use crate::systems::math::{divide, multiply};
-use crate::systems::stats::{calc_stat, Stat, MAX_STAT_VALUE};
+use crate::systems::stats::{calc_stat, Stat};
 use super::accuracy::move_hit_test;
 use super::{effect, stat, Battle, CriticalHitOrOhko, Side, Status2, Status3, MAX_NEUTRAL_DAMAGE,
             MIN_NEUTRAL_DAMAGE, SPECIAL};
+use crate::world::Ruleset;
 
 /// `b`, `c`, `d` and `e` as `GetDamageVarsFor*Attack` leaves them for `CalculateDamage`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,11 +36,11 @@ pub fn critical_hit_test(battle: &mut Battle, attacker: Side, rng: &mut impl Rng
         return;
     }
     let doubled = |rate: u8| rate.checked_mul(2).unwrap_or(0xFF);
-    rate = match (user.status2.contains(Status2::GETTING_PUMPED), battle.cartridge_bugs) {
+    rate = match (user.status2.contains(Status2::GETTING_PUMPED), battle.ruleset) {
         (false, _) => doubled(rate),
         // The cartridge shifts right under Focus Energy, a quarter of the unfocused rate.
-        (true, true) => rate >> 1,
-        (true, false) => doubled(doubled(rate)),
+        (true, Ruleset::Gen1) => rate >> 1,
+        (true, Ruleset::Modern) => doubled(doubled(rate)),
     };
     rate = if high_critical_moves().contains(&user.current_move.animation) { doubled(doubled(rate)) } else { rate >> 1 };
     if rng.random().rotate_left(3) < rate {
@@ -58,17 +59,6 @@ pub enum Counter {
 
 pub(super) const NORMAL: u8 = 0;
 pub(super) const FIGHTING: u8 = 1;
-const GHOST: u8 = 8;
-const PSYCHIC: u8 = 0x18;
-
-/// `TypeEffects` as the battle plays it, in the table's order.
-fn matchups(cartridge_bugs: bool) -> impl Iterator<Item = (u8, u8, u8)> {
-    types::matchups().into_iter().map(move |row| match row {
-        // The cartridge's chart gives Ghost no effect on Psychic.
-        (GHOST, PSYCHIC, NO_EFFECT) if !cartridge_bugs => (GHOST, PSYCHIC, SUPER_EFFECTIVE),
-        row => row,
-    })
-}
 
 /// `HandleCounterMove`: twice the damage the target's Normal or Fighting move did to the Counter
 /// user this turn, and then the usual hit test.
@@ -79,7 +69,7 @@ pub fn handle_counter_move(battle: &mut Battle, attacker: Side, rng: &mut impl R
     }
     battle.move_missed = true;
     let target = battle.side(attacker.other());
-    if !battle.cartridge_bugs {
+    if !battle.ruleset.is_gen1() {
         if target.counter_damage == 0 {
             return Counter::Resolved;
         }
@@ -101,9 +91,10 @@ pub fn handle_counter_move(battle: &mut Battle, attacker: Side, rng: &mut impl R
 }
 
 /// `GetDamageVarsForPlayerAttack` and `GetDamageVarsForEnemyAttack`: `None` for a move with no
-/// power, having zeroed `wDamage` either way. Reflect and Light Screen double the defense, up to
-/// 999; a critical hit reads both mons' unmodified stats instead, which drops stat modifiers, badge
-/// boosts and the screens alike. A stat over a byte scales both by four, neither below 1.
+/// power, having zeroed `wDamage` either way. Reflect and Light Screen double the defense; a
+/// critical hit reads both mons' unmodified stats instead, which drops stat modifiers, badge boosts
+/// and the screens alike. A stat over a byte scales both by four, neither below 1, and outside Gen 1
+/// again until both fit, as Crystal's `TruncateHL_BC` does.
 pub fn get_damage_vars(battle: &mut Battle, party: &[PartyMon], attacker: Side) -> Option<DamageVars> {
     battle.damage = 0;
     let user = battle.side(attacker);
@@ -117,18 +108,14 @@ pub fn get_damage_vars(battle: &mut Battle, party: &[PartyMon], attacker: Side) 
     } else {
         (stat::SPECIAL, stat::SPECIAL, Status3::HAS_LIGHT_SCREEN_UP)
     };
-    let bugs = battle.cartridge_bugs;
+    let gen1 = battle.ruleset.is_gen1();
     let mut defense_stat = target.mon.stats[defense];
     if target.status3.contains(screen) {
         defense_stat = defense_stat.wrapping_shl(1);
-        // The cartridge has no cap, and a doubled stat of 1024 or more wraps in the scaling.
-        if !bugs {
-            defense_stat = defense_stat.min(MAX_STAT_VALUE);
-        }
     }
     let mut attack_stat = user.mon.stats[offense];
     let critical = battle.critical_hit_or_ohko != CriticalHitOrOhko::Normal;
-    if critical && !bugs {
+    if critical && !gen1 {
         (attack_stat, defense_stat) = (user.unmodified_stats[offense], target.unmodified_stats[defense]);
     } else if critical {
         // The cartridge reads the player's party stat, from before any Transform.
@@ -138,13 +125,15 @@ pub fn get_damage_vars(battle: &mut Battle, party: &[PartyMon], attacker: Side) 
             Side::Enemy => (get_enemy_mon_stat(battle, offense), party_stat(defense)),
         };
     }
-    if (attack_stat | defense_stat) > 0xFF {
+    while (attack_stat | defense_stat) > 0xFF {
         defense_stat >>= 2;
         attack_stat = (attack_stat >> 2).max(1);
-        // The cartridge lets a defense of 1 to 3 scale to 0, and hangs dividing by it.
-        if !bugs {
-            defense_stat = defense_stat.max(1);
+        // The cartridge scales once, so a doubled defense of 1024 or more wraps, and it lets a
+        // defense of 1 to 3 scale to 0, and hangs dividing by it.
+        if gen1 {
+            break;
         }
+        defense_stat = defense_stat.max(1);
     }
     let mut level = user.mon.level;
     if critical {
@@ -176,7 +165,8 @@ pub enum Calculated {
 /// by zero, which the cartridge never returns from.
 pub fn calculate_damage(battle: &mut Battle, attacker: Side, vars: DamageVars) -> Calculated {
     let move_effect = battle.side(attacker).current_move.effect;
-    let mut defense = vars.defense;
+    // A Gen 1 defense scaled to 0 hangs the cartridge here, so it divides by Modern's floor of 1.
+    let mut defense = vars.defense.max(1);
     if move_effect == effect::EXPLODE_EFFECT {
         defense = (defense >> 1).max(1);
     }
@@ -246,7 +236,7 @@ pub fn adjust_damage_for_move_type(battle: &mut Battle, attacker: Side) {
         battle.damage = battle.damage.wrapping_add(battle.damage >> 1);
         battle.damage_multipliers |= STAB_DAMAGE;
     }
-    for (attacking, defending, multiplier) in matchups(battle.cartridge_bugs) {
+    for (attacking, defending, multiplier) in types::chart(battle.ruleset) {
         if attacking != move_type || !target_types.contains(&defending) {
             continue;
         }
@@ -268,9 +258,9 @@ const EFFECTIVE: u16 = 10;
 pub fn ai_get_type_effectiveness(battle: &Battle) -> u8 {
     let move_type = battle.enemy.current_move.move_type;
     let types = battle.player.mon.types;
-    let mut rows = matchups(battle.cartridge_bugs)
+    let mut rows = types::chart(battle.ruleset)
         .filter(move |&(attacking, defending, _)| attacking == move_type && types.contains(&defending));
-    if battle.cartridge_bugs {
+    if battle.ruleset.is_gen1() {
         // The cartridge answers the first matching row alone, so a dual type is misread.
         return rows.next().map_or(AI_NEUTRAL, |(_, _, multiplier)| multiplier);
     }
@@ -334,15 +324,16 @@ pub fn calc_move_damage(battle: &mut Battle, party: &[PartyMon], attacker: Side,
             randomize_damage(battle, rng);
             let potential = battle.damage;
             move_hit_test(battle, attacker, rng);
-            // Jump Kick's crash is an eighth of this, which the cartridge's miss has already zeroed.
-            if battle.move_missed && move_effect == effect::JUMP_KICK_EFFECT && !battle.cartridge_bugs {
+            // Jump Kick's crash is an eighth of this, as in Gen 2, which the cartridge's miss has
+            // already zeroed.
+            if battle.move_missed && move_effect == effect::JUMP_KICK_EFFECT && !battle.ruleset.is_gen1() {
                 battle.damage = potential;
             }
         }
     }
     // A trapping move that hits ends the target's recharge; the cartridge's `trapping_effect` has
     // already ended it, hit or miss.
-    if !battle.cartridge_bugs && !battle.move_missed && move_effect == effect::TRAPPING_EFFECT {
+    if !battle.ruleset.is_gen1() && !battle.move_missed && move_effect == effect::TRAPPING_EFFECT {
         battle.side_mut(attacker.other()).status2.remove(Status2::NEEDS_TO_RECHARGE);
     }
     match (battle.move_missed, move_effect) {
@@ -362,12 +353,15 @@ mod tests {
     use super::super::turn::handle_self_confusion_damage;
     use super::super::{Arena, Status1};
     use super::*;
+    use poke_core::types::{NO_EFFECT, SUPER_EFFECTIVE};
+
+    const PSYCHIC: u8 = poke_core::pokemon::PokemonType::Psychic as u8;
 
     const FLYING: u8 = 2;
 
     fn arena(player: PokemonMoveName, enemy: PokemonMoveName) -> Arena {
         let mut arena = Arena::baseline();
-        arena.battle.cartridge_bugs = false;
+        arena.battle.ruleset = Ruleset::Modern;
         arena.battle.player.current_move = MoveData::of_move(player);
         arena.battle.player.selected_move = player as u8;
         arena.battle.enemy.current_move = MoveData::of_move(enemy);
@@ -384,13 +378,37 @@ mod tests {
         assert_eq!(arena.battle.critical_hit_or_ohko, CriticalHitOrOhko::CriticalHit);
     }
 
+    /// A defense of 1 to 3 against an attack over a byte, or a doubled 1024, scales to 0, which
+    /// the cartridge hangs dividing by. Gen 1 keeps the 0 and divides by 1 instead.
     #[test]
-    fn a_doubled_defense_stops_at_999() {
+    fn a_gen_1_defense_scaled_to_0_divides_by_1() {
+        for (defense, reflect) in [(2, false), (512, true)] {
+            let mut arena = arena(PokemonMoveName::Tackle, PokemonMoveName::Tackle);
+            arena.battle.ruleset = Ruleset::Gen1;
+            arena.battle.player.mon.stats[stat::ATTACK] = 300;
+            arena.battle.enemy.mon.stats[stat::DEFENSE] = defense;
+            if reflect {
+                arena.battle.enemy.status3 |= Status3::HAS_REFLECT_UP;
+            }
+            let vars = get_damage_vars(&mut arena.battle, &arena.party, Side::Player).unwrap();
+            assert_eq!(vars.defense, 0, "{defense}");
+            let damage = |defense| {
+                let mut battle = arena.battle.clone();
+                calculate_damage(&mut battle, Side::Player, DamageVars { defense, ..vars });
+                battle.damage
+            };
+            assert_eq!(damage(0), damage(1));
+        }
+    }
+
+    #[test]
+    fn a_doubled_defense_scales_both_stats_again_until_they_fit() {
         let mut arena = arena(PokemonMoveName::Tackle, PokemonMoveName::Tackle);
+        arena.battle.player.mon.stats[stat::ATTACK] = 300;
         arena.battle.enemy.mon.stats[stat::DEFENSE] = 600;
         arena.battle.enemy.status3 |= Status3::HAS_REFLECT_UP;
         let vars = get_damage_vars(&mut arena.battle, &arena.party, Side::Player).unwrap();
-        assert_eq!(vars.defense, (999 >> 2) as u8);
+        assert_eq!((vars.attack, vars.defense), ((300 >> 4) as u8, (1200 >> 4) as u8));
     }
 
     #[test]
@@ -426,17 +444,17 @@ mod tests {
 
     #[test]
     fn ghost_is_super_effective_on_psychic() {
-        let lick = |cartridge_bugs| {
+        let lick = |ruleset| {
             let mut arena = arena(PokemonMoveName::Lick, PokemonMoveName::Lick);
-            arena.battle.cartridge_bugs = cartridge_bugs;
+            arena.battle.ruleset = ruleset;
             arena.battle.enemy.mon.types = [PSYCHIC, PSYCHIC];
             arena.battle.player.mon.types = [PSYCHIC, PSYCHIC];
             arena.battle.damage = 100;
             adjust_damage_for_move_type(&mut arena.battle, Side::Player);
             (arena.battle.damage, arena.battle.move_missed, ai_get_type_effectiveness(&arena.battle))
         };
-        assert_eq!(lick(false), (200, false, SUPER_EFFECTIVE));
-        assert_eq!(lick(true), (0, true, NO_EFFECT));
+        assert_eq!(lick(Ruleset::Modern), (200, false, SUPER_EFFECTIVE));
+        assert_eq!(lick(Ruleset::Gen1), (0, true, NO_EFFECT));
     }
 
     /// Counter against what `enemy`'s move just did to the player, after `setup`.

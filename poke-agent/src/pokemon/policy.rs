@@ -3147,7 +3147,7 @@ impl Policy for DeterministicPolicy {
             // `pp > 0`: a 0-PP move scored here livelocks the switch.
             let move_dmg = |mon: &crate::pokemon::pokemon::PokemonSummary| -> u32 { mon.moves.iter().flatten()
                 .filter(|m| m.pp > 0)
-                .filter_map(|m| expected_damage(mon, m.name, &battle_state.enemy).map(|d| d as u32))
+                .filter_map(|m| expected_damage(mon, m.name, &battle_state.enemy, battle_state.ruleset).map(|d| d as u32))
                 .max().unwrap_or(0) };
             let active_best = move_dmg(&battle_state.player);
             if (active_best * 3) < battle_state.enemy.stats.hp as u32 {
@@ -3179,7 +3179,7 @@ impl Policy for DeterministicPolicy {
                 BattleAction::SwitchPokemon { pokemon, .. } => {
                     let best = pokemon.moves.iter().flatten()
                         .filter(|m| m.pp > 0)
-                        .filter_map(|m| expected_damage(pokemon, m.name, &battle_state.enemy))
+                        .filter_map(|m| expected_damage(pokemon, m.name, &battle_state.enemy, battle_state.ruleset))
                         .max().unwrap_or(0);
                     (best > 0).then_some((best, a))
                 }

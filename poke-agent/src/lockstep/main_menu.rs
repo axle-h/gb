@@ -91,7 +91,8 @@ fn with_no_save_new_game_and_option_match_the_cartridge() {
     press(&mut gb, &mut game, Joypad::A);
     cartridge_until_polling(&mut gb);
     recreation_until(&mut game, Decision::Options);
-    assert_eq!(screen(&gb), ours(&game), "the option screen over the menu");
+    let rows = pokered::modes::option_menu::CARTRIDGE_ROWS;
+    assert_eq!(screen(&gb)[..rows], ours(&game)[..rows], "the option screen over the menu");
     step(&mut gb, &mut game, Joypad::B, Decision::MainMenu, menu_loading(), "back to the menu from the top");
     assert_eq!(gb.core().mmu().read_pointer(&sym::wCurrentMenuItem), 0, "on NEW GAME again");
 

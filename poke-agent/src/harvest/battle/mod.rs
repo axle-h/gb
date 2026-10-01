@@ -26,6 +26,7 @@ use pokered::party::PartyMon;
 use pokered::systems::battle::{Arena, Battle, BattleKind, BattleMon, Combatant, CriticalHitOrOhko, ExpData,
                                Status1, Status2, Status3};
 use pokered::systems::stats::Dvs;
+use pokered::world::Ruleset;
 use serde_json::Value;
 use crate::lockstep::breakpoint;
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgBank, DmgPointer};
@@ -445,7 +446,7 @@ fn read_arena(oracle: &Oracle) -> Arena {
             total_pay_day_money: oracle.read(sym::wTotalPayDayMoney, 3).try_into().unwrap(),
             transformed_enemy_original_dvs: Dvs(oracle.read(sym::wTransformedEnemyMonOriginalDVs, 2).try_into().unwrap()),
             safari_escape_factor: byte(sym::wSafariEscapeFactor),
-            cartridge_bugs: true,
+            ruleset: Ruleset::Gen1,
             safari_bait_factor: byte(sym::wSafariBaitFactor),
         },
         party: read_party(oracle, sym::wPartyCount, sym::wPartyMons),

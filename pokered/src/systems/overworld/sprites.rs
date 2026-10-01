@@ -14,6 +14,7 @@ use poke_core::map_header::TileSetId;
 use super::bike_surf::is_bike_riding_allowed;
 use super::location::{Location, BIKING, SURFING, WALKING};
 use super::map_view::TileMap;
+use crate::world::Ruleset;
 
 pub const NUM_SPRITES: usize = 16;
 /// `MAP_TILESET_SIZE`: a tile id at or past it is text, not map.
@@ -259,8 +260,8 @@ pub struct SpriteEnv<'a> {
     /// What lies past the end of `wTileMap`, `wSurroundingTiles`, which a sprite below the screen
     /// reads its tiles from; without it such a read is `$ff`.
     pub beyond: Option<&'a [u8]>,
-    /// `World::cartridge_bugs`.
-    pub cartridge_bugs: bool,
+    /// `World::ruleset`.
+    pub ruleset: Ruleset,
 }
 
 impl SpriteEnv<'_> {
@@ -482,7 +483,7 @@ fn can_walk_onto_tile(sprites: &mut Sprites, slot: usize, env: &SpriteEnv, rng: 
         detect_collision_between_sprites(sprites, slot);
         let sprite = &mut sprites[slot];
         if sprite.collision_data & direction == 0 {
-            let (y, x) = if env.cartridge_bugs {
+            let (y, x) = if env.ruleset.is_gen1() {
                 // The cartridge tests every step that is not up against 5, which sticks a sprite
                 // that has walked up four, and bounds neither down nor right.
                 let y = if dy & 0x80 != 0 {
@@ -866,7 +867,7 @@ mod tests {
             let env = SpriteEnv {
                 tiles: &tiles, x, y, walk_counter, font_loaded: false, collision: &collision, grass_tile: 0x52,
                 hidden: [false; NUM_SPRITES], no_face_player: false, player_direction, moving_direction: 0, spinning: false,
-                simulating: false, beyond: None, cartridge_bugs: true,
+                simulating: false, beyond: None, ruleset: Ruleset::Gen1,
             };
             let mut tape = GameRng::tape(rng.clone());
             update_npc_sprite(&mut sprites, 1, &env, &mut NpcPaths::default(), &mut tape);
@@ -897,11 +898,11 @@ mod tests {
     fn a_wanderer_walks_up_to_eight_steps_from_home_every_way() {
         let collision = poke_core::tilesets::collision_tiles(poke_core::map_header::TileSetId::Overworld);
         let tiles: TileMap = std::array::from_fn(|_| 0);
-        let walks = |(y, x): (u8, u8), (dy, dx): (u8, u8), cartridge_bugs: bool| {
+        let walks = |(y, x): (u8, u8), (dy, dx): (u8, u8), ruleset: Ruleset| {
             let env = SpriteEnv {
                 tiles: &tiles, x: 0, y: 0, walk_counter: 0, font_loaded: false, collision: &collision, grass_tile: 0x52,
                 hidden: [false; NUM_SPRITES], no_face_player: false, player_direction: 0, moving_direction: 0, spinning: false,
-                simulating: false, beyond: None, cartridge_bugs,
+                simulating: false, beyond: None, ruleset,
             };
             let mut sprites = [SpriteState::default(); NUM_SPRITES];
             sprites[1] = SpriteState { movement1: WALK, y_displacement: y, x_displacement: x, ..walker(0x3C, 0x40, dy, dx) };
@@ -917,8 +918,8 @@ mod tests {
             ((8, 0), left, false, false),
             ((15, 15), down, true, true),
         ] {
-            assert_eq!(walks(home, step, false), fixed, "{home:?} {step:?}");
-            assert_eq!(walks(home, step, true), cartridge, "the cartridge, {home:?} {step:?}");
+            assert_eq!(walks(home, step, Ruleset::Modern), fixed, "{home:?} {step:?}");
+            assert_eq!(walks(home, step, Ruleset::Gen1), cartridge, "the cartridge, {home:?} {step:?}");
         }
     }
 

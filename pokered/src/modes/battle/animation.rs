@@ -25,6 +25,7 @@ use crate::gfx::tiles::{V_CHARS0, V_CHARS2};
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::mode::Ctx;
 use crate::systems::battle::Side;
+use crate::world::Ruleset;
 use super::hud;
 use super::present::{set_pal_battle, HpBarColours, MonPalettes};
 
@@ -179,6 +180,9 @@ pub struct AnimBattle {
     pub mons: MonPalettes,
     #[serde(default)]
     pub hp_bar_colours: HpBarColours,
+    /// `World::ruleset`: whether the petals run past their table as the cartridge's do.
+    #[serde(default)]
+    pub ruleset: Ruleset,
 }
 
 /// The routines the battle calls an animation through.
@@ -423,19 +427,25 @@ pub fn move_sound_of(index: u8, id: u8, turn: Side, player: PokemonSpecies, enem
     (cry.sound, cry.frequency_modifier.wrapping_add(row.pitch), cry.tempo_modifier.wrapping_add(row.tempo))
 }
 
-/// The code between `FallingObjects_DeltaXs` and `FallingObjects_InitialXCoords`:
-/// `FallingObjects_UpdateMovementByte` and `FallingObjects_InitXCoords`, assembled.
-pub const FALLING_OBJECTS_CODE: [u8; 40] = [
-    0xFA, 0x8A, 0xD0, 0x3C, 0x47, 0xE6, 0x7F, 0xFE, 0x09, 0x78, 0x20, 0x04, 0xE6, 0x80, 0xEE, 0x80, 0xEA, 0x8A, 0xD0, 0xC9,
-    0x21, 0x01, 0xC3, 0x11, 0x3E, 0x5D, 0xFA, 0x8B, 0xD0, 0x4F, 0x1A, 0x22, 0x23, 0x23, 0x23, 0x13, 0x0D, 0x20, 0xF7, 0xC9,
-];
+/// The deltas the cartridge's petals read past `FallingObjects_DeltaXs`, for movement indices 10 to
+/// 24: two start at 9 and count on into the code after the table. Past index 24 a petal has fallen
+/// below line 112 and is hidden, so its X is never seen and is held.
+pub const RUN_ON_DELTA_XS: [u8; 15] = [0x8A, 0xD0, 0x3C, 0x47, 0xE6, 0x7F, 0xFE, 0x09, 0x78, 0x20, 0x04, 0xE6, 0x80, 0xEE, 0x80];
 
-/// `FallingObjects_DeltaXs[index]`. Two initial movement bytes start at 9, past the nine deltas, and
-/// only a count of 9 wraps, so those petals read on through the code after the table and into
-/// `FallingObjects_InitialXCoords`.
-fn falling_object_delta_x(index: u8) -> u8 {
-    let mut run_on = tables::FALLING_OBJECTS_DELTA_XS.iter().chain(&FALLING_OBJECTS_CODE).chain(tables::FALLING_OBJECTS_INITIAL_X_COORDS);
-    *run_on.nth(index as usize).expect("a falling object reads no further than its 52 frames take it")
+/// `FallingObjects_DeltaXs[index]`, run on as the cartridge's petals see it.
+pub fn falling_object_delta_x(index: u8) -> u8 {
+    let index = index as usize;
+    tables::FALLING_OBJECTS_DELTA_XS.get(index).or_else(|| RUN_ON_DELTA_XS.get(index.checked_sub(10)?)).copied().unwrap_or(0)
+}
+
+/// `FallingObjects_UpdateMovementByte`: the next delta, wrapping to the first and turning round at
+/// the end of the table. The cartridge wraps only a count landing on 9, so a byte starting there
+/// never wraps; the modern rules wrap any count past the end.
+pub fn next_movement_byte(byte: u8, ruleset: Ruleset) -> u8 {
+    let next = byte.wrapping_add(1);
+    let end = tables::FALLING_OBJECTS_DELTA_XS.len() as u8;
+    let wraps = if ruleset.is_gen1() { next & 0x7F == end } else { next & 0x7F >= end };
+    if wraps { (next & 0x80) ^ 0x80 } else { next }
 }
 
 /// The top left of the side's picture and its first tile id.
@@ -1225,8 +1235,7 @@ impl Animation {
         objects[0].y = 0;
         loop {
             for (object, byte) in objects.iter_mut().zip(movement.iter_mut()) {
-                let next = byte.wrapping_add(1);
-                *byte = if next & 0x7F == 9 { (next & 0x80) ^ 0x80 } else { next };
+                *byte = next_movement_byte(*byte, self.battle.ruleset);
                 let y = object.y.wrapping_add(2);
                 object.y = if y >= 112 { 160 } else { y };
                 let delta = falling_object_delta_x(*byte & 0x7F);
@@ -1550,20 +1559,38 @@ mod tests {
         assert_eq!(palettes[11], SgbPick::both(0xE4), "both end on the normal palette");
     }
 
-    /// `PETALS_FALLING_ANIM`'s twenty petals include the two whose movement bytes count past the
-    /// deltas; they fall to the end rather than off the table.
+    /// `PETALS_FALLING_ANIM`'s twenty petals, two of them counting past the deltas on the cartridge,
+    /// fall to the end under either rules.
     #[test]
     fn every_petal_falls_to_the_end() {
-        let mut animation = Animation::new(Routine::MoveAnimation { id: anim::POUND, kind: 0 }, Side::Player, battle());
-        animation.falling_objects(0x71, 20);
-        assert_eq!(animation.ops.iter().filter(|op| matches!(op, Op::Objects { .. })).count(), 52);
+        for ruleset in [Ruleset::Gen1, Ruleset::Modern] {
+            let mut animation = Animation::new(Routine::MoveAnimation { id: anim::POUND, kind: 0 }, Side::Player, AnimBattle { ruleset, ..battle() });
+            animation.falling_objects(0x71, 20);
+            assert_eq!(animation.ops.iter().filter(|op| matches!(op, Op::Objects { .. })).count(), 52, "{ruleset:?}");
+        }
+    }
+
+    /// Under the modern rules every petal reads its delta from the table, turning round at its end.
+    #[test]
+    fn every_modern_petal_stays_in_the_table() {
+        for &start in tables::FALLING_OBJECTS_INITIAL_MOVEMENT_DATA {
+            let mut byte = start;
+            for _ in 0..52 {
+                byte = next_movement_byte(byte, Ruleset::Modern);
+                assert!(usize::from(byte & 0x7F) < tables::FALLING_OBJECTS_DELTA_XS.len(), "{start:#04x} reached {byte:#04x}");
+            }
+        }
+        assert_eq!(next_movement_byte(0x89, Ruleset::Modern), 0x00, "past the end wraps and turns right");
+        assert_eq!(next_movement_byte(0x09, Ruleset::Modern), 0x80, "past the end wraps and turns left");
+        assert_eq!(next_movement_byte(0x89, Ruleset::Gen1), 0x8A, "the cartridge counts on");
+        assert_eq!(next_movement_byte(0x08, Ruleset::Gen1), 0x80);
     }
 
     fn battle() -> AnimBattle {
         AnimBattle {
             player_species: PokemonSpecies::Pikachu, enemy_species: PokemonSpecies::Pidgey, damage_multipliers: 0,
             trainer_battle: false, item: 0, ball_data: 0, animations_on: true, h_scx: 0,
-            mons: Default::default(), hp_bar_colours: Default::default(),
+            mons: Default::default(), hp_bar_colours: Default::default(), ruleset: Ruleset::default(),
         }
     }
 

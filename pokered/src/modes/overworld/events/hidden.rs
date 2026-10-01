@@ -88,7 +88,7 @@ fn hidden_event(s: &mut Script, event: HiddenEvent) -> Flow {
         }
         R::PrintBenchGuyText => {
             s.enable_auto_text_box_drawing();
-            match hidden_events::bench_guy_text(s.ctx.world.location.map, facing(s), s.ctx.world.cartridge_bugs) {
+            match hidden_events::bench_guy_text(s.ctx.world.location.map, facing(s), s.ctx.world.ruleset) {
                 Some(text) => predef(text).ret(),
                 None => Flow::Return,
             }
@@ -160,7 +160,7 @@ fn hidden_coins(s: &mut Script, event: HiddenEvent) -> Flow {
     if flag_action(&mut world.hidden_coins, index, FlagAction::Test) != 0 {
         return Flow::Return;
     }
-    let amount = hidden_events::hidden_coins_amount(event.argument, world.cartridge_bugs);
+    let amount = hidden_events::hidden_coins_amount(event.argument, world.ruleset);
     world.text.money.insert(TextMoney::Coins, amount.to_vec());
     add_bcd(&mut world.coins, &amount);
     flag_action(&mut world.hidden_coins, index, FlagAction::Set);

@@ -57,6 +57,9 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   mart open while the policy thinks — is a frame-timing change only `full_playthrough` can price.
 - A teach whose move-to-forget is declined is over. The bag reopens where the use started, so a
   driver that reads "not done yet" and begins the chain again asks the same question for ever.
+- A slot machine's bet is placed only by a slots row's `SlotSession`, never above the coins held:
+  the cursor starts on ×3, refused for ever below three coins, and any other entry is left at the
+  bet. Its close reads as the overworld for a moment with the cabinet still drawn (`slots_open`).
 
 ## What the map layer will and will not offer
 

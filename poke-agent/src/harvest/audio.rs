@@ -16,6 +16,7 @@ use gb::ram::{RAM, ROM};
 use pokered::audio::data::{AudioBank, SoundId};
 use pokered::audio::engine::{encode_writes, AudioEngine, Cue, CueInput, CueTrace, TraceInput};
 use pokered::audio::Write;
+use pokered::world::Ruleset;
 use crate::pokemon::symbols::{pokered_symbols, DmgBank, DmgPointer};
 
 /// Where a called routine returns to: unusable memory, so nothing else ever executes there.
@@ -250,7 +251,7 @@ impl Cartridge {
 
 fn compare_cues(cartridge: &mut Cartridge, input: &CueInput) {
     let expected = cartridge.cues(input);
-    let actual = input.play(true);
+    let actual = input.play(Ruleset::Gen1);
     assert_eq!(expected.writes.len(), actual.writes.len());
     assert!(expected.writes.iter().any(|frame| !frame.is_empty()), "{input:?} is silent on the cartridge");
     for (frame, (expected, actual)) in expected.writes.iter().zip(&actual.writes).enumerate() {
@@ -411,7 +412,7 @@ fn every_caller_of_the_frequency_and_tempo_modifiers_matches_the_cartridge() {
         compare_cues(&mut cartridge, input);
     }
     // Both open with 60 frames of cry.
-    let length = |input: &CueInput| input.play(true).finished[60..].find('1').expect("the sound finishes");
+    let length = |input: &CueInput| input.play(Ruleset::Gen1).finished[60..].find('1').expect("the sound finishes");
     assert_eq!(length(&callers[0]), 17);
     assert_eq!(length(&callers[1]), 271);
 }

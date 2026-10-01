@@ -293,10 +293,11 @@ cargo test --release --workspace --features slow-tests   # everything, about an 
 ```
 
 Always `--release`: these tests emulate every frame. The suite is tiered by how much *game time* a
-test costs, since that is the only thing that matters to its wall clock. Two tests are pre-push gates
-and neither replaces the other: `full_playthrough`, the scripted route through the whole of Kanto,
-and `grand_tour`, a fresh save walked through the whole game — every door, every map edge, every
-story gate — through the deployed `LlmPolicy`.
+test costs, since that is the only thing that matters to its wall clock. Four runs are pre-push
+gates and none replaces another: `full_playthrough`, the scripted route through the whole of Kanto;
+`grand_tour`, a fresh save walked through the whole game — every door, every map edge, every story
+gate — through the deployed `LlmPolicy`; and the recreation's slow tier and its lockstep against the
+cartridge.
 [`docs/test-suite.md`](docs/test-suite.md) has the commands, the fixture chain and the regeneration
 recipe.
 

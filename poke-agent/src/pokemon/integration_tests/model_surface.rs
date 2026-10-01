@@ -770,3 +770,45 @@ fn a_second_vending_machine_sells_its_own_drink() {
     let sold = run.tick_until(PATIENCE, |_| *told.lock().expect("not poisoned"));
     assert!(sold, "the second machine never sold its SODA POP");
 }
+
+/// The slots are one row the model chooses by its id, and the next turn says what came of it.
+#[test]
+fn a_slots_row_is_chosen_by_its_id_and_the_next_turn_says_what_it_won() {
+    use crate::pokemon::integration_tests::scripted_brain::Intent;
+    let told = Arc::new(Mutex::new(None));
+    let log = Arc::clone(&told);
+    let mut chosen = false;
+    let brain = move |request: &TurnRequest| {
+        if request.is_battle() {
+            return Reply::call("choose_battle_action", serde_json::json!({ "id": "run", "summary": "not now" }));
+        }
+        if !request.has_tool("choose_action") {
+            return Reply::Calls(vec![Call::wait(10)]);
+        }
+        if let Some(line) = request.situation().lines().find(|line| line.contains("spins at the slot machine")) {
+            *log.lock().expect("not poisoned") = Some(line.to_string());
+            return Reply::Calls(vec![Call::wait(30)]);
+        }
+        if !Intent::Enter("GameCorner").satisfied_by(request) {
+            return match Intent::Enter("GameCorner").resolve(request) {
+                Some(id) => Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "in" })),
+                None => Reply::Calls(vec![Call::wait(30)]),
+            };
+        }
+        match request.menu_ids().into_iter().find(|id| id == "GameCorner:Slots").filter(|_| !chosen) {
+            Some(id) => {
+                chosen = true;
+                Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "a flutter" }))
+            }
+            None => Reply::Calls(vec![Call::wait(30)]),
+        }
+    };
+    let mut run = LlmRun::builder(include_bytes!("../data/postgame-coins.bin"))
+        .named("slots")
+        .game_time(Duration::from_mins(10))
+        .start(Box::new(brain));
+    run.tick_until(PATIENCE, |_| told.lock().expect("not poisoned").is_some());
+    let told = told.lock().expect("not poisoned").clone();
+    assert!(told.as_deref().is_some_and(|line| line.contains("played 10 spins at the slot machine: 200 coins became")),
+            "the model was told {told:?}");
+}

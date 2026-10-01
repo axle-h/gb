@@ -105,8 +105,13 @@ fn lt_surge_is_not_a_row_while_his_doors_are_shut() {
         ],
     );
     fixture.step_until_exhausted();
+    fixture.run_until(|s| s.map.map == Map::VermilionGym && s.map.position_settled);
+    // The gym's script draws the doors shut a few frames after the warp; the agent waits longer
+    // than that before it asks, so read the menu where it would.
+    for _ in 0..50 {
+        fixture.step();
+    }
     let state = fixture.game_state();
-    assert_eq!(state.map.map, Map::VermilionGym);
 
     let rows: Vec<String> = state.map.actions().iter().map(|a| format!("{:?}", a.tile)).collect();
     println!("in the gym on {} badges: {}", state.badges.bits().count_ones(), rows.join(", "));

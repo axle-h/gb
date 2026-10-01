@@ -14,6 +14,7 @@
 
 use poke_core::audio::{sound, AudioBankData, AUDIO_BANKS, CRY_DATA, PITCHES};
 use serde::{Deserialize, Serialize};
+use crate::world::Ruleset;
 
 /// Where `SFX_Headers_(1|2|3)` sits in each of the three banks, and what `music_const` subtracts.
 const HEADERS: u16 = 0x4000;
@@ -93,11 +94,11 @@ impl AudioBank {
     /// Pointers 5 to 8 name a label with no data under it, so the cartridge reads the sixteen bytes
     /// of whatever sound effect its bank stores next, a different instrument in each copy. Only
     /// Lavender Town and the Pokémon Tower play it, the tower's theme an arrangement of the town's,
-    /// so all three banks play [`LAVENDER_WAVE`] unless `cartridge_bugs` asks for the overrun, which
+    /// so all three banks play [`LAVENDER_WAVE`] unless Gen 1 asks for the overrun, which
     /// reads the next sound effect's bytes as the cartridge does.
-    pub fn wave_sample(self, instrument: u8, cartridge_bugs: bool) -> [u8; 16] {
+    pub fn wave_sample(self, instrument: u8, ruleset: Ruleset) -> [u8; 16] {
         use poke_core::tables::{WAVE_POINTERS, WAVE_SAMPLES};
-        if !cartridge_bugs {
+        if !ruleset.is_gen1() {
             let wave = WAVE_POINTERS[instrument as usize] as usize;
             return WAVE_SAMPLES.get(wave).copied().unwrap_or(LAVENDER_WAVE);
         }
@@ -480,21 +481,21 @@ mod tests {
     /// sound effect each bank stores next: three different waves in the cartridge, one here.
     #[test]
     fn the_empty_wave_is_lavender_towns_in_every_bank() {
-        for cartridge_bugs in [false, true] {
-            assert_eq!(AudioBank::One.wave_sample(0, cartridge_bugs)[..4], [0x02, 0x46, 0x8A, 0xCE]);
-            assert_eq!(AudioBank::One.wave_sample(5, cartridge_bugs), LAVENDER_WAVE);
+        for ruleset in [Ruleset::Modern, Ruleset::Gen1] {
+            assert_eq!(AudioBank::One.wave_sample(0, ruleset)[..4], [0x02, 0x46, 0x8A, 0xCE]);
+            assert_eq!(AudioBank::One.wave_sample(5, ruleset), LAVENDER_WAVE);
             for bank in AudioBank::ALL {
                 for instrument in 0..9 {
-                    assert_eq!(bank.wave_sample(instrument, cartridge_bugs), bank.wave_sample(WAVE_POINTERS[instrument as usize], cartridge_bugs));
+                    assert_eq!(bank.wave_sample(instrument, ruleset), bank.wave_sample(WAVE_POINTERS[instrument as usize], ruleset));
                 }
-                assert_eq!(bank.wave_sample(4, cartridge_bugs), AudioBank::One.wave_sample(4, false), "the real tables agree");
+                assert_eq!(bank.wave_sample(4, ruleset), AudioBank::One.wave_sample(4, Ruleset::Modern), "the real tables agree");
             }
         }
         for bank in AudioBank::ALL {
-            assert_eq!(bank.wave_sample(5, false), LAVENDER_WAVE, "{bank:?}");
+            assert_eq!(bank.wave_sample(5, Ruleset::Modern), LAVENDER_WAVE, "{bank:?}");
         }
-        assert_ne!(AudioBank::Two.wave_sample(5, true), LAVENDER_WAVE);
-        assert_ne!(AudioBank::Three.wave_sample(5, true), LAVENDER_WAVE);
+        assert_ne!(AudioBank::Two.wave_sample(5, Ruleset::Gen1), LAVENDER_WAVE);
+        assert_ne!(AudioBank::Three.wave_sample(5, Ruleset::Gen1), LAVENDER_WAVE);
     }
 
     #[test]

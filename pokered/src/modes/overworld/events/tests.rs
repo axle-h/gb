@@ -15,7 +15,7 @@ use crate::party::{Named, PartyMon};
 use crate::rng::GameRng;
 use crate::systems::add_mon::{new_party_mon, Origin};
 use crate::systems::overworld::{Direction, Location};
-use crate::world::World;
+use crate::world::{Ruleset, World};
 use crate::{Game, Input, Pacing};
 
 fn mon(species: PokemonSpecies, level: u8) -> Named<PartyMon> {
@@ -287,12 +287,12 @@ fn the_vermilion_gym_cans_hold_two_locks_and_a_wrong_can_shuts_the_first_again()
 }
 
 /// Where can 0's first lock puts the second, over a run of seeds.
-fn second_locks_from_can_0(cartridge_bugs: bool) -> Vec<u8> {
+fn second_locks_from_can_0(ruleset: Ruleset) -> Vec<u8> {
     (0..16).map(|seed| {
         let mut game = seeded_game(seed, Map::VermilionGym, 1, 8, SpriteFacing::Up, |world| {
             beaten_gym_trainers(world);
             world.scripts.trash_cans = [0, 0];
-            world.cartridge_bugs = cartridge_bugs;
+            world.ruleset = ruleset;
         });
         press_a(&mut game);
         play_until(&mut game, 2000, &mut |_| 0, |game| free(game) && game.world().events.is_set(EVENT_1ST_LOCK_OPENED));
@@ -302,11 +302,11 @@ fn second_locks_from_can_0(cartridge_bugs: bool) -> Vec<u8> {
 
 #[test]
 fn the_second_lock_is_always_in_a_can_next_to_the_first() {
-    let seconds = second_locks_from_can_0(false);
+    let seconds = second_locks_from_can_0(Ruleset::Modern);
     assert!(seconds.iter().all(|can| [1, 3].contains(can)), "{seconds:?}");
     assert!(seconds.contains(&1) && seconds.contains(&3), "{seconds:?}");
 
-    let seconds = second_locks_from_can_0(true);
+    let seconds = second_locks_from_can_0(Ruleset::Gen1);
     assert!(seconds.contains(&0), "the cartridge can put both locks in can 0: {seconds:?}");
 }
 

@@ -7,6 +7,7 @@ use poke_core::map_header::TileSetId;
 use poke_core::sprite::SpriteFacing;
 use poke_core::tables::{HiddenRoutine, TextPredef, BENCH_GUY_TEXTS, BOOKSHELF_TILE_IDS, HIDDEN_EVENTS, MAP_BADGE_FLAGS, SILPH_CO_MAP_LIST};
 use serde::{Deserialize, Serialize};
+use crate::world::Ruleset;
 
 const END: u8 = 0xFF;
 
@@ -69,12 +70,12 @@ pub fn hidden_coin_index(map: Map, x: u8, y: u8) -> u8 {
 
 /// `HiddenCoins`' amount, BCD, from its argument less `COIN`: anything it does not name is a
 /// hundred.
-pub fn hidden_coins_amount(argument: u8, cartridge_bugs: bool) -> [u8; 2] {
+pub fn hidden_coins_amount(argument: u8, ruleset: Ruleset) -> [u8; 2] {
     match argument.wrapping_sub(poke_core::item::ItemId::Coin as u8) {
         10 => [0x00, 0x10],
         20 => [0x00, 0x20],
         // The cartridge jumps to the twenty for forty too.
-        40 if cartridge_bugs => [0x00, 0x20],
+        40 if ruleset.is_gen1() => [0x00, 0x20],
         40 => [0x00, 0x40],
         _ => [0x01, 0x00],
     }
@@ -87,7 +88,7 @@ pub fn bookshelf_text(tileset: TileSetId, tile: u8) -> Option<TextPredef> {
 }
 
 /// `PrintBenchGuyText`'s lookup: the text predef for a player facing the bench guy on `map`.
-pub fn bench_guy_text(map: Map, facing: u8, cartridge_bugs: bool) -> Option<TextPredef> {
+pub fn bench_guy_text(map: Map, facing: u8, ruleset: Ruleset) -> Option<TextPredef> {
     let bytes: Vec<u8> = BENCH_GUY_TEXTS.iter().flat_map(|&(map, facing, text)| [map, facing, text as u8]).chain([END]).collect();
     let mut i = 0;
     while let Some(&m) = bytes.get(i) {
@@ -106,7 +107,7 @@ pub fn bench_guy_text(map: Map, facing: u8, cartridge_bugs: bool) -> Option<Text
         }
         // The cartridge does not step past the text on a wrong facing, so its scan goes on out of
         // step, and past the table into VRAM; `rom_equality` pins that it finds nothing there.
-        if !cartridge_bugs {
+        if !ruleset.is_gen1() {
             i += 1;
         }
     }
@@ -205,15 +206,15 @@ mod tests {
     #[test]
     fn the_bench_guy_answers_the_left_facing() {
         let text = Some(TextPredef::ViridianCityPokecenterBenchGuyText);
-        assert_eq!(bench_guy_text(Map::ViridianPokecenter, SpriteFacing::Left as u8, false), text);
-        assert_eq!(bench_guy_text(Map::ViridianPokecenter, SpriteFacing::Left as u8, true), text);
+        assert_eq!(bench_guy_text(Map::ViridianPokecenter, SpriteFacing::Left as u8, Ruleset::Modern), text);
+        assert_eq!(bench_guy_text(Map::ViridianPokecenter, SpriteFacing::Left as u8, Ruleset::Gen1), text);
     }
 
     #[test]
     fn the_bench_guy_is_silent_to_any_other_facing() {
         for map in Map::all() {
             for facing in [SpriteFacing::Down, SpriteFacing::Up, SpriteFacing::Right] {
-                assert_eq!(bench_guy_text(map, facing as u8, false), None, "{map:?} {facing:?}");
+                assert_eq!(bench_guy_text(map, facing as u8, Ruleset::Modern), None, "{map:?} {facing:?}");
             }
         }
     }
@@ -221,9 +222,9 @@ mod tests {
     #[test]
     fn the_forty_coin_spot_gives_forty() {
         let coin = poke_core::item::ItemId::Coin as u8;
-        assert_eq!(hidden_coins_amount(coin + 40, false), [0, 0x40]);
-        assert_eq!(hidden_coins_amount(coin + 40, true), [0, 0x20], "the cartridge gives twenty");
-        assert_eq!(hidden_coins_amount(coin + 20, false), [0, 0x20]);
-        assert_eq!(hidden_coins_amount(coin + 100, false), [1, 0]);
+        assert_eq!(hidden_coins_amount(coin + 40, Ruleset::Modern), [0, 0x40]);
+        assert_eq!(hidden_coins_amount(coin + 40, Ruleset::Gen1), [0, 0x20], "the cartridge gives twenty");
+        assert_eq!(hidden_coins_amount(coin + 20, Ruleset::Modern), [0, 0x20]);
+        assert_eq!(hidden_coins_amount(coin + 100, Ruleset::Modern), [1, 0]);
     }
 }

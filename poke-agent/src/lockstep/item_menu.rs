@@ -16,7 +16,7 @@ use pokered::party::{Named, PartyMon};
 use pokered::rng::GameRng;
 use pokered::systems::add_mon::{new_party_mon, Origin};
 use pokered::systems::inventory::Inventory;
-use pokered::world::{TextSpeed, World, NUM_EVENTS};
+use pokered::world::{NUM_EVENTS, Ruleset, TextSpeed, World};
 use pokered::{Game, Input, Pacing};
 use crate::pokemon::item::ItemId;
 use crate::pokemon::options::{self, GameOptionsReader};
@@ -68,7 +68,7 @@ pub(super) fn the_bag(gb: &GameBoy) -> Inventory {
 }
 
 /// Everything these screens read: the name, the events, the text speed, the money and the coins,
-/// the bag, the party, and the cartridge's bugs. Only those: a test comparing anything else, such as
+/// the bag, the party, and the Gen 1 ruleset. Only those: a test comparing anything else, such as
 /// the badges, the rival's name, the Pokedex or a party member's OT, has to fill it itself, or the
 /// difference it sees is this world's rather than what it is testing. The party here carries no OT;
 /// `status_screen`'s does.
@@ -80,7 +80,7 @@ pub(super) fn the_world(gb: &GameBoy) -> World {
         bag: the_bag(gb),
         money: mmu.read_slice(sym::wPlayerMoney.address, 3).try_into().unwrap(),
         coins: mmu.read_slice(sym::wPlayerCoins.address, 2).try_into().unwrap(),
-        cartridge_bugs: true,
+        ruleset: Ruleset::Gen1,
         ..World::default()
     };
     world.options.text_speed = match mmu.read_game_options().expect("the fixture's options").text_speed {

@@ -1,6 +1,7 @@
 //! Every table `poke_core::tables` reads from the disassembly, decoded again from the cartridge the
 //! way it was read before, and compared as values. A submodule bump that moves a table fails here.
 
+use pokered::world::Ruleset;
 use crate::pokemon::rom_gfx::rom_slice;
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointer};
 use poke_core::tables::*;
@@ -118,12 +119,33 @@ fn indexed_lists() {
     assert_eq!(rom_slice(sym::TechnicalMachines)[..50 + 5], *TECHNICAL_MACHINES);
     assert_eq!(rom_slice(sym::FallingObjects_InitialXCoords)[..20], *FALLING_OBJECTS_INITIAL_X_COORDS);
     assert_eq!(rom_slice(sym::FallingObjects_DeltaXs)[..9], *FALLING_OBJECTS_DELTA_XS);
-    let run_on = [&FALLING_OBJECTS_DELTA_XS[..], &pokered::modes::battle::animation::FALLING_OBJECTS_CODE, FALLING_OBJECTS_INITIAL_X_COORDS].concat();
-    assert_eq!(rom_slice(sym::FallingObjects_DeltaXs)[..run_on.len()], run_on, "what a falling object's delta reads on into");
     assert_eq!(rom_slice(sym::FallingObjects_InitialMovementData)[..20], *FALLING_OBJECTS_INITIAL_MOVEMENT_DATA);
     assert_eq!(rom_slice(sym::TitleBallYTable)[..12], *TITLE_BALL_Y_TABLE);
     assert_eq!(rom_slice(sym::PlayerJumpingYScreenCoords)[..16], *PLAYER_JUMPING_Y_SCREEN_COORDS);
     assert_eq!(rom_slice(sym::SpinnerPlayerFacingDirections)[..4], *SPINNER_PLAYER_FACING_DIRECTIONS);
+}
+
+/// Every delta a falling object reads while on screen, past the table included, is the byte the
+/// cartridge reads there, and the recreation carries none that no petal shows.
+#[test]
+fn falling_object_deltas_as_the_cartridge_reads_them() {
+    use pokered::modes::battle::animation::{falling_object_delta_x, next_movement_byte, RUN_ON_DELTA_XS};
+    let rom = rom_slice(sym::FallingObjects_DeltaXs);
+    let mut objects: Vec<(u8, u8)> = FALLING_OBJECTS_INITIAL_MOVEMENT_DATA.iter().enumerate()
+        .map(|(i, &byte)| (if i == 0 { 0 } else { 8 * (i as u8 + 1) }, byte)).collect();
+    let mut furthest = 0;
+    while objects[0].0 != 104 {
+        for (y, byte) in &mut objects {
+            *byte = next_movement_byte(*byte, Ruleset::Gen1);
+            *y = if *y + 2 >= 112 { 160 } else { *y + 2 };
+            if *y < 112 {
+                let index = *byte & 0x7F;
+                assert_eq!(falling_object_delta_x(index), rom[usize::from(index)], "the delta at index {index}");
+                furthest = furthest.max(index);
+            }
+        }
+    }
+    assert_eq!(usize::from(furthest), FALLING_OBJECTS_DELTA_XS.len() + RUN_ON_DELTA_XS.len());
 }
 
 /// `rBGP`, `rOBP0` and `rOBP1` for each of `FadePal1` to `FadePal8`, which the code reads as one table.
@@ -1033,7 +1055,7 @@ fn bench_guy_scan_finds_nothing_past_the_table() {
                     break;
                 }
             }
-            assert_eq!(bench_guy_text(map, facing, true).map(|text| text as u8), found, "{map:?} facing {facing}");
+            assert_eq!(bench_guy_text(map, facing, Ruleset::Gen1).map(|text| text as u8), found, "{map:?} facing {facing}");
         }
     }
 }

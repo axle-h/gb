@@ -3,6 +3,7 @@ use poke_core::item::ItemId;
 use poke_core::species::PokemonSpecies;
 use poke_core::text_script::{TextBuffer, TextMoney, TextNumber};
 use serde::{Deserialize, Serialize};
+pub use poke_core::ruleset::Ruleset;
 use crate::party::{BoxMon, Named, PartyMon, Pokedex};
 use crate::systems::hall_of_fame::HallOfFameMon;
 use crate::systems::inventory::Inventory;
@@ -90,10 +91,25 @@ pub struct World {
     pub text: TextVars,
     /// Where the player stands: the map, the square, the facing, and the map state a save keeps.
     pub location: Location,
-    /// Play the cartridge's mechanical and audio bugs rather than their fixes. Off in play; on
-    /// wherever the recreation is compared with the cartridge, and carried into a new game.
-    #[serde(default)]
-    pub cartridge_bugs: bool,
+    /// The player's choice on the option screen, carried into a new game. Every comparison with
+    /// the cartridge plays Gen 1.
+    #[serde(default, alias = "cartridge_bugs", deserialize_with = "ruleset_or_cartridge_bugs")]
+    pub ruleset: Ruleset,
+}
+
+/// A save from before the ruleset kept `ruleset: Ruleset`, which set is Gen 1.
+pub(crate) fn ruleset_or_cartridge_bugs<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Ruleset, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Ruleset(Ruleset),
+        CartridgeBugs(bool),
+    }
+    Ok(match Stored::deserialize(deserializer)? {
+        Stored::Ruleset(ruleset) => ruleset,
+        Stored::CartridgeBugs(true) => Ruleset::Gen1,
+        Stored::CartridgeBugs(false) => Ruleset::Modern,
+    })
 }
 
 /// `NUM_EVENTS`: the event space, most of it unused.

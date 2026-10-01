@@ -1861,6 +1861,11 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
              ({}, {}))",
             boulder.x, boulder.y, crate::pokemon::tile_map::push_word(dir),
             action.destination.x, action.destination.y),
+        MetaTile::Slots => format!(
+            "play the slots at the nearest free machine (you stand at ({}, {})): up to {} spins, each \
+             betting 3 coins, or all that is left below 3, with any win paid in coins; it stops early \
+             if the coins run out",
+            action.destination.x, action.destination.y, crate::pokemon::postgame::game_corner::SLOT_SPINS),
         other => format!("walk to {other}"),
     }
 }
@@ -1950,14 +1955,14 @@ pub fn battle_id(action: &BattleAction) -> String {
 
 /// The battle menu, with every `fight:` row costed against the Pokémon actually in front of you.
 pub fn battle_menu(state: &GameState) -> Vec<MenuItem> {
-    let sides = state.battle.as_ref().map(|battle| (&battle.player, &battle.enemy));
+    let sides = state.battle.as_ref().map(|battle| (&battle.player, &battle.enemy, battle.ruleset));
     battle_options(state)
         .unwrap_or_default()
         .iter()
         .map(|action| {
             let mut description = format!("{action}");
-            if let (BattleAction::Fight { battle_move, .. }, Some((me, foe))) = (action, sides) {
-                description.push_str(&fight_row_note(battle_move.name, me, foe));
+            if let (BattleAction::Fight { battle_move, .. }, Some((me, foe, ruleset))) = (action, sides) {
+                description.push_str(&fight_row_note(battle_move.name, me, foe, ruleset));
             }
             if let BattleAction::UseItem { item, target: Some(target), .. } = action
                 && let Some(mon) = state.pokemon.get(*target as usize)
@@ -1980,13 +1985,14 @@ fn fight_row_note(
     name: crate::pokemon::move_name::PokemonMoveName,
     me: &crate::pokemon::pokemon::PokemonSummary,
     foe: &crate::pokemon::pokemon::PokemonSummary,
+    ruleset: poke_core::ruleset::Ruleset,
 ) -> String {
     use crate::pokemon::damage::{effectiveness_phrase, expected_damage, is_damaging_move, type_multiplier};
     // The multiplier is only reported for a move that deals damage.
     if !is_damaging_move(name) {
         return String::new();
     }
-    match (expected_damage(me, name, foe), effectiveness_phrase(type_multiplier(name, foe))) {
+    match (expected_damage(me, name, foe, ruleset), effectiveness_phrase(type_multiplier(name, foe, ruleset))) {
         // Immune: no damage, and the phrase is the whole decision.
         (_, Some(phrase @ "no effect")) => format!(" — {phrase}"),
         (Some(damage), Some(phrase)) => format!(
@@ -2557,6 +2563,8 @@ mod tests {
         }
     }
 
+    use poke_core::ruleset::Ruleset::{Gen1, Modern};
+
     #[test]
     fn a_fight_row_is_costed_against_the_pokemon_in_front_of_it() {
         use crate::pokemon::pokemon::PokemonType::*;
@@ -2566,24 +2574,53 @@ mod tests {
                          &[PokemonMoveName::Ember, PokemonMoveName::Growl, PokemonMoveName::Scratch]);
         let foe = summary(PokemonSpecies::Bulbasaur, [Grass, Poison], &[PokemonMoveName::Tackle]);
 
-        let ember = fight_row_note(PokemonMoveName::Ember, &me, &foe);
+        let ember = fight_row_note(PokemonMoveName::Ember, &me, &foe, Gen1);
         assert!(ember.contains("super effective"), "Fire on Grass is doubled: {ember}");
         assert!(ember.contains("damage") && ember.contains("% of its HP"),
                 "a number and what share of the target it is: {ember}");
 
         // A status move gets no number, the `34 -> 34` rule.
-        assert_eq!(fight_row_note(PokemonMoveName::Growl, &me, &foe), "",
+        assert_eq!(fight_row_note(PokemonMoveName::Growl, &me, &foe, Gen1), "",
                    "a status move is not priced");
 
         // The multiplier is withheld from a status move as well.
         let ghost = summary(PokemonSpecies::Gastly, [Ghost, Poison], &[PokemonMoveName::Lick]);
-        assert_eq!(fight_row_note(PokemonMoveName::Growl, &me, &ghost), "",
+        assert_eq!(fight_row_note(PokemonMoveName::Growl, &me, &ghost, Gen1), "",
                    "a status move is never labelled by the type chart");
 
         // A damaging move that genuinely cannot land says so, and says only that.
         let normal = summary(PokemonSpecies::Rattata, [Normal, Normal], &[PokemonMoveName::Tackle]);
-        let row = fight_row_note(PokemonMoveName::Tackle, &normal, &ghost);
+        let row = fight_row_note(PokemonMoveName::Tackle, &normal, &ghost, Gen1);
         assert_eq!(row, " — no effect", "immunity is the whole row: {row}");
+    }
+
+    #[test]
+    fn only_a_dual_type_is_doubly_super_effective() {
+        use crate::pokemon::pokemon::PokemonType::*;
+        use crate::pokemon::species::PokemonSpecies;
+
+        let squirtle = summary(PokemonSpecies::Squirtle, [Water, Water], &[PokemonMoveName::WaterGun]);
+        let charmander = summary(PokemonSpecies::Charmander, [Fire, Fire], &[PokemonMoveName::Ember]);
+        let water_gun = fight_row_note(PokemonMoveName::WaterGun, &squirtle, &charmander, Gen1);
+        assert!(water_gun.ends_with("), super effective"), "{water_gun}");
+
+        let lapras = summary(PokemonSpecies::Lapras, [Water, Ice], &[PokemonMoveName::IceBeam]);
+        let dragonite = summary(PokemonSpecies::Dragonite, [Dragon, Flying], &[PokemonMoveName::Wrap]);
+        let ice_beam = fight_row_note(PokemonMoveName::IceBeam, &lapras, &dragonite, Gen1);
+        assert!(ice_beam.ends_with("doubly super effective"), "{ice_beam}");
+    }
+
+    /// The emulated game's chart gives Ghost no effect on Psychic; a Modern native run's doubles it.
+    #[test]
+    fn lick_on_a_psychic_type_is_costed_by_the_ruleset() {
+        use crate::pokemon::pokemon::PokemonType::*;
+        use crate::pokemon::species::PokemonSpecies;
+
+        let me = summary(PokemonSpecies::Gastly, [Ghost, Poison], &[PokemonMoveName::Lick]);
+        let foe = summary(PokemonSpecies::Slowbro, [Water, Psychic], &[PokemonMoveName::Tackle]);
+        assert_eq!(fight_row_note(PokemonMoveName::Lick, &me, &foe, Gen1), " — no effect");
+        let modern = fight_row_note(PokemonMoveName::Lick, &me, &foe, Modern);
+        assert!(modern.contains("damage") && modern.ends_with("super effective"), "{modern}");
     }
 
     #[test]

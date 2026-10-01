@@ -589,7 +589,8 @@ fn a_boulder_goal_re_chosen_after_every_battle_still_arrives() {
         Box::new(AlwaysTheGoal::new(SWITCH)));
     let mut ids: std::collections::BTreeSet<String> = Default::default();
     let mut starts = 0u32;
-    let pressed = |f: &mut TestFixture| f.game_state().map.boulders().contains(&SWITCH);
+    // Polled every step, so it sees a catch half-written into the party.
+    let pressed = |f: &mut TestFixture| f.try_game_state().is_ok_and(|s| s.map.boulders().contains(&SWITCH));
     assert!(!pressed(&mut fixture), "the fixture starts with the switch unpressed");
     while fixture.total_cycles < fixture.max_cycles && !pressed(&mut fixture) {
         fixture.step();

@@ -289,7 +289,7 @@ impl UseItem {
                 let mut restored = false;
                 for slot in 0..4 {
                     let Some(mv) = party_mon.mon.moves[slot] else { continue };
-                    if let Some(pp) = restore_pp(party_mon.mon.pp[slot], mv, full, ctx.world.cartridge_bugs) {
+                    if let Some(pp) = restore_pp(party_mon.mon.pp[slot], mv, full, ctx.world.ruleset) {
                         party_mon.mon.pp[slot] = pp;
                         restored = true;
                     }
@@ -335,7 +335,7 @@ impl UseItem {
                 self.text("_PPIncreasedText", After::Finish { result: USED, remove: true })
             }
             _ => {
-                let restored = restore_pp(*pp, mv, self.item == ItemId::MaxEther, ctx.world.cartridge_bugs);
+                let restored = restore_pp(*pp, mv, self.item == ItemId::MaxEther, ctx.world.ruleset);
                 if let Some(new) = restored {
                     *pp = new;
                 }

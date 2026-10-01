@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::gfx::layers::Object;
 use crate::gfx::ui::SCREEN_TILES_X;
 use crate::rng::Rng;
+use crate::world::Ruleset;
 
 /// The symbols as the cartridge compares them: `HIGH(SLOTS7)` and its neighbours. A symbol is four
 /// tiles, `n`..`n + 3`, and a wheel table holds each as a `dw` whose low byte is the top pair of
@@ -119,9 +120,9 @@ impl Wheels {
 
     /// `SlotMachine_StopOrAnimWheel1`..`3` in turn, `stopping` being
     /// `wStoppingWhichSlotMachineWheel`. True when wheel 3 has come to rest, which ends the spin.
-    pub fn stop_or_anim(&mut self, stopping: u8, flags: u8, cartridge_bugs: bool) -> bool {
+    pub fn stop_or_anim(&mut self, stopping: u8, flags: u8, ruleset: Ruleset) -> bool {
         for index in 0..2 {
-            if !self.stops(index, stopping, flags, cartridge_bugs) {
+            if !self.stops(index, stopping, flags, ruleset) {
                 self.anim(index);
             }
         }
@@ -135,7 +136,7 @@ impl Wheels {
 
     /// Whether wheel 1 or 2 stays where it is this frame. A wheel is asked only once its turn has
     /// come and only on an odd offset, where a symbol is centred rather than two halves showing.
-    fn stops(&mut self, index: usize, stopping: u8, flags: u8, cartridge_bugs: bool) -> bool {
+    fn stops(&mut self, index: usize, stopping: u8, flags: u8, ruleset: Ruleset) -> bool {
         if stopping < index as u8 + 1 || self.offsets[index] % 2 == 0 {
             return false;
         }
@@ -144,9 +145,9 @@ impl Wheels {
         }
         self.slip[index] -= 1;
         let stop = if index == 0 {
-            self.stop_wheel1_early(flags, cartridge_bugs)
+            self.stop_wheel1_early(flags, ruleset)
         } else {
-            self.stop_wheel2_early(flags, cartridge_bugs)
+            self.stop_wheel2_early(flags)
         };
         if stop {
             self.slip[index] = 0;
@@ -156,34 +157,30 @@ impl Wheels {
 
     /// `SlotMachine_StopWheel1Early`: wheel 1 stops on anything but a cherry, or in seven-and-bar
     /// mode as soon as a seven shows.
-    fn stop_wheel1_early(&self, flags: u8, cartridge_bugs: bool) -> bool {
+    fn stop_wheel1_early(&self, flags: u8, ruleset: Ruleset) -> bool {
         let tiles = wheel_tiles(self.offsets)[0];
         if flags & CAN_WIN_WITH_7_OR_BAR == 0 {
             return tiles[1] != CHERRY;
         }
         // The cartridge tests each tile for less than a seven, which none is, so it never stops.
-        !cartridge_bugs && tiles.contains(&SEVEN)
+        !ruleset.is_gen1() && tiles.contains(&SEVEN)
     }
 
     /// `SlotMachine_StopWheel2Early`: wheel 2 stops where wheels 1 and 2 could still line up, in
-    /// seven-and-bar mode only on a line of sevens or bars.
-    fn stop_wheel2_early(&self, flags: u8, cartridge_bugs: bool) -> bool {
+    /// seven-and-bar mode only on a line of sevens or bars. With no match the cartridge reads wheel
+    /// 2's bottom symbol and stops on a seven or bar anyway; every ruleset refuses that stop.
+    fn stop_wheel2_early(&self, flags: u8) -> bool {
         let tiles = wheel_tiles(self.offsets);
         let matched = find_wheel1_wheel2_matches(&tiles);
         if flags & CAN_WIN_WITH_7_OR_BAR == 0 {
             return matched.is_some();
         }
-        // With no match the cartridge reads wheel 2's bottom symbol and stops on a seven or bar anyway.
-        match matched {
-            Some(row) => tiles[1][row] <= BAR,
-            None => cartridge_bugs && tiles[1][0] <= BAR,
-        }
+        matched.is_some_and(|row| tiles[1][row] <= BAR)
     }
 }
 
 /// `SlotMachine_FindWheel1Wheel2Matches`: which of wheel 2's three symbols could still make a line
-/// with wheel 1, or `None`. The order is the cartridge's, and the answer is the row it left `de`
-/// on, which seven-and-bar mode reads even when there is no match.
+/// with wheel 1, or `None`. The order is the cartridge's, and the answer is the row it left `de` on.
 fn find_wheel1_wheel2_matches(tiles: &[[u8; 3]; 3]) -> Option<usize> {
     let (one, two) = (tiles[0], tiles[1]);
     if two[0] == one[0] {
@@ -373,11 +370,31 @@ mod tests {
         stopped: bool,
     }
 
+    /// A frame on which the cartridge stops wheel 2 on an unmatched seven or bar, which no ruleset
+    /// here does. Wheel 2 is asked after wheel 1 has taken its step.
+    fn cartridge_stops_wheel2_unmatched(case: &SpinCase) -> bool {
+        let mut first = case.wheels;
+        first.stop_or_anim(1, case.flags, Ruleset::Gen1);
+        let offsets = [first.offsets[0], case.wheels.offsets[1], case.wheels.offsets[2]];
+        let tiles = wheel_tiles(offsets);
+        case.stopping >= 2 && offsets[1] % 2 == 1 && case.wheels.slip[1] != 0
+            && case.flags & CAN_WIN_WITH_7_OR_BAR != 0
+            && find_wheel1_wheel2_matches(&tiles).is_none() && tiles[1][0] <= BAR
+    }
+
     #[test]
     fn every_harvested_case_of_a_spinning_frame() {
-        for (input, output, _) in cases::<SpinCase, SpinOutput>(include_str!("../../fixtures/slots/stop_or_anim_wheels.jsonl")) {
+        let spins = cases::<SpinCase, SpinOutput>(include_str!("../../fixtures/slots/stop_or_anim_wheels.jsonl"));
+        let (skipped, compared): (Vec<_>, Vec<_>) = spins.into_iter()
+            .partition(|(input, _, _)| cartridge_stops_wheel2_unmatched(input));
+        assert!(!skipped.is_empty(), "the harvest reaches the cartridge's unmatched stop");
+        for (input, output, _) in &skipped {
+            assert_eq!((output.wheels.offsets[1], output.wheels.slip[1]), (input.wheels.offsets[1], 0),
+                "{:?}: the cartridge stopped wheel 2", input.wheels);
+        }
+        for (input, output, _) in compared {
             let mut wheels = input.wheels;
-            let stopped = wheels.stop_or_anim(input.stopping, input.flags, true);
+            let stopped = wheels.stop_or_anim(input.stopping, input.flags, Ruleset::Gen1);
             assert_eq!(SpinOutput { wheels, stopped }, output,
                 "{:?} stopping {} flags ${:02X}", input.wheels, input.stopping, input.flags);
         }
@@ -386,36 +403,37 @@ mod tests {
     #[test]
     fn in_seven_and_bar_mode_wheel_1_stops_early_on_a_seven() {
         let showing = |offset: u8, seven: bool| wheel_tiles([offset; 3])[0].contains(&SEVEN) == seven;
-        let spin = |offset: u8, cartridge_bugs: bool| {
+        let spin = |offset: u8, ruleset: Ruleset| {
             let mut wheels = Wheels { offsets: [offset, Wheels::START, Wheels::START], slip: [SLIP; 2] };
-            wheels.stop_or_anim(1, CAN_WIN_WITH_7_OR_BAR, cartridge_bugs);
+            wheels.stop_or_anim(1, CAN_WIN_WITH_7_OR_BAR, ruleset);
             wheels
         };
         let seven = (1..WHEEL_WRAP).step_by(2).find(|&offset| showing(offset, true)).expect("a seven shows");
-        let stopped = spin(seven, false);
+        let stopped = spin(seven, Ruleset::Modern);
         assert_eq!((stopped.offsets[0], stopped.slip[0]), (seven, 0));
-        assert_eq!(spin(seven, true).offsets[0], seven + 1, "the cartridge spins on past it");
+        assert_eq!(spin(seven, Ruleset::Gen1).offsets[0], seven + 1, "the cartridge spins on past it");
 
         let none = (1..WHEEL_WRAP).step_by(2).find(|&offset| showing(offset, false)).expect("no seven shows");
-        assert_eq!(spin(none, false).offsets[0], none + 1);
+        assert_eq!(spin(none, Ruleset::Modern).offsets[0], none + 1);
     }
 
     #[test]
-    fn in_seven_and_bar_mode_wheel_2_does_not_stop_without_a_match() {
+    fn in_seven_and_bar_mode_wheel_2_never_stops_on_an_unmatched_seven_or_bar() {
         let odd = || (1..WHEEL_WRAP).step_by(2);
-        let (one, two) = odd().flat_map(|a| odd().map(move |b| (a, b)))
-            .find(|&(a, b)| {
+        let unmatched: Vec<(u8, u8)> = odd().flat_map(|a| odd().map(move |b| (a, b)))
+            .filter(|&(a, b)| {
                 let tiles = wheel_tiles([a, b, Wheels::START]);
                 find_wheel1_wheel2_matches(&tiles).is_none() && tiles[1][0] <= BAR
             })
-            .expect("a seven or bar at the bottom of wheel 2 with nothing lined up");
-        let spin = |cartridge_bugs: bool| {
-            let mut wheels = Wheels { offsets: [one, two, Wheels::START], slip: [0, SLIP] };
-            wheels.stop_or_anim(2, CAN_WIN_WITH_7_OR_BAR, cartridge_bugs);
-            wheels
-        };
-        assert_eq!(spin(false).offsets[1], two + 1);
-        assert_eq!((spin(true).offsets[1], spin(true).slip[1]), (two, 0), "the cartridge stops on it");
+            .collect();
+        assert!(!unmatched.is_empty(), "a seven or bar at the bottom of wheel 2 with nothing lined up");
+        for ruleset in [Ruleset::Gen1, Ruleset::Modern] {
+            for &(one, two) in &unmatched {
+                let mut wheels = Wheels { offsets: [one, two, Wheels::START], slip: [0, SLIP] };
+                wheels.stop_or_anim(2, CAN_WIN_WITH_7_OR_BAR, ruleset);
+                assert_eq!((wheels.offsets[1], wheels.slip[1]), ((two + 1) % WHEEL_WRAP, SLIP - 1), "{ruleset:?} at {one}, {two}");
+            }
+        }
     }
 
     #[derive(Debug, PartialEq, Eq, serde::Deserialize)]

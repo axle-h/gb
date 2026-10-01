@@ -569,7 +569,7 @@ impl BattleMode {
             self.battle_type = BattleType::Safari;
         }
         let mut battle = Battle::new(BattleKind::Wild, &ctx.world.party[0].mon, vec![]);
-        battle.cartridge_bugs = ctx.world.cartridge_bugs;
+        battle.ruleset = ctx.world.ruleset;
         load_enemy_mon_data(&mut battle, &mut ctx.world.pokedex, species, level, 0, ctx.rng);
         self.enemy_nick = species.name();
         self.battle = Some(battle);
@@ -682,7 +682,7 @@ impl BattleMode {
         let party = read_trainer(class, number, lone_attack, rival_starter, ctx.world.player_id);
         self.prize_money = party.money;
         let mut battle = Battle::new(BattleKind::Trainer, &ctx.world.party[0].mon, party.mons);
-        battle.cartridge_bugs = ctx.world.cartridge_bugs;
+        battle.ruleset = ctx.world.ruleset;
         battle.trainer_class = class;
         battle.ai_count = 0xFF;
         battle.enemy.mon.party_pos = 0xFF;
@@ -1860,7 +1860,8 @@ impl BattleMode {
     /// `PrintMoveFailureText`, and Jump Kick's crash.
     fn print_move_failure_text(&mut self, side: Side) {
         let battle = self.b();
-        let label = if battle.damage_multipliers & 0x7F == 0 {
+        let immune = battle.damage_multipliers & 0x7F == 0;
+        let label = if immune {
             "_DoesntAffectMonText"
         } else if battle.critical_hit_or_ohko == CriticalHitOrOhko::FailedOhko {
             "_UnaffectedText"
@@ -1869,7 +1870,9 @@ impl BattleMode {
         };
         self.far_text(label, side);
         self.battle_mut().critical_hit_or_ohko = CriticalHitOrOhko::Normal;
-        if self.b().side(side).current_move.effect != effect::JUMP_KICK_EFFECT {
+        // From Gen 2, a type immunity is no crash.
+        let crash_on_immune = self.b().ruleset.is_gen1();
+        if self.b().side(side).current_move.effect != effect::JUMP_KICK_EFFECT || (immune && !crash_on_immune) {
             return;
         }
         let battle = self.battle_mut();
@@ -1893,7 +1896,7 @@ impl BattleMode {
         if self.b().side(side.other()).mon.hp == 0 {
             // The cartridge lets a Hyper Beam that faints its target skip the recharge.
             let battle = self.battle_mut();
-            if !battle.cartridge_bugs && move_effect == effect::HYPER_BEAM_EFFECT {
+            if !battle.ruleset.is_gen1() && move_effect == effect::HYPER_BEAM_EFFECT {
                 battle.side_mut(side).status2 |= Status2::NEEDS_TO_RECHARGE;
             }
             self.target_standing = false;
@@ -1936,7 +1939,7 @@ impl BattleMode {
         }
         battle.player.status1.remove(Status1::ATTACKING_MULTIPLE_TIMES);
         // The cartridge zeroes only the high byte, so the low one carries into the next enemy.
-        battle.player.bide_accumulated_damage &= if battle.cartridge_bugs { 0xFF } else { 0 };
+        battle.player.bide_accumulated_damage &= if battle.ruleset.is_gen1() { 0xFF } else { 0 };
         battle.enemy.status1 = Status1::empty();
         battle.enemy.status2 = Status2::empty();
         battle.enemy.status3 = Status3::empty();
@@ -2277,19 +2280,19 @@ pub(super) mod tests {
     use crate::party::Named;
     use crate::rng::GameRng;
     use crate::systems::battle::{Arena, Status1, Status2};
-    use crate::world::World;
+    use crate::world::{Ruleset, World};
     use crate::Pacing;
     use super::super::BattleMode;
     use super::*;
 
-    /// A wild battle already under way, the baseline arena's, with the cartridge's bugs as asked.
-    pub(in super::super) fn battle_mode(cartridge_bugs: bool) -> (BattleMode, World) {
+    /// A wild battle already under way, the baseline arena's, playing `ruleset`.
+    pub(in super::super) fn battle_mode(ruleset: Ruleset) -> (BattleMode, World) {
         let Arena { mut battle, party, .. } = Arena::baseline();
-        battle.cartridge_bugs = cartridge_bugs;
+        battle.ruleset = ruleset;
         let mut mode = BattleMode::wild(battle.enemy.mon.species, battle.enemy.mon.level);
         mode.battle = Some(battle);
         let party = party.into_iter().map(|mon| Named { nick: mon.mon.species.name(), mon, ot: vec![] }).collect();
-        (mode, World { party, cartridge_bugs, ..World::default() })
+        (mode, World { party, ruleset, ..World::default() })
     }
 
     pub(in super::super) fn with_ctx<T>(world: &mut World, f: impl FnOnce(&mut Ctx) -> T) -> T {
@@ -2306,21 +2309,21 @@ pub(super) mod tests {
 
     #[test]
     fn a_wild_mon_fainting_clears_all_of_bides_damage() {
-        let bide_left_after_a_faint = |cartridge_bugs| {
-            let (mut mode, mut world) = battle_mode(cartridge_bugs);
+        let bide_left_after_a_faint = |ruleset| {
+            let (mut mode, mut world) = battle_mode(ruleset);
             mode.battle_mut().player.bide_accumulated_damage = 0x0123;
             mode.battle_mut().enemy.mon.hp = 0;
             with_ctx(&mut world, |ctx| mode.call_faint_enemy_pokemon(ctx));
             mode.b().player.bide_accumulated_damage
         };
-        assert_eq!(bide_left_after_a_faint(false), 0);
-        assert_eq!(bide_left_after_a_faint(true), 0x23, "the cartridge zeroes the high byte only");
+        assert_eq!(bide_left_after_a_faint(Ruleset::Modern), 0);
+        assert_eq!(bide_left_after_a_faint(Ruleset::Gen1), 0x23, "the cartridge zeroes the high byte only");
     }
 
     #[test]
     fn a_hyper_beam_that_faints_its_target_still_needs_a_recharge_for_the_next_foe() {
-        let must_recharge = |cartridge_bugs| {
-            let (mut mode, mut world) = battle_mode(cartridge_bugs);
+        let must_recharge = |ruleset| {
+            let (mut mode, mut world) = battle_mode(ruleset);
             mode.battle_mut().player.current_move = MoveData::of_move(PokemonMoveName::HyperBeam);
             mode.battle_mut().enemy.mon.hp = 0;
             with_ctx(&mut world, |ctx| {
@@ -2330,14 +2333,14 @@ pub(super) mod tests {
             assert!(!mode.target_standing);
             mode.b().player.status2.contains(Status2::NEEDS_TO_RECHARGE)
         };
-        assert!(must_recharge(false));
-        assert!(!must_recharge(true), "the cartridge skips the recharge after a KO");
+        assert!(must_recharge(Ruleset::Modern));
+        assert!(!must_recharge(Ruleset::Gen1), "the cartridge skips the recharge after a KO");
     }
 
     #[test]
     fn a_jump_kick_that_misses_crashes_for_an_eighth_of_what_it_would_have_done() {
-        let hi_jump_kick = |cartridge_bugs, landed: bool| {
-            let (mut mode, world) = battle_mode(cartridge_bugs);
+        let hi_jump_kick = |ruleset, landed: bool| {
+            let (mut mode, world) = battle_mode(ruleset);
             let battle = mode.battle_mut();
             battle.player.selected_move = PokemonMoveName::HiJumpKick as u8;
             battle.player.current_move = MoveData::of_move(PokemonMoveName::HiJumpKick);
@@ -2356,9 +2359,30 @@ pub(super) mod tests {
             mode.print_move_failure_text(Side::Player);
             hp - mode.b().player.mon.hp
         };
-        let would_have_done = hi_jump_kick(false, true);
+        let would_have_done = hi_jump_kick(Ruleset::Modern, true);
         assert!(would_have_done >= 16, "{would_have_done}");
-        assert_eq!(hi_jump_kick(false, false), would_have_done / 8);
-        assert_eq!(hi_jump_kick(true, false), 1, "the cartridge's miss has zeroed the damage first");
+        assert_eq!(hi_jump_kick(Ruleset::Modern, false), would_have_done / 8);
+        assert_eq!(hi_jump_kick(Ruleset::Gen1, false), 1, "the cartridge's miss has zeroed the damage first");
+    }
+
+    #[test]
+    fn a_jump_kick_a_ghost_is_immune_to_does_not_crash() {
+        use poke_core::pokemon::PokemonType;
+        let crash = |ruleset| {
+            let (mut mode, world) = battle_mode(ruleset);
+            let battle = mode.battle_mut();
+            battle.player.selected_move = PokemonMoveName::JumpKick as u8;
+            battle.player.current_move = MoveData::of_move(PokemonMoveName::JumpKick);
+            battle.player.status2 |= Status2::USING_X_ACCURACY;
+            battle.enemy.mon.types = [PokemonType::Ghost as u8; 2];
+            let party: Vec<PartyMon> = world.party.iter().map(|named| named.mon.clone()).collect();
+            calc_move_damage(battle, &party, Side::Player, &mut GameRng::seeded(3));
+            assert!(battle.move_missed);
+            let hp = battle.player.mon.hp;
+            mode.print_move_failure_text(Side::Player);
+            hp - mode.b().player.mon.hp
+        };
+        assert_eq!(crash(Ruleset::Modern), 0);
+        assert_eq!(crash(Ruleset::Gen1), 1);
     }
 }

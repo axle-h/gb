@@ -6,7 +6,7 @@ use crate::party::PartyMon;
 use crate::rng::Rng;
 use crate::systems::math::{add_bcd, divide};
 use super::super::accuracy::move_hit_test;
-use super::super::ai::{select_enemy_move, CANNOT_MOVE};
+use super::super::ai::CANNOT_MOVE;
 use super::super::modified_stats::apply_penalty_and_badge_boost_to;
 use super::super::{effect, stat, status, BattleKind, Battle, Side, Status1, Status2, Status3, BASE_STAT_LEVEL, PP_MASK};
 use super::{clear_hyper_beam, conditional_but_it_failed, read_player_mon_cur_hp_and_status, BattleText, MimicMenu};
@@ -113,7 +113,7 @@ pub fn trapping_effect(battle: &mut Battle, user: Side, rng: &mut impl Rng) -> V
         return vec![];
     }
     // The cartridge ends it here, so a miss frees the target too.
-    if battle.cartridge_bugs {
+    if battle.ruleset.is_gen1() {
         clear_hyper_beam(battle, user);
     }
     let side = battle.side_mut(user);
@@ -160,19 +160,18 @@ pub fn reflect_light_screen_effect(battle: &mut Battle, user: Side) -> Vec<Battl
 
 /// `HazeEffect_`: both sides' stat modifiers and stats back to unmodified, the target's status
 /// cured, both disabled moves forgotten, and both sides' confusion, X Accuracy, Mist, Focus Energy,
-/// Leech Seed, Toxic and screens ended. The user's own status and the toxic counter stay.
-pub fn haze_effect(battle: &mut Battle, user: Side, badges: u8, rng: &mut impl Rng) -> Vec<BattleText> {
+/// Leech Seed, Toxic and screens ended. The user's own status and the toxic counter stay. A target
+/// it wakes or thaws loses its turn, which the asm says is intended.
+pub fn haze_effect(battle: &mut Battle, user: Side, badges: u8) -> Vec<BattleText> {
     for side in [&mut battle.player, &mut battle.enemy] {
         side.stat_mods = [BASE_STAT_LEVEL; 6];
         side.mon.stats[stat::ATTACK..].copy_from_slice(&side.unmodified_stats[stat::ATTACK..]);
     }
     let target = battle.side_mut(user.other());
-    let woken = target.mon.status & (status::FRZ | status::SLP_MASK) != 0;
-    // The cartridge takes the turn from a target it wakes or thaws.
-    if woken && battle.cartridge_bugs {
-        battle.side_mut(user.other()).selected_move = CANNOT_MOVE;
+    if target.mon.status & (status::FRZ | status::SLP_MASK) != 0 {
+        target.selected_move = CANNOT_MOVE;
     }
-    battle.side_mut(user.other()).mon.status = 0;
+    target.mon.status = 0;
     for side in [&mut battle.player, &mut battle.enemy] {
         side.disabled_move = 0;
         side.disabled_move_number = 0;
@@ -181,33 +180,14 @@ pub fn haze_effect(battle: &mut Battle, user: Side, badges: u8, rng: &mut impl R
         side.status3.remove(Status3::BADLY_POISONED | Status3::HAS_LIGHT_SCREEN_UP | Status3::HAS_REFLECT_UP);
     }
     // The cartridge drops the player's badge boosts, and the penalty of the status the user keeps.
-    if !battle.cartridge_bugs {
+    if !battle.ruleset.is_gen1() {
         for side in [Side::Player, Side::Enemy] {
             for which in 0..4 {
                 apply_penalty_and_badge_boost_to(battle, side, which, badges);
             }
         }
-        if woken {
-            choose_move_after_waking(battle, user.other(), rng);
-        }
     }
     vec![BattleText::StatusChangesEliminatedText]
-}
-
-/// A move for a mon that was asleep or frozen when moves were chosen, and so chose none: the enemy
-/// chooses as it would have, and the player's mon repeats the slot it last chose while it has PP.
-fn choose_move_after_waking(battle: &mut Battle, side: Side, rng: &mut impl Rng) {
-    match side {
-        Side::Enemy => select_enemy_move(battle, rng),
-        Side::Player => {
-            let player = &mut battle.player;
-            let slot = player.move_list_index as usize;
-            player.selected_move = match (player.mon.moves.get(slot).copied().flatten(), player.mon.pp.get(slot)) {
-                (Some(name), Some(pp)) if pp & PP_MASK != 0 => name as u8,
-                _ => CANNOT_MOVE,
-            };
-        }
-    }
 }
 
 /// `ConversionEffect_`: the target's types, unless the target is out of reach, which the enemy's
@@ -231,7 +211,7 @@ pub fn transform_effect(battle: &mut Battle, user: Side) -> Vec<BattleText> {
         battle.player.move_list_index = 0;
     }
     // The cartridge tests the player's own flags on the player's turn and nothing on the enemy's.
-    let out_of_reach = match battle.cartridge_bugs {
+    let out_of_reach = match battle.ruleset.is_gen1() {
         true => user == Side::Player && battle.player.status1.contains(Status1::INVULNERABLE),
         false => battle.side(user.other()).status1.contains(Status1::INVULNERABLE),
     };
@@ -331,6 +311,7 @@ pub fn pay_day_effect(battle: &mut Battle, user: Side) -> Vec<BattleText> {
 
 #[cfg(test)]
 mod tests {
+    use crate::world::Ruleset;
     use crate::rng::GameRng;
     use super::super::super::damage::calc_move_damage;
     use super::super::tests::using;
@@ -363,45 +344,35 @@ mod tests {
     }
 
     #[test]
-    fn haze_lets_a_target_it_wakes_move() {
+    fn haze_takes_the_turn_from_a_target_it_wakes() {
         for (user, frozen) in [(Side::Player, false), (Side::Enemy, true)] {
-            let hazed = |cartridge_bugs| {
-                let mut arena = using(user, PokemonMoveName::Haze);
-                arena.battle.cartridge_bugs = cartridge_bugs;
-                let target = arena.battle.side_mut(user.other());
-                target.mon.status = if frozen { status::FRZ } else { 3 };
-                target.selected_move = 0;
-                target.move_list_index = 1;
-                haze_effect(&mut arena.battle, user, 0, &mut GameRng::tape(vec![SECOND_SLOT_ROLL]));
-                let target = arena.battle.side(user.other());
-                (target.mon.status, target.selected_move, target.mon.moves[1].map(|name| name as u8))
-            };
-            let (status_byte, selected, second_move) = hazed(false);
-            assert_eq!((status_byte, Some(selected)), (0, second_move), "{user:?}");
-            assert_eq!(hazed(true).1, CANNOT_MOVE, "{user:?}");
+            let mut arena = using(user, PokemonMoveName::Haze);
+            let target = arena.battle.side_mut(user.other());
+            target.mon.status = if frozen { status::FRZ } else { 3 };
+            target.selected_move = 0;
+            haze_effect(&mut arena.battle, user, 0);
+            let target = arena.battle.side(user.other());
+            assert_eq!((target.mon.status, target.selected_move), (0, CANNOT_MOVE), "{user:?}");
         }
     }
 
-    /// A random byte `SelectEnemyMove` reads as the second slot.
-    const SECOND_SLOT_ROLL: u8 = 100;
-
     #[test]
     fn haze_keeps_the_badge_boosts_and_the_users_own_penalty() {
-        let hazed = |cartridge_bugs| {
+        let hazed = |ruleset| {
             let mut arena = using(Side::Player, PokemonMoveName::Haze);
-            arena.battle.cartridge_bugs = cartridge_bugs;
+            arena.battle.ruleset = ruleset;
             arena.battle.player.mon.status = status::PAR;
             arena.battle.enemy.mon.status = status::BRN;
-            haze_effect(&mut arena.battle, Side::Player, 0xFF, &mut GameRng::tape(vec![]));
+            haze_effect(&mut arena.battle, Side::Player, 0xFF);
             arena.battle
         };
-        let battle = hazed(false);
+        let battle = hazed(Ruleset::Modern);
         let (unmodified, stats) = (battle.player.unmodified_stats, battle.player.mon.stats);
         let boosted = |value: u16| value + (value >> 3);
         assert_eq!(stats[stat::ATTACK], boosted(unmodified[stat::ATTACK]));
         assert_eq!(stats[stat::SPEED], boosted(unmodified[stat::SPEED] >> 2));
         assert_eq!(battle.enemy.mon.stats, battle.enemy.unmodified_stats);
-        let battle = hazed(true);
+        let battle = hazed(Ruleset::Gen1);
         assert_eq!(battle.player.mon.stats, battle.player.unmodified_stats);
     }
 

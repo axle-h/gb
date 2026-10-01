@@ -4,6 +4,7 @@ use crate::item::ItemId;
 use crate::map::Map;
 use crate::move_name::PokemonMove;
 use crate::pokemon::PokemonSummary;
+use crate::ruleset::Ruleset;
 use crate::status::PokemonStatus;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, strum_macros::Display)]
@@ -27,6 +28,8 @@ pub struct BattleState {
     pub enemy_trapping: bool,
     /// `wEnemyMonActualCatchRate`, the rate `ItemUseBall` compares `Rand1` against.
     pub enemy_catch_rate: u8,
+    /// The rules the battle plays by, which the damage estimate follows.
+    pub ruleset: Ruleset,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -448,14 +448,14 @@ fn prepare(ctx: &mut Ctx) {
     // menu's, which knows whether the option screen was visited.
     let old = std::mem::take(ctx.world);
     let world = &mut *ctx.world;
-    world.cartridge_bugs = old.cartridge_bugs;
+    world.ruleset = old.ruleset;
     world.options = old.options;
     world.no_text_delay = old.no_text_delay;
     world.one_frame_letter_delay = old.one_frame_letter_delay;
     world.hall_of_fame = old.hall_of_fame;
     // The cartridge keeps `wStatusFlags6` too, so a save made on Cycling Road starts the new game
     // stuck on the bike.
-    world.location.always_on_bike = old.cartridge_bugs && old.location.always_on_bike;
+    world.location.always_on_bike = old.ruleset.is_gen1() && old.location.always_on_bike;
     world.player_name = poke_core::charmap::encode("NINTEN").expect("encodes");
     world.rival_name = poke_core::charmap::encode("SONY").expect("encodes");
 
@@ -470,6 +470,7 @@ fn prepare(ctx: &mut Ctx) {
 
 #[cfg(test)]
 mod tests {
+    use crate::world::Ruleset;
     use crate::command::{Command, Decision};
     use crate::mode::{Mode, Status};
     use crate::modes::main_menu::NEW_GAME;
@@ -478,8 +479,8 @@ mod tests {
     use crate::{Game, Input, Pacing};
 
     /// A new game started over a save made on Cycling Road.
-    fn new_game_over_a_cycling_road_save(cartridge_bugs: bool) -> World {
-        let mut save = World { player_id: 1, cartridge_bugs, ..World::default() };
+    fn new_game_over_a_cycling_road_save(ruleset: Ruleset) -> World {
+        let mut save = World { player_id: 1, ruleset, ..World::default() };
         save.location.always_on_bike = true;
         let mut game = Game::power_on(Some(save), GameRng::seeded(2), Pacing::Faithful);
         for _ in 0..30_000 {
@@ -499,12 +500,12 @@ mod tests {
 
     #[test]
     fn a_new_game_gets_off_the_bike_a_save_left_it_on() {
-        let world = new_game_over_a_cycling_road_save(false);
+        let world = new_game_over_a_cycling_road_save(Ruleset::Modern);
         assert!(!world.location.always_on_bike);
-        assert!(!world.cartridge_bugs);
+        assert_eq!(world.ruleset, Ruleset::Modern);
 
-        let world = new_game_over_a_cycling_road_save(true);
+        let world = new_game_over_a_cycling_road_save(Ruleset::Gen1);
         assert!(world.location.always_on_bike, "the cartridge carries `BIT_ALWAYS_ON_BIKE` over");
-        assert!(world.cartridge_bugs, "the switch outlives the rebuilt world");
+        assert_eq!(world.ruleset, Ruleset::Gen1, "the ruleset outlives the rebuilt world");
     }
 }

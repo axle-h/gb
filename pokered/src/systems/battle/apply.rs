@@ -6,7 +6,7 @@ use crate::rng::Rng;
 use super::effects::stat_modifiers::stat_modifier_up_effect;
 use super::damage::{FIGHTING, NORMAL};
 use super::effects::BattleText;
-use super::{effect, Battle, Side, Status2, MAX_STAT_LEVEL};
+use super::{effect, Battle, Side, Status1, Status2, MAX_STAT_LEVEL};
 
 const SONICBOOM_DAMAGE: u8 = 20;
 const DRAGON_RAGE_DAMAGE: u8 = 40;
@@ -33,9 +33,12 @@ pub fn apply_attack_to_pokemon(battle: &mut Battle, attacker: Side, rng: &mut im
                 DRAGON_RAGE_DAMAGE
             } else {
                 let mut bound = level.wrapping_add(level >> 1);
-                // The cartridge lets the enemy roll 0, and the player's roll never ends at level 1.
-                let zero_allowed = battle.cartridge_bugs && attacker == Side::Enemy;
-                if !battle.cartridge_bugs {
+                // The cartridge lets the enemy roll 0, and hangs on a bound no roll can meet, as the
+                // player's is at level 1; Gen 1 takes Modern's range there rather than hang.
+                let gen1 = battle.ruleset.is_gen1();
+                let mut zero_allowed = gen1 && attacker == Side::Enemy;
+                if !gen1 || bound == 0 || (bound == 1 && !zero_allowed) {
+                    zero_allowed = false;
                     bound = bound.max(2);
                 }
                 loop {
@@ -55,24 +58,34 @@ pub fn apply_attack_to_pokemon(battle: &mut Battle, attacker: Side, rng: &mut im
 
 /// `ApplyDamageToEnemyPokemon` or `ApplyDamageToPlayerPokemon`: `wDamage` off `target`'s HP, or
 /// off a substitute if it has one; overkill leaves 0 HP and `wDamage` what the HP was. `turn` is
-/// `hWhoseTurn`: damage a mon does itself ignores substitutes. What `turn`'s move did to the other
-/// mon is kept for Counter.
+/// `hWhoseTurn`: damage a mon does itself ignores substitutes. Outside Gen 1, what `turn`'s move did
+/// to the other mon's HP is kept for Counter and added to a storing Bide's, and damage a substitute
+/// took counts for neither, as from Gen 2.
 pub fn apply_damage_to_pokemon(battle: &mut Battle, target: Side, turn: Side) -> Vec<BattleText> {
     if battle.damage == 0 {
         return vec![];
     }
+    let to_substitute = battle.side(target).status2.contains(Status2::HAS_SUBSTITUTE_UP);
     let texts = damage_hp_or_substitute(battle, target, turn);
+    if battle.ruleset.is_gen1() || target == turn || to_substitute {
+        return texts;
+    }
+    let damage = battle.damage;
     let current = battle.side(turn).current_move;
-    if !battle.cartridge_bugs && target != turn && current.power != 0
-        && matches!(current.move_type, NORMAL | FIGHTING) && current.animation != PokemonMoveName::Counter as u8 {
-        battle.side_mut(turn).counter_damage = battle.damage;
+    if current.power != 0 && matches!(current.move_type, NORMAL | FIGHTING)
+        && current.animation != PokemonMoveName::Counter as u8 {
+        battle.side_mut(turn).counter_damage = damage;
+    }
+    let victim = battle.side_mut(target);
+    if victim.status1.contains(Status1::STORING_ENERGY) {
+        victim.bide_accumulated_damage = victim.bide_accumulated_damage.saturating_add(damage);
     }
     texts
 }
 
 fn damage_hp_or_substitute(battle: &mut Battle, target: Side, turn: Side) -> Vec<BattleText> {
     // The cartridge swaps `hWhoseTurn` for self-inflicted damage, so it hits the *other* substitute.
-    let self_inflicted = target == turn && !battle.cartridge_bugs;
+    let self_inflicted = target == turn && !battle.ruleset.is_gen1();
     if battle.side(target).status2.contains(Status2::HAS_SUBSTITUTE_UP) && !self_inflicted {
         return attack_substitute(battle, turn);
     }
@@ -96,7 +109,7 @@ fn damage_hp_or_substitute(battle: &mut Battle, target: Side, turn: Side) -> Vec
 pub fn attack_substitute(battle: &mut Battle, turn: Side) -> Vec<BattleText> {
     let mut texts = vec![BattleText::SubstituteTookDamageText];
     let damage = battle.damage;
-    let cartridge_bugs = battle.cartridge_bugs;
+    let gen1 = battle.ruleset.is_gen1();
     let victim = battle.side_mut(turn.other());
     let substitute_hp = victim.substitute_hp;
     if damage >> 8 == 0 {
@@ -111,10 +124,10 @@ pub fn attack_substitute(battle: &mut Battle, turn: Side) -> Vec<BattleText> {
     let attacker = battle.side_mut(turn);
     // The cartridge zeroes the whole effect, so the user's own recoil, drain, recharge and
     // self-KO are lost too, and leaves `wDamage` the full hit.
-    if cartridge_bugs || !ATTACKERS_OWN_EFFECTS.contains(&attacker.current_move.effect) {
+    if gen1 || !ATTACKERS_OWN_EFFECTS.contains(&attacker.current_move.effect) {
         attacker.current_move.effect = 0;
     }
-    if !cartridge_bugs {
+    if !gen1 {
         battle.damage = substitute_hp as u16;
     }
     texts
@@ -145,11 +158,12 @@ pub fn handle_building_rage(battle: &mut Battle, attacker: Side, badges: u8) -> 
 
 #[cfg(test)]
 mod tests {
+    use crate::world::Ruleset;
     use poke_core::moves::MoveData;
     use serde_json::{json, Value};
     use crate::rng::GameRng;
     use super::super::fixture::{each_case, side};
-    use super::super::turn::handle_self_confusion_damage;
+    use super::super::turn::{check_status_conditions, handle_self_confusion_damage};
     use super::super::Arena;
     use super::*;
 
@@ -160,9 +174,9 @@ mod tests {
         });
     }
 
-    fn psywave(attacker: Side) -> u16 {
+    fn psywave(attacker: Side, ruleset: Ruleset) -> u16 {
         let mut arena = Arena::baseline();
-        arena.battle.cartridge_bugs = false;
+        arena.battle.ruleset = ruleset;
         let user = arena.battle.side_mut(attacker);
         user.current_move = MoveData::of_move(PokemonMoveName::Psywave);
         user.mon.level = 1;
@@ -172,14 +186,22 @@ mod tests {
 
     #[test]
     fn psywave_at_level_1_does_1_for_either_side() {
-        assert_eq!(psywave(Side::Player), 1);
-        assert_eq!(psywave(Side::Enemy), 1);
+        assert_eq!(psywave(Side::Player, Ruleset::Modern), 1);
+        assert_eq!(psywave(Side::Enemy, Ruleset::Modern), 1);
+    }
+
+    /// The cartridge's player never finishes a level 1 roll; Gen 1 rolls Modern's range instead,
+    /// and its enemy still rolls the 0 the cartridge allows.
+    #[test]
+    fn a_gen_1_psywave_at_level_1_ends() {
+        assert_eq!(psywave(Side::Player, Ruleset::Gen1), 1);
+        assert_eq!(psywave(Side::Enemy, Ruleset::Gen1), 0);
     }
 
     #[test]
     fn damage_a_mon_does_itself_ignores_substitutes() {
         let mut arena = Arena::baseline();
-        arena.battle.cartridge_bugs = false;
+        arena.battle.ruleset = Ruleset::Modern;
         for side in [Side::Player, Side::Enemy] {
             let combatant = arena.battle.side_mut(side);
             combatant.status2 |= Status2::HAS_SUBSTITUTE_UP;
@@ -193,9 +215,9 @@ mod tests {
     }
 
     /// The player's `name` doing 100 damage to an enemy substitute of 10 HP.
-    fn breaking_a_substitute(name: PokemonMoveName, cartridge_bugs: bool) -> Battle {
+    fn breaking_a_substitute(name: PokemonMoveName, ruleset: Ruleset) -> Battle {
         let mut arena = Arena::baseline();
-        arena.battle.cartridge_bugs = cartridge_bugs;
+        arena.battle.ruleset = ruleset;
         arena.battle.player.current_move = MoveData::of_move(name);
         arena.battle.enemy.status2 |= Status2::HAS_SUBSTITUTE_UP;
         arena.battle.enemy.substitute_hp = 10;
@@ -207,14 +229,37 @@ mod tests {
     #[test]
     fn breaking_a_substitute_keeps_the_users_own_effect_and_stops_the_targets() {
         use PokemonMoveName::*;
-        let effect_after = |name, cartridge_bugs| breaking_a_substitute(name, cartridge_bugs).player.current_move.effect;
+        let effect_after = |name, ruleset| breaking_a_substitute(name, ruleset).player.current_move.effect;
         for name in [DoubleEdge, Explosion, HyperBeam] {
-            assert_eq!(effect_after(name, false), MoveData::of_move(name).effect);
-            assert_eq!(effect_after(name, true), 0);
+            assert_eq!(effect_after(name, Ruleset::Modern), MoveData::of_move(name).effect);
+            assert_eq!(effect_after(name, Ruleset::Gen1), 0);
         }
-        assert_eq!(effect_after(Flamethrower, false), 0);
-        assert_eq!(breaking_a_substitute(DoubleEdge, false).damage, 10);
-        assert_eq!(breaking_a_substitute(DoubleEdge, true).damage, 100);
+        assert_eq!(effect_after(Flamethrower, Ruleset::Modern), 0);
+        assert_eq!(breaking_a_substitute(DoubleEdge, Ruleset::Modern).damage, 10);
+        assert_eq!(breaking_a_substitute(DoubleEdge, Ruleset::Gen1).damage, 100);
+    }
+
+    #[test]
+    fn damage_a_substitute_takes_counts_for_neither_counter_nor_bide() {
+        let hit = |substitute: bool| {
+            let mut arena = Arena::baseline();
+            arena.battle.ruleset = Ruleset::Modern;
+            arena.battle.player.current_move = MoveData::of_move(PokemonMoveName::Tackle);
+            let enemy = &mut arena.battle.enemy;
+            enemy.status1 |= Status1::STORING_ENERGY;
+            enemy.num_attacks_left = 2;
+            if substitute {
+                enemy.status2 |= Status2::HAS_SUBSTITUTE_UP;
+                enemy.substitute_hp = 50;
+            }
+            arena.battle.damage = 20;
+            apply_damage_to_pokemon(&mut arena.battle, Side::Enemy, Side::Player);
+            let party = arena.party.clone();
+            check_status_conditions(&mut arena.battle, &party, Side::Enemy, &mut GameRng::tape(vec![0xFF]));
+            (arena.battle.player.counter_damage, arena.battle.enemy.bide_accumulated_damage)
+        };
+        assert_eq!(hit(false), (20, 20));
+        assert_eq!(hit(true), (0, 0));
     }
 
     #[test]

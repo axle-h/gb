@@ -17,10 +17,11 @@ rule names the comment in the code that carries the argument, so the code stays 
   --workspace` is the default tier, about 30 s warm; every other command is in
   [test-suite](docs/test-suite.md).
 - Agent and policy tracing goes to stdout, so add `--nocapture` when you want it.
-- **Run `full_playthrough` *and* `grand_tour` after every major work item and before pushing.** They
-  gate different halves — the scripted route through the whole of Kanto, and the deployed `LlmPolicy`
-  walking the whole game from a fresh save with every story gate live — and the leg tier substitutes
-  for neither.
+- **Run the four pre-push gates after every major work item and before pushing**: `full_playthrough`,
+  `grand_tour`, `pokered`'s slow tier and `poke-agent`'s `lockstep::`/`harvest::` tier, commands in
+  [test-suite](docs/test-suite.md). They gate different things — the scripted route through the whole
+  of Kanto, the deployed `LlmPolicy` walking the whole game from a fresh save with every story gate
+  live, and the recreation against the cartridge — and the leg tier substitutes for none of them.
 - **No em dashes in the strings the *agent* generates**: `AgentEvent`'s `Display`, `MetaTile`'s, a
   `Notice`, `learnset::teach_refusal`. Those go to the page as well as to the model and are assembled
   a fragment at a time, where a dash reads as punctuation the writer did not choose. The rule is

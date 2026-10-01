@@ -429,7 +429,7 @@ impl Overworld {
             spinning: self.spinning,
             simulating: self.scripted,
             beyond: Some(&surrounding),
-            cartridge_bugs: ctx.world.cartridge_bugs,
+            ruleset: ctx.world.ruleset,
         };
         sprites::update_sprites(&mut self.sprites, &env, &mut self.rt.paths, ctx.rng);
         if std::mem::take(&mut self.rt.paths.path_ended) {
@@ -633,7 +633,7 @@ impl Overworld {
                 }
             }
         }
-        self.rt.wild_mons.load(map, ctx.world.cartridge_bugs);
+        self.rt.wild_mons.load(map, ctx.world.ruleset);
         self.rt.text_pointers = None;
         let entry = tileset_entry(header.tileset);
         ctx.screen.tiles.animation.kind = entry.animation;

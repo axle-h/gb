@@ -16,6 +16,7 @@ use pokered::modes::battle::BattleMode;
 use pokered::modes::menu_input::CursorMemory;
 use pokered::rng::GameRng;
 use pokered::{Game, Input, Pacing};
+use pokered::world::Ruleset;
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointer, DmgPointerRead};
 use super::learn_move::hijack;
 use super::{assert_late, breakpoint, joypad, open_the_start_menu, ARROW, BOX, CURSOR, DELAY3};
@@ -348,7 +349,7 @@ fn recreation(gb: &GameBoy, opponent: Opponent, lead: Lead, tape: Vec<u8>) -> Ga
 pub(super) fn recreation_with(gb: &GameBoy, opponent: Opponent, lead: Lead, tape: Vec<u8>, skip_seams: bool) -> Game {
     let mmu = gb.core().mmu();
     let mut world = the_world(gb);
-    world.cartridge_bugs = true;
+    world.ruleset = Ruleset::Gen1;
     world.player_id = word(gb, sym::wPlayerID.address);
     world.badges = mmu.read_pointer(&sym::wObtainedBadges);
     world.bag = super::item_menu::the_bag(gb);

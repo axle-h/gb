@@ -95,6 +95,7 @@ impl BattleStateReader for MMU {
             // `wEnemyBattleStatus1` bit 5 is `USING_TRAPPING_MOVE`.
             enemy_trapping: self.read_pointer(&pokered_symbols::wEnemyBattleStatus1) & (1 << 5) != 0,
             enemy_catch_rate: self.read_pointer(&pokered_symbols::wEnemyMonActualCatchRate),
+            ruleset: poke_core::ruleset::Ruleset::Gen1,
         })
     }
 }

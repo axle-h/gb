@@ -23,10 +23,10 @@ fn modified(unmodified: u16, stat_mod: u8) -> u16 {
 }
 
 /// `StatModifierUpEffect`: one stage, or two for the `_UP2` effects without passing +6, and
-/// nothing at +6 already or at a stat of exactly 999. The stat is worked out afresh from the
-/// unmodified one, then given back its own penalty and badge boost.
+/// nothing at +6 already or at a stat of exactly 999, where a +2 still keeps one stage as Gen 2's
+/// does. The stat is worked out afresh from the unmodified one, then given back its own penalty
+/// and badge boost.
 pub fn stat_modifier_up_effect(battle: &mut Battle, user: Side, badges: u8) -> Vec<BattleText> {
-    let cartridge_bugs = battle.cartridge_bugs;
     let side = battle.side_mut(user);
     let move_effect = side.current_move.effect;
     let mut which = move_effect.wrapping_sub(effect::ATTACK_UP1_EFFECT);
@@ -41,13 +41,11 @@ pub fn stat_modifier_up_effect(battle: &mut Battle, user: Side, badges: u8) -> V
     if move_effect >= effect::ATTACK_UP1_EFFECT + 8 {
         stage = (stage + 1).min(MAX_STAT_LEVEL);
     }
-    let old_stage = side.stat_mods[which];
     side.stat_mods[which] = stage;
     if which < 4 {
         let index = stat::ATTACK + which;
         if side.mon.stats[index] == MAX_STAT_VALUE {
-            // The cartridge takes back one stage of a +2.
-            side.stat_mods[which] = if cartridge_bugs { stage - 1 } else { old_stage };
+            side.stat_mods[which] = stage - 1;
             return vec![BattleText::NothingHappenedText];
         }
         side.mon.stats[index] = modified(side.unmodified_stats[index], stage).min(MAX_STAT_VALUE);
@@ -61,11 +59,12 @@ pub fn stat_modifier_up_effect(battle: &mut Battle, user: Side, badges: u8) -> V
 
 /// `StatModifierDownEffect`, on the user's target. A substitute blocks it, and a side effect lands
 /// a third of the time without a hit test while the move itself takes one. One stage, or two for
-/// the `_DOWN2` effects, not below -6, and nothing for a stat of exactly 1. The stat is worked out
+/// the `_DOWN2` effects, not below -6, and nothing for a stat of exactly 1, where a -2 still keeps
+/// one stage as Gen 2's does. The stat is worked out
 /// afresh, never below 1, then given back its own penalty and badge boost. A side effect that fails
 /// says nothing.
 pub fn stat_modifier_down_effect(battle: &mut Battle, user: Side, badges: u8, rng: &mut impl Rng) -> Vec<BattleText> {
-    let cartridge_bugs = battle.cartridge_bugs;
+    let gen1 = battle.ruleset.is_gen1();
     let move_effect = battle.side(user).current_move.effect;
     let side_effect = move_effect >= effect::ATTACK_DOWN_SIDE_EFFECT;
     let missed = |battle: &Battle| match side_effect || battle.move_didnt_miss {
@@ -75,7 +74,7 @@ pub fn stat_modifier_down_effect(battle: &mut Battle, user: Side, badges: u8, rn
     let cant_lower = || if side_effect { vec![] } else { vec![BattleText::NothingHappenedText] };
     let target = user.other();
     // The cartridge makes the enemy's copy miss a quarter of the time before any other check.
-    if cartridge_bugs && user == Side::Enemy && rng.random() < ENEMY_STAT_DOWN_MISS {
+    if gen1 && user == Side::Enemy && rng.random() < ENEMY_STAT_DOWN_MISS {
         return missed(battle);
     }
     if battle.side(target).status2.contains(Status2::HAS_SUBSTITUTE_UP) {
@@ -107,13 +106,11 @@ pub fn stat_modifier_down_effect(battle: &mut Battle, user: Side, badges: u8, rn
     if move_effect >= effect::ATTACK_DOWN2_EFFECT - 0x16 && !side_effect {
         stage = (stage - 1).max(1);
     }
-    let old_stage = side.stat_mods[which];
     side.stat_mods[which] = stage;
     if which < 4 {
         let index = stat::ATTACK + which;
         if side.mon.stats[index] == 1 {
-            // The cartridge gives back one stage of a -2.
-            side.stat_mods[which] = if cartridge_bugs { stage + 1 } else { old_stage };
+            side.stat_mods[which] = stage + 1;
             return cant_lower();
         }
         side.mon.stats[index] = modified(side.unmodified_stats[index], stage).max(1);
@@ -127,7 +124,7 @@ pub fn stat_modifier_down_effect(battle: &mut Battle, user: Side, badges: u8, rn
 /// paralysis and burn penalties again to the mon not moving, while the stat worked out afresh keeps
 /// neither unless one of those lands on it.
 fn reapply_penalties_and_boosts(battle: &mut Battle, user: Side, whose: Side, which: usize, badges: u8) {
-    if battle.cartridge_bugs {
+    if battle.ruleset.is_gen1() {
         if whose == Side::Player {
             apply_badge_stat_boosts(battle, badges);
         }
@@ -139,6 +136,7 @@ fn reapply_penalties_and_boosts(battle: &mut Battle, user: Side, whose: Side, wh
 
 #[cfg(test)]
 mod tests {
+    use crate::world::Ruleset;
     use serde_json::json;
     use crate::rng::GameRng;
     use super::super::super::fixture::{each_case, side};
@@ -161,7 +159,7 @@ mod tests {
 
     /// The baseline battle playing the fixes, `user` about to use a move with `move_effect`.
     fn playing(arena: &mut Arena, user: Side, move_effect: u8) -> &mut Battle {
-        arena.battle.cartridge_bugs = false;
+        arena.battle.ruleset = Ruleset::Modern;
         let current_move = &mut arena.battle.side_mut(user).current_move;
         current_move.effect = move_effect;
         current_move.accuracy = 255;
@@ -175,15 +173,15 @@ mod tests {
 
     #[test]
     fn an_enemy_stat_down_move_misses_no_more_often_than_the_players() {
-        let lowered = |cartridge_bugs: bool| {
+        let lowered = |ruleset: Ruleset| {
             let mut arena = Arena::baseline();
             let battle = playing(&mut arena, Side::Enemy, effect::ATTACK_DOWN1_EFFECT);
-            battle.cartridge_bugs = cartridge_bugs;
+            battle.ruleset = ruleset;
             let texts = stat_modifier_down_effect(battle, Side::Enemy, 0, &mut GameRng::tape(vec![0, 0]));
             (texts, arena.battle.player.stat_mods[0])
         };
-        assert_eq!(lowered(false), (vec![BattleText::MonsStatsFellText], BASE_STAT_LEVEL - 1));
-        assert_eq!(lowered(true), (vec![BattleText::ButItFailedText], BASE_STAT_LEVEL));
+        assert_eq!(lowered(Ruleset::Modern), (vec![BattleText::MonsStatsFellText], BASE_STAT_LEVEL - 1));
+        assert_eq!(lowered(Ruleset::Gen1), (vec![BattleText::ButItFailedText], BASE_STAT_LEVEL));
     }
 
     #[test]
@@ -220,15 +218,15 @@ mod tests {
     }
 
     #[test]
-    fn a_two_stage_move_that_does_nothing_leaves_the_stage_as_it_was() {
+    fn a_two_stage_move_that_does_nothing_still_keeps_one_stage() {
         let mut arena = Arena::baseline();
         arena.battle.player.mon.stats[stat::ATTACK] = MAX_STAT_VALUE;
         let texts = stat_modifier_up_effect(playing(&mut arena, Side::Player, effect::ATTACK_UP2_EFFECT), Side::Player, 0);
-        assert_eq!((texts, arena.battle.player.stat_mods[0]), (vec![BattleText::NothingHappenedText], BASE_STAT_LEVEL));
+        assert_eq!((texts, arena.battle.player.stat_mods[0]), (vec![BattleText::NothingHappenedText], BASE_STAT_LEVEL + 1));
 
         arena.battle.player.mon.stats[stat::DEFENSE] = 1;
         let battle = playing(&mut arena, Side::Enemy, effect::DEFENSE_DOWN2_EFFECT);
         let texts = stat_modifier_down_effect(battle, Side::Enemy, 0, &mut enemy_hits());
-        assert_eq!((texts, arena.battle.player.stat_mods[1]), (vec![BattleText::NothingHappenedText], BASE_STAT_LEVEL));
+        assert_eq!((texts, arena.battle.player.stat_mods[1]), (vec![BattleText::NothingHappenedText], BASE_STAT_LEVEL - 1));
     }
 }

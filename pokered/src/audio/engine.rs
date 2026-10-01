@@ -12,7 +12,7 @@
 //! its octave shifts, vibrato, the pitch slide, the duty cycle rotation, the sound effect priority
 //! rules, the fade-out's volume steps and the cry modifiers. The frame counts are exact too,
 //! because the engine ticks once a frame and nothing in it waits on anything else. The engine's
-//! bugs are fixed unless [`AudioEngine::cartridge_bugs`] asks for them.
+//! bugs are fixed unless [`AudioEngine::ruleset`] is Gen 1.
 //!
 //! What comes out is a [`Write`] per register the cartridge would have written, in order, so a
 //! backend renders the same sound without the engine knowing what a backend is, and no oscillator
@@ -28,6 +28,7 @@ use super::data::{
     CRY_SFX_START, NOISE_INSTRUMENTS_END,
 };
 use super::Write;
+use crate::world::Ruleset;
 
 const NUM_CHANNELS: usize = 8;
 const CHAN3: usize = 2;
@@ -247,10 +248,9 @@ pub struct AudioEngine {
     /// next VBlank, so a save taken between the two has to keep it.
     #[serde(default)]
     out: Vec<Write>,
-    /// `World::cartridge_bugs`, which `Game` copies here: play the engine's bugs rather than their
-    /// fixes.
-    #[serde(default)]
-    pub cartridge_bugs: bool,
+    /// `World::ruleset`, which `Game` copies here.
+    #[serde(default, alias = "cartridge_bugs", deserialize_with = "crate::world::ruleset_or_cartridge_bugs")]
+    pub ruleset: Ruleset,
     /// Set in a save whose channel pointers are the cartridge's addresses rather than the source
     /// data's, which differ past the engine's code; `restart_saved_music` puts it right.
     #[serde(default = "cartridge_addresses")]
@@ -272,9 +272,9 @@ impl AudioEngine {
         Self { bank, saved_bank: bank, ..Default::default() }
     }
 
-    /// The engine with the cartridge's bugs, for a comparison with the cartridge.
+    /// The engine playing Gen 1, for a comparison with the cartridge.
     pub fn cartridge(bank: AudioBank) -> Self {
-        Self { cartridge_bugs: true, ..Self::new(bank) }
+        Self { ruleset: Ruleset::Gen1, ..Self::new(bank) }
     }
 
     pub fn bank(&self) -> AudioBank {
@@ -965,7 +965,7 @@ impl AudioEngine {
         let delay = multiply_add(self.channels[c].note_delay_counter_fractional_part, scaled, tempo);
         let [mut counter, fractional] = delay.to_be_bytes();
         // The cartridge lets a tempo below `$0100` round a delay to 0, which counts down from 255.
-        if counter == 0 && !self.cartridge_bugs {
+        if counter == 0 && !self.ruleset.is_gen1() {
             counter = 1;
         }
         self.channels[c].note_delay_counter_fractional_part = fractional;
@@ -1000,7 +1000,7 @@ impl AudioEngine {
             let leftovers = self.init_pitch_slide_vars(c, d, e);
             // The cartridge divides in the frequency's own registers, so a note that arms a slide
             // sounds the divide's leftovers for its first frame.
-            if self.cartridge_bugs {
+            if self.ruleset.is_gen1() {
                 (d, e) = leftovers;
             }
         }
@@ -1050,7 +1050,7 @@ impl AudioEngine {
     fn apply_wave_pattern_and_frequency(&mut self, c: usize, d: u8, e: u8) {
         if c == CHAN3 || c == CHAN7 {
             let instrument = if c == CHAN3 { self.music_wave_instrument } else { self.sfx_wave_instrument };
-            let samples = self.bank.wave_sample(instrument, self.cartridge_bugs);
+            let samples = self.bank.wave_sample(instrument, self.ruleset);
             self.write_register(R_AUD3ENA, 0);
             for (i, byte) in samples.into_iter().enumerate() {
                 self.write_register(AUD3WAVERAM + i as u16, byte);
@@ -1063,7 +1063,7 @@ impl AudioEngine {
         self.write_channel_register(c, REG_FREQUENCY_LO + 1, d);
         // The cartridge's engines 1 and 3 do not ask which channel this is, so a cry detunes the
         // music under it too.
-        if c >= CHAN5 || (self.cartridge_bugs && self.bank != AudioBank::Two) {
+        if c >= CHAN5 || (self.ruleset.is_gen1() && self.bank != AudioBank::Two) {
             self.apply_frequency_modifier(c, d, e);
         }
     }
@@ -1095,12 +1095,10 @@ impl AudioEngine {
     }
 
     /// `AudioN_IsBattleSFX`, which only `AUDIO_2` has: whether channel 5 or channel 8 is playing a
-    /// battle sound effect.
+    /// battle sound effect, tested as the cartridge and Yellow do, on the two ids *or*-ed together.
     fn is_battle_sfx(&self) -> bool {
-        let battle = |id: u8| (BATTLE_SFX_START.0..BATTLE_SFX_END.0).contains(&id);
-        let (noise, pulse) = (self.channels[CHAN8].sound_id, self.channels[CHAN5].sound_id);
-        // The cartridge *or*s the two ids together and tests that.
-        if self.cartridge_bugs { battle(noise | pulse) } else { battle(noise) || battle(pulse) }
+        let id = self.channels[CHAN8].sound_id | self.channels[CHAN5].sound_id;
+        (BATTLE_SFX_START.0..BATTLE_SFX_END.0).contains(&id)
     }
 
     fn cry_or_battle_sfx(&self) -> bool {
@@ -1208,7 +1206,7 @@ impl AudioEngine {
                 (channel.pitch_slide_current_frequency_high_byte, channel.pitch_slide_target_frequency_high_byte);
             // The cartridge takes the borrow off the current frequency's high byte rather than the
             // target's, so a slide upwards whose low byte borrows comes out $200 too far.
-            difference_high = if self.cartridge_bugs {
+            difference_high = if self.ruleset.is_gen1() {
                 target_high.wrapping_sub(current_high.wrapping_sub(borrow as u8))
             } else {
                 target_high.wrapping_sub(current_high).wrapping_sub(borrow as u8)
@@ -1357,7 +1355,7 @@ impl AudioEngine {
         self.music_wave_instrument = 0;
         self.sfx_wave_instrument = 0;
         for c in 0..NUM_CHANNELS {
-            let kept = if self.cartridge_bugs { self.channels[c] } else { ChannelState::default() };
+            let kept = if self.ruleset.is_gen1() { self.channels[c] } else { ChannelState::default() };
             // The cartridge's clear stops one array short: the pitch slide targets, the fractional
             // delays, the octaves and the volumes survive a stop.
             self.channels[c] = ChannelState {
@@ -1501,8 +1499,8 @@ impl CueTrace {
 }
 
 impl CueInput {
-    pub fn play(&self, cartridge_bugs: bool) -> CueTrace {
-        let mut engine = AudioEngine { cartridge_bugs, ..AudioEngine::new(self.bank) };
+    pub fn play(&self, ruleset: Ruleset) -> CueTrace {
+        let mut engine = AudioEngine { ruleset, ..AudioEngine::new(self.bank) };
         engine.engine_play_sound(SoundId::STOP_ALL_MUSIC);
         engine.take_writes();
         let mut trace = CueTrace::default();
@@ -1645,7 +1643,7 @@ mod tests {
     fn a_note_that_arms_a_pitch_slide_sounds_its_own_frequency_first() {
         assert_eq!(pulse1_lows(&playing(sounds::MUSIC_SAFARI_ZONE).frame()), [0x0C]);
         let mut cartridge = playing(sounds::MUSIC_SAFARI_ZONE);
-        cartridge.cartridge_bugs = true;
+        cartridge.ruleset = Ruleset::Gen1;
         assert_eq!(pulse1_lows(&cartridge.frame()), [0xFF]);
     }
 
@@ -1653,8 +1651,8 @@ mod tests {
     /// borrows the low byte's carry from the wrong high byte and makes it `$2F0`.
     #[test]
     fn a_slide_upwards_measures_the_distance_it_has_to_go() {
-        let slide = |cartridge_bugs: bool| {
-            let mut engine = AudioEngine { cartridge_bugs, ..AudioEngine::new(AudioBank::One) };
+        let slide = |ruleset: Ruleset| {
+            let mut engine = AudioEngine { ruleset, ..AudioEngine::new(AudioBank::One) };
             engine.channels[0].note_delay_counter = 17;
             engine.channels[0].pitch_slide_length_modifier = 1;
             engine.channels[0].pitch_slide_target_frequency_high_byte = 0x02;
@@ -1666,16 +1664,16 @@ mod tests {
             // divisor is what is left in the fractional part.
             (channel.pitch_slide_frequency_steps, channel.pitch_slide_frequency_steps_fractional_part)
         };
-        assert_eq!(slide(false), (0xF0 / 16 + 1, 0));
-        assert_eq!(slide(true), ((0x2F0 / 16 + 1) as u8, 0));
+        assert_eq!(slide(Ruleset::Modern), (0xF0 / 16 + 1, 0));
+        assert_eq!(slide(Ruleset::Gen1), ((0x2F0 / 16 + 1) as u8, 0));
     }
 
     /// A cry's frequency modifier bends the cry and nothing else: the music on channel 1 under it
     /// keeps its pitch. The cartridge's engines 1 and 3 detune the music too.
     #[test]
     fn a_cry_leaves_the_music_under_it_in_tune() {
-        let detuned = |cartridge_bugs: bool| {
-            let mut engine = AudioEngine { cartridge_bugs, ..AudioEngine::new(AudioBank::One) };
+        let detuned = |ruleset: Ruleset| {
+            let mut engine = AudioEngine { ruleset, ..AudioEngine::new(AudioBank::One) };
             engine.engine_play_sound(SoundId::STOP_ALL_MUSIC);
             engine.play_music(sounds::MUSIC_PALLET_TOWN);
             engine.play_cry(1);
@@ -1684,32 +1682,30 @@ mod tests {
             engine.apply_wave_pattern_and_frequency(0, 0x06, 0x0B);
             pulse1_lows(&engine.take_writes())
         };
-        assert_eq!(detuned(false), [0x0B]);
-        assert_eq!(detuned(true), [0x0B, 0x4B]);
+        assert_eq!(detuned(Ruleset::Modern), [0x0B]);
+        assert_eq!(detuned(Ruleset::Gen1), [0x0B, 0x4B]);
     }
 
-    /// `AUDIO_2` asks whether channel 5 or channel 8 plays a battle sound, which the cartridge does
-    /// by testing the two ids *or*-ed together: a drum under a battle sound can make it not one.
+    /// `AUDIO_2` asks whether channel 5 or channel 8 plays a battle sound by testing the two ids
+    /// *or*-ed together, so a drum under a battle sound can make it not one.
     #[test]
-    fn a_battle_sound_is_one_whatever_the_noise_channel_holds() {
-        let battle = |cartridge_bugs: bool, pulse: SoundId, noise: u8| {
-            let mut engine = AudioEngine { cartridge_bugs, ..AudioEngine::new(AudioBank::Two) };
+    fn a_drum_under_a_battle_sound_can_make_it_not_one() {
+        let battle = |pulse: SoundId, noise: u8| {
+            let mut engine = AudioEngine { ruleset: Ruleset::Modern, ..AudioEngine::new(AudioBank::Two) };
             engine.channels[CHAN5].sound_id = pulse.0;
             engine.channels[CHAN8].sound_id = noise;
             engine.is_battle_sfx()
         };
-        let last = SoundId(BATTLE_SFX_END.0 - 1);
-        assert!(battle(false, last, 0x13));
-        assert!(!battle(true, last, 0x13));
-        assert!(battle(false, BATTLE_SFX_START, 0));
+        assert!(!battle(SoundId(BATTLE_SFX_END.0 - 1), 0x13));
+        assert!(battle(BATTLE_SFX_START, 0));
     }
 
     /// A stop clears every channel array, so nothing the last sound left decides where the next
     /// one's notes land. The cartridge's clear stops one array short.
     #[test]
     fn a_stop_leaves_nothing_of_what_played() {
-        let stopped = |cartridge_bugs: bool| {
-            let mut engine = AudioEngine { cartridge_bugs, ..AudioEngine::new(AudioBank::One) };
+        let stopped = |ruleset: Ruleset| {
+            let mut engine = AudioEngine { ruleset, ..AudioEngine::new(AudioBank::One) };
             engine.engine_play_sound(SoundId::STOP_ALL_MUSIC);
             engine.play_music(sounds::MUSIC_SAFARI_ZONE);
             engine.play_cry(1);
@@ -1718,38 +1714,38 @@ mod tests {
             engine.channels
         };
         let clean = ChannelState { loop_counter: 1, note_delay_counter: 1, note_speed: 1, ..ChannelState::default() };
-        assert_eq!(stopped(false), [clean; NUM_CHANNELS]);
-        assert_ne!(stopped(true), [clean; NUM_CHANNELS]);
+        assert_eq!(stopped(Ruleset::Modern), [clean; NUM_CHANNELS]);
+        assert_ne!(stopped(Ruleset::Gen1), [clean; NUM_CHANNELS]);
     }
 
     /// A tempo below `$0100` can scale a one-frame note to less than a frame. It lasts a frame; the
     /// cartridge rounds it to 0, which counts down from 255.
     #[test]
     fn a_note_shorter_than_a_frame_lasts_one() {
-        let length = |cartridge_bugs: bool| {
-            let mut engine = AudioEngine { cartridge_bugs, ..AudioEngine::new(AudioBank::One) };
+        let length = |ruleset: Ruleset| {
+            let mut engine = AudioEngine { ruleset, ..AudioEngine::new(AudioBank::One) };
             engine.music_tempo = [0, 0x60];
             engine.channels[0].note_speed = 1;
             engine.note_length(0, 0);
             engine.channels[0].note_delay_counter
         };
-        assert_eq!(length(false), 1);
-        assert_eq!(length(true), 0);
+        assert_eq!(length(Ruleset::Modern), 1);
+        assert_eq!(length(Ruleset::Gen1), 0);
     }
 
     /// The Pokémon Tower's wave channel plays the instrument Lavender Town does; the cartridge's
     /// third bank reads a different sound effect's bytes for it.
     #[test]
     fn the_pokemon_tower_plays_lavender_towns_wave() {
-        let waves = |cartridge_bugs: bool| {
-            let mut engine = AudioEngine { cartridge_bugs, ..playing(sounds::MUSIC_POKEMON_TOWER) };
+        let waves = |ruleset: Ruleset| {
+            let mut engine = AudioEngine { ruleset, ..playing(sounds::MUSIC_POKEMON_TOWER) };
             let samples: Vec<u8> = (0..10_000).flat_map(|_| engine.frame())
                 .filter_map(|w| match w { Write::WaveRam { samples, .. } => Some(samples), _ => None }).collect();
             samples.chunks_exact(16).map(|wave| <[u8; 16]>::try_from(wave).unwrap()).collect::<std::collections::BTreeSet<_>>()
         };
-        let third = AudioBank::Three.wave_sample(3, false);
-        assert_eq!(waves(false), [third, super::super::data::LAVENDER_WAVE].into());
-        assert_eq!(waves(true), [third, AudioBank::Three.wave_sample(5, true)].into());
+        let third = AudioBank::Three.wave_sample(3, Ruleset::Modern);
+        assert_eq!(waves(Ruleset::Modern), [third, super::super::data::LAVENDER_WAVE].into());
+        assert_eq!(waves(Ruleset::Gen1), [third, AudioBank::Three.wave_sample(5, Ruleset::Gen1)].into());
     }
 
     /// Every sound in the cartridge, in all three copies of the engine, against the registers the
@@ -1780,7 +1776,7 @@ mod tests {
         let jsonl = include_str!("../../fixtures/audio/cues.jsonl");
         let cases = crate::fixtures::cases::<CueInput, CueTrace>(jsonl);
         for (input, expected, _) in cases {
-            let actual = input.play(true);
+            let actual = input.play(Ruleset::Gen1);
             for (frame, (actual, expected)) in actual.writes.iter().zip(&expected.writes).enumerate() {
                 assert_eq!(actual, expected, "{input:?}, frame {frame}");
             }
