@@ -22,7 +22,7 @@ use super::{assert_late, breakpoint, open_the_start_menu, to_vblank, CURSOR, DEL
 
 /// `.mainMenuLoop` before it takes input: `ClearScreen`'s `Delay3`, the text box tiles and the font
 /// copied through `CopyVideoData` eight tiles a frame and a frame to finish, and the cursor's.
-fn menu_loading() -> u32 {
+pub(super) fn menu_loading() -> u32 {
     let tiles = |start: DmgPointer, end: DmgPointer, bytes| (end.address - start.address) as u32 / bytes;
     let text_box = tiles(sym::TextBoxGraphics, sym::TextBoxGraphicsEnd, 16) / 8 + 1;
     let font = tiles(sym::FontGraphics, sym::FontGraphicsEnd, 8) / 8 + 1;

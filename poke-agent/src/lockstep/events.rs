@@ -1,6 +1,7 @@
 //! Events against the cartridge, through `scripts.rs`'s lockstep: a Pokémon Center heal, a hidden item,
-//! a bookshelf, poison to a blackout, a vending machine, an in-game trade and the day care, each from
-//! the fixture nearest it with WRAM written to clear the event it tests.
+//! a bookshelf and a mart's shelf, the room's PC, poison to a blackout, a vending machine, an in-game
+//! trade and the day care, each from the fixture nearest it with WRAM written to clear the event it
+//! tests.
 
 use gb::game_boy::GameBoy;
 use poke_core::map::Map;
@@ -125,6 +126,79 @@ fn a_bookshelf_is_read_as_the_cartridge_does() {
         (Action::Talk, "read it"),
     ];
     lockstep(include_bytes!("../pokemon/data/reds-house-1f-state.bin"), |_| {}, seeing_text(route(ROUTE, |_| true), "Crammed full of"));
+}
+
+/// A Pokémon Mart's shelf of `PokemonStuffText`, the text `BookshelfTileIDs` gives a Pokémon
+/// Center's shelf tiles as well, which no Pokémon Center's map draws: up from the Cerulean Mart's
+/// door, right below the shelf, face it, and A.
+#[test]
+fn a_mart_shelf_is_read_as_the_cartridge_does() {
+    const ROUTE: &[(Action, &str)] = &[
+        walk(Joypad::UP, "up"), walk(Joypad::RIGHT, "right to (4, 5)"),
+        (Action::Press(Joypad::UP, 2), "face the shelf"),
+        (Action::Talk, "read it"),
+    ];
+    lockstep(include_bytes!("../pokemon/data/cerulean-mart-shopper-in-the-doorway.bin"), |_| {},
+        seeing_text(route(ROUTE, |_| true), "Wow! Tons of"));
+}
+
+/// Walks `route`, then makes `presses` at the prompts that follow in turn, and stops at the first
+/// overworld poll once both are spent.
+fn route_then_pressing(route: &'static [(Action, &'static str)], presses: &'static [(Action, &'static str)])
+    -> impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>
+{
+    let (mut walked, mut pressed) = (0, 0);
+    move |_, seen| match seen.kind {
+        Kind::Prompt => {
+            let press = presses.get(pressed).copied().expect("a prompt after the last press");
+            pressed += 1;
+            Some(press)
+        }
+        Kind::MapChange | Kind::Bubble => Some((Action::Press(Joypad::empty(), 0), "a new map")),
+        Kind::Overworld if walked < route.len() => {
+            walked += 1;
+            Some(route[walked - 1])
+        }
+        Kind::Overworld => {
+            assert_eq!(pressed, presses.len(), "back in the overworld before the last press");
+            None
+        }
+    }
+}
+
+const fn press(button: Joypad, what: &'static str) -> (Action, &'static str) {
+    (Action::Press(button, 1), what)
+}
+
+/// The PC in the player's room, `script_players_pc` from a hidden event: the Potion a new game
+/// leaves in it withdrawn, put back, and the PC logged off.
+#[test]
+fn the_room_pc_withdraws_and_deposits_as_the_cartridge_does() {
+    const ROUTE: &[(Action, &str)] = &[
+        walk(Joypad::LEFT, "left to (2, 6)"),
+        walk(Joypad::UP, "up"), walk(Joypad::UP, "up"), walk(Joypad::UP, "up"), walk(Joypad::UP, "up to (2, 2)"),
+        walk(Joypad::LEFT, "left"), walk(Joypad::LEFT, "left to (0, 2)"),
+        (Action::Press(Joypad::UP, 2), "face the PC"),
+        (Action::Talk, "turn it on"),
+    ];
+    const PRESSES: &[(Action, &str)] = &[
+        press(Joypad::A, "turned on the PC"),
+        press(Joypad::A, "WITHDRAW ITEM"),
+        press(Joypad::A, "the Potion"),
+        press(Joypad::A, "one"),
+        press(Joypad::A, "withdrew"),
+        press(Joypad::B, "out of the list"),
+        press(Joypad::DOWN, "DEPOSIT ITEM"),
+        press(Joypad::A, "deposit"),
+        press(Joypad::A, "the Potion"),
+        press(Joypad::A, "one"),
+        press(Joypad::A, "stored"),
+        press(Joypad::B, "out of the list"),
+        press(Joypad::DOWN, "TOSS ITEM"),
+        press(Joypad::DOWN, "LOG OFF"),
+        press(Joypad::A, "log off"),
+    ];
+    lockstep(include_bytes!("../pokemon/data/start-of-game-state.bin"), |_| {}, route_then_pressing(ROUTE, PRESSES));
 }
 
 /// Cuts `celadon-mart-roof.bin` from `at-celadon.bin`: the Pokémon Center door's entry in
@@ -280,5 +354,3 @@ fn probe_map_walkability() {
         println!("{y:3} {row}");
     }
 }
-
-

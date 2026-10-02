@@ -26,7 +26,7 @@ use crate::audio::data::sounds;
 use crate::gfx::sgb::PaletteCommand;
 use crate::gfx::tiles::V_CHARS2;
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
-use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
+use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, SaveRequest, Status, Transition};
 use crate::modes::cursor_menu::CursorMenu;
 use crate::modes::list_menu::ListMenu;
 use crate::modes::status_screen::StatusScreen;
@@ -452,7 +452,7 @@ impl ModeUpdate for BillsPc {
             (After::ChooseABox, _) => self.box_list(ctx),
             (After::BoxList, Outcome::Chosen(row)) => {
                 ctx.world.current_box = row;
-                ctx.save_game = true;
+                ctx.save = Some(SaveRequest::Write);
                 self.wait_for_sound(Next::BeforeSave, ctx)
             }
             (After::BoxList, _) => self.menu(ctx),

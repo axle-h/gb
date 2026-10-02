@@ -6,13 +6,13 @@
 //! another playthrough asks once more, because writing erases it: `CheckPreviousSaveFile` compares
 //! the player id in SRAM with the one in play, and here the host says whose save it holds.
 //!
-//! `SaveGameData` is one frame: `ctx.save_game` asks `Game::frame` for the bytes. What follows is
+//! `SaveGameData` is one frame: `ctx.save` asks `Game::frame` for the bytes. What follows is
 //! pacing: "Now saving..." held for 120 frames, the text, `SFX_SAVE`, and 30 frames more.
 
 use serde::{Deserialize, Serialize};
 use crate::audio::data::sounds;
 use crate::gfx::ui::UiSurface;
-use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
+use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, SaveRequest, Status, Transition};
 use crate::modes::main_menu::save_screen_info;
 use crate::modes::text_box::TextBox;
 use crate::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
@@ -93,7 +93,7 @@ impl SaveMenu {
 
     /// `.save`: the bytes, then "Now saving..." over the question's box.
     fn save(&mut self, ctx: &mut Ctx) -> Transition {
-        ctx.save_game = true;
+        ctx.save = Some(SaveRequest::Write);
         let (x, y, width, height) = CLEARED;
         ctx.screen.ui.fill(x, y, width, height, UiSurface::BLANK);
         let text = poke_core::charmap::encode("Now saving...").expect("the string encodes");
@@ -218,7 +218,7 @@ mod tests {
 
         fn frame(&mut self, input: Input) -> Frame {
             let frame = self.game.frame(input);
-            if let Some(bytes) = &frame.save {
+            if let Some(crate::Save::Written(bytes)) = &frame.save {
                 assert!(self.saved.is_none(), "the game wrote itself twice");
                 self.saved = Some(bytes.clone());
             }

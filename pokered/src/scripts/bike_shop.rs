@@ -7,6 +7,14 @@ use poke_core::symbols::pokered_map_scripts::{TEXT_BIKESHOP_CLERK, TEXT_BIKESHOP
 use serde::{Deserialize, Serialize};
 use super::{text_named, Flow, Script};
 
+/// `BikeShopMenuPrice`: the only price the Bicycle has, since its `ItemPrices` entry is 0.
+pub const BICYCLE_PRICE: u32 = 1_000_000;
+
+/// `BikeShopMenuPrice` as the menu draws it.
+pub fn menu_price_text() -> String {
+    format!("¥{BICYCLE_PRICE}")
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {}
 

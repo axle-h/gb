@@ -93,6 +93,9 @@ pub trait PokemonApiTrait {
     fn raw_player_coords(&self) -> Point8;
     fn game_state(&self) -> Result<GameState, String>;
     fn on_screen_text(&self, only_message_box: bool) -> Option<String>;
+    /// What a text box is saying: the message box's rows, and nothing while the Pokédex's data page
+    /// or a status screen has the whole screen, whose rows those are too.
+    fn message_text(&self) -> Option<String>;
     fn menu_state(&self) -> Option<MenuState>;
     /// Currently-active list-menu template (`wListMenuID`).
     fn list_menu_id(&self) -> u8;
@@ -307,10 +310,27 @@ impl<'a> PokemonApi<'a> {
 
 /// Font tiles at their screen coordinates, as the text they spell: a line per row, a space where
 /// tiles are not adjacent.
-fn text_of_tiles(mut coordinates: Vec<(usize, gb::geometry::Point8)>, only_message_box: bool) -> String {
-    coordinates.sort_by_key(|(_, p)| *p);
+fn text_of_tiles(coordinates: Vec<(usize, gb::geometry::Point8)>, only_message_box: bool) -> String {
+    rows_of_tiles(coordinates, only_message_box).into_iter().map(|(_, line)| line).join(" ")
+}
 
-    const MESSAGE_BOX_MIN_Y: u8 = 13;
+/// The message box's top row of text.
+const MESSAGE_BOX_MIN_Y: u8 = 13;
+
+/// The message box's rows as what it says, or nothing for a frame drawn mid-scroll. A page puts
+/// text on every other row; `ScrollTextUpOneLine` copies the rows up one and then clears the last,
+/// so a frame drawn in between shows a line, or the end of one, on two in a row.
+fn message_of_rows(rows: Vec<(u8, String)>) -> Option<String> {
+    let rows: Vec<(u8, String)> = rows.into_iter().filter(|(_, line)| !line.is_empty()).collect();
+    if rows.windows(2).any(|pair| pair[1].0 == pair[0].0 + 1) {
+        return None;
+    }
+    Some(rows.into_iter().map(|(_, line)| line).join(" "))
+}
+
+/// [`text_of_tiles`] a row at a time, with the row each line is on.
+fn rows_of_tiles(mut coordinates: Vec<(usize, gb::geometry::Point8)>, only_message_box: bool) -> Vec<(u8, String)> {
+    coordinates.sort_by_key(|(_, p)| *p);
 
     let mut lines = Vec::new();
     let mut current_line = Vec::new();
@@ -322,7 +342,7 @@ fn text_of_tiles(mut coordinates: Vec<(usize, gb::geometry::Point8)>, only_messa
 
         if let Some(prev) = prev_pos {
             if pos.y != prev.y {
-                lines.push(current_line);
+                lines.push((prev.y, current_line));
                 current_line = Vec::new();
             } else {
                 let is_space = pos.x.saturating_sub(prev.x) > 1;
@@ -336,13 +356,13 @@ fn text_of_tiles(mut coordinates: Vec<(usize, gb::geometry::Point8)>, only_messa
         current_line.push(char_id);
         prev_pos = Some(pos);
     }
-    if !current_line.is_empty() {
-        lines.push(current_line);
+    if let Some(prev) = prev_pos {
+        lines.push((prev.y, current_line));
     }
 
     lines.into_iter()
-        .map(|line| render_font_string(&line, false).trim().to_string())
-        .join(" ")
+        .map(|(y, line)| (y, render_font_string(&line, false).trim().to_string()))
+        .collect()
 }
 
 impl<'a> PokemonApiTrait for PokemonApi<'a> {
@@ -477,6 +497,23 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
         }
         let coordinates = ppu.tile_coordinates(&font_tiles);
         Some(text_of_tiles(coordinates, only_message_box))
+    }
+
+    fn message_text(&self) -> Option<String> {
+        let mmu = self.mmu();
+        // `BIT_NO_AUDIO_FADE_OUT`, bit 1 of `wStatusFlags2`, is set only by `ShowPokedexData` and
+        // `StatusScreen`, for as long as either is up.
+        if mmu.read_game_mode() == GameMode::Overworld || !mmu.pokemon_font_loaded()
+            || mmu.read_pointer(&pokered_symbols::wStatusFlags2) & 1 << 1 != 0
+        {
+            return None;
+        }
+        let ppu = mmu.ppu();
+        let font_tiles = ppu.tile_indexes_of_vram_addresses(pokered_symbols::vFont.address, FONT_BYTES.len());
+        if font_tiles.is_empty() {
+            return None;
+        }
+        message_of_rows(rows_of_tiles(ppu.tile_coordinates(&font_tiles), true))
     }
 
     fn game_mode(&self) -> Option<GameMode> {

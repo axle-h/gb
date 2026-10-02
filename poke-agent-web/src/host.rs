@@ -177,7 +177,7 @@ impl EmulatorHost {
         config: HostConfig,
     ) -> Result<Self, String> {
         let mut console = Console::new(config.game, save_state, policy, config.model, config.target_speed)?;
-        if let Some(save) = config.run.as_ref().and_then(|current| current.get().game_save()) {
+        if let Some(save) = config.run.as_ref().map(|current| current.get().game_save()).transpose()?.flatten() {
             console.restore_game_save(save);
         }
 
@@ -1739,6 +1739,76 @@ mod tests {
 
         let mut resumed = native_host(Published::new(), |config| config.run = Some(Arc::clone(&current)));
         assert_eq!(resumed.console.native().save(), Some(&saved[..]), "a resume forgot the game's save");
+    }
+
+    /// YES to the title's clear-save dialogue deletes `save.pkrd`, so a restart has nothing to
+    /// CONTINUE and the console plays on into a new game.
+    #[test]
+    fn a_save_cleared_at_the_title_is_gone_from_the_run() {
+        use poke_agent::run::{RunDir, files};
+        use pokered::command::{Command, Decision};
+        use pokered::input::Joypad;
+        use pokered::mode::{Mode, Status};
+        use pokered::rng::GameRng;
+        use pokered::{Game, Input, Pacing};
+
+        let scratch = poke_agent::run::Scratch::new("host-native-clear-save");
+        let (run, _, _) =
+            RunDir::open_for(GameKind::Native, &scratch.0, false, "random", &|_| true).expect("a fresh run");
+        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let run = current.get();
+        let mut host = native_host(Published::new(), |config| {
+            config.run = Some(Arc::clone(&current));
+            config.checkpoint_interval = Duration::from_secs(3_600);
+        });
+        let world = host.console.native().agent.game().world().clone();
+        host.console.restore_game_save(Game::new(world.clone(), GameRng::seeded(1), Pacing::Faithful).save());
+        host.checkpoint();
+        assert!(run.path().join(files::GAME_SAVE).is_file(), "the save was kept");
+
+        let agent = &mut host.console.native().agent;
+        *agent.game_mut() = Game::power_on(Some(world), GameRng::seeded(2), Pacing::Faithful);
+        fn to_the_title(agent: &mut poke_agent::pokemon::native_agent::NativeAgent) {
+            for _ in 0..20_000 {
+                let input = match agent.game().status() {
+                    Status::Waiting(Decision::TitleScreen) => return,
+                    Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
+                    Status::Waiting(Decision::TwoOption) => Input::Command(Command::ChooseOption(1)),
+                    _ => Input::None,
+                };
+                agent.frame(input);
+            }
+            panic!("the title never came: {:?}", agent.game().status());
+        }
+        to_the_title(agent);
+        for buttons in [Joypad::UP | Joypad::SELECT | Joypad::B, Joypad::empty()] {
+            agent.frame(Input::Buttons(buttons));
+        }
+        to_the_title(agent);
+        host.tick();
+        assert!(host.console.native().save().is_none(), "the console kept a cleared save");
+        host.checkpoint();
+        assert!(!run.path().join(files::GAME_SAVE).exists(), "save.pkrd outlived the clear");
+        drop(host);
+
+        let (_, _, state) =
+            RunDir::open_for(GameKind::Native, &scratch.0, false, "random", &|_| true).expect("resumable");
+        let mut resumed = host_from(&state.expect("a game was checkpointed"), Published::new(), |config| {
+            config.game = GameKind::Native;
+            config.run = Some(Arc::clone(&current));
+        });
+        assert!(resumed.console.native().save().is_none(), "a restart brought the save back");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut menu_rows = None;
+        while !matches!(resumed.console.native().agent.game().modes(), [Mode::Overworld(_)]) && Instant::now() < deadline {
+            if let Some(Mode::MainMenu(menu)) = resumed.console.native().agent.game().modes().last() {
+                menu_rows.get_or_insert(menu.rows());
+            }
+            resumed.tick();
+        }
+        assert_eq!(menu_rows, Some(2), "NEW GAME and OPTION, with no CONTINUE");
+        assert!(matches!(resumed.console.native().agent.game().modes(), [Mode::Overworld(_)]),
+                "the new game never reached the overworld: {:?}", resumed.console.native().agent.game().status());
     }
 
     /// `POST /api/new-run` on a native run: a new game in a new directory of the same kind.

@@ -33,7 +33,8 @@ pub enum Command {
     /// Press B through an evolution's animation, which stops it unless an item forced it.
     CancelEvolution,
     /// Back out with B from the party menu, the bag's USE/TOSS, a mon's moves, or the list of moves
-    /// to forget, which asks whether to abandon learning.
+    /// to forget, which asks whether to abandon learning; or leave the League PC's Hall of Fame
+    /// before its last mon.
     CancelOption,
     /// Count up or down to a quantity and take it.
     ChooseQuantity(u8),
@@ -69,7 +70,8 @@ pub enum Command {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Decision {
-    /// A text box waiting at its `▼`.
+    /// A text box waiting at its `▼`. The League PC's wait under each mon is one, which
+    /// `CancelOption` leaves.
     Text,
     List,
     StartMenu,
@@ -327,6 +329,10 @@ impl Executor {
                                               | Decision::BattleMoves | Decision::SwitchStatsCancel | Decision::CursorMenu
                                               | Decision::TownMap | Decision::FlyDestination | Decision::ForgetMove))) =>
                     Driver::Cancel { from, pressed: false },
+                // The League PC's wait takes A or B, and a B held as it ends leaves the record.
+                Some(Status::Waiting(Decision::Text))
+                    if matches!(modes.iter().rev().nth(1), Some(Mode::PcMenu(pc)) if pc.showing_hall_of_fame()) =>
+                    Driver::Cancel { from: Decision::Text, pressed: false },
                 _ => return Err(Refusal::Invalid("no menu that B backs out of is waiting".into())),
             },
             Command::ChooseQuantity(_) | Command::CancelQuantity => match modes.last() {

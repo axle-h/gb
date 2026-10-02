@@ -138,20 +138,21 @@ impl SellState {
         }
     }
 
-    /// Checked before any menu opens: the clerk answers each with a text box and a bounce back to
-    /// BUY/SELL/QUIT, which a driver would re-drive for ever.
-    fn blocked_by(&self) -> Option<String> {
-        if self.start_qty < self.item.quantity {
-            return Some(format!("the bag holds {} {:?}, not {}", self.start_qty, self.item.id, self.item.quantity));
-        }
-        if self.item.id.is_key_item() {
-            return Some(format!("{:?} is a key item — \"I can't put a PRICE on that!\"", self.item.id));
-        }
-        if self.item.id.is_hm() {
-            return Some(format!("{:?} is an HM, which pokered's `IsItemHM` refuses to buy", self.item.id));
-        }
-        None
-    }
+}
+
+/// Checked before any menu opens: the clerk answers each with a text box and a bounce back to
+/// BUY/SELL/QUIT, which a driver would re-drive for ever. `held` is the bag's count of the item.
+pub(crate) fn sale_refusal(item: BagItem, held: u8) -> Option<String> {
+    let why = if held < item.quantity {
+        format!("the bag holds {held} {:?}, not {}", item.id, item.quantity)
+    } else if item.id.is_key_item() {
+        format!("{:?} is a key item, \"I can't put a PRICE on that!\"", item.id)
+    } else if item.id.is_hm() {
+        format!("{:?} is an HM, which pokered's `IsItemHM` refuses to buy", item.id)
+    } else {
+        return None;
+    };
+    Some(format!("can't sell {:?}: {why}", item.id))
 }
 
 /// `wListMenuID` while the choose-quantity box is open in the sell flow (`PRICEDITEMLISTMENU`).
@@ -224,8 +225,8 @@ pub fn sell_tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: SellStat
     }
 
     if !s.entered_menu {
-        if let Some(why) = s.blocked_by() {
-            abort(agent, api, format!("can't sell {:?} — {why}", s.item.id));
+        if let Some(why) = sale_refusal(s.item, s.start_qty) {
+            abort(agent, api, why);
             return Ok(());
         }
     }

@@ -21,12 +21,12 @@ use serde::{Deserialize, Serialize};
 use crate::command::Decision;
 use crate::gfx::sgb::PaletteCommand;
 use crate::input::Joypad;
-use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
+use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, SaveRequest, Status, Transition};
 use crate::modes::main_menu::{MainMenu, CONTINUE, NEW_GAME};
 use crate::modes::overworld::Overworld;
 use crate::modes::text_box::TextBox;
 use crate::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
-use crate::world::World;
+use crate::world::{Options, World};
 use hall_of_fame::HallOfFame;
 use intro::Intro;
 use oak_speech::OakSpeech;
@@ -166,7 +166,7 @@ impl Ceremony {
             ctx.world.events.clear(event);
         }
         ctx.world.location.last_blackout_map = Map::PalletTown;
-        ctx.save_game = true;
+        ctx.save = Some(SaveRequest::Write);
         self.wait = Wait::frames(SAVED_HOLD);
         self.tail = Some(Tail::Held);
         Transition::Stay
@@ -205,6 +205,10 @@ enum Stage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PowerOn {
     save_exists: bool,
+    /// The save's own `wOptions`, which `MainMenu`'s `TryLoadSaveFile` reads back each time the
+    /// title gives way to it, over whatever the option screen set before B went back to the title.
+    #[serde(default)]
+    saved_options: Option<Options>,
     stage: Stage,
     title: Title,
     screen: MovieScreen,
@@ -213,7 +217,14 @@ pub struct PowerOn {
 
 impl PowerOn {
     fn new(save_exists: bool) -> Self {
-        Self { save_exists, stage: Stage::Intro(Intro::default()), title: Title::default(), screen: MovieScreen::default(), wait: Wait::default() }
+        Self {
+            save_exists,
+            saved_options: None,
+            stage: Stage::Intro(Intro::default()),
+            title: Title::default(),
+            screen: MovieScreen::default(),
+            wait: Wait::default(),
+        }
     }
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
@@ -240,6 +251,9 @@ impl PowerOn {
                 if self.title.clears_save() {
                     return self.clear_save(ctx);
                 }
+                if self.save_exists {
+                    ctx.world.options = *self.saved_options.get_or_insert(ctx.world.options);
+                }
                 self.stage = Stage::MainMenu;
                 Transition::Push(Mode::MainMenu(MainMenu::new(self.save_exists)))
             }
@@ -254,7 +268,7 @@ impl PowerOn {
             Stage::EnterMap { after_speech } => match self.wait.tick(ctx) {
                 Tick::Waiting => Transition::Stay,
                 _ if *after_speech => self.enter_map(ctx, false),
-                _ => Transition::Replace(Mode::Overworld(Overworld::new())),
+                _ => Transition::Replace(Mode::Overworld(Overworld::reset_player_sprite_data(&mut ctx.world.location))),
             },
         }
     }
@@ -306,9 +320,12 @@ impl PowerOn {
                 // `ClearAllSRAMBanks` on YES, then `Init` either way.
                 if outcome == Outcome::Chosen(1) {
                     *ctx.world = World::default();
+                    ctx.save = Some(SaveRequest::Clear);
                     self.save_exists = false;
+                    self.saved_options = None;
                 }
-                Transition::Replace(Mode::Movie(Movie::power_on(self.save_exists)))
+                let saved_options = self.saved_options;
+                Transition::Replace(Mode::Movie(Movie::PowerOn(PowerOn { saved_options, ..PowerOn::new(self.save_exists) })))
             }
             _ => Transition::Stay,
         }
@@ -467,7 +484,7 @@ mod tests {
                 Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
                 _ => Input::None,
             };
-            if let Some(bytes) = game.frame(input).save {
+            if let Some(crate::Save::Written(bytes)) = game.frame(input).save {
                 assert!(saved.is_none(), "the script saves once");
                 saved = Some(bytes);
             }
@@ -484,9 +501,50 @@ mod tests {
 
         let held = play(&mut game, 1_000, |_| None, |game| game.status() == Status::Waiting(Decision::TitleScreen));
         assert_eq!(held, SAVED_HOLD as u32, "THE END stands before the press");
-        game.frame(Input::Buttons(Joypad::A));
+        // The press a driver answers the title with, which is what THE END waits on.
+        let pressed = game.frame(Input::Command(Command::Advance));
+        assert_eq!(pressed.reply, Some(Reply::Accepted));
         assert!(matches!(game.modes(), [Mode::Movie(Movie::PowerOn(_))]), "{:?}", game.modes().last());
+        assert_eq!(game.frame(Input::None).events, [crate::Event::CommandDone(Command::Advance)]);
         assert!(!game.world().play_time.counting, "the clock only counts again on the map");
+    }
+
+    /// `MainMenu`'s `TryLoadSaveFile` runs again after B goes back to the title, so what the option
+    /// screen set is lost and the save's own options are continued with.
+    #[test]
+    fn a_continued_save_has_its_own_options_after_option_and_b_back_to_the_title() {
+        use crate::world::{BattleStyle, Options, TextSpeed};
+        let saved = Options { text_speed: TextSpeed::Fast, battle_animation: false, battle_style: BattleStyle::Set };
+        let world = World { player_name: encode("RED").unwrap(), options: saved, ..World::default() };
+        let mut game = Game::power_on(Some(world), GameRng::seeded(8), Pacing::Faithful);
+        play(&mut game, 20_000, |decision| (*decision == Decision::TitleScreen).then_some(Command::Advance),
+             |game| game.status() == Status::Waiting(Decision::MainMenu));
+        assert_eq!(game.world().options, saved);
+        game.frame(Input::Command(Command::ChooseOption(2)));
+        play(&mut game, 200, |_| None, |game| game.status() == Status::Waiting(Decision::Options));
+        for button in [Joypad::RIGHT, Joypad::empty(), Joypad::B] {
+            game.frame(Input::Buttons(button));
+        }
+        let changed = game.world().options;
+        assert_ne!(changed, saved, "RIGHT slowed the text");
+        play(&mut game, 200, |_| None, |game| game.status() == Status::Waiting(Decision::MainMenu));
+        game.frame(Input::Buttons(Joypad::B));
+        play(&mut game, 20_000, |decision| (*decision == Decision::TitleScreen).then_some(Command::Advance),
+             |game| game.status() == Status::Waiting(Decision::MainMenu));
+        assert_eq!(game.world().options, saved, "the save's options, read back");
+
+        // Without the B, CONTINUE takes what the option screen set.
+        game.frame(Input::Command(Command::ChooseOption(2)));
+        play(&mut game, 200, |_| None, |game| game.status() == Status::Waiting(Decision::Options));
+        for button in [Joypad::RIGHT, Joypad::empty(), Joypad::B] {
+            game.frame(Input::Buttons(button));
+        }
+        play(&mut game, 20_000, |decision| match decision {
+            Decision::ContinueGame => Some(Command::Advance),
+            Decision::MainMenu => Some(Command::ChooseOption(CONTINUE)),
+            _ => None,
+        }, |game| matches!(game.modes().last(), Some(Mode::Overworld(_))));
+        assert_eq!(game.world().options, changed);
     }
 
     /// `.pressedA`'s `wNumHoFTeams` test: the only save continued anywhere but where it was left.
@@ -514,5 +572,32 @@ mod tests {
             _ => None,
         }, |game| matches!(game.modes().last(), Some(Mode::Overworld(_))));
         assert_eq!(game.world().location.map, Map::ViridianCity);
+    }
+
+    /// `DoClearSaveDialogue`'s YES tells the host its save is gone, and the next SAVE has no older
+    /// file to ask about.
+    #[test]
+    fn clearing_the_save_at_the_title_tells_the_host() {
+        let world = World { player_name: encode("RED").unwrap(), player_id: 0x1234, ..World::default() };
+        let mut game = Game::power_on(Some(world), GameRng::seeded(9), Pacing::Faithful);
+        play(&mut game, 20_000, |_| None, |game| game.status() == Status::Waiting(Decision::TitleScreen));
+        let mut saves = vec![];
+        for buttons in [Joypad::UP | Joypad::SELECT | Joypad::B, Joypad::empty()] {
+            saves.extend(game.frame(Input::Buttons(buttons)).save);
+        }
+        for _ in 0..2_000 {
+            if game.status() == Status::Waiting(Decision::TitleScreen) {
+                break;
+            }
+            let input = match game.status() {
+                Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
+                Status::Waiting(Decision::TwoOption) => Input::Command(Command::ChooseOption(1)),
+                _ => Input::None,
+            };
+            saves.extend(game.frame(input).save);
+        }
+        assert_eq!(game.status(), Status::Waiting(Decision::TitleScreen), "the game restarted");
+        assert_eq!(saves, [crate::Save::Cleared]);
+        assert_eq!(game.saved_player_id, None, "the next SAVE would ask about a file that is gone");
     }
 }

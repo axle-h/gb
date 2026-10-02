@@ -21,7 +21,7 @@ use pokered::command::{Command, Decision};
 use pokered::gfx::colour::{BYTES_PER_PIXEL, ColourMode};
 use pokered::mode::{Mode, Status};
 use pokered::rng::GameRng;
-use pokered::{Game, Input, Pacing};
+use pokered::{Game, Input, Pacing, Save};
 
 use crate::web::audio;
 use crate::web::video::{Frame, PIXELS};
@@ -49,7 +49,8 @@ pub struct Native {
     /// for nobody. A save carries no oscillator state, so a new one is told what the engine holds.
     /// It makes a second of samples per second of game, so the stream is right only at 1x.
     synth: Option<Synth>,
-    /// The game's own save, as it last wrote itself, kept as the run's `save.pkrd`.
+    /// The game's own save, as it last wrote itself, kept as the run's `save.pkrd`; `None` once the
+    /// title has cleared it, which removes the file.
     save: Option<Vec<u8>>,
 }
 
@@ -383,6 +384,9 @@ impl Native {
                 self.agent.host_took_the_screen();
                 let command = match self.agent.game().status() {
                     Status::Waiting(Decision::MainMenu) => Some(Command::ChooseOption(0)),
+                    // A new game, once the title has cleared the save: the first preset name, as
+                    // `new_game` answers it.
+                    Status::Waiting(Decision::IntroNameMenu) => Some(Command::ChooseOption(1)),
                     Status::Waiting(_) => Some(Command::Advance),
                     _ => None,
                 };
@@ -390,8 +394,10 @@ impl Native {
             } else if let Err(failure) = self.agent.tick() {
                 result = Err(failure);
             }
-            if let Some(save) = self.agent.take_save() {
-                self.save = Some(save);
+            match self.agent.take_save() {
+                Some(Save::Written(save)) => self.save = Some(save),
+                Some(Save::Cleared) => self.save = None,
+                None => {}
             }
             let writes = self.agent.drain_audio();
             if let Some(synth) = self.synth.as_mut() {

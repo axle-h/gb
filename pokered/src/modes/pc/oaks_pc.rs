@@ -2,7 +2,8 @@
 //! closed either way over the screen from before.
 //!
 //! The rating counts seen and owned, prints the completion and the rating for the owned count, and
-//! plays the rating's sound after whatever is playing ends, then waits for A or B with no `▼`. With
+//! plays the rating's sound after whatever is playing ends, waits for it to end in turn, then waits
+//! for A or B with no `▼`. With
 //! `EVENT_HALL_OF_FAME_DEX_RATING` set the rating is only worked out for the Hall of Fame, which
 //! clears the flag; here that prints nothing.
 
@@ -40,6 +41,8 @@ enum Phase {
     Rated,
     /// `PlaySoundWaitForCurrent`'s wait, before the rating's sound.
     Sound,
+    /// `PlayDefaultMusic`'s `WaitForSoundToFinish`, after it.
+    Playing,
     Heard,
     Closed,
 }
@@ -55,6 +58,7 @@ impl OaksPc {
     pub fn update(&mut self, ctx: &mut Ctx) -> Transition {
         match self.phase {
             Phase::Sound => self.rating_sound(ctx),
+            Phase::Playing => self.play_default_music(ctx),
             _ => Transition::Stay,
         }
     }
@@ -78,7 +82,7 @@ impl OaksPc {
                 print_at(dex_rating_text(owned), ctx)
             }
             Phase::Rated => self.rating_sound(ctx),
-            Phase::Sound => Transition::Stay,
+            Phase::Sound | Phase::Playing => Transition::Stay,
             Phase::Heard => self.close(ctx),
             Phase::Closed => {
                 // `LoadScreenTilesFromBuffer2`; its `Delay3` is loading.
@@ -114,7 +118,7 @@ impl OaksPc {
         print_at("DexCompletionText", ctx)
     }
 
-    /// `PlayPokedexRatingSfx`, then `WaitForTextScrollButtonPress`.
+    /// `PlayPokedexRatingSfx` up to its `PlayDefaultMusic`.
     fn rating_sound(&mut self, ctx: &mut Ctx) -> Transition {
         if !ctx.audio.sound_finished() {
             self.phase = Phase::Sound;
@@ -122,7 +126,16 @@ impl OaksPc {
         }
         ctx.audio.play_new_sound(SoundId::STOP_ALL_MUSIC);
         ctx.audio.play_music(dex_rating_sound(count_set_bits(&ctx.world.pokedex.owned)));
-        crate::modes::overworld::play_default_music_common(ctx, 0);
+        self.phase = Phase::Playing;
+        Transition::Stay
+    }
+
+    /// `PlayDefaultMusic` once the rating's sound has ended, then `WaitForTextScrollButtonPress`.
+    fn play_default_music(&mut self, ctx: &mut Ctx) -> Transition {
+        if !ctx.audio.sound_finished() {
+            return Transition::Stay;
+        }
+        crate::modes::overworld::play_default_music(ctx);
         self.phase = Phase::Heard;
         Transition::Push(Mode::TextBox(TextBox::without_box(vec![TextCommand::WaitButton])))
     }

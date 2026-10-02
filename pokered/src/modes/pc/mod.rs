@@ -105,6 +105,11 @@ impl PcMenu {
         }
     }
 
+    /// The League PC is showing a mon of the Hall of Fame.
+    pub fn showing_hall_of_fame(&self) -> bool {
+        matches!(&self.open, Some(Opened::League(pc)) if pc.showing())
+    }
+
     fn text(&mut self, label: &str, after: After, ctx: &mut Ctx) -> Transition {
         self.phase = Phase::Child(after);
         print(label, ctx)

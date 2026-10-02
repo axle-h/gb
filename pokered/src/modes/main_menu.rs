@@ -227,6 +227,7 @@ impl ModeUpdate for MainMenu {
 #[cfg(test)]
 mod tests {
     use crate::command::{Command, Reply};
+    use poke_core::sprite::SpriteFacing;
     use crate::systems::play_time::PlayTime;
     use crate::world::World;
     use crate::rng::GameRng;
@@ -337,7 +338,15 @@ mod tests {
             play_time: PlayTime { hours: 9, minutes: 41, ..PlayTime::default() },
             ..World::default()
         };
-        let mut game = Game::power_on(Some(saved.clone()), GameRng::seeded(5), Pacing::Faithful);
+        let game = continued(saved.clone());
+        let world = game.world();
+        assert_eq!((&world.player_name, world.player_id, world.badges), (&saved.player_name, 0x1234, 0b0000_0011));
+        assert!(world.play_time.counting, "SpecialEnterMap starts the clock");
+    }
+
+    /// Powered on with `saved` and CONTINUE chosen, into the overworld.
+    fn continued(saved: World) -> Game {
+        let mut game = Game::power_on(Some(saved), GameRng::seeded(5), Pacing::Faithful);
         for _ in 0..40_000 {
             if matches!(game.modes(), [Mode::Overworld(_)]) {
                 break;
@@ -350,9 +359,35 @@ mod tests {
             game.frame(input);
         }
         assert!(matches!(game.modes(), [Mode::Overworld(_)]), "{:?}", game.status());
-        let world = game.world();
-        assert_eq!((&world.player_name, world.player_id, world.badges), (&saved.player_name, 0x1234, 0b0000_0011));
-        assert!(world.play_time.counting, "SpecialEnterMap starts the clock");
+        game
+    }
+
+    /// CONTINUE's `LoadWildData` replaces only the tables its map has, so in Red's room, which has
+    /// neither, the save's lists stand: Gen 1 keeps both, and the later games empty the grass list.
+    #[test]
+    fn continue_keeps_the_wild_lists_its_map_has_none_of() {
+        use crate::systems::overworld::encounters::WildMons;
+        use crate::world::Ruleset;
+        let mut kept = WildMons::default();
+        kept.load(poke_core::map::Map::Route21, Ruleset::Gen1);
+        assert!(kept.grass_rate != 0 && kept.water_rate != 0);
+        for ruleset in [Ruleset::Gen1, Ruleset::Modern] {
+            let mut saved = World { ruleset, ..World::default() };
+            saved.location.wild_mons = kept;
+            let wild = continued(saved).world().location.wild_mons;
+            let grass = if ruleset.is_gen1() { kept.grass } else { [(0, 0); 10] };
+            assert_eq!(wild, WildMons { grass_rate: 0, grass, water_rate: 0, water: kept.water }, "{ruleset:?}");
+        }
+    }
+
+    #[test]
+    fn a_continued_game_faces_down_whichever_way_the_save_faced() {
+        let mut saved = World::default();
+        saved.location.facing = SpriteFacing::Left;
+        let game = continued(saved);
+        let [Mode::Overworld(overworld)] = game.modes() else { unreachable!() };
+        assert_eq!(game.world().location.facing, SpriteFacing::Down);
+        assert_eq!(overworld.sprites()[0].facing, SpriteFacing::Down as u8);
     }
 
     #[test]

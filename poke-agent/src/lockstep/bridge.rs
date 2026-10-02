@@ -11,6 +11,7 @@ use poke_core::sprite::SpriteFacing;
 use poke_core::map_objects::Warp;
 use pokered::mode::Mode;
 use pokered::modes::overworld::{Overworld, Standing};
+use pokered::modes::overworld::script::SpritePosition;
 use pokered::party::{BoxMon, Named, Pokedex};
 use pokered::rng::GameRng;
 use pokered::scripts::MapStates;
@@ -273,6 +274,7 @@ pub(super) fn location(gb: &GameBoy) -> Location {
         used_field_move: None,
         fly_warp: None,
         escape_warp: false,
+        wild_mons: wild_mons(gb),
     }
 }
 
@@ -398,7 +400,31 @@ pub(super) fn world(gb: &GameBoy) -> World {
     oaks_lab.rival_starter_temp = mmu.read_pointer(&sym::wRivalStarterTemp);
     oaks_lab.rival_starter_ball = mmu.read_pointer(&sym::wRivalStarterBallSpriteIndex);
     oaks_lab.saved_steps = mmu.read_pointer(&sym::wSavedNPCMovementDirections2Index);
+    saved_sprite_positions(gb, maps);
     world
+}
+
+/// Where a script put a sprite to bring it back: `GetSpritePosition1`'s `hSprite*Coord` for Oak's
+/// rival and the old man's lesson, `GetSpritePosition2`'s `wSavedSprite*` for Pewter's guides. Each
+/// is carried only while its script has the sprite away, as the recreation holds it.
+fn saved_sprite_positions(gb: &GameBoy, maps: &mut MapStates) {
+    use poke_core::symbols::pokered_map_scripts::*;
+    let mmu = gb.core().mmu();
+    let position = |at: u16| {
+        let [screen_y, screen_x, map_y, map_x] = mmu.read_slice(at, 4).try_into().unwrap();
+        SpritePosition { screen_y, screen_x, map_y, map_x }
+    };
+    let held = position(sym::hSpriteScreenYCoord.address);
+    maps.oaks_lab.rival_at = (maps.oaks_lab.cur_script == SCRIPT_OAKSLAB_RIVAL_END_BATTLE).then_some(held);
+    maps.viridian_city.saved_sprite =
+        (maps.viridian_city.cur_script == SCRIPT_VIRIDIANCITY_OLD_MAN_END_CATCH_TRAINING).then_some(held);
+    let guide_away = [
+        SCRIPT_PEWTERCITY_SUPER_NERD1_SHOWS_PLAYER_MUSEUM, SCRIPT_PEWTERCITY_HIDE_SUPER_NERD1,
+        SCRIPT_PEWTERCITY_RESET_SUPER_NERD1, SCRIPT_PEWTERCITY_YOUNGSTER_SHOWS_PLAYER_GYM,
+        SCRIPT_PEWTERCITY_HIDE_YOUNGSTER, SCRIPT_PEWTERCITY_RESET_YOUNGSTER,
+    ];
+    maps.pewter_city.guide_at = guide_away.contains(&maps.pewter_city.cur_script)
+        .then(|| position(sym::wSavedSpriteScreenY.address));
 }
 
 /// The overworld the cartridge is standing in, its sprites where they are and its blocks as the
@@ -414,7 +440,6 @@ pub(super) fn overworld(gb: &GameBoy) -> Overworld {
             mmu.read_pointer(&sym::wNumberOfNoRandomBattleStepsLeft),
         )
         .with_step_counter(mmu.read_pointer(&sym::wStepCounter))
-        .with_wild_mons(wild_mons(gb))
         .with_blocks(mmu.read_slice(sym::wOverworldMap.address, blocks))
         .with_warps(mmu.read_slice(sym::wWarpEntries.address, 4 * mmu.read_pointer(&sym::wNumberOfWarps) as usize)
             .chunks(4).map(|entry| Warp { y: entry[0], x: entry[1], destination_warp: entry[2], destination_map: entry[3] })
@@ -543,5 +568,78 @@ mod tests {
         assert_eq!(at(&PokemonApi::new(&mut cartridge.gb).game_state().unwrap()), MetaTile::Empty, "the cartridge");
         let native = NativeGame::new(game(&cartridge.gb, GameRng::seeded(0))).unwrap();
         assert_eq!(at(&native.game_state().unwrap()), MetaTile::Empty, "the recreation");
+    }
+
+    /// Pewter's gym guide, bridged while he walks off from the gym: the reset puts him back where the
+    /// cartridge's `wSavedSprite*` say he stood, on both sides.
+    #[test]
+    fn a_guide_bridged_while_he_is_away_is_put_back_where_he_stood() {
+        use gb::joypad::JoypadButtonState;
+        use gb::ram::RAM;
+        use poke_core::symbols::pokered_events::EVENT_BEAT_BROCK;
+        use poke_core::symbols::pokered_toggles::TOGGLE_GYM_GUY;
+        use poke_core::symbols::pokered_map_scripts::{PEWTERCITY_YOUNGSTER, SCRIPT_PEWTERCITY_DEFAULT,
+            SCRIPT_PEWTERCITY_HIDE_YOUNGSTER};
+        use pokered::input::Joypad;
+        use pokered::Input;
+        use super::super::joypad;
+
+        let mut cartridge = Cartridge::from_state(include_bytes!("../pokemon/data/completion-boulder.bin"));
+        // BROCK unbeaten, and his guide back where `PewterGymScriptReceiveTM34` hid him from.
+        super::super::harness::clear_events(&mut cartridge.gb, &[EVENT_BEAT_BROCK]);
+        let flags = sym::wToggleableObjectFlags.address + TOGGLE_GYM_GUY / 8;
+        let shown = cartridge.read(flags) & !(1u8 << (TOGGLE_GYM_GUY % 8));
+        cartridge.gb.core_mut().mmu_mut().write(flags, shown);
+        assert!((0..BUDGET).any(|_| cartridge.frame()));
+        let script = |cartridge: &Cartridge| cartridge.read(sym::wPewterCityCurScript.address);
+        // Round the gym and east along the road into `PewterCityPlayerLeavingEastCoords`, then A
+        // through the guide's texts until he walks off.
+        const ROUTE: [(u8, u8); 5] = [(10, 18), (10, 13), (26, 13), (26, 18), (37, 18)];
+        let (mut frame, mut corner) = (0u32, 0);
+        let bridged = loop {
+            assert!(frame < 3000, "the guide never walked off: script {}", script(&cartridge));
+            let at = (cartridge.read(sym::wXCoord.address), cartridge.read(sym::wYCoord.address));
+            while ROUTE.get(corner) == Some(&at) {
+                corner += 1;
+            }
+            let held = match ROUTE.get(corner) {
+                Some(&(x, _)) if x < at.0 => Joypad::LEFT,
+                Some(&(x, _)) if x > at.0 => Joypad::RIGHT,
+                Some(&(_, y)) if y < at.1 => Joypad::UP,
+                Some(_) => Joypad::DOWN,
+                None if frame % 4 < 2 => Joypad::A,
+                None => Joypad::empty(),
+            };
+            cartridge.gb.hold_buttons(joypad(held));
+            let polled = cartridge.frame();
+            frame += 1;
+            if polled && script(&cartridge) == SCRIPT_PEWTERCITY_HIDE_YOUNGSTER {
+                cartridge.gb.hold_buttons(JoypadButtonState::default());
+                break game(&cartridge.gb, GameRng::seeded(0));
+            }
+        };
+        let saved = cartridge.gb.core().mmu().read_slice(sym::wSavedSpriteMapY.address, 2);
+        let carried = bridged.world().scripts.maps.pewter_city.guide_at.expect("the guide's place is carried");
+        assert_eq!([carried.map_y, carried.map_x], saved[..]);
+
+        for _ in 0..BUDGET {
+            if script(&cartridge) == SCRIPT_PEWTERCITY_DEFAULT {
+                break;
+            }
+            cartridge.frame();
+        }
+        assert_eq!(script(&cartridge), SCRIPT_PEWTERCITY_DEFAULT, "the cartridge put the guide back");
+        let theirs = sprites(&cartridge.gb)[PEWTERCITY_YOUNGSTER as usize];
+        let mut game = bridged;
+        for _ in 0..BUDGET {
+            if game.world().scripts.maps.pewter_city.cur_script == SCRIPT_PEWTERCITY_DEFAULT {
+                break;
+            }
+            game.frame(Input::None);
+        }
+        assert_eq!(game.world().scripts.maps.pewter_city.cur_script, SCRIPT_PEWTERCITY_DEFAULT);
+        let ours = super::super::harness::overworld(&game).expect("the overworld").sprites()[PEWTERCITY_YOUNGSTER as usize];
+        assert_eq!((ours.map_y, ours.map_x), (theirs.map_y, theirs.map_x));
+        assert_eq!((ours.map_y, ours.map_x), (saved[0], saved[1]));
     }
 }

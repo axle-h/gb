@@ -3,9 +3,9 @@
 //!
 //! The three animations are one shape: four objects written as a block beside the player, moved a
 //! pixel or two a frame with `rOBP1` flickering under them, with OAM held still around them
-//! (`wUpdateSpritesEnabled` at `$ff`). Their frame counts are exact. Faithful rather than exact:
-//! cut grass drifts its four leaves at the two speeds `AnimCutGrass_UpdateOAMEntries` gives them but
-//! neither swaps the pairs over nor creeps them down the screen.
+//! (`wUpdateSpritesEnabled` at `$ff`). Cut grass's four leaves drift at the two speeds
+//! `AnimCutGrass_UpdateOAMEntries` gives them, swap pairs every eight frames and creep down every
+//! sixteen. Their frames are exact.
 
 use poke_core::rom_gfx::TILE_BYTES;
 use poke_core::sprite::SpriteFacing;
@@ -30,6 +30,10 @@ const FIRST_PATTERN: usize = V_CHARS1 + 0x7C;
 /// `AnimCut`'s `cutTreeLoop`, and `AnimCutGrass`'s two rounds of eight twice over.
 const CUT_TREE_FRAMES: u8 = 8;
 const CUT_GRASS_FRAMES: u8 = 32;
+/// `AnimCutGrass_SwapOAMEntries` after every round of eight, and the creep after every two.
+const CUT_GRASS_SWAP_FRAMES: u8 = 8;
+const CUT_GRASS_CREEP_FRAMES: u8 = 16;
+const CUT_GRASS_CREEP: u8 = 2;
 /// `AnimateBoulderDust`'s eight steps, each a `Delay3`.
 const DUST_STEPS: u8 = 8;
 const DUST_STEP_FRAMES: u8 = 3;
@@ -74,7 +78,7 @@ impl Overworld {
         let facing = SpriteFacing::from_repr(self.player().facing).unwrap_or_default();
         replace_tree_tile_block(&mut self.view, facing);
         let frames = if self.cut_tile == CUT_GRASS { CUT_GRASS_FRAMES } else { CUT_TREE_FRAMES };
-        Then::call(Routine::AnimCut(frames)).then(Routine::CloseTextDisplay)
+        Then::call(Routine::AnimCut(frames + 1)).then(Routine::CloseTextDisplay)
     }
 
     /// `InitCutAnimOAM`: the tree's own tiles for a tree, four copies of one leaf for grass, then
@@ -116,15 +120,34 @@ impl Overworld {
         }
     }
 
-    /// One frame of `AnimCut`: the left pair drifts right and the right pair left, and `rOBP1`
-    /// flickers. The grass animation's four leaves drift at two speeds.
+    /// One frame of `AnimCut`, with `left` frames of the block still to show: the left pair drifts
+    /// right and the right pair left, and `rOBP1` flickers. The grass animation's four leaves drift at
+    /// two speeds, swap pairs and creep down.
     pub(super) fn anim_cut_frame(&mut self, ctx: &mut Ctx, left: u8) -> Flow {
         if left == 0 {
-            ctx.screen.effects.obp1 = OBP1_NORMAL;
             self.rt.sprites_frozen = false;
-            ctx.audio.play_sound(sounds::SFX_CUT);
-            self.update_sprites(ctx);
             return Flow::Return;
+        }
+        if self.cut_tile == CUT_GRASS {
+            let moved = CUT_GRASS_FRAMES + 1 - left;
+            if moved != 0 && moved % CUT_GRASS_SWAP_FRAMES == 0 {
+                // `AnimCutGrass_SwapOAMEntries`.
+                ctx.screen.sprites[BLOCK..BLOCK + 4].rotate_left(2);
+            }
+            if moved != 0 && moved % CUT_GRASS_CREEP_FRAMES == 0 {
+                for object in &mut ctx.screen.sprites[BLOCK..BLOCK + 4] {
+                    object.y = object.y.wrapping_add(CUT_GRASS_CREEP);
+                }
+            }
+        }
+        if left == 1 {
+            // Back in `UsedCut`, whose `UpdateSprites` runs before the VBlank that still copies the
+            // block out: OAM is prepared again only on the frame after.
+            ctx.audio.play_sound(sounds::SFX_CUT);
+            self.rt.sprites_frozen = false;
+            self.update_sprites(ctx);
+            self.rt.sprites_frozen = true;
+            return Then::block(Block::Frames(1)).then(Routine::AnimCut(0));
         }
         let steps: [i8; 4] = if self.cut_tile == CUT_GRASS { [1, 2, -2, -1] } else { [1, 1, -1, -1] };
         for (i, step) in steps.into_iter().enumerate() {

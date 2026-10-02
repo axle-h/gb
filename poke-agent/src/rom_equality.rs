@@ -669,6 +669,13 @@ fn slot_reward_texts() {
     }
 }
 
+/// The price the native agent offers the Bicycle at is the one the clerk's menu draws.
+#[test]
+fn bike_shop_menu_price() {
+    let string: Vec<u8> = rom_slice(sym::BikeShopMenuPrice).iter().copied().take_while(|&b| b != 0x50).collect();
+    assert_eq!(string, poke_core::charmap::encode(&pokered::scripts::bike_shop::menu_price_text()).unwrap());
+}
+
 /// Each bank's copy of the pointers and the five waves; the pointers past them name the bytes that
 /// follow, which in the first bank are the wave the recreation plays for all three.
 #[test]

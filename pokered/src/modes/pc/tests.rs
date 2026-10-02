@@ -709,6 +709,33 @@ mod oaks_and_league {
     }
 
     #[test]
+    fn cancel_option_leaves_the_league_pc_as_b_does() {
+        let teams = vec![vec![mon(PokemonSpecies::Pidgey, 7), mon(PokemonSpecies::Rattata, 9)]];
+        let mut accessed = at_pc(with_teams(teams, 1), LEAGUE_PC);
+        assert_eq!(settle(&mut accessed), Decision::Text);
+        assert!(matches!(accessed.frame(Input::Command(Command::CancelOption)).reply, Some(Reply::Refused(_))),
+                "the text before the first mon is only a text");
+        let mut pressed = accessed;
+        to_the_first_mon(&mut pressed);
+        assert_eq!(settle(&mut pressed), Decision::Text);
+        let mut commanded = pressed.clone();
+
+        pressed.frame(Input::Buttons(Joypad::B));
+        assert_eq!(commanded.frame(Input::Command(Command::CancelOption)).reply, Some(Reply::Accepted));
+        assert_eq!((commanded.ui(), commanded.modes()), (pressed.ui(), pressed.modes()), "left in the same frame");
+        assert!(commanded.frame(Input::None).events.contains(&Event::CommandDone(Command::CancelOption)));
+        pressed.frame(Input::None);
+        for frame in 0..300 {
+            assert_eq!((commanded.ui(), commanded.modes()), (pressed.ui(), pressed.modes()), "frame {frame}");
+            assert_eq!(commanded.status(), pressed.status(), "frame {frame}");
+            commanded.frame(Input::None);
+            pressed.frame(Input::None);
+        }
+        assert_eq!(settle(&mut commanded), Decision::CursorMenu, "back on the PC's menu without the second mon");
+        assert_eq!(commanded.world(), pressed.world());
+    }
+
+    #[test]
     fn the_numbers_start_where_the_record_does_once_the_oldest_are_gone() {
         let teams = vec![vec![mon(PokemonSpecies::Pidgey, 7)]; 50];
         let mut game = at_pc(with_teams(teams, 53), LEAGUE_PC);

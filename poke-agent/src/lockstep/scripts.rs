@@ -40,6 +40,8 @@ const READS_RANDOM_SUB: [(DmgPointer, DmgPointer); 1] = [(sym::InGameTrade_Prepa
 const BUDGET: u32 = 6000;
 /// `TextCommand_PAUSE`'s `DelayFrames`.
 const TX_PAUSE_FRAMES: u32 = 30;
+/// In `wStatusFlags5`.
+const BIT_NO_TEXT_DELAY: u8 = 6;
 
 /// Where the machine waits for the player.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +74,8 @@ pub(super) enum Action {
 pub(super) struct Seen {
     pub kind: Kind,
     frames: u32,
+    /// In a battle, whose interior is the battle lockstep's to time.
+    battle: bool,
     pub location: (Map, u8, u8, SpriteFacing),
     pub screen: Vec<Vec<u8>>,
     pub events: Vec<u8>,
@@ -126,13 +130,17 @@ pub(super) struct Cartridge {
     spanning: Option<(Breakpoint, u32)>,
     /// A battle has been polled in since the start.
     fought: bool,
+    /// Whether `BattleTransition` is played rather than skipped, and the shadow OAM it kept once it
+    /// has cleared the rest.
+    play_transition: bool,
+    transition_oam: Option<Vec<[u8; 4]>>,
 }
 
 /// What the cartridge does between two points that the recreation leaves out, each entry to one of
 /// these routines costing the frames `Loading::frames` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Loading {
-    /// `DisplayTextIDInit`: `CopyScreenTileBufferToVRAM` and `LoadFontTilePatterns`.
+    /// `DisplayTextIDInit`: `CopyScreenTileBufferToVRAM`, a third of the screen a frame.
     DisplayTextIdInit,
     /// `PrintText`'s `Delay3` after its box.
     PrintText,
@@ -148,15 +156,35 @@ enum Loading {
     PlayerSpriteGraphics,
     /// `LoadMapData` turns the LCD off: no VBlanks to count.
     LoadMapData,
-    /// `DisableLCD` anywhere else: the party menu's icons, a screen's tiles reloaded.
+    /// `DisableLCD` anywhere else: the party menu's icons, a screen's tiles reloaded. The frames with
+    /// the LCD off are not counted, but `EnableLCD` starts a new one for what follows, which the
+    /// recreation does in the frame it began.
     DisableLcd,
+    /// `ClearScreen`'s `Delay3`.
+    ClearScreen,
     /// `HandleMenuInput_`'s `Delay3` after placing the cursor.
     HandleMenuInput,
     /// `RedrawPartyMenu_`'s `Delay3` once the list is drawn.
     PartyMenuDrawn,
-    /// `LoadTextBoxTilePatterns` and `LoadHpBarAndStatusTilePatterns` with the LCD on, which jump to
-    /// `CopyVideoData`: the tiles each copies.
+    /// `LoadTextBoxTilePatterns`, `LoadHpBarAndStatusTilePatterns` and `LoadFontTilePatterns` with the
+    /// LCD on, which jump to `CopyVideoData` or `CopyVideoDataDouble`: the tiles each copies.
     TilePatterns(u16),
+    /// `RestoreScreenTilesAndReloadTilePatterns`' closing `Delay3`.
+    RestoreScreenTiles,
+    /// `UsedCut`'s two `Delay3` either side of reloading the map view.
+    UsedCut,
+    /// `LoadTownMap`'s `Delay3` after its palette.
+    LoadTownMap,
+    /// `LoadTownMap_Fly`'s copies of the bird and the arrow.
+    LoadTownMapFly,
+    /// `InGameTrade_RestoreScreen`'s `Delay3` and `DelayFrames 10` once the screen is back.
+    InGameTradeRestoreScreen,
+    /// `LoadBirdSpriteGraphics`: two copies of a sheet.
+    BirdSpriteGraphics,
+    /// `HandleFlyWarpOrDungeonWarp`'s `Delay3` after `UpdateSprites`.
+    FlyWarp,
+    /// `RedrawMapView`: a frame for each two rows of the screen.
+    RedrawMapView,
     /// `DisplayListMenuID`: its box, its entries and its cursor.
     DisplayListMenuId,
     /// `CopyVideoData` outside the routines above, as the healing machine's tiles: eight tiles a
@@ -173,6 +201,9 @@ enum Loading {
     Step,
     /// Not loading: a `TX_PAUSE` that opens a `PrintText`, and the frames since the action began.
     LeadingPause(u32),
+    /// Not loading: `PrintText` or `DisplayTextIDInit` entered, the frames since the action began, and
+    /// whether `BIT_NO_TEXT_DELAY` was set.
+    TextOpened(u32, bool),
     /// A routine of `LAG`, and the frames it outlasted.
     Lag(u32),
 }
@@ -182,12 +213,19 @@ const LOADING: &[(Loading, DmgPointer)] = &[
     (Loading::Arrow, sym::ProtectedDelay3), (Loading::EmotionBubble, sym::EmotionBubble),
     (Loading::CloseTextDisplay(false), sym::CloseTextDisplay), (Loading::LoadMapData, sym::LoadMapData),
     (Loading::InitBattle, sym::InitBattleCommon), (Loading::Step, local::OverworldLoopLessDelay::noCollision),
-    (Loading::DisableLcd, sym::DisableLCD), (Loading::HandleMenuInput, sym::HandleMenuInput_),
+    (Loading::DisableLcd, sym::DisableLCD), (Loading::ClearScreen, sym::ClearScreen), (Loading::HandleMenuInput, sym::HandleMenuInput_),
     (Loading::DisplayListMenuId, sym::DisplayListMenuID), (Loading::WhiteOut, sym::GBPalWhiteOutWithDelay3),
     (Loading::ReloadMapData, sym::ReloadMapData), (Loading::PartyMenuDrawn, local::RedrawPartyMenu_::done),
     (Loading::TilePatterns(TEXT_BOX_TILES), local::LoadTextBoxTilePatterns::on),
     (Loading::PlayerSpriteGraphics, sym::LoadPlayerSpriteGraphicsCommon),
     (Loading::TilePatterns(HP_BAR_AND_STATUS_TILES), local::LoadHpBarAndStatusTilePatterns::on),
+    (Loading::TilePatterns(FONT_TILES), local::LoadFontTilePatterns::on),
+    (Loading::RestoreScreenTiles, sym::RestoreScreenTilesAndReloadTilePatterns),
+    (Loading::UsedCut, local::UsedCut::canCut),
+    (Loading::LoadTownMap, sym::LoadTownMap), (Loading::LoadTownMapFly, sym::LoadTownMap_Fly),
+    (Loading::InGameTradeRestoreScreen, sym::InGameTrade_RestoreScreen),
+    (Loading::BirdSpriteGraphics, sym::LoadBirdSpriteGraphics),
+    (Loading::FlyWarp, sym::HandleFlyWarpOrDungeonWarp), (Loading::RedrawMapView, sym::RedrawMapView),
 ];
 
 const TEXT_BOX_TILES: u16 = (sym::TextBoxGraphicsEnd.address - sym::TextBoxGraphics.address) / 16;
@@ -199,12 +237,19 @@ const HP_BAR_AND_STATUS_TILES: u16 = (sym::HpBarAndStatusGraphicsEnd.address - s
 /// `CalcStats`.
 const LAG: [DmgPointer; 3] = [sym::CalcLevelFromExperience, sym::CalcStat, sym::CalcStats];
 /// The same for a loop inside a routine that also waits: from the first time its start is reached
-/// to its end.
-const LAG_SPANS: [(DmgPointer, DmgPointer); 1] = [(local::RedrawPartyMenu_::r#loop, local::RedrawPartyMenu_::afterDrawingMonEntries)];
+/// to its end. And for `ShowPokedexData` up to its cry, which is loading the page and decompressing
+/// the picture, all of it, since the recreation puts the page up at once; what a span holds is
+/// priced by the span alone.
+const LAG_SPANS: [(DmgPointer, DmgPointer); 2] = [
+    (local::RedrawPartyMenu_::r#loop, local::RedrawPartyMenu_::afterDrawingMonEntries),
+    (sym::ShowPokedexData, sym::PlayCry),
+];
 
 /// The callers of `CopyVideoData` whose copies are not already priced by the routine that calls.
-const COPY_VIDEO_DATA_CALLERS: [(DmgPointer, DmgPointer); 3] = [
+const COPY_VIDEO_DATA_CALLERS: [(DmgPointer, DmgPointer); 5] = [
     (sym::AnimateHealingMachine, sym::PokeCenterFlashingMonitorAndHealBall),
+    (sym::FishingAnim, local::FishingAnim::ShakePlayerSprite),
+    (sym::LoadAnimSpriteGfx, sym::LoadMonPartySpriteGfxWithLCDDisabled),
     (sym::LoadSmokeTileFourTimes, sym::LoadSmokeTile),
     (sym::InitCutAnimOAM, sym::LoadCutGrassAnimationTilePattern),
 ];
@@ -221,12 +266,17 @@ const FAR_COPY_SHEETS: u32 = 2;
 /// Tiles in a sprite's walking sheet and in the font.
 const SPRITE_SHEET_TILES: u16 = 12;
 const FONT_TILES: u16 = (sym::FontGraphicsEnd.address - sym::FontGraphics.address) / 8;
+const UP_ARROW_TILES: u16 = (sym::TownMapUpArrowEnd.address - sym::TownMapUpArrow.address) / 8;
 
 impl Loading {
     /// `None` where the stretch cannot be timed.
     fn frames(self, map: Map, x: u8, y: u8) -> Option<u32> {
         Some(match self {
-            Loading::DisplayTextIdInit => super::DELAY3 + copy_video_data(FONT_TILES),
+            Loading::DisplayTextIdInit | Loading::RestoreScreenTiles | Loading::LoadTownMap | Loading::FlyWarp => super::DELAY3,
+            Loading::RedrawMapView => 9,
+            Loading::UsedCut => 2 * super::DELAY3,
+            Loading::InGameTradeRestoreScreen => super::DELAY3 + 10,
+            Loading::LoadTownMapFly => copy_video_data(SPRITE_SHEET_TILES) + copy_video_data(UP_ARROW_TILES),
             Loading::PrintText => super::BOX,
             Loading::Arrow => super::ARROW,
             Loading::EmotionBubble => copy_video_data(4),
@@ -234,14 +284,16 @@ impl Loading {
                 true => walking_pictures(map, x, y) as u32 * copy_video_data(SPRITE_SHEET_TILES),
                 false => FAR_COPY_SHEETS,
             },
-            Loading::PlayerSpriteGraphics => 2 * copy_video_data(SPRITE_SHEET_TILES),
-            Loading::Step | Loading::LeadingPause(_) => 0,
+            Loading::PlayerSpriteGraphics | Loading::BirdSpriteGraphics => 2 * copy_video_data(SPRITE_SHEET_TILES),
+            Loading::Step | Loading::LeadingPause(_) | Loading::TextOpened(..) => 0,
             Loading::Lag(frames) => frames,
             Loading::HandleMenuInput => super::CURSOR,
             Loading::DisplayListMenuId => super::LIST,
             Loading::CopyVideoData(tiles) | Loading::TilePatterns(tiles) => copy_video_data(tiles),
             Loading::WhiteOut | Loading::PartyMenuDrawn => super::DELAY3,
-            Loading::LoadMapData | Loading::InitBattle | Loading::DisableLcd | Loading::ReloadMapData => return None,
+            Loading::DisableLcd => 1,
+            Loading::ClearScreen => super::DELAY3,
+            Loading::LoadMapData | Loading::InitBattle | Loading::ReloadMapData => return None,
         })
     }
 }
@@ -267,7 +319,8 @@ impl Cartridge {
         gb.load_state(state).unwrap();
         gb.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
         let map = gb.core().mmu().read(sym::wCurMap.address);
-        Self { gb, tape: Vec::new(), map, entered: Vec::new(), text: 0, acting: 0, lagging: None, spanning: None, fought: false }
+        Self { gb, tape: Vec::new(), map, entered: Vec::new(), text: 0, acting: 0, lagging: None, spanning: None, fought: false,
+            play_transition: false, transition_oam: None }
     }
 
     pub fn read(&self, at: u16) -> u8 {
@@ -282,13 +335,17 @@ impl Cartridge {
     fn run_to(&mut self, points: &[Breakpoint]) -> Breakpoint {
         let random = breakpoint(sym::Random);
         let encounter = breakpoint(local::TryDoWildEncounter::CanEncounter);
-        let seams: Vec<_> = SEAMS.iter().map(|&seam| breakpoint(seam)).collect();
+        let transition = breakpoint(sym::BattleTransition);
+        let seams: Vec<_> = SEAMS.iter().map(|&seam| breakpoint(seam))
+            .filter(|&seam| !(self.play_transition && seam == transition)).collect();
+        let transition_tile = breakpoint(sym::LoadBattleTransitionTile);
         let copy_video = breakpoint(sym::CopyVideoData);
         let pause = breakpoint(sym::TextCommand_PAUSE);
         let mut all = points.to_vec();
         all.extend([copy_video, pause]);
         all.extend([random, encounter]);
         all.extend(&seams);
+        all.extend(self.play_transition.then_some(transition_tile));
         all.extend(LOADING.iter().map(|&(_, at)| breakpoint(at)));
         let lag: Vec<_> = LAG.iter().map(|&at| breakpoint(at)).collect();
         all.extend(&lag);
@@ -310,7 +367,7 @@ impl Cartridge {
                         self.entered.push(Loading::Lag(self.acting - from));
                     }
                 }
-                Stop::Breakpoint(hit) if lag.contains(&hit) && self.lagging.is_none() => {
+                Stop::Breakpoint(hit) if lag.contains(&hit) && self.lagging.is_none() && self.spanning.is_none() => {
                     let back = self.gb.return_address();
                     let bank = if (0x4000..0x8000).contains(&back) { self.gb.core().mmu().rom_bank() as u8 } else { 0 };
                     let back = Breakpoint::new(bank, back);
@@ -327,7 +384,7 @@ impl Cartridge {
                 }
                 Stop::Breakpoint(hit) if self.lagging.is_some_and(|(_, back, _)| hit == back) => {}
                 Stop::Breakpoint(hit) if hit == copy_video => {
-                    if COPY_VIDEO_DATA_CALLERS.iter().any(|&(from, to)| (from.address..to.address).contains(&self.gb.return_address())) {
+                    if self.spanning.is_none() && COPY_VIDEO_DATA_CALLERS.iter().any(|&(from, to)| (from.address..to.address).contains(&self.gb.return_address())) {
                         let tiles = self.gb.core().registers().c as u16;
                         self.entered.push(Loading::CopyVideoData(tiles));
                     }
@@ -340,9 +397,16 @@ impl Cartridge {
                     }
                 }
                 Stop::Breakpoint(hit) if !points.contains(&hit) && LOADING.iter().any(|&(_, at)| breakpoint(at) == hit) => {
+                    if self.spanning.is_some() {
+                        continue;
+                    }
                     if hit == breakpoint(sym::PrintText) {
                         let registers = self.gb.core().registers();
                         self.text = u16::from_be_bytes([registers.h, registers.l]);
+                    }
+                    if hit == breakpoint(sym::PrintText) || hit == breakpoint(sym::DisplayTextIDInit) {
+                        let no_delay = self.read(sym::wStatusFlags5.address) & 1 << BIT_NO_TEXT_DELAY != 0;
+                        self.entered.push(Loading::TextOpened(self.acting, no_delay));
                     }
                     let mut loading = LOADING.iter().find(|&&(_, at)| breakpoint(at) == hit).unwrap().0;
                     if let Loading::CloseTextDisplay(font_loaded) = &mut loading {
@@ -365,6 +429,9 @@ impl Cartridge {
                 Stop::Breakpoint(hit) if hit == encounter => {
                     self.tape.push(self.read(sym::hRandomAdd.address));
                     self.tape.push(self.read(sym::hRandomSub.address));
+                }
+                Stop::Breakpoint(hit) if hit == transition_tile && self.play_transition => {
+                    self.transition_oam = Some(super::battle::cartridge_oam(&self.gb));
                 }
                 Stop::Breakpoint(hit) if seams.contains(&hit) => {
                     let sp = self.gb.core().registers().sp;
@@ -506,6 +573,7 @@ impl Cartridge {
         let mut seen = Seen {
             kind,
             frames,
+            battle: self.read(sym::wIsInBattle.address) != 0,
             location: self.location(),
             screen: (0..18).map(|y| super::tile_row(&self.gb, y)).collect(),
             events: mmu.read_slice(sym::wEventFlags.address, 320),
@@ -573,6 +641,11 @@ fn recreation_to_poll(game: &mut Game) -> (Kind, u32) {
             return (Kind::Bubble, frames);
         }
         if let Status::Waiting(decision) = game.status() {
+            // Cycling Road's slope offers a turn ahead of each square's pass, where a cartridge
+            // with nothing held never polls.
+            if decision == Decision::Overworld && overworld(game).is_some_and(|o| o.on_cycling_road_slope(game.world())) {
+                continue;
+            }
             return (if decision == Decision::Overworld { Kind::Overworld } else { Kind::Prompt }, frames);
         }
     }
@@ -620,7 +693,15 @@ fn recreation_act(game: &mut Game, action: Action) -> (Kind, u32) {
                 return (kind, frames + more - 1);
             }
         }
-        Action::Talk => frames += recreation_talk(game, BUDGET),
+        Action::Talk => {
+            frames += recreation_talk(game, BUDGET);
+            // A text printed at once is polled in the frame it opened, while A is still held; the
+            // frame that lets it go is the harness's.
+            if matches!(game.status(), Status::Waiting(decision) if decision != Decision::Overworld) {
+                let (kind, _) = recreation_to_poll(game);
+                return (kind, frames);
+            }
+        }
     }
     let (kind, more) = recreation_to_poll(game);
     (kind, frames + more)
@@ -629,9 +710,11 @@ fn recreation_act(game: &mut Game, action: Action) -> (Kind, u32) {
 fn recreation_seen(game: &mut Game, kind: Kind, frames: u32) -> (Seen, Option<pokered::gfx::Screen>) {
     let world = game.world();
     let location = &world.location;
+    let in_battle = game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_)));
     let mut seen = Seen {
         kind,
         frames,
+        battle: in_battle,
         location: (location.map, location.x, location.y, location.facing),
         screen: recreated_screen(game),
         events: (0..320u16).map(|byte| (0..8).fold(0, |bits, bit| bits | (world.events.is_set(byte * 8 + bit) as u8) << bit)).collect(),
@@ -644,7 +727,6 @@ fn recreation_seen(game: &mut Game, kind: Kind, frames: u32) -> (Seen, Option<po
         entered: Vec::new(),
     };
     let mut screen = None;
-    let in_battle = game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_)));
     if kind == Kind::Prompt && !in_battle {
         let overworld = overworld(game).expect("the overworld is under the text");
         seen.sprites = Some((overworld.num_sprites(), *overworld.sprites()));
@@ -666,19 +748,30 @@ fn recreation_seen(game: &mut Game, kind: Kind, frames: u32) -> (Seen, Option<po
 /// Runs `choose` on the cartridge from `state` until it returns `None`, then replays its presses into
 /// the recreation, comparing every poll. `prepare` edits the cartridge first.
 pub(super) fn lockstep(state: &[u8], prepare: impl FnOnce(&mut Cartridge), choose: impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>) {
-    lockstep_from(state, prepare, true, choose);
+    lockstep_from(state, prepare, true, Joypad::empty(), choose);
+}
+
+/// `lockstep`, with `held` down until the start's poll: Cycling Road's slope rolls a rider who holds
+/// nothing, and B stops it.
+pub(super) fn lockstep_holding(state: &[u8], held: Joypad, prepare: impl FnOnce(&mut Cartridge),
+    choose: impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>)
+{
+    lockstep_from(state, prepare, true, held, choose);
 }
 
 /// `lockstep`, started where the fixture stands when `from_poll` is false: a map script about to run
 /// on the next pass leaves no overworld poll before it. The start is then neither compared nor timed,
 /// since neither machine knows how far into its pass the other is.
-fn lockstep_from(state: &[u8], prepare: impl FnOnce(&mut Cartridge), from_poll: bool,
+fn lockstep_from(state: &[u8], prepare: impl FnOnce(&mut Cartridge), from_poll: bool, held: Joypad,
     mut choose: impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>)
 {
     let mut cartridge = Cartridge::from_state(state);
     // The SET style, so a trainer's next mon asks nothing a pressed A would answer by switching.
     let options = cartridge.read(sym::wOptions.address);
     cartridge.write(sym::wOptions.address, options | 1 << 6);
+    if !held.is_empty() {
+        cartridge.gb.hold_buttons(joypad(held));
+    }
     while from_poll && cartridge.frame() != Some(Kind::Overworld) {}
     // Edits are made where both start, so the recreation's world has them too.
     prepare(&mut cartridge);
@@ -798,7 +891,7 @@ fn compare(cartridge: &Seen, recreation: &Seen, screen: Option<pokered::gfx::Scr
 /// and at most two lag frames, and never early. A step that turns the LCD off, or that starts from
 /// or runs through a battle, is untimed.
 fn time(from: &Seen, to: &Seen, recreation: u32, action: Action, game: &Game, what: &str) {
-    let in_battle = |seen: &Seen| seen.kind == Kind::Prompt && seen.sprites.is_none();
+    let in_battle = |seen: &Seen| seen.kind == Kind::Prompt && seen.battle;
     let log = std::env::var("LOG_TIMING").is_ok();
     if in_battle(from) || in_battle(to) || to.kind == Kind::MapChange && to.entered.is_empty() && from.location.0 != to.location.0 {
         if log { println!("untimed {what}: a battle or a map change {:?}", to.entered); }
@@ -813,13 +906,24 @@ fn time(from: &Seen, to: &Seen, recreation: u32, action: Action, game: &Game, wh
     // `LIST` already prices the cursor of the `HandleMenuInput` that `DisplayListMenuID` calls.
     let lists = to.entered.iter().filter(|&&l| l == Loading::DisplayListMenuId).count() as u32;
     loading -= lists * super::CURSOR;
-    // A press still held when the first letter of a new text prints hurries it. A text closed on the
-    // way spends the press first, since the recreation's own `Delay3` after it outlasts the press.
-    let pressed_a = matches!(action, Action::Talk) || matches!(action, Action::Press(button, _) if button.contains(Joypad::A));
-    let opens_text = to.entered.iter()
-        .find(|&&l| matches!(l, Loading::CloseTextDisplay(_) | Loading::DisplayTextIdInit | Loading::PrintText))
-        .is_some_and(|&l| !matches!(l, Loading::CloseTextDisplay(_)));
-    if pressed_a && opens_text {
+    // A or B still held when the first letter of a new text prints hurries it, if the text opens
+    // with nothing but loading on the way, give or take the frame the press is let go in, and prints
+    // a letter at a time. A text closed on the way spends the press first, since the recreation's own
+    // `Delay3` after it outlasts the press.
+    let held = match action {
+        Action::Talk => Some(1),
+        Action::Press(button, held) if button.intersects(Joypad::A | Joypad::B) => Some(held),
+        _ => None,
+    };
+    let opening = to.entered.iter()
+        .position(|&l| matches!(l, Loading::CloseTextDisplay(_) | Loading::DisplayTextIdInit | Loading::PrintText))
+        .filter(|&i| !matches!(to.entered[i], Loading::CloseTextDisplay(_)));
+    let hurried = held.zip(opening).is_some_and(|(held, i)| {
+        let before: u32 = to.entered[..i].iter().map(|entry| entry.frames(map, x, y).unwrap_or(0)).sum();
+        to.entered[..i].iter().rev().find_map(|&l| match l { Loading::TextOpened(at, _) => Some(at), _ => None })
+            .is_some_and(|at| at <= held + before + 1)
+    }) && !to.entered.iter().any(|&l| matches!(l, Loading::TextOpened(_, true)));
+    if hurried {
         loading += super::hurried_letter(game);
     }
     // And a pause at its start reached with nothing but loading on the way, which the box's `Delay3`
@@ -877,33 +981,73 @@ pub(super) fn walk_and_answer(route: &'static [(Action, &'static str)], mut done
     }
 }
 
-/// Viridian Forest from its entrance: right along the bottom and up the column past the second Bug
-/// Catcher's sight, who sees the player, walks up, speaks and fights; then the player turns to him
-/// and he only talks.
+/// Viridian Forest from its entrance: right along the bottom and up the column into the second Bug
+/// Catcher's sight; then a turn to him and a talk.
+const BUG_CATCHER_ROUTE: &[(Action, &str)] = &[
+    (Action::Walk(Joypad::RIGHT), "right, turning"),
+    (Action::Walk(Joypad::RIGHT), "right"), (Action::Walk(Joypad::RIGHT), "right"), (Action::Walk(Joypad::RIGHT), "right"),
+    (Action::Walk(Joypad::RIGHT), "right"), (Action::Walk(Joypad::RIGHT), "right"), (Action::Walk(Joypad::RIGHT), "right"),
+    (Action::Walk(Joypad::RIGHT), "right"), (Action::Walk(Joypad::RIGHT), "right to (26, 43)"),
+    (Action::Walk(Joypad::UP), "up, turning"),
+    (Action::Walk(Joypad::UP), "up"), (Action::Walk(Joypad::UP), "up"), (Action::Walk(Joypad::UP), "up"),
+    (Action::Walk(Joypad::UP), "up"), (Action::Walk(Joypad::UP), "up"), (Action::Walk(Joypad::UP), "up"),
+    (Action::Walk(Joypad::UP), "up"), (Action::Walk(Joypad::UP), "up"),
+    (Action::Walk(Joypad::UP), "up into the Bug Catcher's sight"),
+    (Action::Press(Joypad::RIGHT, 2), "turn to him"),
+    (Action::Talk, "talk to him"),
+];
+
+/// The Bug Catcher sees the player, walks up, speaks and fights; then the player turns to him and he
+/// only talks.
 #[test]
 fn a_bug_catcher_sees_the_player_walks_up_battles_and_after_only_talks() {
-    const ROUTE: &[(Action, &str)] = &[
-        (Action::Walk(Joypad::RIGHT), "right, turning"),
-        (Action::Walk(Joypad::RIGHT), "right"), (Action::Walk(Joypad::RIGHT), "right"), (Action::Walk(Joypad::RIGHT), "right"),
-        (Action::Walk(Joypad::RIGHT), "right"), (Action::Walk(Joypad::RIGHT), "right"), (Action::Walk(Joypad::RIGHT), "right"),
-        (Action::Walk(Joypad::RIGHT), "right"), (Action::Walk(Joypad::RIGHT), "right to (26, 43)"),
-        (Action::Walk(Joypad::UP), "up, turning"),
-        (Action::Walk(Joypad::UP), "up"), (Action::Walk(Joypad::UP), "up"), (Action::Walk(Joypad::UP), "up"),
-        (Action::Walk(Joypad::UP), "up"), (Action::Walk(Joypad::UP), "up"), (Action::Walk(Joypad::UP), "up"),
-        (Action::Walk(Joypad::UP), "up"), (Action::Walk(Joypad::UP), "up"),
-        (Action::Walk(Joypad::UP), "up into the Bug Catcher's sight"),
-        (Action::Press(Joypad::RIGHT, 2), "turn to him"),
-        (Action::Talk, "talk to him"),
-    ];
     let event = poke_core::symbols::pokered_events::EVENT_BEAT_VIRIDIAN_FOREST_TRAINER_0;
     let mut spoken = 0;
-    lockstep(include_bytes!("../pokemon/data/viridian-forest.bin"), |_| {}, walk_and_answer(ROUTE, move |seen| {
+    lockstep(include_bytes!("../pokemon/data/viridian-forest.bin"), |_| {}, walk_and_answer(BUG_CATCHER_ROUTE, move |seen| {
         let beaten = seen.events[event as usize / 8] & 1 << (event % 8) != 0;
         if beaten && seen.kind == Kind::Overworld {
             spoken += 1;
         }
         spoken == 3
     }));
+}
+
+/// The Bug Catcher's battle, to its transition: `BattleTransition` clears every OAM block but the
+/// player's and the one its count of the drawn slots before `hSpriteIndex` puts him in.
+#[test]
+fn a_trainer_s_battle_transition_keeps_his_sprite_as_the_cartridge_does() {
+    let mut cartridge = Cartridge::from_state(include_bytes!("../pokemon/data/viridian-forest.bin"));
+    while cartridge.frame() != Some(Kind::Overworld) {}
+    let start = Start::take(&cartridge.gb);
+    cartridge.tape.clear();
+    cartridge.play_transition = true;
+    let mut choose = walk_and_answer(BUG_CATCHER_ROUTE, |_| false);
+    let mut seen = cartridge.seen(Kind::Overworld, 0);
+    let mut script = Vec::new();
+    while cartridge.transition_oam.is_none() {
+        let (action, _) = choose(script.len(), &seen).expect("the Bug Catcher fights before the route ends");
+        let (kind, frames) = cartridge.act(action);
+        script.push(action);
+        seen = cartridge.seen(kind, frames);
+    }
+    let kept = cartridge.transition_oam.take().unwrap();
+    let trainer_block = (1..10).find(|&block| kept[4 * block..4 * block + 4] != [[0; 4]; 4]);
+    assert!(trainer_block.is_some(), "the cartridge kept no trainer's block: {kept:02X?}");
+
+    let mut game = start.game(cartridge.tape.clone());
+    recreation_seen(&mut game, Kind::Overworld, 0);
+    let (&last, before) = script.split_last().unwrap();
+    for &action in before {
+        let (kind, frames) = recreation_act(&mut game, action);
+        recreation_seen(&mut game, kind, frames);
+    }
+    let Action::Press(button, held) = last else { panic!("the battle began on {last:?}") };
+    let transition = (0..BUDGET).find_map(|frame| {
+        game.frame(if frame < held { Input::Buttons(button) } else { Input::None });
+        let playing = game.modes().iter().any(|mode| matches!(mode, Mode::Battle(battle) if battle.animating()));
+        playing.then(|| game.screen().sprites.iter().map(|o| [o.y, o.x, o.tile, o.attributes]).collect::<Vec<_>>())
+    });
+    assert_eq!(transition.as_ref(), Some(&kept), "the OAM the transition keeps, the trainer's in block {trainer_block:?}");
 }
 
 /// Route 1's clerk: the player waits beside his column for him to come alongside, turns to him and
@@ -1145,6 +1289,92 @@ fn cut_takes_a_tree_down_as_the_cartridge_does() {
         (Action::Walk(Joypad::LEFT), "left again"),
     ];
     lockstep(include_bytes!("../pokemon/data/route8-cut-trees.bin"), cutter_chosen, in_order(SCRIPT));
+}
+
+/// Objects 36 to 39, the block `WriteCutOrBoulderDustAnimationOAMBlock` writes, as `[y, x, tile,
+/// attributes]`, and `rOBP1`.
+type OamBlock = ([[u8; 4]; 4], u8);
+
+/// Nothing of the block left on screen: `PrepareOAMData` has put its objects below it, or never
+/// wrote it.
+fn block_gone((objects, _): &OamBlock) -> bool {
+    objects.iter().all(|&[y, _, tile, _]| y >= 160 || tile < 0xFC)
+}
+
+fn cartridge_block(cartridge: &Cartridge) -> OamBlock {
+    let objects = std::array::from_fn(|i| std::array::from_fn(|byte| cartridge.read(sym::wShadowOAMSprite36.address + 4 * i as u16 + byte as u16)));
+    (objects, cartridge.read(0xFF49))
+}
+
+fn recreated_block(game: &Game) -> OamBlock {
+    let objects = std::array::from_fn(|i| game.screen().sprites.get(36 + i)
+        .map_or([160, 0, 0, 0], |object| [object.y, object.x, object.tile, object.attributes]));
+    (objects, game.screen().effects.obp1)
+}
+
+/// CUT from the party menu at the end of `script`, then its animation compared object by object
+/// with `rOBP1` at every frame from `AnimCut` to the one `PrepareOAMData` takes the block back in,
+/// which on the cartridge is each VBlank's `wShadowOAM` as its DMA copies it out. `frames` is how
+/// many show it.
+fn cut_frame_by_frame(script: &[(Action, &str)], frames: usize) {
+    let mut cartridge = Cartridge::from_state(include_bytes!("../pokemon/data/route8-cut-trees.bin"));
+    while cartridge.frame() != Some(Kind::Overworld) {}
+    cutter_chosen(&mut cartridge);
+    let start = Start::take(&cartridge.gb);
+    cartridge.tape.clear();
+    let polls: Vec<Kind> = script.iter().map(|&(action, _)| cartridge.act(action).0).collect();
+    assert_eq!(polls.last(), Some(&Kind::Prompt), "the text CUT puts up");
+    // "hacked away with CUT!", whose `prompt` is all that stands before the animation.
+    cartridge.gb.hold_buttons(joypad(Joypad::A));
+    cartridge.frame();
+    cartridge.gb.hold_buttons(JoypadButtonState::default());
+    cartridge.run_to(&[breakpoint(sym::AnimCut)]);
+    assert!(!block_gone(&cartridge_block(&cartridge)), "InitCutAnimOAM wrote the block");
+    let mut theirs = Vec::new();
+    loop {
+        cartridge.run_to(&[breakpoint(sym::VBlank)]);
+        let block = cartridge_block(&cartridge);
+        if block_gone(&block) {
+            break;
+        }
+        theirs.push(block);
+    }
+    assert_eq!(cartridge.to_poll().0, Kind::Overworld);
+
+    let mut game = start.game(cartridge.tape.clone());
+    let polls: Vec<Kind> = script.iter().map(|&(action, _)| recreation_act(&mut game, action).0).collect();
+    assert_eq!(polls.last(), Some(&Kind::Prompt), "the text CUT puts up");
+    let mut ours = Vec::new();
+    for frame in 0..BUDGET {
+        recreation_frame(&mut game, if frame == 0 { Input::Buttons(Joypad::A) } else { Input::None });
+        let block = recreated_block(&game);
+        match block_gone(&block) {
+            true if ours.is_empty() => {}
+            true => break,
+            false => ours.push(block),
+        }
+    }
+    for (frame, (ours, theirs)) in ours.iter().zip(&theirs).enumerate() {
+        assert_eq!(ours, theirs, "frame {frame} of the block");
+    }
+    assert_eq!((ours.len(), theirs.len()), (frames, frames), "the frames the block is shown");
+}
+
+/// CUT on the tree the fixture faces on Route 8: its halves drift together under a flickering
+/// `rOBP1` for eight frames, and the last is shown once more.
+#[test]
+fn cut_tree_s_halves_drift_as_the_cartridge_s_do() {
+    cut_frame_by_frame(&[(START, "START"), (PROMPT, "POKéMON"), (PROMPT, "the cutter"), (PROMPT, "CUT")], 9);
+}
+
+/// CUT on Route 8's grass, a step right of the tree: the four leaves drift apart, swap pairs every
+/// eight frames and creep down every sixteen, and the last swap and creep are shown for a frame.
+#[test]
+fn cut_grass_s_leaves_swap_and_creep_as_the_cartridge_s_do() {
+    cut_frame_by_frame(&[
+        (Action::Walk(Joypad::RIGHT), "right, turning"), (Action::Walk(Joypad::RIGHT), "right, to face the grass"),
+        (START, "START"), (PROMPT, "POKéMON"), (PROMPT, "the cutter"), (PROMPT, "CUT"),
+    ], 33);
 }
 
 /// The fixture's third mon knows STRENGTH and the party has every badge: the start menu's cursor

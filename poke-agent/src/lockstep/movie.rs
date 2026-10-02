@@ -1,5 +1,6 @@
-//! Power-on to the overworld, the cartridge booted cold beside `Game::power_on`, and `HallOfFamePC`
-//! to THE END beside `Movie::hall_of_fame`.
+//! Power-on to the overworld, the cartridge booted cold beside `Game::power_on`, over no save and
+//! over one: a new game, B from the main menu back to the title, and the title's clear-save
+//! dialogue. And `HallOfFamePC` to THE END beside `Movie::hall_of_fame`.
 //!
 //! The splash, the intro and the title are compared pixel for pixel on every frame. The cartridge
 //! is late wherever the recreation leaves loading out, so the frames are walked with an offset that
@@ -21,7 +22,9 @@ use gb::ram::ROM;
 use crate::pokemon::symbols::pokered_local_labels as local;
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointerRead};
 use super::status_screen::{cartridge_until_polling, ours, screen};
-use super::{assert_late, breakpoint, joypad, ARROW, BOX, CURSOR};
+use super::main_menu::menu_loading;
+use super::save::{text_box_tiles, CHECK_PREVIOUS_SAVE_FILE};
+use super::{assert_late, breakpoint, joypad, ARROW, BOX, CURSOR, DELAY3};
 
 /// The cartridge run alone first: its LCD at every `VBlank`, and every `Random` byte that was not
 /// `VBlank`'s own.
@@ -218,38 +221,65 @@ fn cartridge_to(gb: &mut GameBoy, label: crate::pokemon::symbols::DmgPointer) {
 enum Late {
     /// By exactly this much loading, give or take `assert_late`'s allowance.
     Loading(u32),
-    /// A picture decompressed, the naming screen loaded or the title's cry and copies: all loading,
-    /// and too uneven to name, so held only to never early and at most this late.
-    Untimed(u32),
+    /// Across a stretch with the LCD off, which stays untimed: never early and at most this late.
+    LcdOff(u32),
 }
 
 /// A text opened by the press: its box and its `▼`, less the letter the held press hurries.
 const TEXT: Late = Late::Loading(BOX + ARROW - 2);
 /// A text some frames after the press, which no longer hurries it.
-const TEXT_UNHURRIED: Late = Late::Loading(BOX + ARROW);
-const PICTURE: Late = Late::Untimed(70);
+const TEXT_UNHURRIED: u32 = BOX + ARROW;
 const MENU: Late = Late::Loading(CURSOR);
+/// `.finishedWaiting` after the cry: `GBPalWhiteOutWithDelay3`, `ClearScreen`'s `Delay3`, the two
+/// `TitleScreenCopyTileMapToVRAM`'s and the one before `LoadGBPal`.
+const TITLE_LEAVING: u32 = 5 * DELAY3;
+/// `DisplayTitleScreen` loads its tiles and pictures with the LCD off.
+const TITLE: Late = Late::LcdOff(60);
+
+/// A picture in Oak's speech and the text over it: `ClearScreen`'s `Delay3`, the picture
+/// decompressed and copied, measured, and the text's box and `▼`.
+const fn picture(decompressed: u32) -> Late {
+    Late::Loading(DELAY3 + decompressed + TEXT_UNHURRIED)
+}
+/// Oak's, after `OakSpeech`'s own `ClearScreen`, `LoadTextBoxTilePatterns` and the new game's WRAM.
+const OAK: Late = picture(48);
+const NIDORINO: Late = picture(37);
+const RED_PICTURE: u32 = 39;
+const RED: Late = picture(RED_PICTURE);
+const RIVAL: Late = picture(40);
+/// `DisplayNamingScreen` to its first poll, measured: its white-out and `ClearScreen`, and the HP
+/// bar, `ED` and party icon tiles copied.
+const NAMING_SCREEN: Late = Late::Loading(44);
+/// `.submitNickname`'s `GBPalWhiteOutWithDelay3`, `ClearScreen` and `LoadTextBoxTilePatterns`, then
+/// `ChoosePlayerName`'s `ClearScreen`, `Delay3` and Red's picture again.
+fn red_named() -> Late {
+    Late::Loading(2 * DELAY3 + text_box_tiles() + DELAY3 + DELAY3 + RED_PICTURE + TEXT_UNHURRIED)
+}
+/// Into the overworld, measured: both shrinking pictures decompressed, and the text box tiles
+/// copied with the LCD on.
+const INTO_THE_MAP: u32 = 79;
 
 /// Every poll of a new game, what is pressed at it, and how late the cartridge reaches it: START at
 /// the title, NEW GAME, "AB" typed for the player and Oak's second name for the rival.
 fn new_game_script() -> Vec<(Decision, Joypad, Late)> {
     use Decision::*;
     let a = Joypad::A;
+    let none = Late::Loading(0);
     vec![
-        (TitleScreen, Joypad::START, Late::Loading(0)),
-        (MainMenu, a, Late::Untimed(50)),
-        (Text, a, PICTURE), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT),
-        (Text, a, PICTURE), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT),
+        (TitleScreen, Joypad::START, none),
+        (MainMenu, a, Late::Loading(TITLE_LEAVING + menu_loading())),
+        (Text, a, OAK), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT),
+        (Text, a, NIDORINO), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT),
         (Text, a, TEXT), (Text, a, TEXT),
-        (Text, a, PICTURE),
+        (Text, a, RED),
         (IntroNameMenu, a, MENU),
-        (NamingScreen, a, Late::Untimed(50)), (NamingScreen, Joypad::RIGHT, Late::Loading(0)),
-        (NamingScreen, a, Late::Loading(0)), (NamingScreen, Joypad::START, Late::Loading(0)),
-        (Text, a, PICTURE),
-        (Text, a, PICTURE), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT),
+        (NamingScreen, a, NAMING_SCREEN), (NamingScreen, Joypad::RIGHT, none),
+        (NamingScreen, a, none), (NamingScreen, Joypad::START, none),
+        (Text, a, red_named()),
+        (Text, a, RIVAL), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT),
         (IntroNameMenu, Joypad::DOWN, MENU), (IntroNameMenu, Joypad::DOWN, MENU), (IntroNameMenu, a, MENU),
-        (Text, a, TEXT_UNHURRIED), (Text, a, TEXT),
-        (Text, a, PICTURE), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT),
+        (Text, a, Late::Loading(TEXT_UNHURRIED)), (Text, a, TEXT),
+        (Text, a, RED), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT), (Text, a, TEXT),
     ]
 }
 
@@ -354,36 +384,50 @@ fn recreation_until_asked(game: &mut Game, film: &mut Film) -> u32 {
     panic!("the recreation never asked anything");
 }
 
+fn assert_in_time(cartridge: u32, recreation: u32, late: Late, what: &str) {
+    match late {
+        Late::Loading(loading) => assert_late(cartridge, recreation, loading, what),
+        Late::LcdOff(most) => assert!(cartridge >= recreation && cartridge <= recreation + most,
+            "{what}: the cartridge took {cartridge} frames and the recreation {recreation}"),
+    }
+}
+
+/// Both sides through `script` from where both stand, filming every frame: at each poll the same
+/// decision and tile map, and the cartridge late by the loading named. `since` is the recreation's
+/// frames since the press before the first poll, and `None` where both were started there; the
+/// frames since the last press are returned.
+fn play(gb: &mut GameBoy, game: &mut Game, film: &mut Film, since: Option<u32>, script: Vec<(Decision, Joypad, Late)>) -> u32 {
+    let mut recreation = since;
+    for (poll, (decision, button, late)) in script.into_iter().enumerate() {
+        let cartridge = cartridge_until_polling_filmed(gb, film);
+        assert_eq!(game.status(), Status::Waiting(decision.clone()), "poll {poll}");
+        // Below these the recreation's option screen has the ruleset, which the cartridge has not.
+        let rows = if decision == Decision::Options { pokered::modes::option_menu::CARTRIDGE_ROWS } else { 18 };
+        assert_eq!(screen(gb)[..rows], ours(game)[..rows], "the tile map at poll {poll}, {decision:?}");
+        if let Some(recreation) = recreation {
+            assert_in_time(cartridge, recreation, late, &format!("poll {poll}, {decision:?}"));
+        }
+        gb.hold_buttons(joypad(button));
+        super::to_vblank(gb);
+        film.cartridge_frame(gb);
+        gb.hold_buttons(JoypadButtonState::default());
+        game.frame(Input::Buttons(button));
+        film.recreation_frame(game);
+        recreation = Some(recreation_until_asked(game, film));
+    }
+    recreation.expect("a script of at least one poll")
+}
+
 #[test]
 fn a_new_game_from_the_title_to_reds_room_matches_the_cartridge() {
     let tape = player_id_tape();
     let mut gb = boot();
     let mut game = Game::power_on(None, GameRng::tape(tape), Pacing::Faithful);
     cartridge_to(&mut gb, local::DisplayTitleScreen::awaitUserInterruptionLoop);
-    let script = new_game_script();
     let mut film = Film::default();
     // The intro is the other test's: both are filmed from the title screen's first wait.
     recreation_until_asked(&mut game, &mut Film::default());
-    let mut recreation = 0;
-    for (poll, (decision, button, late)) in script.into_iter().enumerate() {
-        let cartridge = cartridge_until_polling_filmed(&mut gb, &mut film);
-        assert_eq!(game.status(), Status::Waiting(decision.clone()), "poll {poll}");
-        assert_eq!(screen(&gb), ours(&game), "the tile map at poll {poll}, {decision:?}");
-        let what = format!("poll {poll}, {decision:?}");
-        match late {
-            Late::Loading(loading) if poll > 0 => assert_late(cartridge, recreation, loading, &what),
-            Late::Untimed(most) => assert!(cartridge >= recreation && cartridge <= recreation + most,
-                "{what}: the cartridge took {cartridge} frames and the recreation {recreation}"),
-            Late::Loading(_) => {}
-        }
-        gb.hold_buttons(joypad(button));
-        super::to_vblank(&mut gb);
-        film.cartridge_frame(&gb);
-        gb.hold_buttons(JoypadButtonState::default());
-        game.frame(Input::Buttons(button));
-        film.recreation_frame(&game);
-        recreation = recreation_until_asked(&mut game, &mut film);
-    }
+    let recreation = play(&mut gb, &mut game, &mut film, None, new_game_script());
     assert!(matches!(game.modes(), [Mode::Overworld(_)]), "the new game ends in the overworld");
     let (vblank, enter) = (breakpoint(sym::VBlank), breakpoint(sym::EnterMap));
     let mut cartridge = 0;
@@ -391,9 +435,7 @@ fn a_new_game_from_the_title_to_reds_room_matches_the_cartridge() {
         film.cartridge_frame(&gb);
         cartridge += 1;
     }
-    // Both shrinking pictures are decompressed, and the text box tiles copied with the LCD on.
-    assert!(cartridge >= recreation && cartridge <= recreation + 90,
-        "into the overworld: the cartridge took {cartridge} frames and the recreation {recreation}");
+    assert_late(cartridge, recreation, INTO_THE_MAP, "into the overworld");
     film.check(0, 3, "a new game");
 
     let mmu = gb.core().mmu();
@@ -417,6 +459,124 @@ fn a_new_game_from_the_title_to_reds_room_matches_the_cartridge() {
     assert_eq!(mmu.read_pointer(&sym::wObtainedBadges), world.badges);
     assert_eq!(mmu.read_pointer(&sym::wPartyCount), 0);
     assert_eq!(mmu.read_pointer(&sym::wNumHoFTeams), world.hall_of_fame_teams);
+}
+
+/// `dump_sram`'s banks, one after another.
+const SRAM_BANK: usize = 0x2000;
+
+/// Frames until the cartridge reaches `label`, filming every frame and finishing that one.
+fn cartridge_to_filmed(gb: &mut GameBoy, film: &mut Film, label: crate::pokemon::symbols::DmgPointer) -> u32 {
+    let (at, vblank) = (breakpoint(label), breakpoint(sym::VBlank));
+    for frames in 1..5000 {
+        match gb.run_until(&[at, vblank], MachineCycles::PER_FRAME * 600).0 {
+            Stop::Breakpoint(hit) if hit == at => {
+                super::to_vblank(gb);
+                film.cartridge_frame(gb);
+                return frames;
+            }
+            Stop::Breakpoint(_) => film.cartridge_frame(gb),
+            stop => panic!("the cartridge never reached {label}: {stop:?}"),
+        }
+    }
+    panic!("the cartridge never reached {label}");
+}
+
+/// A cartridge booted cold over the SRAM `SaveGameData` writes from the Celadon fixture, run to the
+/// title's first wait, and the recreation powered on with the same world beside it.
+fn boot_with_a_save() -> (GameBoy, Game) {
+    let mut fixture = super::open_the_start_menu();
+    let back = gb::game_boy::Breakpoint::new(0, fixture.return_address());
+    super::learn_move::hijack(&mut fixture, sym::SaveGameData);
+    assert_eq!(fixture.run_until(&[back], MachineCycles::PER_FRAME * 60).0, Stop::Breakpoint(back));
+    let mut world = super::bridge::world(&fixture);
+    world.play_time.counting = false;
+
+    let mut gb = boot();
+    gb.restore_sram(&fixture.dump_sram()).unwrap();
+    let mut game = Game::power_on(Some(world), GameRng::seeded(0), Pacing::Faithful);
+    cartridge_to(&mut gb, local::DisplayTitleScreen::awaitUserInterruptionLoop);
+    recreation_until_asked(&mut game, &mut Film::default());
+    (gb, game)
+}
+
+/// `MainMenu`'s `TryLoadSaveFile`: `ClearScreen`'s `Delay3`, the font and the text box tiles, and
+/// three `CalcCheckSum`s over `sGameData`, each as long as `CheckPreviousSaveFile`'s.
+fn try_load_save_file() -> u32 {
+    menu_loading() - CURSOR + 3 * CHECK_PREVIOUS_SAVE_FILE
+}
+
+/// The title giving way to a main menu with a save: the save read, then the menu drawn.
+fn main_menu_with_a_save() -> Late {
+    Late::Loading(TITLE_LEAVING + try_load_save_file() + menu_loading())
+}
+
+/// OPTION changes the text speed and B leaves the main menu for the title. START there runs
+/// `MainMenu` from the top, whose `TryLoadSaveFile` reads the save's own options back, and CONTINUE
+/// takes them into the game.
+#[test]
+fn with_a_save_b_goes_back_to_the_title_and_the_save_is_read_again() {
+    use Decision::*;
+    let (mut gb, mut game) = boot_with_a_save();
+    let saved = game.world().options;
+    // Filmed but not checked: the recreation's option screen shows the ruleset's box.
+    let mut film = Film::default();
+    let recreation = play(&mut gb, &mut game, &mut film, None, vec![
+        (TitleScreen, Joypad::START, Late::Loading(0)),
+        (MainMenu, Joypad::DOWN, main_menu_with_a_save()),
+        (MainMenu, Joypad::DOWN, MENU),
+        (MainMenu, Joypad::A, MENU),
+        // `DisplayOptionMenu`'s `Delay3` before its loop.
+        (Options, Joypad::RIGHT, Late::Loading(DELAY3)),
+    ]);
+    assert_ne!(game.world().options, saved, "the option screen slowed the text");
+    assert_eq!(super::bridge::world(&gb).options, game.world().options, "both slowed it");
+    let recreation = play(&mut gb, &mut game, &mut film, Some(recreation), vec![
+        (Options, Joypad::B, Late::Loading(0)),
+        (MainMenu, Joypad::B, Late::Loading(menu_loading())),
+        (TitleScreen, Joypad::START, TITLE),
+        (MainMenu, Joypad::A, main_menu_with_a_save()),
+    ]);
+    assert_eq!(super::bridge::world(&gb).options, saved, "the cartridge read its save back");
+    assert_eq!(game.world().options, saved, "the save's own options");
+
+    // `.inputLoop` reads the pad with `Joypad` rather than `JoypadLowSensitivity`.
+    let cartridge = cartridge_to_filmed(&mut gb, &mut film, sym::Joypad);
+    assert_eq!(game.status(), Status::Waiting(ContinueGame));
+    assert_eq!(screen(&gb), ours(&game), "the save's summary");
+    assert_late(cartridge, recreation, 0, "the summary, after 20 frames and its own 30");
+}
+
+/// B at the main menu goes back to the title, and Up, Select and B held there end it in
+/// `DoClearSaveDialogue`. YES clears the save and restarts the game, whose main menu has no
+/// CONTINUE.
+#[test]
+fn with_a_save_up_select_b_at_the_title_clears_it() {
+    use Decision::*;
+    let (mut gb, mut game) = boot_with_a_save();
+    let mut film = Film::default();
+    let recreation = play(&mut gb, &mut game, &mut film, None, vec![
+        (TitleScreen, Joypad::START, Late::Loading(0)),
+        (MainMenu, Joypad::B, main_menu_with_a_save()),
+        (TitleScreen, Joypad::UP | Joypad::SELECT | Joypad::B, TITLE),
+        // `DoClearSaveDialogue` loads the screen as `.mainMenuLoop` does, and prints its text.
+        (TwoOption, Joypad::DOWN, Late::Loading(TITLE_LEAVING + menu_loading() + BOX)),
+        (TwoOption, Joypad::A, MENU),
+    ]);
+    assert_eq!(game.status(), Status::Waiting(TitleScreen), "the game restarted");
+    let cartridge = cartridge_to_filmed(&mut gb, &mut film, local::DisplayTitleScreen::awaitUserInterruptionLoop)
+        + cartridge_until_polling_filmed(&mut gb, &mut film);
+    // The first bank is where pictures are decompressed, which the intro has done since.
+    assert!(gb.dump_sram()[SRAM_BANK..].iter().all(|&byte| byte == 0xFF), "`ClearAllSRAMBanks`");
+    assert_eq!(screen(&gb), ours(&game), "the title again");
+    // `ClearAllSRAMBanks`, then `Init`, the intro and the title, with the LCD off at both ends.
+    assert_in_time(cartridge, recreation, Late::LcdOff(140), "the restart");
+
+    let recreation = play(&mut gb, &mut game, &mut film, None, vec![(TitleScreen, Joypad::START, Late::Loading(0))]);
+    let cartridge = cartridge_until_polling_filmed(&mut gb, &mut film);
+    assert_eq!(game.status(), Status::Waiting(MainMenu));
+    assert_eq!(screen(&gb), ours(&game), "NEW GAME and OPTION, with no CONTINUE");
+    assert_late(cartridge, recreation, TITLE_LEAVING + menu_loading(), "the main menu with no save");
+    film.check(0, 3, "the clear save dialogue");
 }
 
 /// `HOF_MON`, and `sHallOfFame`'s offset into the cartridge's first SRAM bank.

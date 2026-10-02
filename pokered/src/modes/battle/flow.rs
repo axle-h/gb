@@ -2301,7 +2301,7 @@ pub(super) mod tests {
         let mut ctx = Ctx {
             world, pad: &mut pad, rng: &mut rng, frame_counter: &mut counter, screen: &mut screen,
             menu: &mut menu, audio: &mut audio, events: &mut events, pacing: Pacing::Faithful,
-            update_sprites: false, menu_key_pressed: false, save_game: false, saved_player_id: None,
+            update_sprites: false, menu_key_pressed: false, save: None, saved_player_id: None,
             printed: Vec::new(),
         };
         f(&mut ctx)

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::llm::map_image;
@@ -625,4 +625,57 @@ fn each_opening_into_a_neighbour_is_a_row_the_turn_can_take() {
     assert!(left, "never crossed into Route 7, having been offered {offered:?}");
     let at = run.fixture().game_state().map.player_position;
     assert_eq!((at.x, at.y), SOUTHERN_LANDING, "crossed by the nearer opening rather than the one chosen");
+}
+
+/// The player in front of the Bike Shop's clerk on the recreation, with no voucher and ¥3000.
+fn native_bike_shop() -> pokered::Game {
+    use poke_core::species::PokemonSpecies;
+    use pokered::rng::GameRng;
+    use pokered::systems::add_mon::{new_party_mon, Origin};
+    let mut world = pokered::world::World::default();
+    world.player_name = poke_core::charmap::encode("RED").unwrap();
+    let mon = new_party_mon(PokemonSpecies::Squirtle, 10, 1, &Origin::Trainer, &mut GameRng::tape(vec![]));
+    world.party = vec![pokered::party::Named { mon, ot: world.player_name.clone(), nick: PokemonSpecies::Squirtle.name().to_vec() }];
+    world.location = pokered::systems::overworld::location::Location {
+        map: Map::BikeShop, x: 6, y: 3, last_map: Map::CeruleanCity, facing: poke_core::sprite::SpriteFacing::Up,
+        ..Default::default()
+    };
+    world.money = [0x00, 0x30, 0x00];
+    let mut game = pokered::Game::new(world, GameRng::seeded(11), pokered::Pacing::Instant);
+    game.push(pokered::mode::Mode::Overworld(pokered::modes::overworld::Overworld::new()));
+    game
+}
+
+/// On the recreation the Bike Shop's menu is a mart turn whose one row is the Bicycle at the price
+/// the clerk's menu draws, and buying it is answered with the clerk's refusal.
+#[test]
+fn the_native_bike_shop_is_asked_as_a_mart_selling_the_bicycle() {
+    let situations = Arc::new(Mutex::new(Vec::<(bool, String)>::new()));
+    let seen = Arc::clone(&situations);
+    let mut talked = false;
+    let brain = move |request: &TurnRequest| {
+        if request.is_summary() {
+            return Reply::Content("I am in the Bike Shop.".to_string());
+        }
+        let mart = request.has_tool("buy_item");
+        seen.lock().unwrap().push((mart, request.situation().to_string()));
+        if mart {
+            return Reply::call("buy_item", serde_json::json!({ "item": "Bicycle", "summary": "The bike, please." }));
+        }
+        match request.menu_ids().into_iter().find(|id| id.contains("Clerk")).filter(|_| !std::mem::replace(&mut talked, true)) {
+            Some(id) => Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "Asking about a bike." })),
+            None => Reply::Calls(vec![Call::wait(1)]),
+        }
+    };
+    let mut run = LlmRun::builder(FIXTURE).named("native-bike-shop").start_native(native_bike_shop(), Box::new(brain));
+    let refused = run.tick_until(PATIENCE, |_| {
+        situations.lock().unwrap().iter().any(|(_, situation)| situation.contains("Sorry! You can't afford it!"))
+    }).unwrap();
+    let situations = situations.lock().unwrap().clone();
+    let marts: Vec<_> = situations.iter().filter(|(mart, _)| *mart).map(|(_, situation)| situation).collect();
+    assert_eq!(marts.len(), 1, "{situations:#?}");
+    let for_sale = marts[0].split("### For sale").nth(1).expect("a For sale section");
+    assert!(for_sale.contains("`Bicycle`") && for_sale.contains("¥1000000"), "{}", marts[0]);
+    assert!(refused, "the clerk's refusal never reached a turn: {situations:#?}");
+    assert_eq!(run.agent().game().world().bag.quantity_of(poke_core::item::ItemId::Bicycle), 0);
 }

@@ -87,6 +87,11 @@ impl LeaguePc {
         }
     }
 
+    /// A mon on the screen and `WaitForTextScrollButtonPress` above it, where a B leaves.
+    pub fn showing(&self) -> bool {
+        self.phase == Phase::Shown
+    }
+
     /// `wNumHoFTeams`, as far as the record holds.
     fn teams(&self, ctx: &Ctx) -> u8 {
         ctx.world.hall_of_fame_teams.min(HOF_TEAM_CAPACITY as u8)

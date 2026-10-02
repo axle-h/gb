@@ -339,6 +339,12 @@ impl NativeGame {
     fn text_on_rows(&self, from: usize) -> Option<String> {
         (self.game_mode() != GameMode::Overworld).then(|| text_on_rows(self.game.ui(), from))
     }
+
+    /// The Bike Shop clerk's BICYCLE/CANCEL menu is up: the only cursor menu that map opens, read
+    /// as a mart whose stock is the Bicycle.
+    pub fn bike_shop_offer(&self) -> bool {
+        self.world().location.map == Map::BikeShop && matches!(self.game.modes().last(), Some(Mode::CursorMenu(_)))
+    }
 }
 
 /// The text in the message box's rows of `ui`.
@@ -380,6 +386,9 @@ impl crate::pokemon::observe::Readout for NativeGame {
     }
 
     fn price(&self, item: ItemId) -> Option<u32> {
+        if item == ItemId::Bicycle && self.bike_shop_offer() {
+            return Some(pokered::scripts::bike_shop::BICYCLE_PRICE);
+        }
         poke_core::item::price(item).map(|price| bcd(&price)).filter(|&price| price != 0)
     }
 
@@ -388,6 +397,9 @@ impl crate::pokemon::observe::Readout for NativeGame {
     }
 
     fn mart_stock(&self) -> Vec<ItemId> {
+        if self.bike_shop_offer() {
+            return vec![ItemId::Bicycle];
+        }
         self.game.modes().iter().rev().find_map(|mode| match mode {
             Mode::Pokemart(mart) => Some(mart.stock().to_vec()),
             _ => None,
@@ -412,7 +424,7 @@ fn live_blocks(map: Map) -> bool {
 }
 
 /// BCD as the cartridge keeps money and coins, two digits to a byte.
-fn bcd(bytes: &[u8]) -> u32 {
+pub(crate) fn bcd(bytes: &[u8]) -> u32 {
     bytes.iter().fold(0, |total, byte| total * 100 + (byte >> 4) as u32 * 10 + (byte & 0xF) as u32)
 }
 

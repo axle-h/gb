@@ -3,7 +3,8 @@
 //! wherever both wait for a button and the bag and the PC's items compared at the end. Then BILL's PC
 //! over a party and a box written into WRAM: a deposit, STATS and a withdrawal, a release refused and
 //! then made, and a box change, with the party, the box and the box number compared along the way.
-//! Then `<PKMN>LEAGUE` over a Hall of Fame record copied out of a finished game's SRAM.
+//! Then `<PKMN>LEAGUE` over a Hall of Fame record copied out of a finished game's SRAM, and
+//! `PROF.OAK's PC` rating the fixture's Pokédex.
 
 use gb::cycles::MachineCycles;
 use gb::game_boy::{GameBoy, Stop};
@@ -100,6 +101,7 @@ fn the_game_with(gb: &GameBoy, hall_of_fame: Vec<Vec<HallOfFameMon>>) -> Game {
     world.pc_items = the_pc_items(gb);
     world.hall_of_fame_teams = mmu.read_pointer(&sym::wNumHoFTeams);
     world.hall_of_fame = hall_of_fame;
+    world.pokedex = super::bridge::world(gb).pokedex;
     let (party, boxed, current) = the_mons(gb);
     world.party = party;
     world.current_box = current;
@@ -618,3 +620,44 @@ fn b_leaves_the_league_pc_as_the_cartridge_does() {
     same_where_drawn(&gb, &game, "the PC's menu over the map");
 }
 
+/// The Cerulean PC turned on, both on its menu with the cursor on `PROF.OAK's PC`, and A pressed,
+/// up to whether to rate the Pokédex. The sound of entering it is waited out on both.
+fn into_oaks_pc() -> (GameBoy, Game) {
+    let mut gb = turn_on_the_pc();
+    let mut game = the_game(&gb);
+    game.push(Mode::PcMenu(PcMenu::new()));
+    cartridge_until_polling(&mut gb);
+    recreation_until_polling(&mut game, Decision::Text);
+    poll(&mut gb, &mut game, Joypad::A, Decision::CursorMenu, DELAY3 + CURSOR, "the PC's menu");
+    poll(&mut gb, &mut game, Joypad::DOWN, Decision::CursorMenu, CURSOR, "the player's PC");
+    poll(&mut gb, &mut game, Joypad::DOWN, Decision::CursorMenu, CURSOR, "PROF.OAK's PC");
+    poll(&mut gb, &mut game, Joypad::A, Decision::Text, BOX + ARROW, "accessed PROF.OAK's PC");
+    poll(&mut gb, &mut game, Joypad::A, Decision::Text, ARROW, "the rating system");
+    poll(&mut gb, &mut game, Joypad::A, Decision::TwoOption, BOX + CURSOR, "get the POKéDEX rated");
+    (gb, game)
+}
+
+/// `OpenOaksPC`'s YES over the fixture's Pokédex: the rating, its sound waited out before the press
+/// that closes the link, and the PC's menu again.
+#[test]
+fn oaks_pc_rates_the_pokedex_as_the_cartridge_does() {
+    let (mut gb, mut game) = into_oaks_pc();
+    poll(&mut gb, &mut game, Joypad::A, Decision::Text, BOX + ARROW, "the completion");
+    poll(&mut gb, &mut game, Joypad::A, Decision::Text, ARROW, "seen and owned");
+    poll(&mut gb, &mut game, Joypad::A, Decision::Text, ARROW, "PROF.OAK's rating");
+    poll(&mut gb, &mut game, Joypad::A, Decision::Text, BOX + ARROW, "the rating");
+    poll(&mut gb, &mut game, Joypad::A, Decision::Text, ARROW, "the rating's next line");
+    poll(&mut gb, &mut game, Joypad::A, Decision::Text, 0, "the rating's last line and its sound");
+    poll(&mut gb, &mut game, Joypad::A, Decision::Text, BOX, "closed the link");
+    // `ReloadMainMenu`'s `ReloadMapData` turns the LCD off, so the way back to the PC's menu is untimed.
+    untimed(&mut gb, &mut game, Joypad::A, Decision::CursorMenu);
+    same_where_drawn(&gb, &game, "the PC's menu over the map");
+}
+
+#[test]
+fn oaks_pc_closes_the_link_on_a_no_as_the_cartridge_does() {
+    let (mut gb, mut game) = into_oaks_pc();
+    poll(&mut gb, &mut game, Joypad::B, Decision::Text, BOX, "NO, and the link closed");
+    untimed(&mut gb, &mut game, Joypad::A, Decision::CursorMenu);
+    same_where_drawn(&gb, &game, "the PC's menu over the map");
+}

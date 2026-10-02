@@ -324,11 +324,7 @@ fn is_vblank_caller(caller: u16) -> bool {
     (vblank..vblank + 0x80).contains(&caller)
 }
 
-/// `wShadowOAM`, as `VBlank` copies it out.
-pub(super) fn cartridge_oam(gb: &GameBoy) -> Vec<[u8; 4]> {
-    let at = sym::wShadowOAM.address;
-    (0..40).map(|i| std::array::from_fn(|j| gb.core().mmu().read(at + 4 * i + j as u16))).collect()
-}
+pub(super) use super::harness::cartridge_oam;
 
 /// The objects on screen, in OAM order.
 pub(super) fn visible_objects(oam: &[[u8; 4]]) -> Vec<[u8; 4]> {

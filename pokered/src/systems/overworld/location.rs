@@ -3,6 +3,7 @@ use poke_core::map_objects::initial_toggleable_object_flags;
 use poke_core::sprite::SpriteFacing;
 use serde::{Deserialize, Serialize};
 use crate::input::Joypad;
+use super::encounters::WildMons;
 
 /// Where the player is, and what of the map a save carries and a battle on top leaves alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +51,10 @@ pub struct Location {
     /// `last_blackout_map` rather than flying them to the town map's answer.
     #[serde(default)]
     pub escape_warp: bool,
+    /// `wGrassRate`, `wGrassMons`, `wWaterRate` and `wWaterMons`, which a save keeps: `LoadWildData`
+    /// overwrites only the tables the map it continues on has.
+    #[serde(default)]
+    pub wild_mons: WildMons,
 }
 
 /// A field move used from the party menu whose work is the overworld's, since the map view and the
@@ -82,6 +87,7 @@ impl Default for Location {
             used_field_move: None,
             fly_warp: None,
             escape_warp: false,
+            wild_mons: WildMons::default(),
         }
     }
 }

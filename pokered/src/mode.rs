@@ -59,15 +59,23 @@ pub struct Ctx<'a> {
     /// `HandleMenuInput` took a key, which zeroes `wCheckFor180DegreeTurn`: the overworld under
     /// the menu disarms its turn once the frame's transitions have applied.
     pub menu_key_pressed: bool,
-    /// `SaveGameData`: the save menu, a box change or a script asking the game to write itself out.
-    /// `Game::frame` serialises once the frame's transitions have applied and hands the host the bytes.
-    pub save_game: bool,
+    /// What the frame asks of the game's own save. `Game::frame` acts on it once the frame's
+    /// transitions have applied and tells the host.
+    pub save: Option<SaveRequest>,
     /// The player id in the host's save file, if it has one. `CheckPreviousSaveFile` is its only
     /// reader: the SAVE menu warns before writing over a playthrough that is not this one.
     pub saved_player_id: Option<u16>,
     /// The UI surface each time a text box was about to take back what it printed, by scrolling a
     /// line away or ending: a line printed and taken back within one frame is on no frame's screen.
     pub printed: Vec<crate::gfx::ui::UiSurface>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveRequest {
+    /// `SaveGameData`: the save menu, a box change or a script asking the game to write itself out.
+    Write,
+    /// `ClearAllSRAMBanks`.
+    Clear,
 }
 
 pub enum Transition {

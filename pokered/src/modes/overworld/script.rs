@@ -351,7 +351,6 @@ pub(super) struct Runtime {
     /// `wCurMapTextPtr` where a script has put another table in the header's place, until the next
     /// map load.
     pub text_pointers: Option<TextPointers>,
-    pub wild_mons: crate::systems::overworld::encounters::WildMons,
     /// `wCurrentMapScriptFlags`' `BIT_CUR_MAP_LOADED_1` and `_2`: set whenever the map is loaded
     /// afresh, for a script that changes its blocks to change them again.
     pub cur_map_loaded: [bool; 2],
@@ -1511,7 +1510,7 @@ impl Script<'_, '_> {
         let ui = &mut self.ctx.screen.ui;
         ui.place(2, 2, &poke_core::charmap::encode("BICYCLE").expect("charmap"));
         ui.place(2, 4, &poke_core::charmap::encode("CANCEL").expect("charmap"));
-        ui.place(8, 3, &poke_core::charmap::encode("¥1000000").expect("charmap"));
+        ui.place(8, 3, &poke_core::charmap::encode(&crate::scripts::bike_shop::menu_price_text()).expect("charmap"));
     }
 
     /// `HandleMenuInput` watching A and B over a menu the caller has drawn, with `wCurrentMenuItem`
@@ -1995,7 +1994,7 @@ mod tests {
         let mut ctx = Ctx {
             world: &mut world, pad: &mut pad, rng: &mut rng, frame_counter: &mut counter, screen: &mut screen,
             menu: &mut menu, audio: &mut audio, events: &mut events, pacing: Pacing::Faithful,
-            update_sprites: false, menu_key_pressed: false, save_game: false, saved_player_id: None,
+            update_sprites: false, menu_key_pressed: false, save: None, saved_player_id: None,
             printed: Vec::new(),
         };
         let mut overworld = Overworld::new();

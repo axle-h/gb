@@ -333,6 +333,8 @@ impl HallOfFame {
         ui.text_box_border(0, 2, 10, 9);
         place_string_lines(ui, 2, 6, &poke_core::tables::db_string("HoFMonInfoText"));
         ui.place(1, 4, &named.nick);
+        // `PrintLevelCommon`'s digits are the `c` `PlaceString` left, the low byte of the address after
+        // the nickname, never 2 to 6, so `PrintNumber` prints seven digits, which left-aligned are three.
         print_number(ui, 7 * SCREEN_TILES_X + 8, named.mon.level as u32, NumberFormat { digits: 3, leading_zeroes: false, left_align: true });
         print_mon_type(ui, 9 * SCREEN_TILES_X + 3, species);
         ctx.audio.play_cry(species as u8);

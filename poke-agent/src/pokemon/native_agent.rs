@@ -76,6 +76,12 @@ const fn ticks_to_frames(ticks: u16) -> u32 {
     (ticks as u64 * crate::pokemon::agent::AGENT_RESOLUTION.m_cycles() / MachineCycles::PER_FRAME.m_cycles()) as u32
 }
 
+/// Frames the overworld stands free before the policy is asked: a script can free the player for a
+/// frame or two between its steps, as Oak's lab does before Blue speaks. The emulated agent's own
+/// wait starts sooner, so a longer one here outlasts it.
+const ASK_AFTER_FRAMES: u32 = crate::pokemon::delay::SHORT_DELAY_CYCLES.m_cycles()
+    .div_ceil(MachineCycles::PER_FRAME.m_cycles()) as u32;
+
 /// Talks whose menu the emulated agent's A answers with its first row: the drinks the roof's girl
 /// is shown, and the fossils the lab's scientist is.
 const FIRST_ROW_TALKS: [(Map, &str); 2] = [(Map::CeladonMartRoof, "Little Girl"), (Map::CinnabarLabFossilRoom, "Scientist 1")];
@@ -83,8 +89,8 @@ const FIRST_ROW_TALKS: [(Map, &str); 2] = [(Map::CeladonMartRoof, "Little Girl")
 /// Steps a walk may take without its route getting shorter before it is given up.
 const MAX_STALE_STEPS: u32 = 64;
 
-/// Decision points a task's walk waits for someone to move off its way: longer than a row's, since
-/// a person at a counter can stand there for seconds. Twenty seconds of game time.
+/// Decision points a task's refused step waits for whoever stands in it to move on: longer than a
+/// row's, since a person at a counter can stand there for seconds. Twenty seconds of game time.
 const MAX_TASK_BLOCKED_POLLS: u32 = 1200;
 
 /// Presses of A at one Silph door before it is taken for a wall that looks like one.
@@ -119,6 +125,7 @@ enum Task {
     Bag(BagUse),
     Pc(PcUse),
     Mart(MartVisit),
+    BikeShop(BikeShopBuy),
     Talk(TalkUse),
     Switch(SwitchUse),
     Pace(Pace),
@@ -183,6 +190,14 @@ struct MartVisit {
     /// The bag's count of the want's item as it began.
     before: u8,
     quitting: bool,
+}
+
+/// The Bicycle chosen off the Bike Shop's menu, which the clerk refuses whatever the wallet holds;
+/// reported as a mart visit once the overworld is back.
+#[derive(Debug, Clone, Copy)]
+struct BikeShopBuy {
+    item: BagItem,
+    before: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -345,6 +360,9 @@ pub struct NativeAgent {
     boulder_goal: Option<BoulderGoal>,
     /// Frames ticked, which is game time under any pacing.
     frames: u64,
+    /// Frames in a row the overworld has waited with nothing in flight; an agent made where the
+    /// player stands free counts as having waited.
+    free: u32,
     /// `pick_move_to_forget`'s answer, held while its `LearnMove` is up.
     forget: Option<Option<usize>>,
     /// Accepted and not yet done or interrupted.
@@ -397,8 +415,8 @@ const MANUAL_HOLD_FRAMES: usize = 2;
 struct Outputs {
     audio: Vec<Write>,
     events: Vec<AgentEvent>,
-    /// The game's own save, as it last wrote itself: what CONTINUE resumes from.
-    save: Option<Vec<u8>>,
+    /// The latest thing the game did to its own save: wrote what CONTINUE resumes from, or cleared it.
+    save: Option<pokered::Save>,
 }
 
 impl NativeAgent {
@@ -416,6 +434,7 @@ impl NativeAgent {
             slot_bet: None,
             boulder_goal: None,
             frames: 0,
+            free: ASK_AFTER_FRAMES,
             running: None,
             in_battle: false,
             battle_was_up: false,
@@ -454,8 +473,8 @@ impl NativeAgent {
         self.outputs.as_mut().map(|outputs| std::mem::take(&mut outputs.events)).unwrap_or_default()
     }
 
-    /// The save the game wrote since the last take, the latest if it wrote more than one.
-    pub fn take_save(&mut self) -> Option<Vec<u8>> {
+    /// What the game did to its own save since the last take, the latest if it did more than one.
+    pub fn take_save(&mut self) -> Option<pokered::Save> {
         self.outputs.as_mut().and_then(|outputs| outputs.save.take())
     }
 
@@ -689,6 +708,13 @@ impl NativeAgent {
             walk.came_from = Some(left);
         }
         self.flush_text();
+        // A text the overworld opened and printed inside one frame never puts a text box on top,
+        // and it stops the walk as the emulated agent's text box does.
+        if self.running.is_some() && self.walk.is_some() && self.task.is_none() && self.boulder_goal.is_none() && !self.spinning()
+            && self.native.game_mode() == GameMode::TextBox
+        {
+            self.end_walk_off_the_map()?;
+        }
         if self.running.is_some() {
             // A pad's destination is arrived at even when the player only passes over it, on a pad
             // of its own, as the emulated agent sees it between two of its ticks.
@@ -714,6 +740,10 @@ impl NativeAgent {
             Status::Busy if (self.walk.is_some() || self.task_walking()) && self.poll_offered() =>
                 Status::Waiting(Decision::Overworld),
             status => status,
+        };
+        self.free = match status == Status::Waiting(Decision::Overworld) && self.walk.is_none() && self.task.is_none() {
+            true => self.free.saturating_add(1),
+            false => 0,
         };
         // Every decision point, as the emulated agent polls: a policy's tools are answered here.
         if matches!(status, Status::Waiting(_)) && let Ok(state) = self.game_state() {
@@ -757,6 +787,7 @@ impl NativeAgent {
                 None => Command::CancelOption,
             }),
             Status::Waiting(Decision::SlotWheels) => Some(Command::StopWheel),
+            Status::Waiting(Decision::CursorMenu) if self.native.bike_shop_offer() => self.bike_shop_answer()?,
             Status::Waiting(Decision::CursorMenu) => Some(match self.menu_pick.take() {
                 Some(row) => Command::ChooseOption(row),
                 None => Command::CancelOption,
@@ -986,6 +1017,9 @@ impl NativeAgent {
         if let Some(report) = self.slots.take().and_then(|session| session.report(coins)) {
             self.say(&report);
         }
+        if self.free < ASK_AFTER_FRAMES {
+            return Ok(None);
+        }
         self.asked();
         if let Some(field_move) = self.policy.pick_field_move(&state) {
             return self.field_move(field_move, &state);
@@ -1171,8 +1205,16 @@ impl NativeAgent {
         Ok((door && presses < CARD_KEY_PRESSES).then_some(ahead))
     }
 
-    /// Wait out a task's walk that somebody stands in, up to [`MAX_TASK_BLOCKED_POLLS`], then give
-    /// the task up saying `why`. A prize counter is waited on as long as the emulated agent waits.
+    /// A task no square on the map reaches, given up at once, as every emulated driver but the prize
+    /// counter's gives it up.
+    fn give_up(&mut self, why: &str) {
+        self.task_blocked = 0;
+        self.task = None;
+        self.say(why);
+    }
+
+    /// Wait out a task's refused step, up to [`MAX_TASK_BLOCKED_POLLS`], then give the task up saying
+    /// `why`. A prize counter with no route is waited on as long as the emulated agent waits.
     fn task_blocked(&mut self, task: Task, why: String) -> Result<(), String> {
         const PRIZE_BLOCKED_POLLS: u32 = (crate::pokemon::postgame::game_corner::BLOCKED_TICKS as u64
             * crate::pokemon::agent::AGENT_RESOLUTION.m_cycles() / gb::cycles::MachineCycles::PER_FRAME.m_cycles()) as u32;
@@ -1362,6 +1404,10 @@ impl NativeAgent {
                 self.task_step(self.native.game().status())
             }
             FieldMove::SellToMart { item, clerk } => {
+                if let Some(why) = crate::pokemon::postgame::game_corner::sale_refusal(item, bag_quantity(self.native.game().world(), item.id)) {
+                    self.say(&format!("sell: {why}"));
+                    return Ok(None);
+                }
                 self.task = Some(Task::Mart(MartVisit {
                     clerk: Some(clerk), opened: false, asked: true, want: Some(MartWant::Sell(item)), chosen: false,
                     picked: false, before: bag_quantity(self.native.game().world(), item.id), quitting: false,
@@ -1415,9 +1461,20 @@ impl NativeAgent {
                     }
                     Some(&[button, ..]) => self.step_or_face(button)?,
                     None => {
-                        let what = state.map.tile_at_checked(talk.at)
-                            .map_or_else(|| "a square that is not on this map".to_string(), |tile| format!("{tile}"));
-                        self.task_blocked(Task::Talk(talk), format!("Could not get next to {what} at {} to face it", talk.at))?;
+                        let why = match talk.what {
+                            Talk::Party { .. } => format!("party-script: can't reach the NPC at {}", talk.at),
+                            Talk::Elevator { .. } => format!("Can't reach elevator panel at {}", talk.at),
+                            Talk::Prize(prize) => format!("prize: can't reach the {prize:?} vendor at {}", talk.at),
+                            Talk::Press => {
+                                let what = state.map.tile_at_checked(talk.at)
+                                    .map_or_else(|| "a square that is not on this map".to_string(), |tile| format!("{tile}"));
+                                format!("Could not get next to {what} at {} to face it", talk.at)
+                            }
+                        };
+                        match talk.what {
+                            Talk::Prize(_) => self.task_blocked(Task::Talk(talk), why)?,
+                            _ => self.give_up(&why),
+                        }
                         return Ok(None);
                     }
                 }
@@ -1544,6 +1601,9 @@ impl NativeAgent {
         let (kind, species, limit) = (screen.kind(), screen.species(), screen.limit());
         let name = match (kind, species) {
             (pokered::modes::naming_screen::NamingScreenType::Mon, Some(species)) => {
+                // The question is said before it is asked, as the emulated agent's reader is
+                // flushed when the naming takes over.
+                self.say_text();
                 self.asked();
                 let Some(name) = self.policy.pick_nickname(species) else { return Ok(None) };
                 name
@@ -1573,7 +1633,7 @@ impl NativeAgent {
                     }
                     Some(&[button, ..]) => self.step_or_face(button)?,
                     None => {
-                        self.task_blocked(Task::Mart(mart), format!("Can't reach the clerk at {at}"))?;
+                        self.give_up(&format!("sell: can't reach the clerk at {at}"));
                         return Ok(None);
                     }
                 }
@@ -1650,6 +1710,23 @@ impl NativeAgent {
         self.say(&message);
     }
 
+    /// The Bike Shop's menu, asked as a mart whose stock is the Bicycle. The Bicycle is chosen
+    /// untrimmed, so the clerk's own refusal is what is said; anything else is CANCEL.
+    fn bike_shop_answer(&mut self) -> Result<Option<Command>, String> {
+        self.say_text();
+        let state = self.native.game_state()?;
+        self.asked();
+        let Some(want) = self.policy.pick_mart_purchase(&state) else { return Ok(None) };
+        Ok(Some(match want.filter(|item| item.id == ItemId::Bicycle) {
+            Some(item) => {
+                let before = bag_quantity(self.native.game().world(), item.id);
+                self.task = Some(Task::BikeShop(BikeShopBuy { item, before }));
+                Command::ChooseOption(0)
+            }
+            None => Command::ChooseOption(1),
+        }))
+    }
+
     /// Trimmed to the wallet, as the emulated side trims every purchase.
     fn affordable(&self, item: BagItem) -> Option<BagItem> {
         let money = bcd(&self.native.game().world().money);
@@ -1702,7 +1779,10 @@ impl NativeAgent {
                     }
                     Some(&[button, ..]) => self.step_or_face(button)?,
                     None => {
-                        self.task_blocked(Task::Pc(pc), format!("Can't reach the PC at {}", pc.at))?;
+                        self.give_up(&match pc.job {
+                            PcJob::Items { .. } => format!("Can't reach the PC at {}", pc.at),
+                            PcJob::Box(_) => format!("PC box: can't reach the PC at {}", pc.at),
+                        });
                         return Ok(None);
                     }
                 }
@@ -1845,7 +1925,7 @@ impl NativeAgent {
                         }
                         Some(&[button, ..]) => self.step_or_face(button)?,
                         None => {
-                            self.task_blocked(Task::Bag(bag), format!("Can't reach the field-item target at {target}"))?;
+                            self.give_up(&format!("Can't reach the field-item target at {target}"));
                             return Ok(None);
                         }
                     }
@@ -2008,6 +2088,16 @@ impl NativeAgent {
             Some(Task::Bag(bag)) => self.bag_step(bag, status),
             Some(Task::Pc(pc)) => self.pc_step(pc, status),
             Some(Task::Mart(mart)) => self.mart_step(mart, status),
+            Some(Task::BikeShop(buy)) => match status {
+                Status::Waiting(Decision::Overworld) => {
+                    self.task = None;
+                    self.mart_report(MartWant::Buy(buy.item), buy.before);
+                    Ok(None)
+                }
+                Status::Waiting(Decision::Text) => Ok(Some(Command::Advance)),
+                Status::Busy | Status::Idle => Ok(None),
+                Status::Waiting(decision) => Err(format!("the bike shop met {decision:?}")),
+            },
             Some(Task::Talk(talk)) => self.talk_step(talk, status),
             Some(Task::Switch(switch)) => self.switch_step(switch, status),
             Some(Task::Pace(pace)) => match status {
@@ -2417,6 +2507,8 @@ mod tests {
         events: Vec<String>,
         battles: u32,
         goals_left: usize,
+        /// Each mart stock the readout gave, priced, as it changed.
+        stocks: Vec<Vec<(ItemId, Option<u32>)>>,
     }
 
     /// Takes the goals in order, a row at a time, and fights with the first move that has PP.
@@ -2439,8 +2531,21 @@ mod tests {
             Some(self.forget)
         }
 
+        fn pick_nickname(&mut self, species: PokemonSpecies) -> Option<Option<String>> {
+            self.log.borrow_mut().events.push(format!("asked for a nickname for {species:?}"));
+            Some(None)
+        }
+
         fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
             Some(self.next_mart_purchase())
+        }
+
+        fn service_tools(&mut self, _state: &GameState, readout: &dyn crate::pokemon::observe::Readout, _graph: &WorldGraph) {
+            let stock: Vec<_> = readout.mart_stock().into_iter().map(|item| (item, readout.price(item))).collect();
+            let mut log = self.log.borrow_mut();
+            if log.stocks.last() != Some(&stock) {
+                log.stocks.push(stock);
+            }
         }
 
         fn next_mart_purchase(&mut self) -> Option<BagItem> {
@@ -2758,6 +2863,25 @@ mod tests {
             native.game_mut().frame(Input::None);
         }
         modes
+    }
+
+    /// Oak stops the player at the grass, as the emulated agent reads it: his "Hey! Wait!" is a
+    /// message of its own, said after the walk it stopped, though at `Instant` it opens, prints and
+    /// ends inside one frame; and nothing is asked in the lab before Blue speaks, which leaves the
+    /// player free for less time than the emulated agent waits before it asks.
+    #[test]
+    fn oak_stopping_the_player_reads_as_it_does_on_the_cartridge() {
+        let game = game_at(Map::PalletTown, 10, 2, |world|
+            world.events.clear(poke_core::symbols::pokered_events::EVENT_FOLLOWED_OAK_INTO_LAB));
+        let (mut agent, log) = agent(game, vec![Goal::Enter(Map::Route1)]);
+        run(&mut agent, &log, |_, log| log.events.iter().any(|event| event.contains("fed up with waiting")));
+        let events = log.borrow().events.clone();
+        assert_eq!(messages(&events)[..2], ["OAK: Hey! Wait! Don't go out!",
+            "OAK: It's unsafe! Wild POKéMON live in tall grass! You need your own POKéMON for your protection. \
+             I know! Here, come with me!"], "{events:#?}");
+        let stopped = events.iter().position(|event| event.starts_with("OverworldActionAborted")).expect("the walk was stopped");
+        let said = events.iter().position(|event| event.starts_with("TextBox")).unwrap();
+        assert!(stopped < said, "{events:#?}");
     }
 
     /// The player walking reads as the overworld, as the emulated reading has it with nothing in
@@ -3161,6 +3285,46 @@ mod tests {
         assert_eq!(money(&agent), 100);
     }
 
+    /// The Bike Shop's clerk talked to without a voucher, by a policy that buys `purchases`.
+    fn bike_shop(purchases: Vec<BagItem>) -> (NativeAgent, Rc<RefCell<Log>>) {
+        let game = game_at(Map::BikeShop, 6, 3, |world| {
+            world.location.facing = poke_core::sprite::SpriteFacing::Up;
+            world.money = [0x00, 0x30, 0x00];
+        });
+        let log = Rc::new(RefCell::new(Log { goals_left: 1, ..Log::default() }));
+        let policy = Goals { goals: vec![Goal::Talk("Clerk")], log: log.clone(), forget: None, purchases };
+        let mut agent = NativeAgent::new(game, Box::new(policy)).unwrap();
+        run(&mut agent, &log, settled);
+        (agent, log)
+    }
+
+    #[test]
+    fn the_bike_shop_s_menu_reads_as_a_mart_selling_the_bicycle_for_a_million() {
+        let (_, log) = bike_shop(Vec::new());
+        assert_eq!(log.borrow().stocks, [vec![], vec![(ItemId::Bicycle, Some(1_000_000))], vec![]]);
+    }
+
+    #[test]
+    fn buying_the_bicycle_hears_the_clerk_refuse_it() {
+        let (agent, log) = bike_shop(vec![BagItem::new(ItemId::Bicycle, 1)]);
+        let events = log.borrow().events.clone();
+        let refused = events.iter().position(|event| event.contains("Sorry! You can't afford it!"));
+        let reported = events.iter().position(|event| event.contains("Bought no Bicycle"));
+        assert!(refused.is_some() && refused < reported, "{events:#?}");
+        assert_eq!(quantity(&agent, ItemId::Bicycle), 0);
+        assert_eq!(money(&agent), 3000);
+    }
+
+    /// CANCEL rather than B, which leaves every text after it printing at once.
+    #[test]
+    fn declining_the_bicycle_leaves_through_cancel() {
+        let (agent, log) = bike_shop(Vec::new());
+        let events = log.borrow().events.clone();
+        assert!(events.iter().any(|event| event.contains("Come back again some time!")), "{events:#?}");
+        assert!(!events.iter().any(|event| event.contains("afford")), "{events:#?}");
+        assert!(!agent.game().world().no_text_delay);
+    }
+
     #[test]
     fn a_sale_walks_to_the_counter_and_sells_as_many_as_asked() {
         let game = pewter_mart([0; 3], |world| { world.bag.add(ItemId::Potion, 4); });
@@ -3170,6 +3334,48 @@ mod tests {
         assert_eq!(quantity(&agent, ItemId::Potion), 1, "{events:#?}");
         assert_eq!(money(&agent), 3 * 150);
         assert!(says(&events, "Sold"), "{events:#?}");
+    }
+
+    /// A square no walk reaches, for a PC, a clerk or a trader somebody has walled in.
+    const OUT_OF_REACH: Point8 = Point8 { x: 0, y: 0 };
+
+    /// A field move that cannot be done is given up within a few frames, saying `why`, as the
+    /// emulated driver gives it up.
+    fn given_up_at_once(game: Game, field_move: FieldMove, why: &str) -> NativeAgent {
+        let (mut agent, log) = agent(game, vec![Goal::Field(field_move)]);
+        let start = agent.game().frames();
+        run(&mut agent, &log, settled);
+        let (frames, events) = (agent.game().frames() - start, log.borrow().events.clone());
+        assert!(frames < 10, "given up after {frames} frames: {events:#?}");
+        assert!(says(&events, why), "{events:#?}");
+        agent
+    }
+
+    #[test]
+    fn a_pc_out_of_reach_is_given_up_at_once() {
+        let (game, _) = pokecenter(|world| { world.bag.add(ItemId::Potion, 5); world.party.push(level(PokemonSpecies::Pidgey, 5)); });
+        let deposit = FieldMove::UsePcBox { op: PcBoxOp::Deposit { slot: 1 }, pc: OUT_OF_REACH };
+        let agent = given_up_at_once(game.clone(), deposit, "PC box: can't reach the PC at");
+        assert_eq!(agent.game().world().party.len(), 2);
+        let items = FieldMove::UseItemPc { op: PcItemOp::Deposit, item: ItemId::Potion, qty: 1, pc: OUT_OF_REACH };
+        given_up_at_once(game, items, "Can't reach the PC at");
+    }
+
+    #[test]
+    fn a_clerk_out_of_reach_is_given_up_at_once() {
+        let game = pewter_mart([0; 3], |world| { world.bag.add(ItemId::Potion, 4); });
+        let sale = FieldMove::SellToMart { item: BagItem::new(ItemId::Potion, 1), clerk: (OUT_OF_REACH, PlayerFacingDirection::Up) };
+        let agent = given_up_at_once(game, sale, "sell: can't reach the clerk at");
+        assert_eq!(quantity(&agent, ItemId::Potion), 4);
+    }
+
+    #[test]
+    fn a_key_item_is_not_carried_to_the_clerk() {
+        let game = pewter_mart([0; 3], |world| { world.bag.add(ItemId::TownMap, 1); });
+        let state = NativeGame::new(game.clone()).unwrap().game_state().unwrap();
+        let sale = crate::pokemon::postgame::game_corner::pick_sale(&state, BagItem::new(ItemId::TownMap, 1)).expect("a clerk to sell to");
+        let agent = given_up_at_once(game, sale, "sell: can't sell TownMap: TownMap is a key item");
+        assert_eq!(quantity(&agent, ItemId::TownMap), 1);
     }
 
     #[test]
@@ -3272,6 +3478,37 @@ mod tests {
     }
 
     #[test]
+    fn a_trader_out_of_reach_is_given_up_at_once() {
+        let trade = crate::pokemon::postgame::trades::trade_for(PokemonSpecies::Abra);
+        let game = game_at(trade.at, 2, 5, |world| world.party.push(level(PokemonSpecies::Abra, 5)));
+        let swap = FieldMove::UsePartyScript { script: trade.script(), slot: 1, npc: (OUT_OF_REACH, PlayerFacingDirection::Up) };
+        let agent = given_up_at_once(game, swap, "party-script: can't reach the NPC at");
+        assert_eq!(agent.game().world().party[1].mon.mon.species, PokemonSpecies::Abra);
+    }
+
+    #[test]
+    fn a_trash_can_out_of_reach_is_given_up_at_once() {
+        let game = game_at(Map::VermilionGym, 4, 16, |_| {});
+        given_up_at_once(game, FieldMove::CheckTrashCan { target: OUT_OF_REACH, facing: None }, "Could not get next to");
+    }
+
+    #[test]
+    fn an_elevator_panel_out_of_reach_is_given_up_at_once() {
+        let game = game_at(Map::SilphCoElevator, 1, 2, |world| world.location.last_map = Map::SilphCo1F);
+        let off_the_map = Point8 { x: 20, y: 20 };
+        let agent = given_up_at_once(game, FieldMove::UseElevator { panel: off_the_map, floor: 4 }, "Can't reach elevator panel at");
+        assert_eq!(agent.game().world().location.map, Map::SilphCoElevator);
+    }
+
+    #[test]
+    fn a_field_item_target_out_of_reach_is_given_up_at_once() {
+        let game = with_bag(&[(ItemId::PokeFlute, 1)], |_| {});
+        let flute = FieldMove::UseFieldItem { item: ItemId::PokeFlute, target: OUT_OF_REACH };
+        let agent = given_up_at_once(game, flute, "Can't reach the field-item target at");
+        assert_eq!(quantity(&agent, ItemId::PokeFlute), 1);
+    }
+
+    #[test]
     fn switch_brings_a_mon_to_the_front_and_keeps_the_rest_in_order() {
         let game = game_at(Map::PalletTown, 5, 6, |world| {
             world.party.push(level(PokemonSpecies::Pidgey, 5));
@@ -3345,6 +3582,20 @@ mod tests {
         assert_eq!(messages(&events), ["Moved party slot 2 to the front"]);
     }
 
+    /// The naming screen's question is said before the policy is asked it, as the emulated agent
+    /// says a text box before the naming takes it over.
+    #[test]
+    fn a_nickname_is_asked_after_the_question_is_said() {
+        let game = game_at(Map::GameCornerPrizeRoom, 4, 6, |world| {
+            world.coins = [0x05, 0x00];
+            world.bag.add(ItemId::CoinCase, 1);
+        });
+        let (_, events) = ask(game, FieldMove::RedeemPrize { prize: Prize::Abra }, None);
+        let asked = events.iter().position(|event| event.starts_with("asked for a nickname")).expect("a nickname asked for");
+        let said = events.iter().position(|event| event.contains("Do you want to give a nickname to ABRA?"));
+        assert!(said.is_some_and(|said| said < asked), "{events:#?}");
+    }
+
     #[test]
     fn a_vending_row_buys_the_drink_it_names() {
         let game = game_at(Map::CeladonMartRoof, 10, 4, |world| world.money = [0x00, 0x10, 0x00]);
@@ -3388,4 +3639,5 @@ mod tests {
         assert!(log.events.iter().any(|event| event.starts_with("OverworldActionCompleted { destination: BoulderGoal")),
                 "{:#?} from rows {rows:#?}", log.events);
     }
+
 }

@@ -6,7 +6,7 @@ pub struct DelayContext {
     cycles: MachineCycles,
 }
 
-const SHORT_DELAY_CYCLES: MachineCycles = MachineCycles::from_duration(Duration::from_millis(50));
+pub(crate) const SHORT_DELAY_CYCLES: MachineCycles = MachineCycles::from_duration(Duration::from_millis(50));
 const DEFAULT_DELAY_CYCLES: MachineCycles = MachineCycles::from_duration(Duration::from_millis(500));
 const LONG_DELAY_CYCLES: MachineCycles = MachineCycles::from_duration(Duration::from_millis(1000));
 

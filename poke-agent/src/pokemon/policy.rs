@@ -412,6 +412,48 @@ fn needs_a_centre(state: &GameState, grinding: bool) -> bool {
     lead.current_hp as u32 * 3 < lead.stats.hp as u32 && best < missing
 }
 
+/// An item the scripted route reaches for with no step naming it: a ball, as a pinned catch falls
+/// back to any other; medicine, which the battle and grind arms pick; a drink, for a Saffron guard.
+fn used_unnamed(item: ItemId) -> bool {
+    matches!(item,
+        ItemId::PokeBall | ItemId::GreatBall | ItemId::UltraBall | ItemId::MasterBall | ItemId::SafariBall
+        | ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion | ItemId::MaxPotion
+        | ItemId::FullRestore | ItemId::Revive | ItemId::MaxRevive
+        | ItemId::FullHeal | ItemId::Antidote | ItemId::BurnHeal | ItemId::IceHeal
+        | ItemId::Awakening | ItemId::ParlyzHeal
+        | ItemId::Ether | ItemId::MaxEther | ItemId::Elixer | ItemId::MaxElixer)
+        || poke_core::item::is_guard_drink(item)
+}
+
+/// The ball a catch throws: `pinned` while it lasts, then the best other, never the Master Ball.
+/// An unpinned catch throws the best ball held.
+fn catch_ball(bag: &crate::pokemon::bag::Bag, pinned: Option<ItemId>) -> Option<&BagItem> {
+    let Some(pinned) = pinned else { return bag.best_pokeball() };
+    bag.iter().find(|i| i.id == pinned && i.quantity > 0).or_else(|| bag.iter()
+        .filter(|i| i.quantity > 0 && i.id != ItemId::MasterBall
+            && matches!(i.id, ItemId::UltraBall | ItemId::GreatBall | ItemId::PokeBall | ItemId::SafariBall))
+        .min_by_key(|i| i.id))
+}
+
+/// What to toss so a purchase of `buying` has a slot: `Ok(None)` when it needs none, `Err` when
+/// every entry is needed. The cheapest stack by sell value goes, the earlier on a tie.
+fn toss_for_room<'a>(state: &GameState, buying: ItemId, queue: impl Iterator<Item = &'a PolicyStep>)
+    -> Result<Option<ItemId>, ()>
+{
+    if state.bag.len() < crate::pokemon::bag::Bag::MAX_ITEMS || state.bag.iter().any(|i| i.id == buying) {
+        return Ok(None);
+    }
+    let named: Vec<ItemId> = queue.flat_map(PolicyStep::items_used).collect();
+    let value = |item: &BagItem| poke_core::item::price(item.id)
+        .map_or(u32::MAX, |price| crate::pokemon::native::bcd(&price))
+        .saturating_mul(item.quantity as u32);
+    state.bag.iter().enumerate()
+        .filter(|(_, i)| !i.id.is_key_item() && !i.id.is_hm() && !used_unnamed(i.id) && !named.contains(&i.id))
+        .min_by_key(|&(index, item)| (value(item), index))
+        .map(|(_, item)| Some(item.id))
+        .ok_or(())
+}
+
 /// Every party member at full HP, full PP and no status — what a Pokémon Centre leaves behind.
 fn party_is_fresh(state: &GameState) -> bool {
     state.pokemon.iter().all(|p| p.current_hp == p.stats.hp
@@ -725,6 +767,31 @@ pub(crate) fn field_move_index_of(mon: &crate::pokemon::pokemon::Pokemon, want: 
 }
 
 impl PolicyStep {
+    /// Every item this step spends, sells, teaches, throws or stocks up on.
+    pub fn items_used(&self) -> Vec<ItemId> {
+        match *self {
+            Self::UseBagItem { item, .. } | Self::UseItemPc { item, .. } | Self::TeachMove { item, .. }
+            | Self::UseFieldItem { item, .. } => vec![item],
+            Self::BuyFromMart { item, .. } | Self::SellToMart { item, .. } => vec![item.id],
+            Self::EvolveWithStone { stone, .. } => vec![stone],
+            Self::UseVendingMachine { drink, .. } => vec![drink],
+            Self::UseRareCandy { .. } => vec![ItemId::RareCandy],
+            Self::UseItemsInBattle { items, .. } => items.to_vec(),
+            Self::CatchPokemon { ball, .. } | Self::SweepDex { ball, .. } => ball.into_iter().collect(),
+            Self::Fish { rod, .. } => vec![rod.item()],
+            Self::RedeemPrize { prize } => prize.item().into_iter().collect(),
+            // A toss spends nothing the route needs, so an earlier one may take the same item.
+            Self::TossItem { .. }
+            | Self::Goto { .. } | Self::EnterMap { .. } | Self::Interact(_) | Self::InteractIfReachable(_)
+            | Self::UsePc { .. } | Self::Fly { .. } | Self::UseFlash { .. } | Self::PartyScript { .. }
+            | Self::EnterMapIfReachable { .. } | Self::UsePcBox { .. } | Self::SafariHunt { .. }
+            | Self::SafariExit | Self::BuyGameCoins { .. } | Self::CollectItem(_)
+            | Self::DefeatGymLeader { .. } | Self::BattleTrainer { .. } | Self::MovePokemonToFront { .. }
+            | Self::GrindUntilLevel { .. } | Self::Dig { .. } | Self::CutTree { .. }
+            | Self::UseStrength { .. } | Self::SolveBoulders { .. } | Self::DropBoulderInHole { .. }
+            | Self::SolveTrashCans | Self::FlipSwitch { .. } | Self::UseElevator { .. } => vec![],
+        }
+    }
 
     pub const fn goto(map: Map) -> Self {
         Self::Goto { map, strict: true }
@@ -1371,8 +1438,6 @@ impl PolicyStep {
             Self::enter(Map::CinnabarPokecenter),
             Self::Interact(MapSprite::CINNABARPOKECENTER_NURSE),
             Self::enter(Map::CinnabarIsland),
-            // A full bag refuses the purchase in silence, so the unsold Nugget goes first.
-            Self::TossItem { item: ItemId::Nugget },
             Self::BuyFromMart { item: BagItem::new(ItemId::GreatBall, 10), map: Map::CinnabarMart },
             // Top the Hyper Potions back up while at the last mart on the route that sells them.
             Self::BuyFromMart { item: BagItem::new(ItemId::HyperPotion, 20), map: Map::CinnabarMart },
@@ -1743,6 +1808,8 @@ pub struct DeterministicPolicy {
     mart_attempts: u32,
     /// `(money, quantity held)` as the last `BuyFromMart` shop visit was opened.
     mart_baseline: Option<(u32, u8)>,
+    /// The purchase last reported as finding a full bag with nothing in it to spare.
+    no_room_reported: Option<ItemId>,
     /// Consecutive polls a heal detour has been unable to move.
     heal_route_stuck: u32,
     /// Set when a heal detour gives up on routing; cleared by the next heal.
@@ -1932,6 +1999,7 @@ impl DeterministicPolicy {
             interact_again: None,
             mart_attempts: 0,
             mart_baseline: None,
+            no_room_reported: None,
             gym_route_stuck: 0,
             dig_from_map: None,
             collect_item_seen: false,
@@ -2199,7 +2267,7 @@ impl Policy for DeterministicPolicy {
                     }
                     action
                 },
-                PolicyStep::CatchPokemon { species, on_map, .. } => {
+                PolicyStep::CatchPokemon { species, on_map, ball } => {
                     if state.map.map != on_map {
                         let action = Self::route_toward(world_graph, &actions, on_map);
                         if action.is_none() {
@@ -2212,7 +2280,7 @@ impl Policy for DeterministicPolicy {
                         // Caught the pokemon (note this only works once for each species)
                         self.queue.pop_front();
                         continue;
-                    } else if state.bag.best_pokeball().is_none() {
+                    } else if catch_ball(&state.bag, ball).is_none() {
                         self.abandon_catch(species, "no Pokéballs left in the bag");
                         self.queue.pop_front();
                         continue;
@@ -2264,7 +2332,7 @@ impl Policy for DeterministicPolicy {
                         }
                     }
                 },
-                PolicyStep::SweepDex { on_map, min_share, .. } => {
+                PolicyStep::SweepDex { on_map, min_share, ball } => {
                     use crate::pokemon::postgame::aides;
                     if state.map.map != on_map {
                         let action = Self::route_toward(world_graph, &actions, on_map);
@@ -2280,7 +2348,7 @@ impl Policy for DeterministicPolicy {
                         self.catch_wander_stuck = 0;
                         self.queue.pop_front();
                         continue;
-                    } else if state.bag.best_pokeball().is_none() {
+                    } else if catch_ball(&state.bag, ball).is_none() {
                         println!("[policy] SweepDex {on_map}: out of Pokéballs, {:?} still missing!",
                             aides::sweep_remaining(&state, on_map, min_share));
                         self.catch_wander_stuck = 0;
@@ -3058,9 +3126,7 @@ impl Policy for DeterministicPolicy {
             let species = &battle_state.enemy.species;
             if battle_state.battle_type == BattleType::Wild {
                 // A step may pin its ball so an incidental catch spares the Master Ball.
-                let chosen = ball
-                    .and_then(|id| state.bag.iter().find(|i| i.id == id && i.quantity > 0))
-                    .or_else(|| state.bag.best_pokeball());
+                let chosen = catch_ball(&state.bag, ball);
                 if let Some(best_pokeball) = chosen {
                     if let Some(use_pokeball_action) = actions.iter()
                         .find(|a| matches!(a, BattleAction::UseItem { item, .. } if item.id == best_pokeball.id )) {
@@ -3490,6 +3556,21 @@ impl Policy for DeterministicPolicy {
                 return None;
             }
             return Some(FieldMove::TeachMove { item: ItemId::RareCandy, target_slot: slot });
+        }
+        if let Some(&PolicyStep::BuyFromMart { item, map }) = self.queue.front() {
+            match toss_for_room(state, item.id, self.queue.iter()) {
+                Ok(None) => {}
+                Ok(Some(toss)) => {
+                    println!("[policy] BuyFromMart: the bag is full, so {toss:?} goes to make room for {item}");
+                    return Some(FieldMove::TossItem { item: toss });
+                }
+                Err(()) if self.no_room_reported != Some(item.id) => {
+                    self.no_room_reported = Some(item.id);
+                    println!("[policy] BuyFromMart: the bag is full and the route needs everything in it, \
+                              so {item} from {map} has no slot to go in");
+                }
+                Err(()) => {}
+            }
         }
         if let Some(&PolicyStep::TossItem { item }) = self.queue.front() {
             if !state.bag.iter().any(|b| b.id == item) {
@@ -4134,5 +4215,78 @@ mod abandoned_catch_tests {
         assert!(!policy.target_was_abandoned(PartyRef::Species(PokemonSpecies::Machop)));
         assert!(!policy.target_was_abandoned(PartyRef::Line(&[PokemonSpecies::Machop])));
         assert!(!policy.target_was_abandoned(PartyRef::Slot(0)));
+    }
+}
+
+#[cfg(test)]
+mod full_bag_tests {
+    use super::*;
+    use crate::pokemon::bag::Bag;
+    use crate::pokemon::integration_tests::fixture::TestFixture;
+
+    /// A state whose bag is `spare` topped up to `len` entries with key items and HMs.
+    fn with_bag(spare: &[(ItemId, u8)], len: usize) -> GameState {
+        const FILLER: [ItemId; 20] = [ItemId::TownMap, ItemId::Bicycle, ItemId::OldAmber, ItemId::HelixFossil,
+            ItemId::SecretKey, ItemId::CardKey, ItemId::SSTicket, ItemId::GoldTeeth, ItemId::CoinCase,
+            ItemId::Itemfinder, ItemId::SilphScope, ItemId::PokeFlute, ItemId::LiftKey, ItemId::OldRod,
+            ItemId::GoodRod, ItemId::Hm01Cut, ItemId::Hm02Fly, ItemId::Hm03Surf, ItemId::Hm04Strength,
+            ItemId::Hm05Flash];
+        let mut fixture = TestFixture::new(
+            include_bytes!("data/back-in-cerulean.bin"), std::time::Duration::from_secs(1), vec![]);
+        let mut state = fixture.game_state();
+        let items: Vec<BagItem> = spare.iter().map(|&(id, n)| BagItem::new(id, n))
+            .chain(FILLER.iter().map(|&id| BagItem::new(id, 1)))
+            .take(len).collect();
+        state.bag = Bag::new(items);
+        assert_eq!(state.bag.len(), len);
+        state
+    }
+
+    const BUY: PolicyStep = PolicyStep::BuyFromMart { map: Map::CinnabarMart, item: BagItem::new(ItemId::GreatBall, 10) };
+
+    /// Balls, medicine, key items and what a later step names are all cheaper than the toss.
+    #[test]
+    fn a_full_bag_tosses_the_cheapest_stack_the_route_does_not_need() {
+        let state = with_bag(&[(ItemId::PokeBall, 1), (ItemId::Potion, 1), (ItemId::Repel, 1),
+            (ItemId::Nugget, 1), (ItemId::EscapeRope, 1)], Bag::MAX_ITEMS);
+        let later = PolicyStep::UseBagItem { item: ItemId::Repel, target: crate::pokemon::postgame::items::UseTarget::Nothing };
+        let mut policy = DeterministicPolicy::new(0, vec![BUY, later]);
+        assert_eq!(policy.pick_field_move(&state), Some(FieldMove::TossItem { item: ItemId::EscapeRope }));
+        assert_eq!(policy.steps_remaining(), Some(2), "the toss is not a step of the route");
+
+        // A stack is priced whole, so five Repels cost more than one Escape Rope.
+        let state = with_bag(&[(ItemId::Repel, 5), (ItemId::EscapeRope, 1)], Bag::MAX_ITEMS);
+        let mut policy = DeterministicPolicy::new(0, vec![BUY]);
+        assert_eq!(policy.pick_field_move(&state), Some(FieldMove::TossItem { item: ItemId::EscapeRope }));
+    }
+
+    #[test]
+    fn a_buy_with_a_slot_to_go_in_tosses_nothing() {
+        let room = with_bag(&[(ItemId::Nugget, 1)], Bag::MAX_ITEMS - 1);
+        assert_eq!(DeterministicPolicy::new(0, vec![BUY]).pick_field_move(&room), None);
+        let topping_up = with_bag(&[(ItemId::Nugget, 1), (ItemId::GreatBall, 2)], Bag::MAX_ITEMS);
+        assert_eq!(DeterministicPolicy::new(0, vec![BUY]).pick_field_move(&topping_up), None);
+    }
+
+    #[test]
+    fn a_full_bag_of_needed_items_tosses_nothing() {
+        let state = with_bag(&[(ItemId::PokeBall, 1), (ItemId::FullHeal, 1), (ItemId::Tm34Bide, 1)], Bag::MAX_ITEMS);
+        let teach = PolicyStep::TeachMove { item: ItemId::Tm34Bide, target: PartyRef::Slot(0) };
+        let mut policy = DeterministicPolicy::new(0, vec![BUY, teach]);
+        assert_eq!(policy.pick_field_move(&state), None);
+        assert_eq!(policy.steps_remaining(), Some(2));
+    }
+
+    #[test]
+    fn a_pinned_ball_falls_back_to_the_best_but_the_master_ball() {
+        let bag = |items: &[(ItemId, u8)]| Bag::new(items.iter().map(|&(id, n)| BagItem::new(id, n)).collect());
+        let pinned = Some(ItemId::PokeBall);
+        let spent = bag(&[(ItemId::MasterBall, 1), (ItemId::PokeBall, 0), (ItemId::GreatBall, 3), (ItemId::UltraBall, 1)]);
+        assert_eq!(catch_ball(&spent, pinned).map(|i| i.id), Some(ItemId::UltraBall));
+        assert_eq!(catch_ball(&spent, Some(ItemId::GreatBall)).map(|i| i.id), Some(ItemId::GreatBall));
+        let master_only = bag(&[(ItemId::MasterBall, 1)]);
+        assert_eq!(catch_ball(&master_only, pinned), None);
+        assert_eq!(catch_ball(&master_only, Some(ItemId::MasterBall)).map(|i| i.id), Some(ItemId::MasterBall));
+        assert_eq!(catch_ball(&master_only, None).map(|i| i.id), Some(ItemId::MasterBall), "an unpinned catch throws it");
     }
 }

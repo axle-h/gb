@@ -1461,6 +1461,29 @@ fn a_cut_with_no_cut_never_opens_the_party_menu() {
             "the agent went {worst_silence:?} without asking anything — a guard that wedges is not a fix");
 }
 
+/// A starter's ball shows the Pokédex's page for it and then asks over a YES/NO box: only the
+/// question is said, as the recreation says it, since the page and the box are no message.
+#[test]
+fn a_starter_s_ball_says_its_question_and_not_its_dex_page_or_its_yes_no_box() {
+    let mut fixture = TestFixture::new(
+        include_bytes!("../data/branch-oaks-lab.bin"),
+        Duration::from_secs(120),
+        vec![PolicyStep::Interact(MapSprite::OAKSLAB_SQUIRTLE_POKE_BALL)],
+    );
+    let mut heard: Vec<String> = Vec::new();
+    for _ in 0..6000 {
+        fixture.step();
+        for event in fixture.agent.drain_events() {
+            if let AgentEvent::TextBox { message } = event { heard.push(message) }
+        }
+        if heard.iter().any(|line| line.contains("nickname")) { break; }
+    }
+    let asked = heard.iter().find(|line| line.contains("nickname")).unwrap_or_else(|| panic!("never asked: {heard:?}"));
+    assert!(asked.starts_with("So! You want the water POKéMON, SQUIRTLE? This POKéMON is really energetic!"),
+            "the Pokédex's page is not said: {asked:?}");
+    assert!(asked.ends_with("Do you want to give a nickname to SQUIRTLE?"), "nor a YES/NO box: {asked:?}");
+}
+
 #[test]
 fn a_guard_who_turns_you_back_is_quoted_rather_than_swallowed() {
     let mut fixture = TestFixture::new(

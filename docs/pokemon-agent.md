@@ -161,7 +161,8 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
 - A `CatchPokemon` that gives up records the species and the steps naming a `PartyRef` skip it: their
   wait on a species target is unbounded, and no scripted policy has a watchdog.
 - The bag holds twenty entries and the route runs at the cap, so every pickup is somebody's toss. Put
-  the toss where the bag binds, not beside the pickup it is for.
+  the toss where the bag binds, not beside the pickup it is for. A purchase makes its own room
+  (`toss_for_room`), sparing whatever `items_used` or `used_unnamed` names.
 - Two arms over one decision must share a damage model: a 0-PP move scoring 122 livelocked the
   Elite-Four switch tactic.
 - A battle item that asks which Pokémon has a row per member it would help (`helps_in_battle`), so
@@ -209,6 +210,9 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   text closes on A's release or a fresh press, before its last letters are ever drawn.
 - A menu read from memory takes over before the text above it reaches the screen, so the mart's
   last read of its greeting is `wTileMap`'s (`assert_pokemart_state`); waiting would move its presses.
+- The buttons wait on the screen standing still, the whole of it outside a battle, but what is said
+  is `message_text`: the message box's rows, never a dex page or a frame drawn mid-scroll
+  (`message_of_rows`). Judging the stillness on that would move every press (`accumulate`).
 
 ## The native agent
 
@@ -225,10 +229,15 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   menu and `BattleEnded`. The recreation is never read mid-draw, so it breaks a page on one mismatch
   (`PokemonTextReader::untorn`).
 - A walk is bounded on progress as well as on a lost route (`MAX_STALE_STEPS`: a current takes back
-  every step), and a task's walk waits `MAX_TASK_BLOCKED_POLLS` for someone to move before giving up
-  (a prize counter the emulated agent's `BLOCKED_TICKS`).
+  every step). A task's refused step waits `MAX_TASK_BLOCKED_POLLS` for whoever stands in it to move,
+  a prize counter with no route the emulated agent's `BLOCKED_TICKS`, and any other task with no
+  route is given up at once (`NativeAgent::give_up`), as the emulated drivers do.
 - A harness that drives the game itself (the credits) calls `host_took_the_screen`, or the agent waits
   for ever on a command that will never report back.
+- It asks for an overworld action only once the overworld has stood free for the emulated agent's
+  shortest wait (`ASK_AFTER_FRAMES`): a script can free the player for a frame or two, as Oak's lab
+  does before Blue speaks. Waiting the emulated agent's second instead runs action for action out
+  of tape, because the cartridge's wait starts sooner.
 - The native watchdog's clock is reset by `NativeAgent::asked`, called beside every `pick_*`; a new
   call site without it wakes the policy on a healthy run.
 - A walk, or a task's walk up to what it faces and out of a lift (`task_walking`), carries a held

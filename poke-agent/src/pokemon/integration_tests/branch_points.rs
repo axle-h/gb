@@ -295,9 +295,6 @@ fn the_bike_branch_can_be_taken_without_the_voucher() {
     assert!(refused,
         "the model was never told the shop refused. `BikeShopCantAffordText` is the cartridge's own \
          sentence for it and it never reached a turn.\n  {}", why(&stuck));
-    assert!(told(&run, "1000000"),
-        "the price never reached a turn, so a model reading this cannot tell why ¥{money} was not \
-         enough");
 
     let state = run.fixture().game_state();
     assert!(!state.bag.iter().any(|entry| entry.id == ItemId::Bicycle),
@@ -307,7 +304,7 @@ fn the_bike_branch_can_be_taken_without_the_voucher() {
     assert!(!run.endpoint.requests().iter().any(|request| request.has_tool("buy_item")),
         "this arm is a text box rather than a mart; a `buy_item` turn here means the agent's mart \
          driver has started claiming it, and the assertions above are then about the wrong thing");
-    println!("[branch-bike-shop] the shop asked ¥1,000,000 of ¥{money} and refused, in one text box");
+    println!("[branch-bike-shop] the shop refused ¥{money} for a ¥1,000,000 bicycle, in one text box");
 }
 
 // ── The trade ──

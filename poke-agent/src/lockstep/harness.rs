@@ -1,6 +1,6 @@
 //! What a lockstep started from a cartridge standing in the overworld shares: the edits made to the
 //! cartridge before both start, the recreation's start taken from it, and the recreation's side of a
-//! talk and of the screen.
+//! talk and of the screen. And both sides' OAM, for any lockstep.
 
 use gb::game_boy::GameBoy;
 use gb::ram::{RAM, ROM};
@@ -143,4 +143,34 @@ pub(super) fn recreation_talk(game: &mut Game, budget: u32) -> u32 {
         }
     }
     panic!("the recreation never talked");
+}
+
+/// `wShadowOAM`, as `VBlank` copies it out: 40 `[y, x, tile, attributes]`.
+pub(super) fn cartridge_oam(gb: &GameBoy) -> Vec<[u8; 4]> {
+    let at = sym::wShadowOAM.address;
+    (0..40).map(|i| std::array::from_fn(|j| gb.core().mmu().read(at + 4 * i + j as u16))).collect()
+}
+
+/// The recreation's objects in the same form, an entry it has never written reading as a cleared one.
+pub(super) fn recreation_oam(game: &Game) -> Vec<[u8; 4]> {
+    let sprites = &game.screen().sprites;
+    (0..40).map(|i| sprites.get(i).map_or([0; 4], |o| [o.y, o.x, o.tile, o.attributes])).collect()
+}
+
+/// OAM itself: what the frame just drawn showed, where `wShadowOAM` is already the next frame's.
+fn displayed_oam(gb: &GameBoy) -> Vec<[u8; 4]> {
+    gb.core().mmu().ppu().oam().chunks_exact(4).map(|entry| entry.try_into().unwrap()).collect()
+}
+
+/// The objects the frame both just drew showed, entry for entry, for a lockstep whose screen has
+/// objects on it, stopped as the cartridge's `VBlank` begins. An entry off the screen is hidden
+/// whatever else it holds: `PrepareOAMData` hides one by its Y alone.
+pub(super) fn assert_same_oam(gb: &GameBoy, game: &Game, what: &str) {
+    let shown = |oam: Vec<[u8; 4]>| oam.into_iter()
+        .map(|entry| ((1..160).contains(&entry[0]) && (1..168).contains(&entry[1])).then_some(entry))
+        .collect::<Vec<_>>();
+    let (theirs, ours) = (shown(displayed_oam(gb)), shown(recreation_oam(game)));
+    if let Some(i) = (0..40).find(|&i| theirs[i] != ours[i]) {
+        panic!("{what}: OAM entry {i} [y, x, tile, attributes]\ncartridge  {:02X?}\nrecreation {:02X?}", theirs[i], ours[i]);
+    }
 }

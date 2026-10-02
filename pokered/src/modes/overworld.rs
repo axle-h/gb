@@ -259,6 +259,13 @@ impl Overworld {
         }
     }
 
+    /// `SpecialEnterMap`, which a new game and CONTINUE both end in: `ResetPlayerSpriteData` turns
+    /// the player to face down, whichever way the save faced.
+    pub fn reset_player_sprite_data(location: &mut Location) -> Self {
+        location.facing = SpriteFacing::Down;
+        Self::new()
+    }
+
     /// Standing where a running game left the player, with its sprites mid-wander: `sprites` are
     /// the sixteen slots as the cartridge has them.
     pub fn standing(sprites: Sprites, num_sprites: u8, standing: Standing) -> Self {
@@ -289,13 +296,6 @@ impl Overworld {
         self.rt.no_battles = no_battles;
         self.rt.wild_encounter_cooldown = cooldown;
         self.rt.no_random_battle_steps = steps_left;
-        self
-    }
-
-    /// `wGrassRate`, `wGrassMons`, `wWaterRate` and `wWaterMons`, as a running game left them: a
-    /// left shore reads the grass list the last map with one loaded.
-    pub fn with_wild_mons(mut self, wild: crate::systems::overworld::encounters::WildMons) -> Self {
-        self.rt.wild_mons = wild;
         self
     }
 
@@ -633,7 +633,7 @@ impl Overworld {
                 }
             }
         }
-        self.rt.wild_mons.load(map, ctx.world.ruleset);
+        location.wild_mons.load(map, ctx.world.ruleset);
         self.rt.text_pointers = None;
         let entry = tileset_entry(header.tileset);
         ctx.screen.tiles.animation.kind = entry.animation;
@@ -2001,6 +2001,17 @@ mod tests {
         assert!(matches!(frame.reply, Some(Reply::Refused(Refusal::Invalid(_)))), "{:?}", frame.reply);
         command(&mut game, Command::Step(Direction::Left));
         assert_eq!(at(&game).1, 7, "a step still goes");
+    }
+
+    /// A save made before the wild lists were saved continues with the lists of the map it is on.
+    #[test]
+    fn a_save_without_wild_lists_takes_its_maps() {
+        let mut game = game_at(Map::Route1, 10, 20);
+        let route_1 = game.world().location.wild_mons;
+        assert_ne!(route_1.grass_rate, 0);
+        game.world.location.wild_mons = Default::default();
+        let loaded = crate::Game::load(&game.save(), crate::Pacing::Faithful).unwrap();
+        assert_eq!(loaded.world().location.wild_mons, route_1);
     }
 
     #[test]

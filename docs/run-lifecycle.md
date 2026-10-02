@@ -49,7 +49,8 @@ Read before touching `poke-agent/src/run/`, `poke-agent-web/src/host.rs`'s new-r
   the frames the host drives through the credits as well as the agent's own.
 - A native run keeps the game's own save, `Frame.save`, as `save.pkrd` beside `game.pkrd`, and a
   console with no run to start next powers on into it after the credits, as CONTINUE loads the
-  cartridge's (`Native::advance`).
+  cartridge's (`Native::advance`). The title's clear-save removes the file at the next checkpoint
+  (`RunDir::checkpoint_game`).
 - The archive nests under `hall-of-fame/`, and that is load-bearing: `run::resumable` lists direct
   children of `$GB_RUN_DIR` and continues the newest.
 - `archive` copies every artifact by name. There is no "copy everything", so a new run-directory

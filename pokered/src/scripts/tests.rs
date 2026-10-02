@@ -4540,7 +4540,9 @@ fn beating_the_champion_ends_on_the_title_screen_with_the_game_saved() {
             Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
             _ => Input::None,
         };
-        saves.extend(game.frame(input).save);
+        if let Some(crate::Save::Written(bytes)) = game.frame(input).save {
+            saves.push(bytes);
+        }
     }
     assert_eq!(game.status(), Status::Waiting(Decision::TitleScreen), "THE END waits for a press");
     assert_eq!(saves.len(), 1, "the ceremony saves once");

@@ -712,7 +712,6 @@ impl LlmRunBuilder {
     }
 }
 
-#[cfg(feature = "slow-tests")]
 impl LlmRunBuilder {
     /// The same stack over the recreation: `game` played by `LlmPolicy` through the native agent,
     /// from a fresh run directory. The fixture and the options are the emulator's and go unused.
@@ -757,7 +756,6 @@ impl LlmRunBuilder {
 /// the emulator was, and a frame where the host ticked 20 ms.
 ///
 /// [`NativeAgent`]: crate::pokemon::native_agent::NativeAgent
-#[cfg(feature = "slow-tests")]
 pub struct NativeLlmRun {
     /// Held so the server outlives the run; the brain behind it is what a test reads.
     _endpoint: MockEndpoint,
@@ -770,7 +768,6 @@ pub struct NativeLlmRun {
     max_frames: u64,
 }
 
-#[cfg(feature = "slow-tests")]
 impl NativeLlmRun {
     pub fn agent(&mut self) -> &mut crate::pokemon::native_agent::NativeAgent {
         self.agent.as_mut().expect("a live agent")
@@ -818,7 +815,6 @@ impl NativeLlmRun {
     }
 }
 
-#[cfg(feature = "slow-tests")]
 impl Drop for NativeLlmRun {
     fn drop(&mut self) {
         self.agent = None;

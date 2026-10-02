@@ -21,7 +21,7 @@ use command::{Command, Drive, Executor, Reply};
 use gfx::ui::UiSurface;
 use gfx::Screen;
 use input::{Joypad, Pad};
-use mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
+use mode::{Ctx, Mode, ModeUpdate, Outcome, SaveRequest, Status, Transition};
 use modes::menu_input::CursorMemory;
 use modes::movie::Movie;
 use rng::GameRng;
@@ -56,11 +56,19 @@ pub struct Frame {
     /// This frame's register writes, for the host to play. The game holds no audio backend, so a
     /// save carries no oscillator state.
     pub audio: Vec<Write>,
-    /// The game's own save, written this frame: what the SAVE menu, a box change and the Hall of
-    /// Fame hand the host to keep. `Game::save`'s bytes.
-    pub save: Option<Vec<u8>>,
+    /// What became of the game's own save this frame, for the host to keep or delete.
+    pub save: Option<Save>,
     /// The message box as each text box left it this frame; see `Ctx::printed`.
     pub printed: Vec<UiSurface>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Save {
+    /// `SaveGameData`: what the SAVE menu, a box change and the Hall of Fame hand the host to keep.
+    /// `Game::save`'s bytes.
+    Written(Vec<u8>),
+    /// `ClearAllSRAMBanks`, from the title screen's clear-save dialogue: the host has no save now.
+    Cleared,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,17 +226,24 @@ impl Game {
         self.frame_counter = self.frame_counter.saturating_sub(1);
         self.frames += 1;
 
-        let (save_game, printed) = self.with_ctx(&mut events, |modes, ctx| {
+        let (save, printed) = self.with_ctx(&mut events, |modes, ctx| {
             if let Some(top) = modes.last_mut() {
                 let transition = top.update(ctx);
                 apply(modes, transition, ctx);
             }
         });
-        // `SaveGameData`. The save is taken after the frame's transitions, so it holds the screen the
-        // player is looking at, and it becomes the file the next `CheckPreviousSaveFile` sees.
-        let save = save_game.then(|| {
-            self.saved_player_id = Some(self.world.player_id);
-            self.save()
+        // `SaveGameData` or `ClearAllSRAMBanks`. A save is taken after the frame's transitions, so it
+        // holds the screen the player is looking at, and either becomes what the next
+        // `CheckPreviousSaveFile` sees.
+        let save = save.map(|save| match save {
+            SaveRequest::Write => {
+                self.saved_player_id = Some(self.world.player_id);
+                Save::Written(self.save())
+            }
+            SaveRequest::Clear => {
+                self.saved_player_id = None;
+                Save::Cleared
+            }
         });
 
         Frame { events, status: self.status(), reply, audio, save, printed }
@@ -255,12 +270,12 @@ impl Game {
         }
     }
 
-    /// Runs `f`, and answers whether the game asked to be saved and what its text boxes printed.
-    fn with_ctx(&mut self, events: &mut Vec<Event>, f: impl FnOnce(&mut Vec<Mode>, &mut Ctx)) -> (bool, Vec<UiSurface>) {
+    /// Runs `f`, and answers what the game asked of its save and what its text boxes printed.
+    fn with_ctx(&mut self, events: &mut Vec<Event>, f: impl FnOnce(&mut Vec<Mode>, &mut Ctx)) -> (Option<SaveRequest>, Vec<UiSurface>) {
         let Self { world, modes, rng, pad, frame_counter, screen, menu, audio, pacing, saved_player_id, .. } = self;
         audio.ruleset = world.ruleset;
         let mut ctx = Ctx { world, pad, rng, screen, menu, audio, frame_counter, events, pacing: *pacing,
-                            update_sprites: false, menu_key_pressed: false, save_game: false, saved_player_id: *saved_player_id,
+                            update_sprites: false, menu_key_pressed: false, save: None, saved_player_id: *saved_player_id,
                             printed: Vec::new() };
         f(modes, &mut ctx);
         if ctx.update_sprites
@@ -273,7 +288,7 @@ impl Game {
         {
             overworld.disarm_turn();
         }
-        (ctx.save_game, ctx.printed)
+        (ctx.save, ctx.printed)
     }
 
     pub fn save(&self) -> Vec<u8> {
@@ -295,6 +310,11 @@ impl Game {
         };
         let mut game: Self = rmp_serde::from_slice(&body).map_err(|e| e.to_string())?;
         game.pacing = pacing;
+        // A save from before the wild lists were saved holds none: the map it stands on supplies them.
+        if game.world.location.wild_mons == Default::default() && game.modes.iter().any(|mode| matches!(mode, Mode::Overworld(_))) {
+            let (map, ruleset) = (game.world.location.map, game.world.ruleset);
+            game.world.location.wild_mons.load(map, ruleset);
+        }
         game.audio.restart_saved_music();
         Ok(game)
     }
@@ -420,9 +440,9 @@ mod tests {
         }
     }
 
-    fn digest(bytes: &[u8]) -> u64 {
+    fn digest(value: &(impl Hash + ?Sized)) -> u64 {
         let mut hasher = std::hash::DefaultHasher::new();
-        bytes.hash(&mut hasher);
+        value.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -479,7 +499,7 @@ mod tests {
             let out = game.frame(fed.input());
             kept.feed(&out.audio);
             played.push(Played { fed, audio: out.audio, status: out.status, save: digest(&game.save()),
-                saved: out.save.as_deref().map(digest), kept: kept.clone() });
+                saved: out.save.as_ref().map(digest), kept: kept.clone() });
         }
         assert!(!saves.is_empty(), "nowhere was saved");
         for (from, bytes) in &saves {
@@ -494,7 +514,7 @@ mod tests {
                 backend.feed(&out.audio);
                 assert_eq!(backend, original.kept, "{what}: what a backend started on the copy holds");
                 assert_eq!(out.status, original.status, "{what}: the status");
-                assert_eq!(out.save.as_deref().map(digest), original.saved, "{what}: the game's own save");
+                assert_eq!(out.save.as_ref().map(digest), original.saved, "{what}: the game's own save");
                 assert_eq!(digest(&copy.save()), original.save, "{what}: the save bytes");
             }
         }

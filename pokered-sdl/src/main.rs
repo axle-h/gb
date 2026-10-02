@@ -12,7 +12,7 @@ use pokered::gfx::colour::{ColourMode, BYTES_PER_PIXEL};
 use pokered::input::Joypad;
 use pokered::rng::GameRng;
 use pokered::world::World;
-use pokered::{Game, Input, Pacing};
+use pokered::{Game, Input, Pacing, Save};
 use sdl2::audio::{AudioQueue, AudioSpecDesired};
 use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Scancode};
@@ -25,8 +25,9 @@ const FRAME: Duration = Duration::from_nanos(16_742_706);
 const COLOUR_MODES: [ColourMode; 4] =
     [ColourMode::Dmg, ColourMode::Gbc, ColourMode::Sgb, ColourMode::SgbBorder];
 
-/// The game's own save file, which the SAVE menu, a box change and the Hall of Fame write. It is
-/// what CONTINUE resumes from, so the window reads it back at every power-on.
+/// The game's own save file, which the SAVE menu, a box change and the Hall of Fame write and the
+/// title's clear-save dialogue removes. It is what CONTINUE resumes from, so the window reads it
+/// back at every power-on.
 fn save_path() -> PathBuf {
     std::env::var("POKERED_SAVE").unwrap_or_else(|_| "pokered.sav".to_string()).into()
 }
@@ -135,8 +136,13 @@ fn main() -> Result<(), String> {
         }
 
         let frame = game.frame(Input::Buttons(buttons(&events.keyboard_state())));
-        if let Some(bytes) = frame.save {
-            std::fs::write(save_path(), bytes).map_err(|e| e.to_string())?;
+        match frame.save {
+            Some(Save::Written(bytes)) => std::fs::write(save_path(), bytes).map_err(|e| e.to_string())?,
+            Some(Save::Cleared) => match std::fs::remove_file(save_path()) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.to_string()),
+                _ => {}
+            },
+            None => {}
         }
 
         for write in frame.audio {

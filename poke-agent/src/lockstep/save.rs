@@ -31,14 +31,14 @@ const S_PLAYER_NAME: usize = SRAM_BANK + (sym::sPlayerName.address - 0xA000) as 
 const S_PLAYER_ID: usize = SRAM_BANK + (sym::sMainData.address - 0xA000) as usize
     + (sym::wPlayerID.address - sym::wMainDataStart.address) as usize;
 /// `CheckPreviousSaveFile`'s `CalcCheckSum` over the whole of `sGameData`: lag frames.
-const CHECK_PREVIOUS_SAVE_FILE: u32 = 4;
+pub(super) const CHECK_PREVIOUS_SAVE_FILE: u32 = 4;
 /// `SaveGameData`: three passes over `sGameData`, each copying it and then summing it, all lag.
 const SAVE_GAME_DATA: u32 = 15;
 /// The `DelayFrames 120` "Now saving..." is held for.
 const NOW_SAVING: u32 = 120;
 
 /// `LoadTextBoxTilePatterns` through `CopyVideoData`, eight tiles a frame and a frame to finish.
-fn text_box_tiles() -> u32 {
+pub(super) fn text_box_tiles() -> u32 {
     let tiles = |start: DmgPointer, end: DmgPointer| (end.address - start.address) as u32 / 16;
     tiles(sym::TextBoxGraphics, sym::TextBoxGraphicsEnd) / 8 + 1
 }

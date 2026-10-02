@@ -102,15 +102,24 @@ impl PokemonTextReader {
     }
 
     /// [`Self::update_with`] without the button: read this tick's screen and press nothing.
+    ///
+    /// The buttons wait on the screen standing still, the whole of it outside a battle, a menu over
+    /// the text or the `▼` prompt appearing included; only [`PokemonApiTrait::message_text`] is said.
     pub fn accumulate<A: PokemonApiTrait>(&mut self, api: &A) {
-        self.read(api.on_screen_text(self.message_box_only));
+        self.read_apart(api.on_screen_text(self.message_box_only), api.message_text());
     }
 
     /// Fold in one read of the screen, `None` where there was nothing to read.
     pub fn read(&mut self, screen: Option<String>) {
+        self.read_apart(screen.clone(), screen);
+    }
+
+    /// Fold in one read: `screen` for whether the page stands still, `message` for what it says.
+    fn read_apart(&mut self, screen: Option<String>, message: Option<String>) {
         self.still = if screen == self.last_screen { self.still.saturating_add(1) } else { 0 };
-        self.last_screen.clone_from(&screen);
-        let Some(screen) = screen else { return };
+        self.last_screen = screen;
+        // A row of glyphs that render as nothing, the `▼` prompt's, reads as an empty line.
+        let Some(screen) = message.map(|message| message.split_whitespace().collect::<Vec<_>>().join(" ")) else { return };
 
         // A blank frame is not a page break and must not commit anything.
         if screen.is_empty() {
@@ -253,6 +262,10 @@ mod tests {
         fn pc_stored_items(&self) -> crate::pokemon::bag::Bag { crate::pokemon::bag::Bag::default() }
 
         fn on_screen_text(&self, _only_message_box: bool) -> Option<String> {
+            self.on_screen_text.clone()
+        }
+
+        fn message_text(&self) -> Option<String> {
             self.on_screen_text.clone()
         }
 
@@ -399,6 +412,34 @@ mod tests {
             reader.update(&mut api);
         }
         assert!(!api.joypad.is_button_pressed(JoypadButton::A), "A is let go of on the scrolled page");
+    }
+
+    /// The `▼` prompt is a row of its own that renders as nothing, so a page ending on one reads
+    /// with a space after it.
+    #[test]
+    fn a_page_ending_on_the_prompt_is_joined_by_one_space() {
+        let mut reader: PokemonTextReader = Default::default();
+        for frame in ["Here, RED!", "Here, RED! ", "Here, RED! ", "There are", "There are 3 POKéMON here!"] {
+            reader.read(Some(frame.to_string()));
+        }
+        assert_eq!(reader.take(), "Here, RED! There are 3 POKéMON here!");
+    }
+
+    /// A box scrolls by copying its rows up one and then clearing the last, and a frame drawn in
+    /// between has a line, or the end of one, twice.
+    #[test]
+    fn a_frame_drawn_mid_scroll_says_nothing() {
+        let rows = |rows: &[(u8, &str)]| rows.iter().map(|&(y, line)| (y, line.to_string())).collect();
+        assert_eq!(crate::pokemon::message_of_rows(rows(&[(14, "Did you see the"), (16, "FISHING GURU in")])),
+                   Some("Did you see the FISHING GURU in".to_string()));
+        assert_eq!(crate::pokemon::message_of_rows(rows(&[(13, "Did you see the"), (15, "FISHING GURU in")])),
+                   Some("Did you see the FISHING GURU in".to_string()), "the frames between the two copies");
+        assert_eq!(crate::pokemon::message_of_rows(rows(&[(13, "Did you see the"), (15, "FISHING GURU in"), (16, "FISHING GURU in")])),
+                   None, "copied and not yet cleared");
+        assert_eq!(crate::pokemon::message_of_rows(rows(&[(13, "With your ability,"), (15, "you could become"), (16, "become")])),
+                   None, "half cleared");
+        assert_eq!(crate::pokemon::message_of_rows(rows(&[(14, "Here, RED!"), (16, "")])),
+                   Some("Here, RED!".to_string()), "the prompt's row is no row of text");
     }
 
     #[test]

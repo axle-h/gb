@@ -4,6 +4,7 @@ pub(crate) mod action_for_action;
 mod audio;
 mod battle;
 mod battle_animations;
+mod cycling_road;
 mod events;
 pub(crate) mod bridge;
 mod game_state;

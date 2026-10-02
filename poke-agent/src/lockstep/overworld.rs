@@ -56,7 +56,7 @@ impl Cartridge {
 
     /// Runs to the first of `points`, recording the NPC routines' `Random` bytes on the way. The
     /// LCD is off while a map loads, so a stretch without any of them is not an error.
-    fn run_to(&mut self, points: &[gb::game_boy::Breakpoint]) -> gb::game_boy::Breakpoint {
+    pub(super) fn run_to(&mut self, points: &[gb::game_boy::Breakpoint]) -> gb::game_boy::Breakpoint {
         let random = breakpoint(sym::Random);
         let movement = sym::UpdateNPCSprite.address..sym::DoScriptedNPCMovement.address;
         let mut all = points.to_vec();
@@ -103,7 +103,7 @@ impl Cartridge {
         polled
     }
 
-    fn location(&self) -> (Map, u8, u8, SpriteFacing) {
+    pub(super) fn location(&self) -> (Map, u8, u8, SpriteFacing) {
         let mmu = self.gb.core().mmu();
         (Map::from_repr(mmu.read_pointer(&sym::wCurMap)).unwrap(), mmu.read_pointer(&sym::wXCoord),
          mmu.read_pointer(&sym::wYCoord), SpriteFacing::from_repr(self.read(sym::wSpriteStateData1.address + 9)).unwrap())

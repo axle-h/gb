@@ -140,6 +140,7 @@ fn icons_at_every_poll(hurt: &[(u16, u16)], polls: u32) -> Game {
             }
         }
         assert_same_picture(&gb, &game, &format!("poll {poll}"));
+        super::harness::assert_same_oam(&gb, &game, &format!("poll {poll}"));
     }
     game
 }

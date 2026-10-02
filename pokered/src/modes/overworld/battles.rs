@@ -75,12 +75,26 @@ impl Overworld {
                 false => BattleMode::wild(species, level),
             });
         }
-        let battle = BattleMode::trainer(opponent - OPP_ID_OFFSET, self.rt.trainer_no, self.rt.gym_leader_no,
+        let mut battle = BattleMode::trainer(opponent - OPP_ID_OFFSET, self.rt.trainer_no, self.rt.gym_leader_no,
             ctx.world.scripts.rival_starter);
+        if let Some(block) = self.trainer_oam_block() {
+            battle = battle.with_trainer_oam_block(block);
+        }
         Some(match self.rt.end_battle_text.filter(|_| self.rt.print_end_battle_text) {
             Some(words) => battle.with_end_battle_text(text_named(words)),
             None => battle,
         })
+    }
+
+    /// `BattleTransition`'s count of the OAM block the trainer in `hSpriteIndex` is drawn in: one block
+    /// for each slot before it drawn at all, the player's included. A value that is no sprite slot
+    /// runs the cartridge's count on through the rest of WRAM, which is not modelled: no block is kept.
+    fn trainer_oam_block(&self) -> Option<u8> {
+        let slot = self.rt.sprite_index as usize;
+        if !(1..self.sprites.len()).contains(&slot) {
+            return None;
+        }
+        Some(self.sprites[..slot].iter().filter(|sprite| sprite.image_index != 0xFF).count() as u8)
     }
 
     /// `.lastRepelStep`'s `DisplayTextID`, which `NewBattle` shows before it returns to `then`.
@@ -115,7 +129,7 @@ impl Overworld {
             height: self.view.height,
             repel_steps: location.repel_steps,
             lead_level: ctx.world.party.first().map_or(0, |mon| mon.mon.level),
-            wild: self.rt.wild_mons,
+            wild: location.wild_mons,
         };
         let encounter = try_do_wild_encounter(&input, ctx.rng);
         ctx.world.location.repel_steps = encounter.repel_steps;
