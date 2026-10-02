@@ -2,8 +2,9 @@
 //! `LlmPolicy`, the worker and the wire, with every story gate live and the ledger asserted.
 //!
 //! The brain answers from the rendered turn only. What it may be handed is the god-mode boundary:
-//! battle strength and money (`Cheats::story`), and Master Balls and Rare Candies where a step
-//! asks for them. Everything else is earned through the menu.
+//! battle strength and money (`Cheats::story`), Master Balls and Full Heals held in the bag
+//! (`STOCK`), and Rare Candies where a step asks for them. Everything else is earned through the
+//! menu.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -21,15 +22,33 @@ use crate::pokemon::PokemonApiTrait;
 use crate::pokemon::symbols::DmgPointerRead;
 
 /// Trainers are fought by the script; a wild battle is the brain's, because only it knows what the
-/// run is hunting. A frozen lead is switched out while anyone else can fight, or else cured from the
-/// bag: only a Fire move thaws it, so it would sit out every turn until it fainted.
+/// run is hunting. Any status is cured first, from the Full Heals the run holds. A foe is knocked
+/// out with the most accurate move that does it at the lowest damage roll, the weakest of those:
+/// the strongest can be Blizzard, and a miss hands a Mirror Move user a Blizzard of its own. A
+/// frozen lead with no cure is switched out while anyone else can fight: only a Fire move thaws it.
 const SCRIPT: &str = r#"
+if battle.kind != "safari" && !battle.me.fainted && battle.me.status != "" {
+    let cure = #{ poisoned: "Antidote", burned: "BurnHeal", frozen: "IceHeal", paralyzed: "ParlyzHeal", asleep: "Awakening" };
+    for want in [cure[battle.me.status], "FullHeal", "FullRestore"] {
+        for item in battle.bag {
+            if item.name == want { battle.use_item(item.name); }
+        }
+    }
+}
 if battle.kind == "wild" { battle.ask(); }
 if battle.me.fainted {
     for mon in battle.party {
         if !mon.fainted && mon.slot != battle.me.slot { battle.switch_to(mon); }
     }
 }
+let knockout = ();
+for mv in battle.moves {
+    if mv.usable && mv.damage * 217 / 255 >= battle.foe.hp && (knockout == () || mv.accuracy > knockout.accuracy
+            || mv.accuracy == knockout.accuracy && mv.damage < knockout.damage) {
+        knockout = mv;
+    }
+}
+if knockout != () && battle.me.status != "frozen" { battle.fight(knockout); }
 if battle.best_move != () && battle.me.status != "frozen" { battle.fight(battle.best_move); }
 for mon in battle.party {
     if !mon.fainted && mon.slot != battle.me.slot {
@@ -152,9 +171,34 @@ impl Pc {
 
 /// What a tidy keeps besides what cannot be tossed: the balls, the stones and the candy.
 const KEEP: &[ItemId] = &[
-    // The catches, a level evolution, Pikachu's evolution for the Raichu trade, and a drink for
-    // Saffron's guards.
-    ItemId::MasterBall, ItemId::RareCandy, ItemId::ThunderStone, ItemId::FreshWater,
+    // The catches, a level evolution, Pikachu's evolution for the Raichu trade, a drink for
+    // Saffron's guards, and the battle script's cure.
+    ItemId::MasterBall, ItemId::RareCandy, ItemId::ThunderStone, ItemId::FreshWater, ItemId::FullHeal,
+];
+
+/// What the run is handed and held at, as `(item, refilled below, refilled to)`, topped up only in
+/// the overworld so a driver mid-battle sees what it spends: Master Balls for every catch outside
+/// the Safari Zone, as the legendary legs have, and Full Heals for [`SCRIPT`]'s cures.
+const STOCK: [(ItemId, u8, u8); 2] = [(ItemId::MasterBall, 5, 10), (ItemId::FullHeal, 5, 10)];
+
+/// The key items and HMs nothing wants back once the Volcano Badge phase begins, bar the Secret Key
+/// it is yet to find: the bag holds twenty kinds, Full Heals among them, and with these in it a gift
+/// or a pickup finds no room. Deposited at the first PC of every phase from there on, since a phase
+/// played from its fixture may still carry them; one already in the PC, or not found yet, is refused.
+const SPENT: [&str; 13] = [
+    r#"{"move":"pc_items","op":"deposit","item":"TownMap"}"#,
+    r#"{"move":"pc_items","op":"deposit","item":"SSTicket"}"#,
+    r#"{"move":"pc_items","op":"deposit","item":"OldRod"}"#,
+    r#"{"move":"pc_items","op":"deposit","item":"CoinCase"}"#,
+    r#"{"move":"pc_items","op":"deposit","item":"LiftKey"}"#,
+    r#"{"move":"pc_items","op":"deposit","item":"SilphScope"}"#,
+    r#"{"move":"pc_items","op":"deposit","item":"PokeFlute"}"#,
+    r#"{"move":"pc_items","op":"deposit","item":"CardKey"}"#,
+    r#"{"move":"pc_items","op":"deposit","item":"Hm01Cut"}"#,
+    r#"{"move":"pc_items","op":"deposit","item":"Hm02Fly"}"#,
+    r#"{"move":"pc_items","op":"deposit","item":"Hm03Surf"}"#,
+    r#"{"move":"pc_items","op":"deposit","item":"Hm04Strength"}"#,
+    r#"{"move":"pc_items","op":"deposit","item":"SecretKey"}"#,
 ];
 
 /// One pocket of a map, as last offered: what is in it to take, and its passages out as
@@ -1459,13 +1503,14 @@ pub fn play_phases_with(fixture: &'static [u8], name: &'static str, phases: Vec<
         }
         if let Ok(state) = run.fixture().try_game_state() {
             ledger.lock().expect("not poisoned").observe(&state, run.fixture().gb.core().mmu());
-            // Master Balls for every catch outside the Safari Zone, as the legendary legs have.
-            let balls = state.bag.iter().find(|item| item.id == ItemId::MasterBall).map_or(0, |item| item.quantity);
-            // Only in the overworld: topped up mid-catch, the ball driver never sees one spent.
-            if balls < 5 && state.mode == crate::pokemon::encoding::GameMode::Overworld
-                && state.bag.iter().count() < crate::pokemon::bag::Bag::MAX_ITEMS
-            {
-                run.fixture().api().debug_give_item(ItemId::MasterBall, 10 - balls).ok();
+            if state.mode == crate::pokemon::encoding::GameMode::Overworld {
+                for (item, low, full) in STOCK {
+                    let held = state.bag.iter().find(|held| held.id == item).map_or(0, |held| held.quantity);
+                    if held < low {
+                        // A full bag with none held refuses, and the next tick asks again.
+                        run.fixture().api().debug_give_item(item, full - held).ok();
+                    }
+                }
             }
         }
         *done.lock().expect("not poisoned") || stuck.lock().expect("not poisoned").is_some()
@@ -1551,10 +1596,11 @@ pub fn play_phases_native(seed: u64, name: &'static str, phases: Vec<Vec<Step>>,
         if agent.is_free() && agent.game().frames() % 8 == 0 && let Ok(state) = agent.game_state() {
             let world = agent.game_mut().world_mut();
             cheats.apply_native(world, &state, true);
-            // Master Balls for every catch outside the Safari Zone, as the emulated run has.
-            let balls = world.bag.quantity_of(ItemId::MasterBall);
-            if balls < 5 && world.bag.items.len() < crate::pokemon::bag::Bag::MAX_ITEMS {
-                world.bag.add(ItemId::MasterBall, 10 - balls);
+            for (item, low, full) in STOCK {
+                let held = world.bag.quantity_of(item);
+                if held < low {
+                    world.bag.add(item, full - held);
+                }
             }
         }
         *done.lock().expect("not poisoned") || stuck.lock().expect("not poisoned").is_some()
@@ -2520,12 +2566,16 @@ pub fn to_the_volcano_badge() -> Vec<Step> {
     let mut steps = vec![
         Collect(true),
         // The zone left the bag full, and a full bag refuses a pickup and a gift in silence.
-        Tidy,
+        Tidy, GoTo("FuchsiaPokecenter"),
+    ];
+    steps.extend(SPENT.map(Field));
+    steps.extend([
+        GoTo("FuchsiaCity"),
         // South over the water: the sea routes, which no phase before this one could cross.
         GoTo("Route19"), Explore { maps: &["Route19"], patience: 500 },
         GoTo("Route20"), Explore { maps: &["Route20"], patience: 600 },
         GoTo("Route19"), GoTo("FuchsiaCity"),
-    ];
+    ]);
     // Route 20 is a north channel and a south channel with the islands between them, and they do
     // not meet: the north one runs east to Route 19 and the south one west to Cinnabar, and
     // neither the islands' ground floor nor the floor below it joins the two. So Cinnabar is
@@ -2681,18 +2731,24 @@ fn completion_phase_seafoam() {
 /// the run first walked past it.
 pub fn to_the_earth_badge() -> Vec<Step> {
     use Step::*;
-    vec![
+    let mut steps = vec![
         Collect(true), Tidy,
         // The one flight of the tour, and the one the cartridge makes the natural thing: Viridian
         // is the whole world away from Fuchsia, and the gym that was shut when the run first
         // walked past it is the last badge. Every other leg is walked.
         Field(r#"{"move":"fly","map":"ViridianCity"}"#), GoTo("ViridianCity"),
+        GoTo("ViridianPokecenter"),
+    ];
+    steps.extend(SPENT.map(Field));
+    steps.extend([
+        GoTo("ViridianCity"),
         // Giovanni is only in the gym once Silph Co has sent the Rockets home. The arrow tiles are
         // the floor itself rather than an obstacle: `MetaTileMap` slides a route over them, so the
         // gym is walked like any other.
         GoTo("ViridianGym"), Explore { maps: &["ViridianGym"], patience: 600 },
         GoTo("ViridianCity"),
-    ]
+    ]);
+    steps
 }
 
 #[test]
@@ -2756,11 +2812,15 @@ fn completion_phase_power_plant() {
 pub fn to_victory_road() -> Vec<Step> {
     use Step::*;
     const ROAD: &[&str] = &["VictoryRoad1F", "VictoryRoad2F", "VictoryRoad3F"];
-    vec![
+    let mut steps = vec![
         Collect(false), Tidy,
         // The phases before filled the party and the box, and a full box refuses every ball, so the
         // bird would be met with nothing to throw.
-        GoTo("ViridianPokecenter"), AtPc(Pc::ChangeBox(4)), GoTo("ViridianCity"),
+        GoTo("ViridianPokecenter"), AtPc(Pc::ChangeBox(4)),
+    ];
+    steps.extend(SPENT.map(Field));
+    steps.extend([
+        GoTo("ViridianCity"),
         GoTo("Route22"), Explore { maps: &["Route22"], patience: 300 },
         GoTo("Route22Gate"), Clear(&[]),
         GoTo("Route23"), Explore { maps: &["Route23"], patience: 300 },
@@ -2811,7 +2871,8 @@ pub fn to_victory_road() -> Vec<Step> {
         GoTo("IndigoPlateau"), GoTo("IndigoPlateauLobby"), Clear(&[]),
         // Out of the lobby and off the plateau, then back: the walk up crosses neither.
         GoTo("IndigoPlateau"), GoTo("Route23"), GoTo("IndigoPlateau"), GoTo("IndigoPlateauLobby"),
-    ]
+    ]);
+    steps
 }
 
 #[test]
@@ -3032,17 +3093,11 @@ pub fn to_the_north_errands() -> Vec<Step> {
         // Slot 3 is whatever the collecting caught last, and the party has to have room for the
         // Pikachu: a catch into a full party goes to the box, where a stone cannot reach it.
         GoTo("ViridianPokecenter"), AtPc(Pc::DepositSlot(3)),
-        // The bag is nineteen twentieths key items by now, and a gift with no room for it is
-        // refused in silence. What is wanted again is fetched back where it is wanted.
-        Field(r#"{"move":"pc_items","op":"deposit","item":"TownMap"}"#),
-        Field(r#"{"move":"pc_items","op":"deposit","item":"SSTicket"}"#),
-        Field(r#"{"move":"pc_items","op":"deposit","item":"OldRod"}"#),
-        Field(r#"{"move":"pc_items","op":"deposit","item":"CoinCase"}"#),
-        Field(r#"{"move":"pc_items","op":"deposit","item":"LiftKey"}"#),
-        Field(r#"{"move":"pc_items","op":"deposit","item":"SilphScope"}"#),
-        Field(r#"{"move":"pc_items","op":"deposit","item":"PokeFlute"}"#),
-        Field(r#"{"move":"pc_items","op":"deposit","item":"CardKey"}"#),
-        Field(r#"{"move":"pc_items","op":"deposit","item":"SecretKey"}"#),
+    ];
+    // A gift with no room for it is refused in silence. What is wanted again is fetched back where
+    // it is wanted.
+    steps.extend(SPENT.map(Field));
+    steps.extend([
         GoTo("ViridianCity"),
         Talk("Fisher"),
         GoTo("ViridianGym"), Talk("Giovanni"), GoTo("ViridianCity"),
@@ -3064,7 +3119,7 @@ pub fn to_the_north_errands() -> Vec<Step> {
         GoTo("Route2Gate"), Repeat("Route2, arriving at (16, 36)"),
         GoTo("DiglettsCaveRoute2"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute11"),
         GoTo("Route11"), GoTo("VermilionCity"),
-    ];
+    ]);
     steps.extend(vermilion_to_saffron());
     steps.extend(saffron_to_cerulean());
     steps.extend([
@@ -3288,18 +3343,48 @@ fn the_tour_script_switches_a_frozen_lead_out() {
     assert!(matches!(outcome, Outcome::Action(BattleAction::SwitchPokemon { slot: 1, .. })), "got {outcome:?}");
 }
 
+/// Before a switch, a move or handing a wild battle back: the status's own cure if the bag has it,
+/// else a Full Heal.
 #[test]
-fn the_tour_script_cures_a_frozen_lead_with_nobody_to_switch_to() {
+fn the_tour_script_cures_any_status_first() {
     use crate::llm::battle_script::{run, scenarios, Outcome};
     use crate::pokemon::bag::{Bag, BagItem};
     use crate::pokemon::battle::BattleAction;
     use crate::pokemon::status::PokemonStatus;
-    let mut state = scenarios::last_mon();
-    state.bag = Bag::new(vec![BagItem::new(ItemId::SuperPotion, 2), BagItem::new(ItemId::IceHeal, 1)]);
-    state.pokemon.get_mut(0).expect("a lead").status = PokemonStatus::Frozen;
-    state.battle.as_mut().expect("a battle").player.status = PokemonStatus::Frozen;
+    let cases = [
+        (scenarios::hurt_trainer(), PokemonStatus::Frozen, vec![ItemId::SuperPotion, ItemId::FullHeal], ItemId::FullHeal),
+        (scenarios::last_mon(), PokemonStatus::Paralyzed, vec![ItemId::FullHeal, ItemId::ParlyzHeal], ItemId::ParlyzHeal),
+        (scenarios::healthy_wild(), PokemonStatus::Burned, vec![ItemId::Potion, ItemId::FullHeal], ItemId::FullHeal),
+    ];
+    for (mut state, status, bag, want) in cases {
+        state.bag = Bag::new(bag.into_iter().map(|id| BagItem::new(id, 3)).collect());
+        state.pokemon.get_mut(0).expect("a lead").status = status;
+        state.battle.as_mut().expect("a battle").player.status = status;
+        let outcome = run(SCRIPT, &state, 2).outcome;
+        assert!(matches!(&outcome, Outcome::Action(BattleAction::UseItem { item, .. }) if item.id == want),
+                "{status:?}: got {outcome:?}");
+    }
+}
+
+/// Against a Rattata on 1 HP, Scratch: as sure as Ember, which `best_move` would pick, and surer
+/// than the weaker Fire Spin.
+#[test]
+fn the_tour_script_knocks_out_with_the_surest_weakest_move_that_can() {
+    use crate::llm::battle_script::{run, scenarios, Outcome};
+    use crate::pokemon::battle::BattleAction;
+    use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
+    let mut state = scenarios::hurt_trainer();
+    let battle = state.battle.as_mut().expect("a battle");
+    battle.enemy.current_hp = 1;
+    battle.player.moves[2] = Some(PokemonMove { name: PokemonMoveName::FireSpin, pp: 15 });
     let outcome = run(SCRIPT, &state, 2).outcome;
-    assert!(matches!(&outcome, Outcome::Action(BattleAction::UseItem { item, .. }) if item.id == ItemId::IceHeal), "got {outcome:?}");
+    assert!(matches!(&outcome, Outcome::Action(BattleAction::Fight { battle_move, .. }) if battle_move.name == PokemonMoveName::Scratch),
+            "got {outcome:?}");
+
+    state.battle.as_mut().expect("a battle").enemy.current_hp = 999;
+    let outcome = run(SCRIPT, &state, 2).outcome;
+    assert!(matches!(&outcome, Outcome::Action(BattleAction::Fight { battle_move, .. }) if battle_move.name == PokemonMoveName::Ember),
+            "nothing knocks it out, so the best move: got {outcome:?}");
 }
 
 /// Every phase above, back to back in one run from the fresh save, and the whole ledger asserted:
