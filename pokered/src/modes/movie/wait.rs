@@ -5,7 +5,8 @@ use crate::input::Joypad;
 use crate::mode::Ctx;
 
 /// What `CheckForUserInterruption` stops on besides a new A or START: Up, Select and B held
-/// together and nothing else, which the title screen reads as the way to clear the save.
+/// together and nothing else, the cartridge's way into clearing the save. There are no saves to
+/// clear here, so it only ends the wait.
 pub const CLEAR_SAVE_BUTTONS: Joypad = Joypad::UP.union(Joypad::SELECT).union(Joypad::B);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

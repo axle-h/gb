@@ -22,7 +22,6 @@ mod party_menu;
 mod pc;
 mod pokedex;
 mod pokemart;
-mod save;
 mod screen;
 mod scripts;
 mod slots;

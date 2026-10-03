@@ -5,14 +5,14 @@
 //! modes, and `M` mutes.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use pokered::audio::synth::{Synth, HEADROOM, SAMPLE_RATE};
 use pokered::audio::{Voices, Write};
 use pokered::gfx::colour::{ColourMode, BYTES_PER_PIXEL};
 use pokered::input::Joypad;
 use pokered::rng::GameRng;
-use pokered::world::World;
-use pokered::{Game, Input, Pacing, Save};
+use pokered::save_slots::{DirectoryStore, SavedAt, SlotRequest, SlotStore};
+use pokered::{Game, Input, Pacing};
 use sdl2::audio::{AudioQueue, AudioSpecDesired};
 use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Scancode};
@@ -25,28 +25,16 @@ const FRAME: Duration = Duration::from_nanos(16_742_706);
 const COLOUR_MODES: [ColourMode; 4] =
     [ColourMode::Dmg, ColourMode::Gbc, ColourMode::Sgb, ColourMode::SgbBorder];
 
-/// The game's own save file, which the SAVE menu, a box change and the Hall of Fame write and the
-/// title's clear-save dialogue removes. It is what CONTINUE resumes from, so the window reads it
-/// back at every power-on.
-fn save_path() -> PathBuf {
-    std::env::var("POKERED_SAVE").unwrap_or_else(|_| "pokered.sav".to_string()).into()
+/// Where the save slots are kept: `POKERED_SAVES`, or `saves` beside the window.
+fn slots_dir() -> PathBuf {
+    std::env::var("POKERED_SAVES").unwrap_or_else(|_| "saves".to_string()).into()
 }
 
-/// The world the save file holds, or `None` for a file that is missing or from another version,
-/// which is `TryLoadSaveFile`'s bad checksum: the main menu then offers NEW GAME alone.
-fn saved_world() -> Option<World> {
-    let bytes = std::fs::read(save_path()).ok()?;
-    match Game::load(&bytes, Pacing::Faithful) {
-        Ok(game) => Some(game.world().clone()),
-        Err(e) => {
-            eprintln!("ignoring {}: {e}", save_path().display());
-            None
-        }
-    }
-}
-
-fn boot() -> Game {
-    Game::power_on(saved_world(), GameRng::from_entropy(), Pacing::Faithful)
+/// Power-on, with the slots on disk for CONTINUE to offer.
+fn boot(store: &DirectoryStore) -> Game {
+    let mut game = Game::power_on(GameRng::from_entropy(), Pacing::Faithful);
+    game.set_slots(store.slots());
+    game
 }
 
 fn buttons(keys: &sdl2::keyboard::KeyboardState) -> Joypad {
@@ -93,24 +81,13 @@ fn main() -> Result<(), String> {
     let mut samples = vec![0.0f32; SAMPLE_RATE as usize / 8 * 2];
 
     let mut events = sdl.event_pump()?;
-    let mut game = boot();
-    let mut state: Option<Vec<u8>> = None;
+    let mut store = DirectoryStore::new(slots_dir());
+    let mut game = boot(&store);
     let mut next = Instant::now();
     'running: loop {
         for event in events.poll_iter() {
             match event {
                 Event::Quit { .. } | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => break 'running,
-                Event::KeyDown { keycode: Some(Keycode::F5), .. } => state = Some(game.save()),
-                Event::KeyDown { keycode: Some(Keycode::F9), repeat: false, .. } => if let Some(bytes) = &state {
-                    game = Game::load(bytes, Pacing::Faithful)?;
-                    // A save carries no oscillator state, so the backend starts over and is told
-                    // what the engine is holding, or a note playing across the load goes silent.
-                    voices = synth();
-                    for write in game.audio().standing_writes() {
-                        voices.write(write);
-                    }
-                    queue.clear();
-                },
                 Event::KeyDown { keycode: Some(Keycode::C), repeat: false, .. } => {
                     let next = COLOUR_MODES[(COLOUR_MODES.iter().position(|&m| m == mode).unwrap() + 1) % COLOUR_MODES.len()];
                     if next.size() != mode.size() {
@@ -132,17 +109,27 @@ fn main() -> Result<(), String> {
         // The Hall of Fame's script ends the game with a restart, and so does a blackout on the
         // title screen: what is left is an empty stack, and the console comes back on.
         if game.modes().is_empty() {
-            game = boot();
+            game = boot(&store);
         }
 
         let frame = game.frame(Input::Buttons(buttons(&events.keyboard_state())));
-        match frame.save {
-            Some(Save::Written(bytes)) => std::fs::write(save_path(), bytes).map_err(|e| e.to_string())?,
-            Some(Save::Cleared) => match std::fs::remove_file(save_path()) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.to_string()),
-                _ => {}
-            },
-            None => {}
+        if let Some(request) = frame.slot {
+            let loading = matches!(request, SlotRequest::Load(_));
+            // The window knows no time zone, so the slots are stamped in UTC.
+            let saved_at = SavedAt::from_system_time(SystemTime::now(), 0);
+            match store.answer(&mut game, request, saved_at) {
+                Err(e) => eprintln!("a save slot in {}: {e}", slots_dir().display()),
+                // A save carries no oscillator state, so the backend starts over and is told what
+                // the engine is holding, or a note playing across the load goes silent.
+                Ok(()) if loading => {
+                    voices = synth();
+                    for write in game.audio().standing_writes() {
+                        voices.write(write);
+                    }
+                    queue.clear();
+                }
+                Ok(()) => {}
+            }
         }
 
         for write in frame.audio {
@@ -190,7 +177,7 @@ mod tests {
     #[ignore = "a tool: dumps the title screen's picture and music"]
     fn dump_title_screen() {
         let dir = std::env::var("POKERED_DUMP").unwrap();
-        let mut game = Game::power_on(None, GameRng::seeded(1), Pacing::Faithful);
+        let mut game = Game::power_on(GameRng::seeded(1), Pacing::Faithful);
         let mut voices = synth();
         let mut samples = vec![0.0f32; SAMPLE_RATE as usize / 8 * 2];
         let mut played = Vec::new();
@@ -239,10 +226,10 @@ mod tests {
     }
 
     /// The window's own boot: a new game reaches the overworld from power-on, and everything the
-    /// loop does with a frame - the save it writes, the samples it plays - is driven from there.
+    /// loop does with a frame - the slots it answers, the samples it plays - is driven from there.
     #[test]
     fn a_new_game_boots_into_the_overworld_and_sounds() {
-        let mut game = Game::power_on(None, GameRng::seeded(1), Pacing::Instant);
+        let mut game = Game::power_on(GameRng::seeded(1), Pacing::Instant);
         let mut voices = synth();
         let mut samples = vec![0.0f32; SAMPLE_RATE as usize / 8 * 2];
         let mut heard = false;

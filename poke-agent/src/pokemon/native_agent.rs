@@ -47,7 +47,7 @@ use crate::pokemon::GameState;
 /// A new game played from power-on through the intro, on the preset names, to Red's room, with
 /// `options` in force. The intro is played at [`pokered::Pacing::Instant`]: no policy answers it.
 pub fn new_game(rng: impl Fn() -> pokered::rng::GameRng, options: pokered::world::Options, pacing: pokered::Pacing) -> Result<Game, String> {
-    let mut game = Game::power_on(None, rng(), pokered::Pacing::Instant);
+    let mut game = Game::power_on(rng(), pokered::Pacing::Instant);
     for _ in 0..60_000 {
         if matches!(game.modes(), [Mode::Overworld(_)]) {
             let mut world = game.world().clone();
@@ -415,8 +415,8 @@ const MANUAL_HOLD_FRAMES: usize = 2;
 struct Outputs {
     audio: Vec<Write>,
     events: Vec<AgentEvent>,
-    /// The latest thing the game did to its own save: wrote what CONTINUE resumes from, or cleared it.
-    save: Option<pokered::Save>,
+    /// What the game asked of the host's save slots, in order: the Hall of Fame's autosave.
+    slot_requests: Vec<pokered::save_slots::SlotRequest>,
 }
 
 impl NativeAgent {
@@ -473,9 +473,9 @@ impl NativeAgent {
         self.outputs.as_mut().map(|outputs| std::mem::take(&mut outputs.events)).unwrap_or_default()
     }
 
-    /// What the game did to its own save since the last take, the latest if it did more than one.
-    pub fn take_save(&mut self) -> Option<pokered::Save> {
-        self.outputs.as_mut().and_then(|outputs| outputs.save.take())
+    /// What the game asked of the host's save slots since the last take.
+    pub fn take_slot_requests(&mut self) -> Vec<pokered::save_slots::SlotRequest> {
+        self.outputs.as_mut().map(|outputs| std::mem::take(&mut outputs.slot_requests)).unwrap_or_default()
     }
 
     /// Start `game` afresh under the same policy, which is told the run it now writes to.
@@ -522,9 +522,7 @@ impl NativeAgent {
         self.battle_was_up = battle_up;
         if let Some(outputs) = self.outputs.as_mut() {
             outputs.audio.append(&mut frame.audio);
-            if let Some(save) = &frame.save {
-                outputs.save = Some(save.clone());
-            }
+            outputs.slot_requests.extend(frame.slot.take());
         }
         frame
     }
@@ -1840,7 +1838,7 @@ impl NativeAgent {
                 (Some(Mode::QuantityMenu(menu)), PcJob::Items { quantity, .. }) => Some(Command::ChooseQuantity(quantity.min(menu.max()))),
                 _ => return Err("a PC asked how many of something it was not asked to move".into()),
             },
-            // Release's and CHANGE BOX's question.
+            // Release's question.
             Status::Waiting(Decision::TwoOption) => Some(Command::ChooseOption(0)),
             Status::Waiting(decision) => return Err(format!("the PC met {decision:?}")),
         };

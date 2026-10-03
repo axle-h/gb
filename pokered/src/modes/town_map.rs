@@ -391,7 +391,7 @@ fn compressed_map() -> Vec<u8> {
 /// `LoadTownMapEntry`: the square a map marks on the picture, packed as `y` in the high nibble and
 /// `x` in the low, and the map's name. An outside map indexes its own row; an indoor one belongs to
 /// the first group it is below, so a whole building shares one town's square.
-fn load_town_map_entry(map: u8) -> Option<(u8, Vec<u8>)> {
+pub fn load_town_map_entry(map: u8) -> Option<(u8, Vec<u8>)> {
     let ((x, y), name) = if map < FIRST_INDOOR_MAP {
         poke_core::tables::EXTERNAL_MAP_ENTRIES[map as usize]
     } else {

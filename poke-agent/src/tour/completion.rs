@@ -20,7 +20,7 @@ use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::symbols::{pokered_events, pokered_symbols, pokered_toggles, DmgPointerRead};
 
 /// Headers the ROM carries that no warp in any map targets, so nothing can walk into one.
-pub(crate) const UNREACHABLE_DUPLICATES: [Map; 4] = [
+pub const UNREACHABLE_DUPLICATES: [Map; 4] = [
     Map::CeruleanTrashedHouseCopy,
     Map::CinnabarMartCopy,
     Map::UndergroundPathRoute6Copy,
@@ -29,9 +29,9 @@ pub(crate) const UNREACHABLE_DUPLICATES: [Map; 4] = [
 
 /// Why a map number is or is not somewhere a run could stand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MapBucket { Padding, LinkCable, Duplicate, Reachable }
+pub enum MapBucket { Padding, LinkCable, Duplicate, Reachable }
 
-pub(crate) fn classify(map: Map, name: &str) -> MapBucket {
+pub fn classify(map: Map, name: &str) -> MapBucket {
     match map {
         _ if name.starts_with("UnusedMap") => MapBucket::Padding,
         Map::Colosseum | Map::TradeCenter => MapBucket::LinkCable,
@@ -161,13 +161,13 @@ fn toggle(index: u16) -> Check {
 }
 
 /// The map whose `Map` name is `name`, as a sym label spells it.
-pub(crate) fn map_named(name: &str) -> Option<Map> {
+pub fn map_named(name: &str) -> Option<Map> {
     Map::iter().find(|map| format!("{map:?}") == name)
 }
 
 /// One object on a map, as its `object_event` laid it out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MapObject {
+pub struct MapObject {
     /// 1-based, as `ToggleableObjectStates` and `HideObject` number them.
     pub number: u8,
     pub item: Option<u8>,
@@ -175,7 +175,7 @@ pub(crate) struct MapObject {
 }
 
 /// Every object on `map`, in its `object_event` order.
-pub(crate) fn map_objects(map: Map) -> Vec<MapObject> {
+pub fn map_objects(map: Map) -> Vec<MapObject> {
     let Ok(objects) = MapObjects::read(map) else { return Vec::new() };
     (1..).zip(objects.objects).map(|(number, object)| match object.kind {
         ObjectKind::Trainer { .. } => MapObject { number, item: None, trainer: true },
@@ -397,14 +397,12 @@ impl Flags for MMU {
 
 /// The recreation's world laid out at the cartridge's addresses, for exactly the flags a ledger
 /// reads: any other address is a checklist entry nobody taught the recreation to answer.
-#[cfg(feature = "slow-tests")]
 pub struct WorldFlags<'a> {
     pub world: &'a pokered::world::World,
     /// `wWarpedFromWhichWarp` and `wWarpedFromWhichMap`, which the overworld keeps.
     pub warped_from: (u8, u8),
 }
 
-#[cfg(feature = "slow-tests")]
 impl Flags for WorldFlags<'_> {
     fn read(&self, address: u16) -> u8 {
         use pokered_symbols as sym;
@@ -641,7 +639,7 @@ mod tests {
     fn a_crossing_is_read_from_the_warp_record() {
         use gb::ram::RAM;
         let mut fixture = TestFixture::new(
-            include_bytes!("../data/start-of-game-state.bin"), Duration::from_secs(10), vec![]);
+            include_bytes!("../pokemon/data/start-of-game-state.bin"), Duration::from_secs(10), vec![]);
         let state = fixture.game_state();
         let list = super::checklist(fixture.gb.core().mmu());
         let mut ledger = Ledger::new(&list);
@@ -683,7 +681,7 @@ mod tests {
     #[test]
     fn the_ledger_reads_a_finished_game_as_finished() {
         let mut finished = TestFixture::new(
-            include_bytes!("../data/postgame-entry.bin"), Duration::from_secs(10), vec![]);
+            include_bytes!("../pokemon/data/postgame-entry.bin"), Duration::from_secs(10), vec![]);
         let state = finished.game_state();
         let list = super::checklist(finished.gb.core().mmu());
         let ledger = Ledger::new(&list);
@@ -694,7 +692,7 @@ mod tests {
         }
 
         let mut fresh = TestFixture::new(
-            include_bytes!("../data/start-of-game-state.bin"), Duration::from_secs(10), vec![]);
+            include_bytes!("../pokemon/data/start-of-game-state.bin"), Duration::from_secs(10), vec![]);
         let state = fresh.game_state();
         let mmu = fresh.gb.core().mmu();
         let flags_done = list.iter()
@@ -719,7 +717,7 @@ mod tests {
     fn a_trainer_the_game_unbeats_stays_beaten() {
         use gb::ram::RAM;
         let mut fixture = TestFixture::new(
-            include_bytes!("../data/start-of-game-state.bin"), Duration::from_secs(10), vec![]);
+            include_bytes!("../pokemon/data/start-of-game-state.bin"), Duration::from_secs(10), vec![]);
         let state = fixture.game_state();
         let list = super::checklist(fixture.gb.core().mmu());
         let lorelei = Entry::Trainer { map: Map::LoreleisRoom, index: 0 };

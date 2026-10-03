@@ -4,6 +4,7 @@ pub mod native;
 pub mod pokemon;
 pub mod published;
 pub mod run;
+pub mod tour;
 #[cfg(test)]
 mod lockstep;
 #[cfg(test)]

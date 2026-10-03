@@ -108,8 +108,6 @@ pub enum Decision {
     FlyDestination,
     /// `CONTINUE`, `NEW GAME` and `OPTION`, which `ChooseOption` answers.
     MainMenu,
-    /// The save's summary under the main menu: `Advance` takes it, `CancelOption` goes back.
-    ContinueGame,
     /// FIGHT, PKMN, ITEM and RUN.
     BattleMenu,
     /// The battle's move menu, with the move's type and PP beside it.
@@ -132,6 +130,8 @@ pub enum Decision {
     /// is a `CursorMenu` (row 0 bets three coins, row 2 one), its texts and a win's `▼` are `Text`,
     /// and "One more go?" is a `TwoOption`.
     SlotWheels,
+    /// The save slots' list. Only buttons answer it: no agent saves.
+    SlotSelector,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,7 +173,10 @@ enum Driver {
     /// of the same kind, as a PC's LOG OFF does, cannot otherwise be told from the one asked.
     /// `stopped` is the menu having stopped waiting since: one that waits again at the same depth
     /// is another menu, as `LearnMove`'s second yes/no replaces its first inside one frame.
-    Option { target: u8, from: Decision, released: bool, #[serde(default)] chosen: Option<usize>, #[serde(default)] stopped: bool },
+    /// `rows` is the chosen cursor menu's: one of another size up in its place is another menu
+    /// that never stopped waiting, as CHANGE BOX's list of boxes replaces Bill's menu.
+    Option { target: u8, from: Decision, released: bool, #[serde(default)] chosen: Option<usize>, #[serde(default)] stopped: bool,
+             #[serde(default)] rows: Option<u8> },
     /// The grid is walked a letter at a time, so the target is kept and the next press worked out
     /// against whatever is typed so far.
     Name { target: Vec<u8>, released: bool },
@@ -210,8 +213,6 @@ impl Executor {
                     Driver::Advance { answered: overworld.answered(), held: 0 },
                 Some(Mode::TrainerCard(card)) if card.status() == Status::Waiting(Decision::TrainerCard) =>
                     Driver::Advance { answered: card.answered(), held: 0 },
-                Some(Mode::MainMenu(menu)) if menu.status() == Status::Waiting(Decision::ContinueGame) =>
-                    Driver::Advance { answered: menu.answered(), held: 0 },
                 Some(Mode::Battle(battle)) if battle.status() == Status::Waiting(Decision::Text) =>
                     Driver::Advance { answered: battle.answered(), held: 0 },
                 Some(Mode::Movie(movie)) if movie.status() == Status::Waiting(Decision::TitleScreen) =>
@@ -282,7 +283,7 @@ impl Executor {
                     },
                     Some(top) => {
                         let Status::Waiting(from) = top.status() else { unreachable!("only a waiting menu has rows") };
-                        Driver::Option { target: *row, from, released: true, chosen: None, stopped: false }
+                        Driver::Option { target: *row, from, released: true, chosen: None, stopped: false, rows: None }
                     }
                     None => unreachable!("a menu was matched above"),
                 }
@@ -325,7 +326,7 @@ impl Executor {
                 _ => return Err(Refusal::Invalid("the Pokédex is not open".into())),
             },
             Command::CancelOption => match modes.last().map(|mode| mode.status()) {
-                Some(Status::Waiting(from @ (Decision::PartyMenu | Decision::UseToss | Decision::MoveMenu | Decision::ContinueGame
+                Some(Status::Waiting(from @ (Decision::PartyMenu | Decision::UseToss | Decision::MoveMenu
                                               | Decision::BattleMoves | Decision::SwitchStatsCancel | Decision::CursorMenu
                                               | Decision::TownMap | Decision::FlyDestination | Decision::ForgetMove))) =>
                     Driver::Cancel { from, pressed: false },
@@ -387,7 +388,6 @@ impl Executor {
                     Some(Mode::UseItem(flow)) => (flow.answered(), flow.status(), Decision::Text),
                     Some(Mode::Overworld(overworld)) => (overworld.answered(), overworld.status(), Decision::Text),
                     Some(Mode::TrainerCard(card)) => (card.answered(), card.status(), Decision::TrainerCard),
-                    Some(Mode::MainMenu(menu)) => (menu.answered(), menu.status(), Decision::ContinueGame),
                     Some(Mode::Battle(battle)) => (battle.answered(), battle.status(), Decision::Text),
                     Some(Mode::Movie(movie)) => (movie.answered(), movie.status(), Decision::TitleScreen),
                     Some(Mode::SlotMachine(machine)) => (machine.answered(), machine.status(), Decision::Text),
@@ -439,8 +439,15 @@ impl Executor {
                 }
                 _ => Drive::Done,
             },
-            Driver::Option { target, from, released, chosen, stopped } => {
+            Driver::Option { target, from, released, chosen, stopped, rows } => {
                 if chosen.is_some_and(|depth| depth != modes.len()) {
+                    return Drive::Done;
+                }
+                let cursor_rows = match modes.last() {
+                    Some(Mode::CursorMenu(menu)) => Some(menu.rows()),
+                    _ => None,
+                };
+                if chosen.is_some() && cursor_rows != *rows {
                     return Drive::Done;
                 }
                 let (kind, status, selected) = match modes.last() {
@@ -495,6 +502,7 @@ impl Executor {
                 };
                 if button == Joypad::A {
                     *chosen = Some(modes.len());
+                    *rows = cursor_rows;
                 }
                 Drive::Press(button)
             }

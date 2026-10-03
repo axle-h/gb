@@ -19,168 +19,8 @@ use crate::llm::worker::{self, RefusalPark};
 use crate::pokemon::integration_tests::fixture::TestFixture;
 use crate::pokemon::llm_policy::LlmPolicy;
 use crate::published::{Published, UiEvent, UiEventBody};
-
-// ── What a brain is allowed to see ──
-
-/// One message, as the endpoint received it.
-#[derive(Debug, Clone)]
-pub struct SeenMessage {
-    pub role: String,
-    pub text: String,
-    pub images: Vec<(String, String)>,
-}
-
-/// One tool, as the endpoint was offered it.
-#[derive(Debug, Clone)]
-pub struct SeenTool {
-    pub name: String,
-}
-
-/// Everything a [`Brain`] is allowed to see: the request, as strings.
-#[derive(Debug, Clone)]
-pub struct TurnRequest {
-    pub messages: Vec<SeenMessage>,
-    pub tools: Vec<SeenTool>,
-    /// How many requests this endpoint has answered before this one, from zero.
-    pub seen: usize,
-}
-
-impl TurnRequest {
-    /// The newest `user` message: the situation this turn is asked about.
-    pub fn situation(&self) -> &str {
-        self.messages
-            .iter()
-            .rev()
-            .find(|message| message.role == "user")
-            .map_or("", |message| message.text.as_str())
-    }
-
-    /// The ids the situation offered, in order, parsed out of the rendered menu as a model must.
-    pub fn menu_ids(&self) -> Vec<String> {
-        self.situation()
-            .lines()
-            .filter_map(|line| line.strip_prefix("- `"))
-            .filter_map(|line| line.split_once('`'))
-            .map(|(id, _)| id.to_string())
-            .collect()
-    }
-
-    /// The menu as `(id, description)`, parsed out of the rendered situation as a model must.
-    pub fn menu_rows(&self) -> Vec<(String, String)> {
-        self.situation()
-            .lines()
-            .filter_map(|line| line.strip_prefix("- `"))
-            .filter_map(|line| line.split_once('`'))
-            .map(|(id, rest)| {
-                (id.to_string(), rest.trim_start_matches([' ', '—']).trim().to_string())
-            })
-            .collect()
-    }
-
-    /// The map the situation says the player is on; `None` on every kind but the overworld.
-    pub fn location(&self) -> Option<String> {
-        self.situation()
-            .lines()
-            .find_map(|line| line.strip_prefix("Location: "))
-            .and_then(|line| line.split(" at (").next())
-            .map(str::to_string)
-    }
-
-    pub fn tool_names(&self) -> Vec<&str> {
-        self.tools.iter().map(|tool| tool.name.as_str()).collect()
-    }
-
-    pub fn has_tool(&self, name: &str) -> bool {
-        self.tools.iter().any(|tool| tool.name == name)
-    }
-
-    pub fn is_battle(&self) -> bool {
-        self.has_tool("choose_battle_action")
-    }
-
-    pub fn is_stuck(&self) -> bool {
-        self.has_tool("press_buttons")
-            && !self.has_tool("choose_action")
-            && !self.has_tool("choose_battle_action")
-    }
-
-    /// Compaction's own request: no tools, and the last user message is the instruction.
-    pub fn is_summary(&self) -> bool {
-        self.tools.is_empty()
-            && self.situation().starts_with(
-                crate::llm::compaction::SUMMARY_INSTRUCTION.split('\n').next().unwrap_or_default(),
-            )
-    }
-
-    /// Every `(data_url, detail)` the endpoint has been sent in this request, in order.
-    pub fn images(&self) -> Vec<(String, String)> {
-        self.messages.iter().flat_map(|message| message.images.iter().cloned()).collect()
-    }
-
-}
-
-// ── What a brain answers with ──
-
-/// One tool call, before it is fragmented onto the wire.
-#[derive(Debug, Clone)]
-pub struct Call {
-    pub name: String,
-    pub arguments: serde_json::Value,
-}
-
-impl Call {
-    pub fn new(name: &str, arguments: serde_json::Value) -> Self {
-        Self { name: name.to_string(), arguments }
-    }
-
-    /// The terminal `wait`, every brain's "I have nothing" answer.
-    pub fn wait(ticks: u64) -> Self {
-        Self::new("wait", serde_json::json!({ "ticks": ticks }))
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum Reply {
-    /// Tool calls, fragmented across `data:` frames by the endpoint.
-    Calls(Vec<Call>),
-    /// Prose and no tool call: the nudge-then-force path in [`worker::Worker::decide`], and a
-    /// compaction summary.
-    Content(String),
-    Fault(Fault),
-}
-
-impl Reply {
-    pub fn call(name: &str, arguments: serde_json::Value) -> Self {
-        Self::Calls(vec![Call::new(name, arguments)])
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum Fault {
-    /// A non-2xx with a body.
-    Http { status: u16, message: String },
-    /// A 429.
-    RateLimited { retry_after: Option<Duration>, message: String },
-    /// A 200 whose body stops arriving for longer than `GB_REQUEST_TIMEOUT_SECS`.
-    Timeout,
-    /// Valid SSE, arguments that are not JSON.
-    MalformedToolArgs,
-    /// The body ends part-way through a `data:` line.
-    TruncatedStream,
-    /// A completion with neither content nor a tool call.
-    EmptyChoice,
-}
-
-/// What decides. Handed [`TurnRequest`] and nothing else.
-pub trait Brain: Send {
-    fn respond(&mut self, request: &TurnRequest) -> Reply;
-}
-
-impl<F: FnMut(&TurnRequest) -> Reply + Send> Brain for F {
-    fn respond(&mut self, request: &TurnRequest) -> Reply {
-        self(request)
-    }
-}
+use crate::tour::endpoint::{error_body, sse_body};
+pub use crate::tour::turn::{Brain, Call, Fault, Reply, SeenMessage, TurnRequest};
 
 /// A brain that answers with the same thing every time.
 pub struct Always(pub Reply);
@@ -292,50 +132,9 @@ impl MockEndpoint {
 
 }
 
-/// Flatten one wire message into what a brain is allowed to see.
-fn seen_message(message: &serde_json::Value) -> SeenMessage {
-    let role = message["role"].as_str().unwrap_or_default().to_string();
-    let (mut text, mut images) = (String::new(), Vec::new());
-    match &message["content"] {
-        serde_json::Value::String(whole) => text.push_str(whole),
-        serde_json::Value::Array(parts) => {
-            for part in parts {
-                match part["type"].as_str() {
-                    Some("image_url") => images.push((
-                        part["image_url"]["url"].as_str().unwrap_or_default().to_string(),
-                        part["image_url"]["detail"].as_str().unwrap_or_default().to_string(),
-                    )),
-                    _ => {
-                        if let Some(fragment) = part["text"].as_str() {
-                            if !text.is_empty() {
-                                text.push('\n');
-                            }
-                            text.push_str(fragment);
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    SeenMessage { role, text, images }
-}
-
 async fn completions(State(endpoint): State<Endpoint>, body: String) -> Response {
     let wire: serde_json::Value = serde_json::from_str(&body).expect("the client sends JSON");
-    let messages: Vec<SeenMessage> =
-        wire["messages"].as_array().expect("messages").iter().map(seen_message).collect();
-    let tools: Vec<SeenTool> = wire["tools"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-        .iter()
-        .map(|tool| SeenTool {
-            name: tool["function"]["name"].as_str().unwrap_or_default().to_string(),
-        })
-        .collect();
-    let seen = endpoint.seen.fetch_add(1, Ordering::SeqCst);
-    let request = TurnRequest { messages, tools, seen };
+    let request = TurnRequest::from_wire(&wire, endpoint.seen.fetch_add(1, Ordering::SeqCst));
     {
         let mut log = endpoint.log.lock().expect("not poisoned");
         if log.len() == KEPT_REQUESTS {
@@ -345,18 +144,14 @@ async fn completions(State(endpoint): State<Endpoint>, body: String) -> Response
     }
 
     let reply = endpoint.brain.lock().expect("not poisoned").respond(&request);
-    match reply {
-        Reply::Calls(calls) => sse_calls(&calls).into_response(),
-        Reply::Content(text) => sse_content(&text).into_response(),
-        Reply::Fault(fault) => serve_fault(fault, endpoint.timeout_hold).await,
+    if let Some(body) = sse_body(&reply) {
+        return ([(header::CONTENT_TYPE, "text/event-stream")], body).into_response();
     }
-}
-
-async fn serve_fault(fault: Fault, timeout_hold: Duration) -> Response {
+    let Reply::Fault(fault) = reply else { unreachable!("every other reply is a stream") };
     match fault {
         Fault::Http { status, message } => (
             StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            serde_json::json!({ "error": { "message": message } }).to_string(),
+            error_body(&message),
         )
             .into_response(),
         Fault::RateLimited { retry_after, message } => {
@@ -367,16 +162,12 @@ async fn serve_fault(fault: Fault, timeout_hold: Duration) -> Response {
                     after.as_secs().to_string().parse().expect("a number is a header value"),
                 );
             }
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                headers,
-                serde_json::json!({ "error": { "message": message } }).to_string(),
-            )
-                .into_response()
+            (StatusCode::TOO_MANY_REQUESTS, headers, error_body(&message)).into_response()
         }
         // A 200 with the body half-written: `timeout_recv_body` is a separate deadline from
         // `timeout_recv_response`.
-        Fault::Timeout => {
+        _ => {
+            let timeout_hold = endpoint.timeout_hold;
             let (sender, receiver) =
                 tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(1);
             tokio::spawn(async move {
@@ -393,130 +184,8 @@ async fn serve_fault(fault: Fault, timeout_hold: Duration) -> Response {
             )
                 .into_response()
         }
-        Fault::MalformedToolArgs => {
-            ([(header::CONTENT_TYPE, "text/event-stream")], sse_raw_call("choose_action", "{not json"))
-                .into_response()
-        }
-        // Ends part-way through a `data:` line, as `read_stream` sees a socket closed mid-frame.
-        Fault::TruncatedStream => (
-            [(header::CONTENT_TYPE, "text/event-stream")],
-            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"hel".to_string(),
-        )
-            .into_response(),
-        Fault::EmptyChoice => (
-            [(header::CONTENT_TYPE, "text/event-stream")],
-            format!(
-                "{}{}",
-                frame(serde_json::json!({ "choices": [{ "delta": {}, "finish_reason": "stop" }] })),
-                "data: [DONE]\n\n",
-            ),
-        )
-            .into_response(),
     }
 }
-
-fn frame(value: serde_json::Value) -> String {
-    format!("data: {value}\n\n")
-}
-
-/// One completion carrying prose and no tool call.
-fn sse_content(text: &str) -> impl IntoResponse {
-    let mut out = String::new();
-    out.push_str(&frame(serde_json::json!({
-        "choices": [{ "delta": { "role": "assistant", "content": text } }]
-    })));
-    out.push_str(&frame(serde_json::json!({
-        "choices": [{ "delta": {}, "finish_reason": "stop" }]
-    })));
-    out.push_str(&usage_frame());
-    out.push_str("data: [DONE]\n\n");
-    ([(header::CONTENT_TYPE, "text/event-stream")], out)
-}
-
-/// One call whose arguments are sent verbatim, so a fault can send something that is not JSON.
-fn sse_raw_call(name: &str, arguments: &str) -> String {
-    let mut out = String::new();
-    out.push_str(&frame(serde_json::json!({
-        "choices": [{ "delta": { "tool_calls": [{
-            "index": 0, "id": "call_mock_0", "type": "function",
-            "function": { "name": name, "arguments": arguments },
-        }] } }]
-    })));
-    out.push_str(&frame(serde_json::json!({
-        "choices": [{ "delta": {}, "finish_reason": "tool_calls" }]
-    })));
-    out.push_str(&usage_frame());
-    out.push_str("data: [DONE]\n\n");
-    out
-}
-
-fn usage_frame() -> String {
-    frame(serde_json::json!({
-        "choices": [], "usage": { "prompt_tokens": 1200, "completion_tokens": 40, "total_tokens": 1240 }
-    }))
-}
-
-/// One completion as an OpenAI-compatible stream, arguments chopped into three-character fragments
-/// and interleaved across calls as a parallel tool call is.
-fn sse_calls(calls: &[Call]) -> impl IntoResponse {
-    let rendered: Vec<(String, String)> = calls
-        .iter()
-        .map(|call| {
-            let mut arguments = call.arguments.clone();
-            if let Some(object) = arguments.as_object_mut() {
-                object
-                    .entry("summary")
-                    .or_insert_with(|| serde_json::json!("what the brain is doing"));
-            }
-            (call.name.clone(), serde_json::to_string(&arguments).expect("valid JSON"))
-        })
-        .collect();
-
-    let mut out = String::new();
-    out.push_str(&frame(serde_json::json!({
-        "choices": [{ "delta": { "role": "assistant", "content": "Let me look at where I am." } }]
-    })));
-    for (index, (name, _)) in rendered.iter().enumerate() {
-        out.push_str(&frame(serde_json::json!({
-            "choices": [{ "delta": { "tool_calls": [{
-                "index": index, "id": format!("call_mock_{index}"), "type": "function",
-                "function": { "name": name, "arguments": "" },
-            }] } }]
-        })));
-    }
-    let fragments: Vec<Vec<&str>> =
-        rendered.iter().map(|(_, arguments)| chunks(arguments, 3)).collect();
-    for step in 0..fragments.iter().map(Vec::len).max().unwrap_or(0) {
-        for (index, call) in fragments.iter().enumerate() {
-            let Some(fragment) = call.get(step) else { continue };
-            out.push_str(&frame(serde_json::json!({
-                "choices": [{ "delta": { "tool_calls": [{
-                    "index": index, "function": { "arguments": fragment },
-                }] } }]
-            })));
-        }
-    }
-    out.push_str(&frame(serde_json::json!({
-        "choices": [{ "delta": {}, "finish_reason": "tool_calls" }]
-    })));
-    out.push_str(&usage_frame());
-    out.push_str("data: [DONE]\n\n");
-    ([(header::CONTENT_TYPE, "text/event-stream")], out)
-}
-
-fn chunks(text: &str, size: usize) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while !rest.is_empty() {
-        let split = rest.char_indices().nth(size).map_or(rest.len(), |(i, _)| i);
-        let (head, tail) = rest.split_at(split);
-        out.push(head);
-        rest = tail;
-    }
-    out
-}
-
-// ── The assembled stack ──
 
 /// How the harness paces the emulator by default.
 pub const HOST_TICK: Duration = Duration::from_millis(20);
@@ -556,7 +225,7 @@ pub struct LlmRun {
     stuck_timeout: Option<Duration>,
     /// How many processes this run has had. `1` until the first [`Self::restart`].
     pub processes: u64,
-    pub cheats: Option<crate::pokemon::integration_tests::cheats::Cheats>,
+    pub cheats: Option<crate::tour::cheats::Cheats>,
     options: crate::pokemon::options::GameOptions,
     recording: Option<Arc<Mutex<crate::lockstep::action_for_action::Log>>>,
 }
@@ -659,8 +328,12 @@ impl LlmRunBuilder {
     }
 
     fn config(&self, endpoint: &MockEndpoint) -> LlmConfig {
+        self.config_for(&endpoint.base_url())
+    }
+
+    fn config_for(&self, base_url: &str) -> LlmConfig {
         LlmConfig {
-            base_url: endpoint.base_url(),
+            base_url: base_url.to_string(),
             api_key: "mock".to_string(),
             model: "mock".to_string(),
             context_limit: self.context_limit,
@@ -718,6 +391,21 @@ impl LlmRunBuilder {
     pub fn start_native(self, game: pokered::Game, brain: Box<dyn Brain>) -> NativeLlmRun {
         let endpoint = self.endpoint(brain);
         let config = self.config(&endpoint);
+        let client = Box::new(OpenAiClient::new(&config));
+        self.start_native_on(game, config, client, Some(endpoint))
+    }
+
+    #[cfg(feature = "slow-tests")]
+    /// [`Self::start_native`] with `brain` answering in this process, behind a
+    /// [`BrainEndpoint`](crate::tour::endpoint::BrainEndpoint) rather than a server.
+    pub fn start_native_in_process(self, game: pokered::Game, brain: Box<dyn Brain>) -> NativeLlmRun {
+        let config = self.config_for("");
+        let client = Box::new(crate::tour::endpoint::BrainEndpoint::new(brain));
+        self.start_native_on(game, config, client, None)
+    }
+
+    fn start_native_on(self, game: pokered::Game, config: LlmConfig, client: Box<dyn crate::llm::client::ChatEndpoint>,
+                       endpoint: Option<MockEndpoint>) -> NativeLlmRun {
         let scratch = crate::run::Scratch::new(self.name);
         let (run, _origin, _saved) = crate::run::RunDir::open(&scratch.0, true, "mock", &|bytes| !bytes.is_empty())
             .expect("a run directory");
@@ -725,7 +413,7 @@ impl LlmRunBuilder {
         let dir = Some(run_dir.as_path());
         let published = Published::new();
         let (worker, handles) = worker::channels(
-            Box::new(OpenAiClient::new(&config)),
+            client,
             config.clone(),
             Arc::clone(&published),
             TodoList::open(dir),
@@ -748,6 +436,7 @@ impl LlmRunBuilder {
             _scratch: scratch,
             worker: Some(worker),
             max_frames: self.max_game_time.as_secs() * 60,
+            slots: pokered::save_slots::MemoryStore::default(),
         }
     }
 }
@@ -757,8 +446,8 @@ impl LlmRunBuilder {
 ///
 /// [`NativeAgent`]: crate::pokemon::native_agent::NativeAgent
 pub struct NativeLlmRun {
-    /// Held so the server outlives the run; the brain behind it is what a test reads.
-    _endpoint: MockEndpoint,
+    /// Held so the server outlives the run; `None` when the brain answers in process.
+    _endpoint: Option<MockEndpoint>,
     published: Arc<Published>,
     /// `None` only once dropped, so the policy's channel closes before the worker is joined.
     agent: Option<crate::pokemon::native_agent::NativeAgent>,
@@ -766,6 +455,8 @@ pub struct NativeLlmRun {
     worker: Option<std::thread::JoinHandle<()>>,
     /// The game time the run may play, in frames.
     max_frames: u64,
+    /// The host's save slots, which only the Hall of Fame writes.
+    slots: pokered::save_slots::MemoryStore,
 }
 
 impl NativeLlmRun {
@@ -780,23 +471,15 @@ impl NativeLlmRun {
             return Ok(());
         }
         let max_frames = self.max_frames;
-        let agent = self.agent();
+        let Self { agent, slots, .. } = self;
+        let agent = agent.as_mut().expect("a live agent");
         if agent.game().frames() >= max_frames {
             return Err(format!("out of game time after {} frames", agent.game().frames()));
         }
         // The ceremony, the credits and the title screen they end on are the game playing to
         // itself: the agent stops at the Hall of Fame and a deployed run ends there, so the buttons
         // that see a run on into the postgame are the harness's own, as the emulated run presses them.
-        use pokered::command::{Command, Decision};
-        use pokered::mode::{Mode, Status};
-        if let Some(Mode::Movie(_) | Mode::MainMenu(_)) = agent.game().modes().last() {
-            agent.host_took_the_screen();
-            let command = match agent.game().status() {
-                Status::Waiting(Decision::MainMenu) => Some(Command::ChooseOption(0)),
-                Status::Waiting(_) => Some(Command::Advance),
-                _ => None,
-            };
-            agent.game_mut().frame(command.map_or(pokered::Input::None, pokered::Input::Command));
+        if crate::tour::native_ceremony(agent, slots) {
             return Ok(());
         }
         agent.tick()
@@ -947,7 +630,7 @@ impl LlmRun {
 
     #[cfg(feature = "slow-tests")]
     /// Turn on the cheat sidecar.
-    pub fn with_cheats(&mut self, cheats: crate::pokemon::integration_tests::cheats::Cheats) {
+    pub fn with_cheats(&mut self, cheats: crate::tour::cheats::Cheats) {
         self.cheats = Some(cheats);
     }
 

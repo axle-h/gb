@@ -9,10 +9,10 @@
 //! box and a withdrawal to the end of the party, each crying as it moves. A release asks first, and
 //! a NO goes back to the list where it was.
 //!
-//! CHANGE BOX asks whether the game may be saved, lists the twelve boxes with a ball beside each
-//! that holds a mon, and makes the one chosen current. Changing one is `SaveGameData` and `SFX_SAVE`,
-//! the same save the SAVE menu writes. `EmptyAllSRAMBoxes` on the first change is not modelled,
-//! because no box but the current one can hold a mon before a change.
+//! CHANGE BOX lists the twelve boxes with a ball beside each that holds a mon, and makes the one
+//! chosen current. The cartridge saves the game on a change and asks first; saving is the player's
+//! own here, so neither the question nor the save is kept. `EmptyAllSRAMBoxes` on the first change
+//! is not modelled, because no box but the current one can hold a mon before a change.
 //!
 //! `ExitListMenu` clears `BIT_NO_TEXT_DELAY`, which `BillsPC_` set, so once a list has closed every
 //! text prints a letter at a time. "What?" and "Choose a <PKMN> BOX." print with the background
@@ -26,7 +26,7 @@ use crate::audio::data::sounds;
 use crate::gfx::sgb::PaletteCommand;
 use crate::gfx::tiles::V_CHARS2;
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
-use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, SaveRequest, Status, Transition};
+use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::cursor_menu::CursorMenu;
 use crate::modes::list_menu::ListMenu;
 use crate::modes::status_screen::StatusScreen;
@@ -95,8 +95,6 @@ enum After {
     Stats,
     OnceReleased,
     ConfirmRelease,
-    WhenYouChangeBox,
-    ConfirmChangeBox,
     /// "Choose a <PKMN> BOX.", then the list of boxes.
     ChooseABox,
     BoxList,
@@ -111,9 +109,6 @@ enum Next {
     /// Released, and `WaitForSoundToFinish` before `PlayCry`.
     Released,
     ReleasedCry,
-    /// `PlaySoundWaitForCurrent` with `SFX_SAVE`.
-    BeforeSave,
-    Saved,
 }
 
 /// Which of its three cursor menus is up over it.
@@ -282,6 +277,14 @@ impl BillsPc {
         }
     }
 
+    /// `DisplayChangeBoxMenu`'s "Choose a <PKMN> BOX.".
+    fn choose_a_box(&mut self, ctx: &mut Ctx) -> Transition {
+        let shown = ctx.screen.ui.clone();
+        ctx.screen.ui.text_box_border(0, 0, 9, 2);
+        self.phase = Phase::Child(After::ChooseABox);
+        print_off_screen("_ChooseABoxText", shown, ctx)
+    }
+
     /// `DisplayChangeBoxMenu` from after its "Choose a <PKMN> BOX.", and `ChangeBox`'s
     /// `HandleMenuInput`.
     fn box_list(&mut self, ctx: &mut Ctx) -> Transition {
@@ -326,11 +329,6 @@ impl BillsPc {
                 self.wait_for_sound(Next::ReleasedCry, ctx)
             }
             Next::ReleasedCry => self.text("_MonWasReleasedText", After::ToMenu, ctx),
-            Next::BeforeSave => {
-                ctx.audio.play_sound(sounds::SFX_SAVE);
-                self.wait_for_sound(Next::Saved, ctx)
-            }
-            Next::Saved => self.menu(ctx),
         }
     }
 
@@ -399,7 +397,7 @@ impl ModeUpdate for BillsPc {
                 self.parent = row;
                 match row {
                     WITHDRAW | DEPOSIT | RELEASE => self.start(ctx),
-                    CHANGE_BOX => self.text("_WhenYouChangeBoxText", After::WhenYouChangeBox, ctx),
+                    CHANGE_BOX => self.choose_a_box(ctx),
                     _ => self.see_ya(ctx),
                 }
             }
@@ -441,19 +439,10 @@ impl ModeUpdate for BillsPc {
                 self.wait_for_sound(Next::Released, ctx)
             }
             (After::ConfirmRelease, _) => self.mon_list(ctx),
-            (After::WhenYouChangeBox, _) => self.yes_no(After::ConfirmChangeBox),
-            (After::ConfirmChangeBox, Outcome::Chosen(0)) => {
-                let shown = ctx.screen.ui.clone();
-                ctx.screen.ui.text_box_border(0, 0, 9, 2);
-                self.phase = Phase::Child(After::ChooseABox);
-                print_off_screen("_ChooseABoxText", shown, ctx)
-            }
-            (After::ConfirmChangeBox, _) => self.menu(ctx),
             (After::ChooseABox, _) => self.box_list(ctx),
             (After::BoxList, Outcome::Chosen(row)) => {
                 ctx.world.current_box = row;
-                ctx.save = Some(SaveRequest::Write);
-                self.wait_for_sound(Next::BeforeSave, ctx)
+                self.menu(ctx)
             }
             (After::BoxList, _) => self.menu(ctx),
         }

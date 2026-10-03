@@ -23,7 +23,7 @@ use crate::mode::Ctx;
 use crate::rng::Rng;
 use super::intro::{pal_normal, place_string_lines, white_out};
 use super::screen::{clear_screen, copy_pic_to_tile_map, load_mon_pic, Dest, MovieScreen, WINDOW_HIDDEN};
-use super::wait::{Tick, Wait, CLEAR_SAVE_BUTTONS};
+use super::wait::{Tick, Wait};
 
 /// `vTitleLogo2`: the tiles past `vFrontPic` in `vChars2`.
 const TITLE_LOGO2: usize = V_CHARS2 + 49;
@@ -86,8 +86,6 @@ pub struct Title {
     ball: u8,
     /// Presses that have ended the wait, for a driver to see its own land.
     answered: u32,
-    /// Up, Select and B were held when it ended, which asks to clear the save.
-    clear_save: bool,
 }
 
 impl Default for Title {
@@ -100,7 +98,6 @@ impl Default for Title {
             with_mon: UiSurface::default(),
             ball: 0,
             answered: 0,
-            clear_save: false,
         }
     }
 }
@@ -112,11 +109,6 @@ impl Title {
 
     pub fn answered(&self) -> u32 {
         self.answered
-    }
-
-    /// Up, Select and B ended the title: `.doClearSaveDialogue` rather than `MainMenu`.
-    pub fn clears_save(&self) -> bool {
-        self.clear_save
     }
 
     /// Waiting on the player, from the title music on.
@@ -344,7 +336,6 @@ impl Title {
     /// `.finishedWaiting`'s cry, from the press that ended the wait.
     fn finish(&mut self, ctx: &mut Ctx) {
         self.answered += 1;
-        self.clear_save = ctx.pad.held.contains(CLEAR_SAVE_BUTTONS);
         ctx.audio.play_cry(self.species as u8);
         self.phase = Phase::Cry;
     }

@@ -222,7 +222,7 @@ view! {
         pub stored_items: Vec<String>,
         pub party_size: usize,
         /// Only the open box can be read: the other eleven live in SRAM banks the emulator does not
-        /// window, and `change_box`, which copies WRAM to SRAM, saves the game.
+        /// window.
         pub note: String,
     }
 }
@@ -244,10 +244,7 @@ pub fn pc(state: &GameState, readout: &(impl Readout + ?Sized)) -> PcView {
         }).collect(),
         stored_items: readout.pc_items().iter().map(|item| item.to_string()).collect(),
         party_size: state.pokemon.len(),
-        note: format!(
-            "Only box {} can be read. Switching to another with `change_box` saves the game.",
-            state.current_box + 1,
-        ),
+        note: format!("Only box {} can be read.", state.current_box + 1),
     }
 }
 

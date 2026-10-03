@@ -27,7 +27,6 @@ use crate::modes::pc::bills_pc::BillsPc;
 use crate::modes::pc::players_pc::PlayerPc;
 use crate::modes::pokedex::PokedexMenu;
 use crate::modes::pokemart::Pokemart;
-use crate::modes::save_menu::SaveMenu;
 use crate::modes::slots::SlotMachine;
 use crate::modes::pokemon_menu::PokemonMenu;
 use crate::modes::quantity_menu::QuantityMenu;
@@ -35,6 +34,7 @@ use crate::modes::start_menu::StartMenu;
 use crate::modes::status_screen::StatusScreen;
 use crate::modes::text_box::TextBox;
 use crate::modes::town_map::TownMap;
+use crate::modes::slot_selector::SlotSelector;
 use crate::modes::trainer_card::TrainerCard;
 use crate::modes::two_option_menu::TwoOptionMenu;
 use crate::modes::use_item::UseItem;
@@ -59,23 +59,14 @@ pub struct Ctx<'a> {
     /// `HandleMenuInput` took a key, which zeroes `wCheckFor180DegreeTurn`: the overworld under
     /// the menu disarms its turn once the frame's transitions have applied.
     pub menu_key_pressed: bool,
-    /// What the frame asks of the game's own save. `Game::frame` acts on it once the frame's
-    /// transitions have applied and tells the host.
-    pub save: Option<SaveRequest>,
-    /// The player id in the host's save file, if it has one. `CheckPreviousSaveFile` is its only
-    /// reader: the SAVE menu warns before writing over a playthrough that is not this one.
-    pub saved_player_id: Option<u16>,
+    /// The save slots the host holds, `None` where one is empty.
+    pub slots: &'a [Option<crate::save_slots::Slot>],
+    /// What the frame asks of the slots. `Game::frame` acts on it once the frame's transitions have
+    /// applied and hands the host the request.
+    pub slot: Option<crate::save_slots::SlotAction>,
     /// The UI surface each time a text box was about to take back what it printed, by scrolling a
     /// line away or ending: a line printed and taken back within one frame is on no frame's screen.
     pub printed: Vec<crate::gfx::ui::UiSurface>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SaveRequest {
-    /// `SaveGameData`: the save menu, a box change or a script asking the game to write itself out.
-    Write,
-    /// `ClearAllSRAMBanks`.
-    Clear,
 }
 
 pub enum Transition {
@@ -138,10 +129,10 @@ pub enum Mode {
     MoveSelectionMenu(MoveSelectionMenu),
     Pokemart(Pokemart),
     TrainerCard(TrainerCard),
+    SlotSelector(SlotSelector),
     TownMap(TownMap),
     SlotMachine(SlotMachine),
     MainMenu(MainMenu),
-    SaveMenu(SaveMenu),
     PcMenu(PcMenu),
     PlayerPc(PlayerPc),
     BillsPc(BillsPc),
@@ -174,10 +165,10 @@ macro_rules! each_mode {
             Mode::MoveSelectionMenu($inner) => $body,
             Mode::Pokemart($inner) => $body,
             Mode::TrainerCard($inner) => $body,
+            Mode::SlotSelector($inner) => $body,
             Mode::TownMap($inner) => $body,
             Mode::SlotMachine($inner) => $body,
             Mode::MainMenu($inner) => $body,
-            Mode::SaveMenu($inner) => $body,
             Mode::PcMenu($inner) => $body,
             Mode::PlayerPc($inner) => $body,
             Mode::BillsPc($inner) => $body,

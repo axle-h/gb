@@ -6,6 +6,7 @@ pub mod transcript;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+use pokered::save_slots::{DirectoryStore, SlotStore};
 
 /// Where runs live when `GB_RUN_DIR` is unset.
 pub const DEFAULT_ROOT: &str = "runs";
@@ -17,9 +18,8 @@ pub mod files {
     pub const SRAM: &str = "sram.bin";
     /// A run on the recreation: the whole game, `pokered::Game::save`, in place of the two above.
     pub const GAME: &str = "game.pkrd";
-    /// Beside it, the save the game last wrote of itself (the SAVE menu, a box change, the Hall of
-    /// Fame): what CONTINUE powers on into, as `sram.bin` is the cartridge's.
-    pub const GAME_SAVE: &str = "save.pkrd";
+    /// Beside it, the game's save slots, a `pokered::save_slots::DirectoryStore`.
+    pub const SLOTS: &str = "slots";
     pub const TRANSCRIPT: &str = "transcript.jsonl";
     /// Legacy: nothing writes it, and only the archiver reads it.
     pub const MEMORIES: &str = "memories";
@@ -307,31 +307,28 @@ impl RunDir {
         self.checkpointed(progress)
     }
 
-    /// A native run's checkpoint: the whole game, and the game's own save, which is removed when
-    /// there is none, since the title screen can clear it.
-    pub fn checkpoint_game(&self, game: &[u8], save: Option<&[u8]>, progress: RunProgress) -> Result<(), String> {
+    /// A native run's checkpoint: the whole game, and the slots `slots` holds, a slot rewritten
+    /// only when it changed and removed when it was deleted.
+    pub fn checkpoint_game(&self, game: &[u8], slots: &dyn SlotStore, progress: RunProgress) -> Result<(), String> {
         write_atomically(&self.path.join(files::GAME), game)?;
-        let path = self.path.join(files::GAME_SAVE);
-        match save {
-            Some(save) => write_atomically(&path, save)?,
-            None => match std::fs::remove_file(&path) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound =>
-                    return Err(format!("could not remove {}: {e}", path.display())),
-                _ => {}
-            },
+        let mut kept = self.game_slots();
+        let on_disk = kept.slots();
+        for (index, (slot, written)) in slots.slots().into_iter().zip(on_disk).enumerate() {
+            let index = index as u8;
+            let result = match slot {
+                Some(slot) if written.as_ref() == Some(&slot) => Ok(()),
+                Some(slot) => slots.read(index).and_then(|bytes| kept.write(index, &bytes, slot)),
+                None if written.is_some() => kept.delete(index),
+                None => Ok(()),
+            };
+            result.map_err(|e| format!("could not keep slot {index}: {e}"))?;
         }
         self.checkpointed(progress)
     }
 
-    /// The native game's own save, if it has written one. Only a missing file is no save: a
-    /// checkpoint removes the file when there is none.
-    pub fn game_save(&self) -> Result<Option<Vec<u8>>, String> {
-        let path = self.path.join(files::GAME_SAVE);
-        match std::fs::read(&path) {
-            Ok(save) => Ok(Some(save)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("could not read {}: {e}", path.display())),
-        }
+    /// The native game's save slots as the last checkpoint left them.
+    pub fn game_slots(&self) -> DirectoryStore {
+        DirectoryStore::new(self.path.join(files::SLOTS))
     }
 
     fn checkpointed(&self, progress: RunProgress) -> Result<(), String> {
@@ -561,19 +558,30 @@ pub(crate) mod tests {
         assert_eq!(meta.resumed_from.len(), 1, "the resume is recorded");
     }
 
-    /// A checkpoint with no save removes the file, so a save that cannot be read is an error rather
-    /// than no save.
+    /// A checkpoint leaves the run's slots as the host holds them: written, rewritten and deleted.
     #[test]
-    fn a_game_save_is_none_only_when_there_is_no_file() {
-        let scratch = Scratch::new("rungamesave");
+    fn a_checkpoint_keeps_the_slots_the_host_holds() {
+        use pokered::save_slots::{MemoryStore, SavedAt, Slot, SlotSummary, Thumbnail, AUTOSAVE};
+        let scratch = Scratch::new("rungameslots");
         let (run, _, _) = RunDir::open(&scratch.0, false, "gpt-test", &|_| true).expect("a fresh run");
-        assert_eq!(run.game_save(), Ok(None));
-        run.checkpoint_game(b"game", Some(b"save"), RunProgress::default()).expect("checkpoint");
-        assert_eq!(run.game_save(), Ok(Some(b"save".to_vec())));
-        run.checkpoint_game(b"game", None, RunProgress::default()).expect("checkpoint");
-        assert_eq!(run.game_save(), Ok(None));
-        std::fs::create_dir(run.path().join(files::GAME_SAVE)).unwrap();
-        assert!(run.game_save().is_err());
+        let game = pokered::Game::new(pokered::world::World::default(), pokered::rng::GameRng::seeded(1), pokered::Pacing::Instant);
+        let slot = |seconds| Slot {
+            summary: SlotSummary::of(game.world(), Thumbnail::of(&game.screen().frame())),
+            saved_at: SavedAt { unix_seconds: seconds, utc_offset_minutes: 0 },
+        };
+        let mut held = MemoryStore::default();
+        held.write(0, b"first", slot(1)).unwrap();
+        held.write(AUTOSAVE, b"autosave", slot(2)).unwrap();
+        run.checkpoint_game(b"game", &held, RunProgress::default()).expect("checkpoint");
+        assert_eq!(run.game_slots().slots(), held.slots());
+        assert_eq!(run.game_slots().read(AUTOSAVE).unwrap(), b"autosave");
+
+        held.write(0, b"second", slot(3)).unwrap();
+        held.delete(AUTOSAVE).unwrap();
+        run.checkpoint_game(b"game", &held, RunProgress::default()).expect("checkpoint");
+        assert_eq!(run.game_slots().slots(), held.slots());
+        assert_eq!(run.game_slots().read(0).unwrap(), b"second");
+        assert!(!run.path().join(files::SLOTS).join(format!("slot-{AUTOSAVE}.pkslot")).exists());
     }
 
     #[test]

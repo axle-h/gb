@@ -55,6 +55,7 @@ pub mod symbols;
 pub mod font;
 pub mod roms;
 mod text;
+pub mod speech;
 pub mod map_header;
 pub use poke_core::item;
 pub mod item_use;
@@ -173,6 +174,13 @@ impl<'a> PokemonApi<'a> {
         if mmu.read_game_mode() == GameMode::Overworld || !mmu.pokemon_font_loaded() {
             return None;
         }
+        Some(self.tile_map_glyphs(only_message_box))
+    }
+
+    /// The font's glyphs in `wTileMap`, whatever the game mode says: the intro prints Oak's speech
+    /// with no text box open, so `wFontLoaded` reads as the overworld throughout.
+    pub(crate) fn tile_map_glyphs(&self, only_message_box: bool) -> String {
+        let mmu = self.mmu();
         const FIRST_FONT_TILE: u8 = 0x80;
         let coordinates = (0..SCREEN_TILES.1).flat_map(|y| (0..SCREEN_TILES.0).map(move |x| (x, y)))
             .filter_map(|(x, y)| {
@@ -181,7 +189,7 @@ impl<'a> PokemonApi<'a> {
                     .then(|| ((tile - FIRST_FONT_TILE) as usize, gb::geometry::Point8 { x, y }))
             })
             .collect();
-        Some(text_of_tiles(coordinates, only_message_box))
+        text_of_tiles(coordinates, only_message_box)
     }
 
     pub fn pimp_out_pokemon(&mut self) -> Result<(), String> {

@@ -4540,7 +4540,7 @@ fn beating_the_champion_ends_on_the_title_screen_with_the_game_saved() {
             Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
             _ => Input::None,
         };
-        if let Some(crate::Save::Written(bytes)) = game.frame(input).save {
+        if let Some(crate::save_slots::SlotRequest::Save { bytes, .. }) = game.frame(input).slot {
             saves.push(bytes);
         }
     }

@@ -1,3 +1,10 @@
-mod frame_rate;
-pub mod render;
+mod controller;
 mod font;
+mod games;
+mod log;
+mod pixels;
+pub mod render;
+mod routing;
+mod speed;
+mod tour;
+mod window;

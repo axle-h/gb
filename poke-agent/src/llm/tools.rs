@@ -991,7 +991,7 @@ fn use_field_move_spec() -> ToolSpec {
              - `toss_item` — throw `item` away to free a bag slot. The bag holds only 20 kinds.\n\
              - `reorder_party` — make the Pokémon in `slot` the party leader.\n\
              - `pc_pokemon` — at a PC: `op` is `deposit` (party `slot` → box), `withdraw` or \
-             `release` (a `box_slot`), or `change_box` (`box`, 1-12, which also saves the game). \
+             `release` (a `box_slot`), or `change_box` (`box`, 1-12). \
              Only the open box can be read; `read_pc` shows it.\n\
              - `pc_items` — at a PC: `op` `deposit` or `withdraw` moves `quantity` of `item` \
              between the bag and PC storage. The bag holds only 20 kinds.\n\

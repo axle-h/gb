@@ -5,8 +5,9 @@
 //! is under it is whatever was there before power-on, which for a host is nothing.
 //!
 //! [`Movie::hall_of_fame`] is the whole of the script that calls `HallOfFamePC`, so it saves the
-//! game and restarts the console rather than returning to the overworld it took the place of. The save it leaves is
-//! taken in the Hall of Fame, the one room CONTINUE does not resume in.
+//! game and restarts the console rather than returning to the overworld it took the place of. Its
+//! save is the autosave slot, holding the game as the cartridge's CONTINUE resumed it: in Pallet
+//! Town, since the room the ceremony is in has no way out.
 
 mod hall_of_fame;
 mod intro;
@@ -21,12 +22,13 @@ use serde::{Deserialize, Serialize};
 use crate::command::Decision;
 use crate::gfx::sgb::PaletteCommand;
 use crate::input::Joypad;
-use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, SaveRequest, Status, Transition};
-use crate::modes::main_menu::{MainMenu, CONTINUE, NEW_GAME};
+use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
+use crate::modes::main_menu::{MainMenu, NEW_GAME};
 use crate::modes::overworld::Overworld;
-use crate::modes::text_box::TextBox;
-use crate::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
-use crate::world::{Options, World};
+use crate::rng::GameRng;
+use crate::save_slots::SlotAction;
+use crate::world::World;
+use crate::{Game, Pacing};
 use hall_of_fame::HallOfFame;
 use intro::Intro;
 use oak_speech::OakSpeech;
@@ -52,9 +54,8 @@ pub enum Movie {
 }
 
 impl Movie {
-    /// Power-on. `save_exists` is whether the world the game holds is a save to continue.
-    pub fn power_on(save_exists: bool) -> Self {
-        Self::PowerOn(PowerOn::new(save_exists))
+    pub fn power_on() -> Self {
+        Self::PowerOn(PowerOn::new())
     }
 
     /// The Hall of Fame script, which the League's script calls. It never returns: the cartridge
@@ -166,18 +167,18 @@ impl Ceremony {
             ctx.world.events.clear(event);
         }
         ctx.world.location.last_blackout_map = Map::PalletTown;
-        ctx.save = Some(SaveRequest::Write);
+        ctx.slot = Some(SlotAction::Autosave);
         self.wait = Wait::frames(SAVED_HOLD);
         self.tail = Some(Tail::Held);
         Transition::Stay
     }
 
-    /// `jp Init`: the console restarts on the save the script has just written, and the clock it
-    /// cleared with the rest of WRAM only counts again once a map is entered.
+    /// `jp Init`: the console restarts, and the clock it cleared with the rest of WRAM only counts
+    /// again once a map is entered.
     fn reset(&mut self, ctx: &mut Ctx) -> Transition {
         MovieScreen::release(ctx);
         ctx.world.play_time.counting = false;
-        Transition::Replace(Mode::Movie(Movie::power_on(true)))
+        Transition::Replace(Mode::Movie(Movie::power_on()))
     }
 
     /// The press that ends the script is the one the title screen is waiting for a frame later.
@@ -196,19 +197,12 @@ enum Stage {
     /// The main menu is up.
     MainMenu,
     OakSpeech(OakSpeech),
-    /// `SpecialEnterMap`, after `StartNewGame`'s own hold when it came from Oak's speech.
+    /// `StartNewGame`'s hold, then `SpecialEnterMap`.
     EnterMap { after_speech: bool },
-    /// `DoClearSaveDialogue`: its text is up, then its menu.
-    ClearSave { asking: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PowerOn {
-    save_exists: bool,
-    /// The save's own `wOptions`, which `MainMenu`'s `TryLoadSaveFile` reads back each time the
-    /// title gives way to it, over whatever the option screen set before B went back to the title.
-    #[serde(default)]
-    saved_options: Option<Options>,
     stage: Stage,
     title: Title,
     screen: MovieScreen,
@@ -216,10 +210,8 @@ pub struct PowerOn {
 }
 
 impl PowerOn {
-    fn new(save_exists: bool) -> Self {
+    fn new() -> Self {
         Self {
-            save_exists,
-            saved_options: None,
             stage: Stage::Intro(Intro::default()),
             title: Title::default(),
             screen: MovieScreen::default(),
@@ -248,16 +240,10 @@ impl PowerOn {
                     return Transition::Stay;
                 }
                 MovieScreen::release(ctx);
-                if self.title.clears_save() {
-                    return self.clear_save(ctx);
-                }
-                if self.save_exists {
-                    ctx.world.options = *self.saved_options.get_or_insert(ctx.world.options);
-                }
                 self.stage = Stage::MainMenu;
-                Transition::Push(Mode::MainMenu(MainMenu::new(self.save_exists)))
+                Transition::Push(Mode::MainMenu(MainMenu::new()))
             }
-            Stage::MainMenu | Stage::ClearSave { .. } => Transition::Stay,
+            Stage::MainMenu => Transition::Stay,
             Stage::OakSpeech(speech) => {
                 let transition = speech.update(ctx);
                 if speech.is_done() {
@@ -294,10 +280,6 @@ impl PowerOn {
                     self.stage = Stage::OakSpeech(speech);
                     transition
                 }
-                Outcome::Chosen(CONTINUE) => {
-                    continue_from_hall_of_fame(ctx);
-                    self.enter_map(ctx, false)
-                }
                 // B: back to `DisplayTitleScreen`.
                 _ => {
                     self.stage = Stage::Title;
@@ -312,34 +294,8 @@ impl PowerOn {
                 }
                 transition
             }
-            Stage::ClearSave { asking: false } => {
-                self.stage = Stage::ClearSave { asking: true };
-                Transition::Push(Mode::TwoOptionMenu(TwoOptionMenu::new(TwoOptionMenuId::NoYes, (14, 7), false)))
-            }
-            Stage::ClearSave { asking: true } => {
-                // `ClearAllSRAMBanks` on YES, then `Init` either way.
-                if outcome == Outcome::Chosen(1) {
-                    *ctx.world = World::default();
-                    ctx.save = Some(SaveRequest::Clear);
-                    self.save_exists = false;
-                    self.saved_options = None;
-                }
-                let saved_options = self.saved_options;
-                Transition::Replace(Mode::Movie(Movie::PowerOn(PowerOn { saved_options, ..PowerOn::new(self.save_exists) })))
-            }
             _ => Transition::Stay,
         }
-    }
-
-    /// `DoClearSaveDialogue` up to its menu.
-    fn clear_save(&mut self, ctx: &mut Ctx) -> Transition {
-        ctx.screen.sgb.run(&PaletteCommand::Default);
-        ctx.screen.tiles.load_font();
-        ctx.screen.tiles.load_text_box_tiles();
-        self.stage = Stage::ClearSave { asking: false };
-        let text = poke_core::text_script::far_text("ClearSaveDataText")
-            .expect("the clear save text decodes");
-        Transition::Push(Mode::TextBox(TextBox::script(text)))
     }
 
     fn status(&self) -> Status {
@@ -351,19 +307,32 @@ impl PowerOn {
     }
 }
 
-/// `.pressedA`: a game saved inside the Hall of Fame is continued from Pallet Town, on the square a
-/// fly lands on, since the room the ceremony saved in has no way out. Every other save is continued
-/// where it was left.
-fn continue_from_hall_of_fame(ctx: &mut Ctx) {
-    if ctx.world.hall_of_fame_teams == 0 || ctx.world.location.map != Map::HallOfFame {
-        return;
-    }
+/// The game the Hall of Fame's autosave holds: the cartridge's CONTINUE of the save the ceremony
+/// wrote, which `.pressedA` moves to the square a fly lands on in Pallet Town, the main menu's
+/// screen setup, and `SpecialEnterMap`. It is played until the overworld settles, so its picture
+/// shows the player.
+pub(crate) fn continued_after_hall_of_fame(mut world: World, rng: GameRng, pacing: Pacing) -> Game {
     let warp = fly_warp(Map::PalletTown).expect("Pallet Town has a fly warp");
-    let location = &mut ctx.world.location;
+    let location = &mut world.location;
     location.map = Map::PalletTown;
     location.last_map = Map::PalletTown;
     location.x = warp.x;
     location.y = warp.y;
+    world.play_time.counting = true;
+    world.one_frame_letter_delay = false;
+    let mut game = Game::new(world, rng, pacing);
+    game.screen.sgb.run(&PaletteCommand::Default);
+    game.screen.tiles.load_text_box_tiles();
+    game.screen.tiles.load_font();
+    let overworld = Overworld::reset_player_sprite_data(&mut game.world.location);
+    game.push(Mode::Overworld(overworld));
+    for _ in 0..60 {
+        if game.status() != Status::Busy {
+            break;
+        }
+        game.frame(crate::Input::None);
+    }
+    game
 }
 
 #[cfg(test)]
@@ -393,14 +362,14 @@ mod tests {
 
     #[test]
     fn power_on_reaches_the_title_and_waits() {
-        let mut game = Game::power_on(None, GameRng::seeded(1), Pacing::Faithful);
+        let mut game = Game::power_on(GameRng::seeded(1), Pacing::Faithful);
         let frames = play(&mut game, 10_000, |_| None, |game| game.status() == Status::Waiting(Decision::TitleScreen));
         assert!(frames > 700, "the intro plays first: {frames}");
     }
 
     #[test]
     fn a_new_game_with_preset_names_ends_in_reds_room() {
-        let mut game = Game::power_on(None, GameRng::seeded(2), Pacing::Faithful);
+        let mut game = Game::power_on(GameRng::seeded(2), Pacing::Faithful);
         play(&mut game, 30_000, |decision| match decision {
             Decision::TitleScreen | Decision::Text => Some(Command::Advance),
             Decision::MainMenu => Some(Command::ChooseOption(0)),
@@ -418,7 +387,7 @@ mod tests {
 
     #[test]
     fn typed_names_go_through_the_naming_screen() {
-        let mut game = Game::power_on(None, GameRng::seeded(3), Pacing::Faithful);
+        let mut game = Game::power_on(GameRng::seeded(3), Pacing::Faithful);
         play(&mut game, 40_000, |decision| match decision {
             Decision::TitleScreen | Decision::Text => Some(Command::Advance),
             Decision::MainMenu => Some(Command::ChooseOption(0)),
@@ -467,10 +436,11 @@ mod tests {
     }
 
     /// `HallOfFameResetEventsAndSaveScript` after the credits: the save, the hold, the press and
-    /// `Init`.
+    /// `Init`. The save is the autosave slot, of the game continued in Pallet Town.
     #[test]
     fn the_credits_save_the_game_and_restart_the_console() {
         use poke_core::symbols::pokered_events::EVENT_BEAT_LANCE;
+        use crate::save_slots::{SlotRequest, AUTOSAVE};
         let mut world = champion();
         world.events.set(EVENT_BEAT_LANCE);
         world.location.last_blackout_map = Map::ViridianCity;
@@ -484,20 +454,28 @@ mod tests {
                 Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
                 _ => Input::None,
             };
-            if let Some(crate::Save::Written(bytes)) = game.frame(input).save {
+            if let Some(request) = game.frame(input).slot {
                 assert!(saved.is_none(), "the script saves once");
-                saved = Some(bytes);
+                saved = Some(request);
             }
             if matches!(game.modes().last(), Some(Mode::Movie(movie)) if movie.hall_of_fame_returned()) {
                 break;
             }
         }
-        let saved = saved.expect("the script wrote the game out");
+        let Some(SlotRequest::Save { slot, bytes, summary }) = saved else { panic!("the script wrote no slot: {saved:?}") };
+        assert_eq!(slot, AUTOSAVE);
         assert!(!game.world().events.is_set(EVENT_BEAT_LANCE), "the Elite Four can be fought again");
         assert_eq!(game.world().location.last_blackout_map, Map::PalletTown);
-        let reloaded = Game::load(&saved, Pacing::Faithful).unwrap();
+        let reloaded = Game::load(&bytes, Pacing::Faithful).unwrap();
+        let landing = fly_warp(Map::PalletTown).unwrap();
+        let location = &reloaded.world().location;
+        assert_eq!((location.map, location.x, location.y, location.last_map), (Map::PalletTown, landing.x, landing.y, Map::PalletTown),
+                   "the autosave is continued where a fly lands, not in the room the ceremony was in");
         assert_eq!(reloaded.world().hall_of_fame_teams, 1);
-        assert_eq!(reloaded.world().location.map, Map::HallOfFame, "the save is taken where the ceremony was");
+        assert!(!reloaded.world().events.is_set(EVENT_BEAT_LANCE));
+        assert!(reloaded.world().play_time.counting, "SpecialEnterMap starts the clock");
+        assert!(matches!(reloaded.modes(), [Mode::Overworld(_)]), "{:?}", reloaded.modes());
+        assert_eq!(summary.map, Map::PalletTown);
 
         let held = play(&mut game, 1_000, |_| None, |game| game.status() == Status::Waiting(Decision::TitleScreen));
         assert_eq!(held, SAVED_HOLD as u32, "THE END stands before the press");
@@ -509,95 +487,47 @@ mod tests {
         assert!(!game.world().play_time.counting, "the clock only counts again on the map");
     }
 
-    /// `MainMenu`'s `TryLoadSaveFile` runs again after B goes back to the title, so what the option
-    /// screen set is lost and the save's own options are continued with.
+    /// The cartridge continues a game finished in the Hall of Fame from Pallet Town: here CONTINUE
+    /// after the credits opens the slots on the autosave, the newest, and A and LOAD play on there.
     #[test]
-    fn a_continued_save_has_its_own_options_after_option_and_b_back_to_the_title() {
-        use crate::world::{BattleStyle, Options, TextSpeed};
-        let saved = Options { text_speed: TextSpeed::Fast, battle_animation: false, battle_style: BattleStyle::Set };
-        let world = World { player_name: encode("RED").unwrap(), options: saved, ..World::default() };
-        let mut game = Game::power_on(Some(world), GameRng::seeded(8), Pacing::Faithful);
-        play(&mut game, 20_000, |decision| (*decision == Decision::TitleScreen).then_some(Command::Advance),
-             |game| game.status() == Status::Waiting(Decision::MainMenu));
-        assert_eq!(game.world().options, saved);
-        game.frame(Input::Command(Command::ChooseOption(2)));
-        play(&mut game, 200, |_| None, |game| game.status() == Status::Waiting(Decision::Options));
-        for button in [Joypad::RIGHT, Joypad::empty(), Joypad::B] {
-            game.frame(Input::Buttons(button));
-        }
-        let changed = game.world().options;
-        assert_ne!(changed, saved, "RIGHT slowed the text");
-        play(&mut game, 200, |_| None, |game| game.status() == Status::Waiting(Decision::MainMenu));
-        game.frame(Input::Buttons(Joypad::B));
-        play(&mut game, 20_000, |decision| (*decision == Decision::TitleScreen).then_some(Command::Advance),
-             |game| game.status() == Status::Waiting(Decision::MainMenu));
-        assert_eq!(game.world().options, saved, "the save's options, read back");
-
-        // Without the B, CONTINUE takes what the option screen set.
-        game.frame(Input::Command(Command::ChooseOption(2)));
-        play(&mut game, 200, |_| None, |game| game.status() == Status::Waiting(Decision::Options));
-        for button in [Joypad::RIGHT, Joypad::empty(), Joypad::B] {
-            game.frame(Input::Buttons(button));
-        }
-        play(&mut game, 20_000, |decision| match decision {
-            Decision::ContinueGame => Some(Command::Advance),
-            Decision::MainMenu => Some(Command::ChooseOption(CONTINUE)),
-            _ => None,
-        }, |game| matches!(game.modes().last(), Some(Mode::Overworld(_))));
-        assert_eq!(game.world().options, changed);
-    }
-
-    /// `.pressedA`'s `wNumHoFTeams` test: the only save continued anywhere but where it was left.
-    #[test]
-    fn continuing_from_the_hall_of_fame_starts_in_pallet_town() {
-        let mut world = champion();
-        world.hall_of_fame_teams = 1;
-        let landing = fly_warp(Map::PalletTown).unwrap();
-        let mut game = Game::power_on(Some(world.clone()), GameRng::seeded(7), Pacing::Faithful);
-        play(&mut game, 20_000, |decision| match decision {
-            Decision::TitleScreen | Decision::ContinueGame => Some(Command::Advance),
-            Decision::MainMenu => Some(Command::ChooseOption(CONTINUE)),
-            _ => None,
-        }, |game| matches!(game.modes().last(), Some(Mode::Overworld(_))));
-        let location = &game.world().location;
-        assert_eq!((location.map, location.x, location.y), (Map::PalletTown, landing.x, landing.y));
-        assert_eq!(location.last_map, Map::PalletTown);
-
-        // A champion who saved anywhere else is continued where they left off.
-        world.location.map = Map::ViridianCity;
-        let mut game = Game::power_on(Some(world), GameRng::seeded(7), Pacing::Faithful);
-        play(&mut game, 20_000, |decision| match decision {
-            Decision::TitleScreen | Decision::ContinueGame => Some(Command::Advance),
-            Decision::MainMenu => Some(Command::ChooseOption(CONTINUE)),
-            _ => None,
-        }, |game| matches!(game.modes().last(), Some(Mode::Overworld(_))));
-        assert_eq!(game.world().location.map, Map::ViridianCity);
-    }
-
-    /// `DoClearSaveDialogue`'s YES tells the host its save is gone, and the next SAVE has no older
-    /// file to ask about.
-    #[test]
-    fn clearing_the_save_at_the_title_tells_the_host() {
-        let world = World { player_name: encode("RED").unwrap(), player_id: 0x1234, ..World::default() };
-        let mut game = Game::power_on(Some(world), GameRng::seeded(9), Pacing::Faithful);
-        play(&mut game, 20_000, |_| None, |game| game.status() == Status::Waiting(Decision::TitleScreen));
-        let mut saves = vec![];
-        for buttons in [Joypad::UP | Joypad::SELECT | Joypad::B, Joypad::empty()] {
-            saves.extend(game.frame(Input::Buttons(buttons)).save);
-        }
-        for _ in 0..2_000 {
-            if game.status() == Status::Waiting(Decision::TitleScreen) {
+    fn continuing_after_the_credits_loads_the_autosave_in_pallet_town() {
+        use crate::save_slots::{MemoryStore, SavedAt, SlotStore, AUTOSAVE};
+        let mut store = MemoryStore::default();
+        let mut game = Game::new(champion(), GameRng::seeded(7), Pacing::Faithful);
+        game.set_slots(store.slots());
+        game.push(Mode::Movie(Movie::hall_of_fame()));
+        let (mut chose_continue, mut pressed) = (false, false);
+        for frame in 0..40_000 {
+            if chose_continue && matches!(game.modes(), [Mode::Overworld(_)]) {
                 break;
             }
             let input = match game.status() {
-                Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
-                Status::Waiting(Decision::TwoOption) => Input::Command(Command::ChooseOption(1)),
+                Status::Waiting(Decision::Text | Decision::TitleScreen) => Input::Command(Command::Advance),
+                Status::Waiting(Decision::MainMenu) => {
+                    chose_continue = true;
+                    Input::Command(Command::ChooseOption(crate::modes::main_menu::CONTINUE))
+                }
+                Status::Waiting(Decision::SlotSelector) => {
+                    let Some(Mode::SlotSelector(selector)) = game.modes().last() else { unreachable!() };
+                    assert_eq!(selector.current(), AUTOSAVE, "the cursor on the newest slot");
+                    Input::Buttons(Joypad::A)
+                }
+                Status::Waiting(Decision::CursorMenu) => Input::Buttons(Joypad::A),
                 _ => Input::None,
             };
-            saves.extend(game.frame(input).save);
+            // A press is new only after a frame without it.
+            let input = if pressed && matches!(input, Input::Buttons(_)) { Input::None } else { input };
+            pressed = matches!(input, Input::Buttons(_));
+            if let Some(request) = game.frame(input).slot {
+                let saved_at = SavedAt { unix_seconds: frame as i64, utc_offset_minutes: 0 };
+                store.answer(&mut game, request, saved_at).unwrap();
+            }
         }
-        assert_eq!(game.status(), Status::Waiting(Decision::TitleScreen), "the game restarted");
-        assert_eq!(saves, [crate::Save::Cleared]);
-        assert_eq!(game.saved_player_id, None, "the next SAVE would ask about a file that is gone");
+        assert!(chose_continue && matches!(game.modes(), [Mode::Overworld(_)]), "{:?}", game.status());
+        let landing = fly_warp(Map::PalletTown).unwrap();
+        let location = &game.world().location;
+        assert_eq!((location.map, location.x, location.y), (Map::PalletTown, landing.x, landing.y));
+        assert_eq!(game.world().hall_of_fame_teams, 1);
+        assert_eq!(game.slots().len(), crate::save_slots::SLOTS, "the host handed the slots back after the load");
     }
 }

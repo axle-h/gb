@@ -1,3 +1,6 @@
+//! The god-mode sidecar: what a driver writes into the game between ticks so a scripted run is
+//! never stopped by a battle or a price, with every story gate left as the cartridge has it.
+
 use crate::pokemon::badge::Badge;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::move_name::PokemonMoveName;
@@ -181,7 +184,6 @@ impl Cheats {
     }
 }
 
-#[cfg(feature = "slow-tests")]
 impl Cheats {
     /// [`Self::apply`] on the recreation, whose world is fields rather than memory. `free` is the
     /// agent's [`is_free`](crate::pokemon::native_agent::NativeAgent::is_free), the one moment the
@@ -233,14 +235,12 @@ impl Cheats {
 }
 
 /// Six BCD digits, as `wPlayerMoney` holds them.
-#[cfg(feature = "slow-tests")]
 fn to_bcd(value: u32) -> [u8; 3] {
     let digit = |place: u32| (value / place % 10) as u8;
     [digit(100_000) << 4 | digit(10_000), digit(1_000) << 4 | digit(100), digit(10) << 4 | digit(1)]
 }
 
 /// [`Pokemon::maxed`] as the recreation holds a party member.
-#[cfg(feature = "slow-tests")]
 fn native_maxed(species: PokemonSpecies, nickname: &str, moves: [PokemonMoveName; 4], ot: &[u8], ot_id: u16)
     -> pokered::party::Named<pokered::party::PartyMon> {
     use pokered::systems::stats::{calc_stats, Dvs};
@@ -378,7 +378,6 @@ mod tests {
     /// A battle text splices the nickname in whole, so a terminator in it ends every text at the
     /// name: "MEWTWO's attack missed!" read as "MEWTWO".
     #[test]
-    #[cfg(feature = "slow-tests")]
     fn the_recreation_s_god_party_is_named_unterminated() {
         for (species, nickname) in [(PokemonSpecies::Mewtwo, "MEWTWO"), (PokemonSpecies::Lapras, "TERRAIN")] {
             let named = native_maxed(species, nickname, FIGHTER_MOVES, &[], 0);
@@ -434,7 +433,7 @@ mod tests {
     #[test]
     fn the_story_cheats_give_no_badge_key_item_or_hm() {
         let mut fixture = TestFixture::with_policy(
-            include_bytes!("../data/back-in-cerulean.bin"),
+            include_bytes!("../pokemon/data/back-in-cerulean.bin"),
             Duration::from_secs(10),
             Box::new(crate::pokemon::policy::RandomPolicy::seeded(0)),
         );

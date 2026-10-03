@@ -2,7 +2,8 @@
 //! deposited with a count, withdrawn, one tossed, and both menus logged off, with the screen compared
 //! wherever both wait for a button and the bag and the PC's items compared at the end. Then BILL's PC
 //! over a party and a box written into WRAM: a deposit, STATS and a withdrawal, a release refused and
-//! then made, and a box change, with the party, the box and the box number compared along the way.
+//! then made, and a box change (the cartridge's save before it untimed), with the party, the box
+//! and the box number compared along the way.
 //! Then `<PKMN>LEAGUE` over a Hall of Fame record copied out of a finished game's SRAM, and
 //! `PROF.OAK's PC` rating the fixture's Pokédex.
 
@@ -314,11 +315,6 @@ fn hp_bar_tiles() -> u32 {
     let bytes = (sym::HpBarAndStatusGraphicsEnd.address - sym::HpBarAndStatusGraphics.address) as u32;
     (bytes / 16).div_ceil(8)
 }
-/// `EmptyAllSRAMBoxes` on a first box change: lag frames summing the checksums of both SRAM banks.
-const EMPTY_ALL_SRAM_BOXES: u32 = 21;
-/// `ChangeBox`'s two `CopyBoxToOrFromSRAM` and `SaveGameData`: lag frames, all of them checksums and
-/// copies.
-const CHANGE_BOX_SAVE: u32 = 37;
 /// `BillsPCMenu` drawn: the ball, "What?"'s box, the `Delay3` before the menu, and the cursor.
 const BILLS_MENU: u32 = BALL_TILE + BOX + DELAY3 + CURSOR;
 const BOX_STRUCT: u16 = 0x21;
@@ -398,13 +394,17 @@ fn ours(game: &Game) -> (Vec<pokered::party::Named<pokered::party::PartyMon>>, V
 /// [`step`], with both screens spelled out when they differ.
 fn poll(gb: &mut GameBoy, game: &mut Game, button: Joypad, then: Decision, loading: u32, what: &str) {
     let (cartridge, recreation) = press(gb, game, button, then);
+    same_screen(gb, game, what);
+    assert_late(cartridge, recreation, loading, what);
+}
+
+fn same_screen(gb: &GameBoy, game: &Game, what: &str) {
     let theirs = screen(gb);
     let mine: Vec<_> = (0..18).map(|y| game.ui().row(y).to_vec()).collect();
     if theirs != mine {
         let spelled = |rows: &[Vec<u8>]| rows.iter().map(|row| letters(row)).collect::<Vec<_>>().join("\n");
         panic!("{what}:\ncartridge\n{}\nrecreation\n{}\n{theirs:?}\n{mine:?}", spelled(&theirs), spelled(&mine));
     }
-    assert_late(cartridge, recreation, loading, what);
 }
 
 /// A press into both and both until they wait again, the cartridge through an LCD-off stretch that
@@ -488,12 +488,19 @@ fn bills_pc_deposits_withdraws_releases_and_changes_box_as_the_cartridge_does() 
     let_the_sound_end(&mut gb, &mut game);
 
     poll(&mut gb, &mut game, Joypad::DOWN, Decision::CursorMenu, CURSOR, "CHANGE BOX");
-    poll(&mut gb, &mut game, Joypad::A, Decision::Text, BOX + ARROW, "when you change a box");
-    poll(&mut gb, &mut game, Joypad::A, Decision::Text, ARROW, "will be saved");
-    poll(&mut gb, &mut game, Joypad::A, Decision::TwoOption, CURSOR, "is that okay");
-    poll(&mut gb, &mut game, Joypad::A, Decision::CursorMenu, EMPTY_ALL_SRAM_BOXES + BOX + CURSOR, "the boxes");
+    // The cartridge saves on a change and asks first; the recreation has no such save, so the
+    // question is answered on the cartridge alone and neither its save nor its sound is timed.
+    for _ in ["when you change a box", "will be saved", "is that okay"] {
+        gb.hold_buttons(joypad(Joypad::A));
+        to_vblank(&mut gb);
+        gb.hold_buttons(JoypadButtonState::default());
+        cartridge_until_polling(&mut gb);
+    }
+    press(&mut gb, &mut game, Joypad::A, Decision::CursorMenu);
+    same_screen(&gb, &game, "the boxes");
     poll(&mut gb, &mut game, Joypad::DOWN, Decision::CursorMenu, CURSOR, "BOX 2");
-    poll(&mut gb, &mut game, Joypad::A, Decision::CursorMenu, CHANGE_BOX_SAVE + BILLS_MENU, "saved, and the menu");
+    press(&mut gb, &mut game, Joypad::A, Decision::CursorMenu);
+    same_screen(&gb, &game, "the menu");
     let_the_sound_end(&mut gb, &mut game);
     assert_eq!(ours(&game), the_mons(&gb), "after the change");
     assert_eq!(game.world().current_box, 1);

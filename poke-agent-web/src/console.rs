@@ -21,7 +21,8 @@ use pokered::command::{Command, Decision};
 use pokered::gfx::colour::{BYTES_PER_PIXEL, ColourMode};
 use pokered::mode::{Mode, Status};
 use pokered::rng::GameRng;
-use pokered::{Game, Input, Pacing, Save};
+use pokered::save_slots::{MemoryStore, SavedAt, SlotRequest, SlotStore};
+use pokered::{Game, Input, Pacing};
 
 use crate::web::audio;
 use crate::web::video::{Frame, PIXELS};
@@ -49,9 +50,8 @@ pub struct Native {
     /// for nobody. A save carries no oscillator state, so a new one is told what the engine holds.
     /// It makes a second of samples per second of game, so the stream is right only at 1x.
     synth: Option<Synth>,
-    /// The game's own save, as it last wrote itself, kept as the run's `save.pkrd`; `None` once the
-    /// title has cleared it, which removes the file.
-    save: Option<Vec<u8>>,
+    /// The game's save slots, kept in the run directory at each checkpoint.
+    slots: MemoryStore,
 }
 
 /// Re-apply everything about the APU that a save state does not carry.
@@ -88,7 +88,9 @@ impl Console {
                 })))
             }
             GameKind::Native => {
-                let game = Game::load(state, SERVED_PACING).map_err(|e| format!("could not load the starting game: {e}"))?;
+                let mut game = Game::load(state, SERVED_PACING).map_err(|e| format!("could not load the starting game: {e}"))?;
+                let slots = MemoryStore::default();
+                game.set_slots(slots.slots());
                 Ok(Self::Native(Box::new(Native {
                     agent: NativeAgent::new(game, policy)?.hosted(),
                     colours: match model {
@@ -96,7 +98,7 @@ impl Console {
                         Model::Cgb => ColourMode::Gbc,
                     },
                     synth: None,
-                    save: None,
+                    slots,
                 })))
             }
         }
@@ -174,7 +176,7 @@ impl Console {
     pub fn checkpoint(&self, run: &RunDir, state: &[u8], progress: RunProgress) -> Result<(), String> {
         match self {
             Self::Emulated(e) => run.checkpoint(state, &e.gb.dump_sram(), progress),
-            Self::Native(n) => run.checkpoint_game(state, n.save.as_deref(), progress),
+            Self::Native(n) => run.checkpoint_game(state, &n.slots, progress),
         }
     }
 
@@ -182,10 +184,7 @@ impl Console {
     pub fn archive_files(&self, state: Vec<u8>) -> Vec<(&'static str, Vec<u8>)> {
         match self {
             Self::Emulated(e) => vec![(files::STATE, state), (files::SRAM, e.gb.dump_sram())],
-            Self::Native(n) => [(files::GAME, Some(state)), (files::GAME_SAVE, n.save.clone())]
-                .into_iter()
-                .filter_map(|(name, bytes)| Some((name, bytes?)))
-                .collect(),
+            Self::Native(_) => vec![(files::GAME, state)],
         }
     }
 
@@ -250,7 +249,8 @@ impl Console {
                 let game = Game::load(&native_start_of_game()?, SERVED_PACING)?;
                 n.agent.restart(game, Some(run_dir))?;
                 n.synth = None;
-                n.save = None;
+                n.slots = MemoryStore::default();
+                n.agent.game_mut().set_slots(n.slots.slots());
                 Ok(())
             }
         }
@@ -263,10 +263,17 @@ impl Console {
         }
     }
 
-    /// The save a resumed native run's game last wrote, read back from its run directory.
-    pub fn restore_game_save(&mut self, save: Vec<u8>) {
+    /// A resumed native run's slots, read back from its run directory. A slot that cannot be read
+    /// is left empty, as the slot list shows it.
+    pub fn restore_slots(&mut self, kept: &dyn SlotStore) {
         if let Self::Native(n) = self {
-            n.save = Some(save);
+            for (index, slot) in kept.slots().into_iter().enumerate() {
+                let index = index as u8;
+                if let (Some(slot), Ok(bytes)) = (slot, kept.read(index)) {
+                    n.slots.write(index, &bytes, slot).expect("a slot in memory is written");
+                }
+            }
+            n.agent.game_mut().set_slots(n.slots.slots());
         }
     }
 
@@ -291,15 +298,7 @@ impl Console {
         match self {
             Self::Emulated(e) => e.gb.core_mut().mmu_mut().audio_mut().set_output_enabled(enabled),
             Self::Native(n) => match (enabled, n.synth.is_some()) {
-                (true, false) => {
-                    let mut synth = Synth::new();
-                    // The audio engine never writes `NR52`: the cartridge powers the APU on outside it.
-                    synth.write(pokered::audio::Write::Power(true));
-                    for write in n.agent.game().audio().standing_writes() {
-                        synth.write(write);
-                    }
-                    n.synth = Some(synth);
-                }
+                (true, false) => n.synth = Some(poke_agent::native::synth_for(n.agent.game())),
                 (false, true) => n.synth = None,
                 _ => {}
             },
@@ -359,33 +358,58 @@ impl Native {
     }
 
     #[cfg(test)]
-    pub fn save(&self) -> Option<&[u8]> {
-        self.save.as_deref()
+    pub fn slots(&self) -> &MemoryStore {
+        &self.slots
     }
 
-    fn saved_world(&self) -> Option<pokered::world::World> {
-        Game::load(self.save.as_deref()?, SERVED_PACING).ok().map(|game| game.world().clone())
+    /// The game's request answered at the host's clock, in UTC, which is all the host knows. A
+    /// loaded game carries no oscillator state, so a synth starts over from what its engine holds.
+    fn answer(&mut self, request: SlotRequest) -> Result<(), String> {
+        let loading = matches!(request, SlotRequest::Load(_));
+        let saved_at = SavedAt::from_system_time(std::time::SystemTime::now(), 0);
+        self.slots.answer(self.agent.game_mut(), request, saved_at).map_err(|e| format!("a save slot: {e}"))?;
+        if loading {
+            self.agent.host_took_the_screen();
+            self.agent.drain_audio();
+            if self.synth.is_some() {
+                self.synth = Some(poke_agent::native::synth_for(self.agent.game()));
+            }
+        }
+        Ok(())
     }
 
     /// Whole frames until `budget` is spent. The ceremony, the credits and the title screen they
     /// end on take no decisions, so the host plays them itself, and an empty mode stack is the
-    /// console coming back on, into the game's own save as CONTINUE would load it.
+    /// console coming back on. CONTINUE is answered by loading the newest slot, the autosave the
+    /// credits wrote, as choosing it in the slots would.
     fn advance(&mut self, budget: MachineCycles) -> (MachineCycles, Result<(), String>) {
         let mut ran = MachineCycles::ZERO;
         let mut result = Ok(());
         while ran < budget {
             ran += MachineCycles::PER_FRAME;
             if self.agent.game().modes().is_empty() {
-                let world = self.saved_world().unwrap_or_else(|| self.agent.game().world().clone());
-                *self.agent.game_mut() = Game::power_on(Some(world), GameRng::from_entropy(), SERVED_PACING);
+                let world = self.agent.game().world().clone();
+                let mut game = Game::new(world, GameRng::from_entropy(), SERVED_PACING);
+                game.push(Mode::Movie(pokered::modes::movie::Movie::power_on()));
+                game.set_slots(self.slots.slots());
+                *self.agent.game_mut() = game;
                 self.agent.host_took_the_screen();
             }
             if let Some(Mode::Movie(_) | Mode::MainMenu(_)) = self.agent.game().modes().last() {
                 self.agent.host_took_the_screen();
+                let continued = match self.agent.game().status() {
+                    Status::Waiting(Decision::MainMenu) => pokered::save_slots::newest(self.agent.game().slots()),
+                    _ => None,
+                };
+                if let Some(slot) = continued {
+                    if let Err(failure) = self.answer(SlotRequest::Load(slot)) {
+                        result = Err(failure);
+                    }
+                    continue;
+                }
                 let command = match self.agent.game().status() {
+                    // With no slot: a new game, on the first preset name, as `new_game` answers it.
                     Status::Waiting(Decision::MainMenu) => Some(Command::ChooseOption(0)),
-                    // A new game, once the title has cleared the save: the first preset name, as
-                    // `new_game` answers it.
                     Status::Waiting(Decision::IntroNameMenu) => Some(Command::ChooseOption(1)),
                     Status::Waiting(_) => Some(Command::Advance),
                     _ => None,
@@ -394,10 +418,10 @@ impl Native {
             } else if let Err(failure) = self.agent.tick() {
                 result = Err(failure);
             }
-            match self.agent.take_save() {
-                Some(Save::Written(save)) => self.save = Some(save),
-                Some(Save::Cleared) => self.save = None,
-                None => {}
+            for request in self.agent.take_slot_requests() {
+                if let Err(failure) = self.answer(request) {
+                    result = Err(failure);
+                }
             }
             let writes = self.agent.drain_audio();
             if let Some(synth) = self.synth.as_mut() {

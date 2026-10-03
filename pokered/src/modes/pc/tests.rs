@@ -468,23 +468,14 @@ mod bills {
     }
 
     #[test]
-    fn changing_the_box_asks_first_marks_full_boxes_and_moves_the_box_number() {
+    /// The cartridge asks whether it may save first; with no save there is nothing to ask.
+    fn changing_the_box_marks_full_boxes_and_moves_the_box_number() {
         let mut world = trainer(&[(PokemonSpecies::Pidgey, 5)], &[(PokemonSpecies::Spearow, 4)]);
         world.boxes.resize(3, Vec::new());
         world.boxes[2].push(box_mon(PokemonSpecies::Zubat, 6));
         let mut game = at_bills_pc(world);
         answer(&mut game, Decision::CursorMenu, Command::ChooseOption(CHANGE_BOX));
-        assert_eq!(settle(&mut game), Decision::Text);
-        assert_eq!(text_row(&game, 14), encode("When you change a").unwrap());
-        assert_eq!(read_on(&mut game), Decision::TwoOption);
-        answer(&mut game, Decision::TwoOption, Command::ChooseOption(1));
-        assert_eq!(read_on(&mut game), Decision::CursorMenu);
-        assert_eq!(selected(&game), CHANGE_BOX);
-
-        answer(&mut game, Decision::CursorMenu, Command::ChooseOption(CHANGE_BOX));
-        assert_eq!(read_on(&mut game), Decision::TwoOption);
-        answer(&mut game, Decision::TwoOption, Command::ChooseOption(0));
-        assert_eq!(settle(&mut game), Decision::CursorMenu);
+        assert_eq!(settle(&mut game), Decision::CursorMenu, "the boxes, with no question first");
         let Some(Mode::CursorMenu(menu)) = game.modes().last() else { panic!() };
         assert_eq!((menu.rows(), menu.selected()), (12, 0));
         row_at(&game, 13, 1, "BOX 1");

@@ -21,7 +21,7 @@ pub mod pokedex;
 pub mod pokemart;
 pub mod pokemon_menu;
 pub mod quantity_menu;
-pub mod save_menu;
+pub mod slot_selector;
 pub mod slots;
 pub mod start_menu;
 pub mod status_screen;

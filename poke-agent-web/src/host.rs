@@ -177,8 +177,8 @@ impl EmulatorHost {
         config: HostConfig,
     ) -> Result<Self, String> {
         let mut console = Console::new(config.game, save_state, policy, config.model, config.target_speed)?;
-        if let Some(save) = config.run.as_ref().map(|current| current.get().game_save()).transpose()?.flatten() {
-            console.restore_game_save(save);
+        if let Some(current) = config.run.as_ref() {
+            console.restore_slots(&current.get().game_slots());
         }
 
         let now = Instant::now();
@@ -1699,14 +1699,15 @@ mod tests {
         assert_eq!(second.console.native().agent.game().frames(), frames);
     }
 
-    /// The game's own save is kept beside `game.pkrd` as the cartridge's is beside `state.gbst`, a
-    /// resume reads it back, and it is what the console powers on into once the credits end.
+    /// The game's slots are kept in the run directory, a resume hands them back to the game, and
+    /// once the credits end the console continues the newest, as CONTINUE and LOAD would.
     #[test]
-    fn a_native_run_keeps_the_games_own_save_and_continues_from_it() {
-        use poke_agent::run::{RunDir, files};
+    fn a_native_run_keeps_its_slots_and_continues_from_the_newest() {
+        use poke_agent::run::RunDir;
         use pokered::mode::Mode;
+        use pokered::save_slots::{MemoryStore, SavedAt, Slot, SlotStore, SlotSummary, Thumbnail, AUTOSAVE};
 
-        let scratch = poke_agent::run::Scratch::new("host-native-game-save");
+        let scratch = poke_agent::run::Scratch::new("host-native-slots");
         let (run, _, _) =
             RunDir::open_for(GameKind::Native, &scratch.0, false, "random", &|_| true).expect("a fresh run");
         let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
@@ -1715,15 +1716,14 @@ mod tests {
             config.run = Some(Arc::clone(&current));
             config.checkpoint_interval = Duration::from_secs(3_600);
         });
-        host.console.native().agent.game_mut().push(Mode::SaveMenu(pokered::modes::save_menu::SaveMenu::new()));
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while host.console.native().save().is_none() && Instant::now() < deadline {
-            host.tick();
-            std::thread::sleep(Duration::from_micros(500));
-        }
-        let saved = host.console.native().save().expect("the SAVE menu wrote the game").to_vec();
+        let saved = host.console.native().agent.game().save();
+        let game = host.console.native().agent.game();
+        let summary = SlotSummary::of(game.world(), Thumbnail::of(&game.screen().frame()));
+        let mut store = MemoryStore::default();
+        store.write(AUTOSAVE, &saved, Slot { summary, saved_at: SavedAt { unix_seconds: 1, utc_offset_minutes: 0 } }).unwrap();
+        host.console.restore_slots(&store);
         host.checkpoint();
-        assert_eq!(std::fs::read(run.path().join(files::GAME_SAVE)).expect("save.pkrd"), saved);
+        assert_eq!(run.game_slots().read(AUTOSAVE).expect("the slot is in the run"), saved);
 
         // The credits over, with money spent since the save.
         let mut world = host.console.native().agent.game().world().clone();
@@ -1731,84 +1731,41 @@ mod tests {
         world.money = [0x00, 0x00, 0x01];
         *host.console.native().agent.game_mut() =
             pokered::Game::new(world, pokered::rng::GameRng::seeded(1), pokered::Pacing::Faithful);
-        host.tick();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !matches!(host.console.native().agent.game().modes(), [Mode::Overworld(_)]) && Instant::now() < deadline {
+            host.tick();
+        }
         let game = host.console.native().agent.game();
-        assert!(matches!(game.modes().first(), Some(Mode::Movie(_))), "the console came back on");
-        assert_eq!(game.world().money, saved_money, "CONTINUE is the save, not the world the credits ended in");
+        assert!(matches!(game.modes(), [Mode::Overworld(_)]), "never continued: {:?}", game.status());
+        assert_eq!(game.world().money, saved_money, "CONTINUE is the slot, not the world the credits ended in");
+        assert!(game.slots()[AUTOSAVE as usize].is_some(), "the loaded game was handed the slots");
         drop(host);
 
         let mut resumed = native_host(Published::new(), |config| config.run = Some(Arc::clone(&current)));
-        assert_eq!(resumed.console.native().save(), Some(&saved[..]), "a resume forgot the game's save");
+        assert_eq!(resumed.console.native().slots().read(AUTOSAVE).ok(), Some(saved), "a resume forgot the slot");
+        assert!(resumed.console.native().agent.game().slots()[AUTOSAVE as usize].is_some(), "the resumed game has no slots");
     }
 
-    /// YES to the title's clear-save dialogue deletes `save.pkrd`, so a restart has nothing to
-    /// CONTINUE and the console plays on into a new game.
+    /// With no slot to continue, the main menu has no CONTINUE and the console plays on into a new
+    /// game once the credits end.
     #[test]
-    fn a_save_cleared_at_the_title_is_gone_from_the_run() {
-        use poke_agent::run::{RunDir, files};
-        use pokered::command::{Command, Decision};
-        use pokered::input::Joypad;
-        use pokered::mode::{Mode, Status};
-        use pokered::rng::GameRng;
-        use pokered::{Game, Input, Pacing};
-
-        let scratch = poke_agent::run::Scratch::new("host-native-clear-save");
-        let (run, _, _) =
-            RunDir::open_for(GameKind::Native, &scratch.0, false, "random", &|_| true).expect("a fresh run");
-        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
-        let run = current.get();
-        let mut host = native_host(Published::new(), |config| {
-            config.run = Some(Arc::clone(&current));
-            config.checkpoint_interval = Duration::from_secs(3_600);
-        });
+    fn with_no_slot_the_console_plays_on_into_a_new_game() {
+        use pokered::mode::Mode;
+        let mut host = native_host(Published::new(), |config| config.checkpoint_interval = Duration::from_secs(3_600));
         let world = host.console.native().agent.game().world().clone();
-        host.console.restore_game_save(Game::new(world.clone(), GameRng::seeded(1), Pacing::Faithful).save());
-        host.checkpoint();
-        assert!(run.path().join(files::GAME_SAVE).is_file(), "the save was kept");
-
-        let agent = &mut host.console.native().agent;
-        *agent.game_mut() = Game::power_on(Some(world), GameRng::seeded(2), Pacing::Faithful);
-        fn to_the_title(agent: &mut poke_agent::pokemon::native_agent::NativeAgent) {
-            for _ in 0..20_000 {
-                let input = match agent.game().status() {
-                    Status::Waiting(Decision::TitleScreen) => return,
-                    Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
-                    Status::Waiting(Decision::TwoOption) => Input::Command(Command::ChooseOption(1)),
-                    _ => Input::None,
-                };
-                agent.frame(input);
-            }
-            panic!("the title never came: {:?}", agent.game().status());
-        }
-        to_the_title(agent);
-        for buttons in [Joypad::UP | Joypad::SELECT | Joypad::B, Joypad::empty()] {
-            agent.frame(Input::Buttons(buttons));
-        }
-        to_the_title(agent);
-        host.tick();
-        assert!(host.console.native().save().is_none(), "the console kept a cleared save");
-        host.checkpoint();
-        assert!(!run.path().join(files::GAME_SAVE).exists(), "save.pkrd outlived the clear");
-        drop(host);
-
-        let (_, _, state) =
-            RunDir::open_for(GameKind::Native, &scratch.0, false, "random", &|_| true).expect("resumable");
-        let mut resumed = host_from(&state.expect("a game was checkpointed"), Published::new(), |config| {
-            config.game = GameKind::Native;
-            config.run = Some(Arc::clone(&current));
-        });
-        assert!(resumed.console.native().save().is_none(), "a restart brought the save back");
+        *host.console.native().agent.game_mut() =
+            pokered::Game::new(world, pokered::rng::GameRng::seeded(1), pokered::Pacing::Faithful);
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut menu_rows = None;
-        while !matches!(resumed.console.native().agent.game().modes(), [Mode::Overworld(_)]) && Instant::now() < deadline {
-            if let Some(Mode::MainMenu(menu)) = resumed.console.native().agent.game().modes().last() {
+        while !matches!(host.console.native().agent.game().modes(), [Mode::Overworld(_)]) && Instant::now() < deadline {
+            if let Some(Mode::MainMenu(menu)) = host.console.native().agent.game().modes().last() {
                 menu_rows.get_or_insert(menu.rows());
             }
-            resumed.tick();
+            host.tick();
         }
         assert_eq!(menu_rows, Some(2), "NEW GAME and OPTION, with no CONTINUE");
-        assert!(matches!(resumed.console.native().agent.game().modes(), [Mode::Overworld(_)]),
-                "the new game never reached the overworld: {:?}", resumed.console.native().agent.game().status());
+        assert!(matches!(host.console.native().agent.game().modes(), [Mode::Overworld(_)]),
+                "the new game never reached the overworld: {:?}", host.console.native().agent.game().status());
     }
 
     /// `POST /api/new-run` on a native run: a new game in a new directory of the same kind.
@@ -1894,7 +1851,6 @@ mod tests {
             config.run = Some(Arc::clone(&current));
             config.checkpoint_interval = Duration::from_secs(3_600);
         });
-        host.console.restore_game_save(b"PKRDsaved".to_vec());
 
         let deadline = Instant::now() + Duration::from_secs(60);
         while current.get().run_id() == finished_id && Instant::now() < deadline {
@@ -1913,7 +1869,6 @@ mod tests {
         assert_eq!(party, [("BLASTOISE", "Blastoise", 85), ("PIDGEY", "Pidgey", 9)]);
         let archive = scratch.0.join(files::HALL_OF_FAME).join(&rows[0].archive);
         assert!(archive.join(files::GAME).is_file(), "the game at the moment of victory");
-        assert_eq!(std::fs::read(archive.join(files::GAME_SAVE)).ok().as_deref(), Some(&b"PKRDsaved"[..]), "the game's own save");
         assert!(!archive.join(files::STATE).exists(), "a native win filed an emulator state");
         assert!(finished.path().join(files::GAME).is_file(), "the outgoing run was checkpointed");
         assert!(finished.already_archived(1));

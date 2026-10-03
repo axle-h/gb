@@ -28,11 +28,8 @@ macro_rules! in_both_animation_modes {
 pub(crate) mod fixture;
 pub use fixture::TestFixture;
 
-pub(crate) mod cheats;
-
 pub(crate) mod coverage;
 
-pub(crate) mod completion;
 #[cfg(feature = "slow-tests")]
 pub(crate) mod completion_run;
 

@@ -47,10 +47,11 @@ Read before touching `poke-agent/src/run/`, `poke-agent-web/src/host.rs`'s new-r
   first tick so a resume does not re-announce a victory.
 - `NativeAgent::check_hall_of_fame` is the same rule on `World::hall_of_fame_teams`, and runs on
   the frames the host drives through the credits as well as the agent's own.
-- A native run keeps the game's own save, `Frame.save`, as `save.pkrd` beside `game.pkrd`, and a
-  console with no run to start next powers on into it after the credits, as CONTINUE loads the
-  cartridge's (`Native::advance`). The title's clear-save removes the file at the next checkpoint
-  (`RunDir::checkpoint_game`).
+- A native run keeps the game's save slots in memory and writes them to `slots/` beside `game.pkrd`
+  at each checkpoint (`RunDir::checkpoint_game`); a resume hands them back to the game
+  (`Console::restore_slots`), since `Game::load` brings none. A console with no run to start next
+  loads the newest slot, the Hall of Fame's autosave, at the main menu after the credits
+  (`Native::advance`).
 - The archive nests under `hall-of-fame/`, and that is load-bearing: `run::resumable` lists direct
   children of `$GB_RUN_DIR` and continues the newest.
 - `archive` copies every artifact by name. There is no "copy everything", so a new run-directory

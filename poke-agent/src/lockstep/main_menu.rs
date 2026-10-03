@@ -1,24 +1,19 @@
-//! The main menu, with no save and with one. With none it is the cartridge booted cold and START
-//! pressed at the title; with one it is the Celadon fixture's call of the start menu turned into a
-//! call of `MainMenu`, told a save was found without loading one, so the summary under `CONTINUE`
-//! has the fixture's own player, badges, Pokédex and clock to show.
+//! The main menu with no save: the cartridge booted cold and START pressed at the title. With one,
+//! the recreation's CONTINUE opens its save slots, which the cartridge has no counterpart to.
 
 use gb::cycles::MachineCycles;
 use gb::game_boy::{GameBoy, Stop};
 use gb::joypad::JoypadButtonState;
-use gb::ram::{RAM, ROM};
 use pokered::command::Decision;
 use pokered::input::Joypad;
-use pokered::mode::{Mode, Status};
+use pokered::mode::Mode;
 use pokered::modes::main_menu::MainMenu;
 use pokered::rng::GameRng;
-use pokered::systems::play_time::PlayTime;
 use pokered::world::World;
 use pokered::{Game, Input, Pacing};
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointer, DmgPointerRead};
-use super::learn_move::hijack;
-use super::status_screen::{cartridge_until_polling, ours, press, recreation_until, screen, the_world};
-use super::{assert_late, breakpoint, open_the_start_menu, to_vblank, CURSOR, DELAY3};
+use super::status_screen::{cartridge_until_polling, ours, press, recreation_until, screen};
+use super::{assert_late, breakpoint, to_vblank, CURSOR, DELAY3};
 
 /// `.mainMenuLoop` before it takes input: `ClearScreen`'s `Delay3`, the text box tiles and the font
 /// copied through `CopyVideoData` eight tiles a frame and a frame to finish, and the cursor's.
@@ -80,7 +75,7 @@ fn with_no_save_new_game_and_option_match_the_cartridge() {
     assert_eq!(gb.core().mmu().read_pointer(&sym::wNumBagItems), 0, "a cold boot, with no save loaded");
 
     let mut game = Game::new(World::default(), GameRng::seeded(0), Pacing::Faithful);
-    game.push(Mode::MainMenu(MainMenu::new(false)));
+    game.push(Mode::MainMenu(MainMenu::new()));
     let cartridge = cartridge_until_polling(&mut gb);
     let recreation = recreation_until(&mut game, Decision::MainMenu);
     assert_eq!(screen(&gb), ours(&game), "NEW GAME and OPTION");
@@ -101,52 +96,4 @@ fn with_no_save_new_game_and_option_match_the_cartridge() {
     let recreation = recreation_until_gone(&mut game);
     assert_eq!(game.menu().chosen_item, 0, "nothing else was chosen on the way");
     assert_late(cartridge, recreation, 0, "NEW GAME, answered after its 20 frames");
-}
-
-#[test]
-fn with_a_save_continue_shows_the_save_and_takes_it() {
-    let mut gb = open_the_start_menu();
-    hijack(&mut gb, sym::MainMenu);
-    let check = breakpoint(sym::CheckForPlayerNameInSRAM);
-    assert_eq!(gb.run_until(&[check], MachineCycles::PER_FRAME * 10).0, Stop::Breakpoint(check));
-    // A save found and already in WRAM: the status says so, and no carry skips `TryLoadSaveFile`.
-    gb.core_mut().mmu_mut().write(sym::wSaveFileStatus.address, 2);
-    let sp = gb.core().registers().sp;
-    let back = gb.core().mmu().read_u16_le(sp);
-    let registers = gb.core_mut().registers_mut();
-    (registers.sp, registers.pc, registers.flags.c) = (sp + 2, back, false);
-
-    let mmu = gb.core().mmu();
-    let mut world = the_world(&gb);
-    world.badges = mmu.read_pointer(&sym::wObtainedBadges);
-    world.pokedex.owned.copy_from_slice(&mmu.read_pointer_vec(&sym::wPokedexOwned, 19));
-    let time = mmu.read_pointer_vec(&sym::wPlayTimeHours, 5);
-    world.play_time = PlayTime { hours: time[0], maxed: time[1] != 0, minutes: time[2], seconds: time[3], frames: time[4], counting: false };
-    let mut game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
-    game.push(Mode::MainMenu(MainMenu::new(true)));
-
-    let cartridge = cartridge_until_polling(&mut gb);
-    let recreation = recreation_until(&mut game, Decision::MainMenu);
-    assert_eq!(screen(&gb), ours(&game), "CONTINUE, NEW GAME and OPTION");
-    assert_late(cartridge, recreation, menu_loading(), "the menu's first poll");
-
-    // `.inputLoop` reads the pad with `Joypad` rather than `JoypadLowSensitivity`, and nothing else
-    // calls it between here and there.
-    press(&mut gb, &mut game, Joypad::A);
-    let cartridge = cartridge_until(&mut gb, sym::Joypad);
-    let recreation = recreation_until(&mut game, Decision::ContinueGame);
-    assert_eq!(screen(&gb), ours(&game), "the save's summary");
-    assert_late(cartridge, recreation, 0, "the summary, after 20 frames and its own 30");
-
-    step(&mut gb, &mut game, Joypad::B, Decision::MainMenu, menu_loading(), "B back to the menu");
-
-    press(&mut gb, &mut game, Joypad::A);
-    cartridge_until(&mut gb, sym::Joypad);
-    recreation_until(&mut game, Decision::ContinueGame);
-    // `.pressedA`'s `GBPalWhiteOutWithDelay3` and `ClearScreen` are loading; its 10 frames are not.
-    press(&mut gb, &mut game, Joypad::A);
-    let cartridge = cartridge_until(&mut gb, sym::SpecialEnterMap);
-    let recreation = recreation_until_gone(&mut game);
-    assert_eq!(game.status(), Status::Idle);
-    assert_late(cartridge, recreation, 2 * DELAY3, "CONTINUE taken");
 }

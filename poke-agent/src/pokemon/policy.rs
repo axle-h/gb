@@ -24,6 +24,43 @@ use crate::pokemon::world_graph::WorldGraph;
 /// The one [`Policy::name`] that means a model is playing.
 pub const LLM_POLICY_NAME: &str = "llm";
 
+/// Where a policy's `[policy]` lines go besides stdout: nowhere until a host that shows several
+/// games' traces apart asks for them with [`Policy::trace_to`], then a queue it drains.
+#[derive(Debug, Clone, Default)]
+pub struct Trace(Option<std::sync::Arc<std::sync::Mutex<VecDeque<String>>>>);
+
+impl Trace {
+    /// Lines held for a host that stops draining; the oldest go first.
+    const CAPACITY: usize = 1000;
+
+    pub fn listening() -> Self {
+        Self(Some(Default::default()))
+    }
+
+    pub fn write(&self, line: String) {
+        let Some(lines) = &self.0 else { return };
+        let mut lines = lines.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lines.len() == Self::CAPACITY {
+            lines.pop_front();
+        }
+        lines.push_back(line);
+    }
+
+    pub fn drain(&self) -> Vec<String> {
+        let Some(lines) = &self.0 else { return Vec::new() };
+        lines.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).drain(..).collect()
+    }
+}
+
+/// `println!` that also writes the line to a [`Trace`], so stdout is unchanged.
+macro_rules! trace {
+    ($trace:expr, $($arg:tt)*) => {{
+        let line = format!($($arg)*);
+        println!("{line}");
+        $trace.write(line);
+    }};
+}
+
 /// Non-blocking policy interface.
 pub trait Policy {
     /// What this decider is called: `"llm"`, `"random"`, `"console"` or `"scripted"`.
@@ -81,6 +118,9 @@ pub trait Policy {
     fn pick_unstick(&mut self, _state: &GameState, _jam: Jam<'_>) {}
 
     fn restart(&mut self, _run_dir: Option<&std::path::Path>) {}
+
+    /// Copy every trace line to `trace` from now on; a policy that writes none ignores it.
+    fn trace_to(&mut self, _trace: Trace) {}
 
     /// `POST /api/clear`: forget what this policy remembers about the game, keep the game.
     fn clear_conversation(&mut self, _run_dir: Option<&std::path::Path>) -> Result<(), String> {
@@ -1875,6 +1915,7 @@ pub struct DeterministicPolicy {
     grind_heal_trips: u32,
     /// The map of the last battle, which a black-out is reported against.
     last_battle_map: Option<Map>,
+    trace: Trace,
 }
 
 /// Whether a map sprite is a static encounter of `species`.
@@ -1895,7 +1936,7 @@ impl DeterministicPolicy {
 
     /// Give up on `species` and record it, so steps waiting for it stop.
     fn abandon_catch(&mut self, species: PokemonSpecies, why: &str) {
-        println!("[policy] giving up on catching {species}: {why}");
+        trace!(self.trace, "[policy] giving up on catching {species}: {why}");
         if !self.catch_abandoned.contains(&species) {
             self.catch_abandoned.push(species);
         }
@@ -1936,9 +1977,9 @@ impl DeterministicPolicy {
         let full_route: Vec<PolicyStep> = self.queue.iter().cloned().collect();
         match scripted_progress::load(run_dir) {
             None if from_the_beginning =>
-                println!("[policy] no scripted progress on disk — starting the route from the beginning"),
+                trace!(self.trace, "[policy] no scripted progress on disk — starting the route from the beginning"),
             None => {
-                println!(
+                trace!(self.trace, 
                     "[policy] this run is being resumed but recorded no scripted progress, so \
                      there is no telling how much of the {total}-step route its save has already \
                      played. Parking rather than replaying the route over a game that may be \
@@ -1947,11 +1988,11 @@ impl DeterministicPolicy {
                 self.queue.clear();
             }
             Some((completed, saved_total, saved_route)) if saved_total == total && saved_route == route => {
-                println!("[policy] resuming the scripted route at step {completed}/{total}");
+                trace!(self.trace, "[policy] resuming the scripted route at step {completed}/{total}");
                 self.queue.drain(..completed.min(total));
             }
             Some((completed, saved_total, saved_route)) => {
-                println!(
+                trace!(self.trace, 
                     "[policy] the scripted route has changed under this run ({saved_total} steps \
                      / {saved_route:016x} recorded, {total} / {route:016x} now), so step \
                      {completed} means nothing here. Parking rather than replaying a different \
@@ -2026,6 +2067,7 @@ impl DeterministicPolicy {
             heal_hops: 0,
             grind_heal_trips: 0,
             last_battle_map: None,
+            trace: Trace::default(),
         }
     }
 
@@ -2113,7 +2155,7 @@ impl Policy for DeterministicPolicy {
         self.catch_ball_baseline = None;
         if self.blackout_pending {
             self.blackout_pending = false;
-            println!("[policy] BLACKOUT #{} — lost on {}; queue at {} with {:?}; party {:?}",
+            trace!(self.trace, "[policy] BLACKOUT #{} — lost on {}; queue at {} with {:?}; party {:?}",
                 self.blackouts,
                 self.last_battle_map.map_or_else(|| "an unrecorded map".to_string(), |m| m.to_string()),
                 self.queue.len(),
@@ -2136,7 +2178,7 @@ impl Policy for DeterministicPolicy {
             && needs_a_centre(state,
                 matches!(self.queue.front(), Some(PolicyStep::GrindUntilLevel { .. })))
         {
-            println!("[policy] the lead cannot fight another battle — detouring to {centre} first");
+            trace!(self.trace, "[policy] the lead cannot fight another battle — detouring to {centre} first");
             self.heal_return = Some(centre);
             self.heal_came_from = Some(state.map.map);
             self.heal_route_stuck = 0;
@@ -2157,12 +2199,12 @@ impl Policy for DeterministicPolicy {
                 if self.heal_route_stuck < Self::MAX_HEAL_ROUTE_WAIT {
                     return None;
                 }
-                println!("[policy] no Nurse in sight on {pokecenter} — carrying on without the heal");
+                trace!(self.trace, "[policy] no Nurse in sight on {pokecenter} — carrying on without the heal");
                 self.heal_return = None;
                 self.heal_route_stuck = 0;
             } else if self.heal_hops >= Self::MAX_HEAL_HOPS {
                 // Routing and arriving are different things, and only one of them was bounded.
-                println!("[policy] the heal detour to {pokecenter} has taken {} hops without \
+                trace!(self.trace, "[policy] the heal detour to {pokecenter} has taken {} hops without \
                           arriving — carrying on with the route", self.heal_hops);
                 self.heal_return = None;
                 self.heal_route_stuck = 0;
@@ -2184,7 +2226,7 @@ impl Policy for DeterministicPolicy {
                 if self.heal_route_stuck < Self::MAX_HEAL_ROUTE_WAIT {
                     return None;
                 }
-                println!("[policy] no route from {} to {} to heal — carrying on with the route",
+                trace!(self.trace, "[policy] no route from {} to {} to heal — carrying on with the route",
                     state.map.map, pokecenter);
                 self.heal_return = None;
                 self.heal_route_stuck = 0;
@@ -2204,13 +2246,13 @@ impl Policy for DeterministicPolicy {
             } else {
                 self.heal_route_stuck += 1;
                 if self.heal_route_stuck < Self::MAX_HEAL_ROUTE_WAIT { return None; }
-                println!("[policy] healed, but no route back to {from} — carrying on with the route");
+                trace!(self.trace, "[policy] healed, but no route back to {from} — carrying on with the route");
                 self.heal_came_from = None;
                 self.heal_route_stuck = 0;
             }
         }
 
-        println!("[policy] map={} pos={} front={:?} queue_len={}",
+        trace!(self.trace, "[policy] map={} pos={} front={:?} queue_len={}",
             state.map.map, state.map.player_position, self.queue.front(), self.queue.len());
         loop {
             let step = self.queue.front()?.clone();
@@ -2246,7 +2288,7 @@ impl Policy for DeterministicPolicy {
                     // Counted on every poll: the failure this survives is not always nowhere to go.
                     self.enter_stuck += 1;
                     if self.enter_stuck >= Self::MAX_ENTER_WAIT {
-                        println!("[policy] TOUR: gave up entering {to_map} from {} after {} ticks",
+                        trace!(self.trace, "[policy] TOUR: gave up entering {to_map} from {} after {} ticks",
                             state.map.map, self.enter_stuck);
                         self.enter_stuck = 0;
                         self.queue.pop_front();
@@ -2288,7 +2330,7 @@ impl Policy for DeterministicPolicy {
                         // A static encounter (a legendary) is a map sprite named after its species.
                         match actions.iter().find(|a| matches!(a.tile, MetaTile::Sprite(n) if sprite_is_species(n, species))) {
                             Some(action) => {
-                                println!("[policy] static encounter: routing to {species} at {} ({} steps)",
+                                trace!(self.trace, "[policy] static encounter: routing to {species} at {} ({} steps)",
                                     action.destination, action.route.len());
                                 self.catch_wander_stuck = 0;
                                 Some(action.clone())
@@ -2337,19 +2379,19 @@ impl Policy for DeterministicPolicy {
                     if state.map.map != on_map {
                         let action = Self::route_toward(world_graph, &actions, on_map);
                         if action.is_none() {
-                            println!("[policy] want to sweep {on_map}, but no path there!");
+                            trace!(self.trace, "[policy] want to sweep {on_map}, but no path there!");
                             self.queue.pop_front();
                             continue;
                         }
                         action
                     } else if aides::sweep_remaining(&state, on_map, min_share).is_empty() {
-                        println!("[policy] SweepDex {on_map}: every target owned — done ({} in the dex)",
+                        trace!(self.trace, "[policy] SweepDex {on_map}: every target owned — done ({} in the dex)",
                             state.pokedex_owned.species().len());
                         self.catch_wander_stuck = 0;
                         self.queue.pop_front();
                         continue;
                     } else if catch_ball(&state.bag, ball).is_none() {
-                        println!("[policy] SweepDex {on_map}: out of Pokéballs, {:?} still missing!",
+                        trace!(self.trace, "[policy] SweepDex {on_map}: out of Pokéballs, {:?} still missing!",
                             aides::sweep_remaining(&state, on_map, min_share));
                         self.catch_wander_stuck = 0;
                         self.queue.pop_front();
@@ -2371,7 +2413,7 @@ impl Policy for DeterministicPolicy {
                         if self.catch_wander_stuck < 400 {
                             None
                         } else {
-                            println!("[policy] SweepDex {on_map}: nowhere to trigger an encounter (gave up)!");
+                            trace!(self.trace, "[policy] SweepDex {on_map}: nowhere to trigger an encounter (gave up)!");
                             self.catch_wander_stuck = 0;
                             self.queue.pop_front();
                             continue;
@@ -2380,7 +2422,7 @@ impl Policy for DeterministicPolicy {
                 },
                 PolicyStep::GrindUntilLevel { target_level, on_map, target } => {
                     let Some(slot) = target.resolve(state) else {
-                        println!("[policy] nothing matching {target:?} to level up");
+                        trace!(self.trace, "[policy] nothing matching {target:?} to level up");
                         self.queue.pop_front();
                         continue;
                     };
@@ -2392,7 +2434,7 @@ impl Policy for DeterministicPolicy {
                         if pokemon.current_hp == 0 {
                             // Honour the detour's give-up here, or it is not one.
                             if self.heal_unreachable {
-                                println!("[policy] grind mon (slot {slot}) is fainted and no Pokémon \
+                                trace!(self.trace, "[policy] grind mon (slot {slot}) is fainted and no Pokémon \
                                     Centre can be routed to from {} — giving up on the grind",
                                     state.map.map);
                                 self.heal_unreachable = false;
@@ -2402,21 +2444,21 @@ impl Policy for DeterministicPolicy {
                             if let Some(center) = self.last_pokemon_center {
                                 // Counted: the round trip is the grind's other cost.
                                 self.grind_heal_trips += 1;
-                                println!("[policy] grind mon (slot {slot}) fainted — routing to {center} to heal (trip #{})",
+                                trace!(self.trace, "[policy] grind mon (slot {slot}) fainted — routing to {center} to heal (trip #{})",
                                     self.grind_heal_trips);
                                 self.heal_return = Some(center);
                                 return Self::route_toward(world_graph, &actions, center);
                             }
                         }
                     } else {
-                        println!("[policy] no Pokemon in slot {slot} to level up");
+                        trace!(self.trace, "[policy] no Pokemon in slot {slot} to level up");
                         self.queue.pop_front();
                         continue;
                     }
                     if state.map.map != on_map {
                         let action = Self::route_toward(world_graph, &actions, on_map);
                         if action.is_none() {
-                            println!("[policy] want to grind until level {} in {}, but no path there!", target_level, on_map);
+                            trace!(self.trace, "[policy] want to grind until level {} in {}, but no path there!", target_level, on_map);
                             self.queue.pop_front();
                             continue;
                         }
@@ -2443,7 +2485,7 @@ impl Policy for DeterministicPolicy {
                         Some(action)
                     } else {
                         // Pacing is only for a grassless map; elsewhere it loops.
-                        println!(
+                        trace!(self.trace, 
                             "[policy] cannot level up a Pokemon on {}: {}",
                             state.map.map,
                             match state.map.has_grass_tiles() {
@@ -2467,7 +2509,7 @@ impl Policy for DeterministicPolicy {
                         match Self::route_toward(world_graph, &actions, leader.map()) {
                             Some(action) => { self.gym_route_stuck = 0; Some(action) }
                             None if actions.iter().any(|a| matches!(a.tile, MetaTile::Cut { .. })) => {
-                                println!("[policy] no route to {} — cutting the regrown trees on {}",
+                                trace!(self.trace, "[policy] no route to {} — cutting the regrown trees on {}",
                                     leader.map(), state.map.map);
                                 self.gym_route_stuck = 0;
                                 self.queue.push_front(PolicyStep::CutTree { map: state.map.map });
@@ -2479,7 +2521,7 @@ impl Policy for DeterministicPolicy {
                                 if self.gym_route_stuck < Self::MAX_GYM_ROUTE_WAIT {
                                     None
                                 } else {
-                                    println!("[policy] want to defeat {} to obtain the {}, but no path there!", leader, badge);
+                                    trace!(self.trace, "[policy] want to defeat {} to obtain the {}, but no path there!", leader, badge);
                                     self.gym_route_stuck = 0;
                                     self.queue.pop_front();
                                     continue;
@@ -2492,7 +2534,7 @@ impl Policy for DeterministicPolicy {
                         Some(a.clone())
                     } else if actions.iter().any(|a| matches!(a.tile, MetaTile::Cut { .. })) {
                         // The leader is walled off behind cuttable trees.
-                        println!("[policy] {} is walled off — cutting the regrown trees in {}",
+                        trace!(self.trace, "[policy] {} is walled off — cutting the regrown trees in {}",
                             leader, state.map.map);
                         self.queue.push_front(PolicyStep::CutTree { map: state.map.map });
                         continue;
@@ -2587,7 +2629,7 @@ impl Policy for DeterministicPolicy {
                             return Some(action.clone());
                         }
                         if self.heal_waits >= Self::MAX_HEAL_WAITS {
-                            println!("[policy] the nurse on {} never finished healing — carrying on",
+                            trace!(self.trace, "[policy] the nurse on {} never finished healing — carrying on",
                                 state.map.map);
                         }
                         self.heal_waits = 0;
@@ -2601,7 +2643,7 @@ impl Policy for DeterministicPolicy {
                     } else {
                         let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
-                            println!("[policy] want to interact with {} on {}, but no path there!", sprite, map);
+                            trace!(self.trace, "[policy] want to interact with {} on {}, but no path there!", sprite, map);
                             self.queue.pop_front();
                             continue;
                         }
@@ -2620,7 +2662,7 @@ impl Policy for DeterministicPolicy {
                         // Loading, or walled off by the maze.
                         self.interact_skip_waits += 1;
                         if self.interact_skip_waits > 250 {
-                            println!("[policy] {} unreachable after waiting — skipping", sprite);
+                            trace!(self.trace, "[policy] {} unreachable after waiting — skipping", sprite);
                             self.interact_skip_waits = 0;
                             self.queue.pop_front();
                             continue;
@@ -2640,7 +2682,7 @@ impl Policy for DeterministicPolicy {
                     if state.map.map != map {
                         let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
-                            println!("[policy] want to use the PC on {}, but no path there!", map);
+                            trace!(self.trace, "[policy] want to use the PC on {}, but no path there!", map);
                             self.queue.pop_front();
                             continue;
                         }
@@ -2659,7 +2701,7 @@ impl Policy for DeterministicPolicy {
                     if state.map.map != map {
                         let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
-                            println!("[policy] want to fish on {map}, but no path there!");
+                            trace!(self.trace, "[policy] want to fish on {map}, but no path there!");
                             self.fish_casts = 0;
                             self.queue.pop_front();
                             continue;
@@ -2694,7 +2736,7 @@ impl Policy for DeterministicPolicy {
                 PolicyStep::RedeemPrize { .. } if state.map.map != Map::GameCornerPrizeRoom => {
                     let action = Self::route_toward(world_graph, &actions, Map::GameCornerPrizeRoom);
                     if action.is_none() {
-                        println!("[policy] want a prize, but no path to the prize room!");
+                        trace!(self.trace, "[policy] want a prize, but no path to the prize room!");
                         self.queue.pop_front();
                         continue;
                     }
@@ -2707,7 +2749,7 @@ impl Policy for DeterministicPolicy {
                     if state.map.map != on_map {
                         let action = Self::route_toward(world_graph, &actions, on_map);
                         if action.is_none() {
-                            println!("[policy] want a battle on {on_map} to use items in, but no path there!");
+                            trace!(self.trace, "[policy] want a battle on {on_map} to use items in, but no path there!");
                             self.battle_item_baseline = None;
                             self.queue.pop_front();
                             continue;
@@ -2721,7 +2763,7 @@ impl Policy for DeterministicPolicy {
                             .map(|(&item, _)| item)
                             .collect();
                         if left.is_empty() {
-                            println!("[policy] UseItemsInBattle {on_map}: every item spent — done");
+                            trace!(self.trace, "[policy] UseItemsInBattle {on_map}: every item spent — done");
                             self.battle_item_baseline = None;
                             self.catch_wander_stuck = 0;
                             self.queue.pop_front();
@@ -2729,7 +2771,7 @@ impl Policy for DeterministicPolicy {
                         }
                         // Nothing left in the bag to spend — say so rather than pace for ever.
                         if left.iter().all(|&i| crate::pokemon::postgame::items::bag_quantity(&state, i) == 0) {
-                            println!("[policy] UseItemsInBattle {on_map}: none of {left:?} are in the bag — skipping");
+                            trace!(self.trace, "[policy] UseItemsInBattle {on_map}: none of {left:?} are in the bag — skipping");
                             self.battle_item_baseline = None;
                             self.catch_wander_stuck = 0;
                             self.queue.pop_front();
@@ -2743,7 +2785,7 @@ impl Policy for DeterministicPolicy {
                             None => {
                                 self.catch_wander_stuck += 1;
                                 if self.catch_wander_stuck < 400 { None } else {
-                                    println!("[policy] UseItemsInBattle {on_map}: nowhere to trigger an encounter!");
+                                    trace!(self.trace, "[policy] UseItemsInBattle {on_map}: nowhere to trigger an encounter!");
                                     self.battle_item_baseline = None;
                                     self.catch_wander_stuck = 0;
                                     self.queue.pop_front();
@@ -2758,7 +2800,7 @@ impl Policy for DeterministicPolicy {
                     if state.map.map != map {
                         let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
-                            println!("[policy] want the PC on {}, but no path there!", map);
+                            trace!(self.trace, "[policy] want the PC on {}, but no path there!", map);
                             self.queue.pop_front();
                             continue;
                         }
@@ -2772,7 +2814,7 @@ impl Policy for DeterministicPolicy {
                     if state.map.map != map {
                         let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
-                            println!("[policy] want to collect {} on {}, but no path there!", sprite, map);
+                            trace!(self.trace, "[policy] want to collect {} on {}, but no path there!", sprite, map);
                             self.collect_item_waits = 0;
                             self.queue.pop_front();
                             continue;
@@ -2791,7 +2833,7 @@ impl Policy for DeterministicPolicy {
                         // Bounded: a refused pickup never makes the sprite go.
                         self.collect_item_waits += 1;
                         if self.collect_item_waits >= Self::MAX_COLLECT_ITEM_WAITS {
-                            println!("[policy] gave up collecting {sprite} on {map} after {} polls{}",
+                            trace!(self.trace, "[policy] gave up collecting {sprite} on {map} after {} polls{}",
                                 self.collect_item_waits,
                                 match state.bag.len() >= crate::pokemon::bag::Bag::MAX_ITEMS {
                                     true => format!(" — the bag is full ({} entries), which refuses \
@@ -2818,7 +2860,7 @@ impl Policy for DeterministicPolicy {
                     if state.map.map != map {
                         let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
-                            println!("[policy] want to buy {} from {} but no path there!", item, map);
+                            trace!(self.trace, "[policy] want to buy {} from {} but no path there!", item, map);
                             self.queue.pop_front();
                             continue;
                         }
@@ -2837,7 +2879,7 @@ impl Policy for DeterministicPolicy {
                         // Neither money nor bag moved: the wallet, not a dropped confirm.
                         let bag_full = state.bag.len() >= crate::pokemon::bag::Bag::MAX_ITEMS
                             && !state.bag.iter().any(|i| i.id == item.id);
-                        println!(
+                        trace!(self.trace, 
                             "[policy] bought {} of {} from {} — {}",
                             held, item, map,
                             if bag_full { format!("the bag is full at {} entries, and ¥{} was not the problem",
@@ -2849,7 +2891,7 @@ impl Policy for DeterministicPolicy {
                         self.queue.pop_front();
                         continue;
                     } else if self.mart_attempts >= Self::MAX_MART_ATTEMPTS {
-                        println!("[policy] gave up buying {} from {} after {} attempts", item, map, self.mart_attempts);
+                        trace!(self.trace, "[policy] gave up buying {} from {} after {} attempts", item, map, self.mart_attempts);
                         self.mart_attempts = 0;
                         self.mart_baseline = None;
                         self.queue.pop_front();
@@ -2860,7 +2902,7 @@ impl Policy for DeterministicPolicy {
                             .find(|a| matches!(a.tile, MetaTile::Sprite(sprite) if sprite == "Clerk" || sprite == "Clerk 1"));
 
                         if action.is_none() {
-                            println!("[policy] BuyFromMart step encountered in pick_overworld_action and no clerk available — skipping");
+                            trace!(self.trace, "[policy] BuyFromMart step encountered in pick_overworld_action and no clerk available — skipping");
                             self.mart_attempts = 0;
                             self.queue.pop_front();
                             continue;
@@ -2898,7 +2940,7 @@ impl Policy for DeterministicPolicy {
                     if state.map.map != map {
                         let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
-                            println!("[policy] want to cut a tree on {map} but no path there!");
+                            trace!(self.trace, "[policy] want to cut a tree on {map} but no path there!");
                             self.queue.pop_front();
                             continue;
                         }
@@ -2918,7 +2960,7 @@ impl Policy for DeterministicPolicy {
                     if state.map.map != Map::VermilionGym {
                         let action = Self::route_toward(world_graph, &actions, Map::VermilionGym);
                         if action.is_none() {
-                            println!("[policy] want to solve trash cans but can't reach Vermilion Gym!");
+                            trace!(self.trace, "[policy] want to solve trash cans but can't reach Vermilion Gym!");
                             self.queue.pop_front();
                             continue;
                         }
@@ -2932,7 +2974,7 @@ impl Policy for DeterministicPolicy {
                     if state.map.map != map {
                         let action = Self::route_toward(world_graph, &actions, map);
                         if action.is_none() {
-                            println!("[policy] want to flip a switch on {map} but can't reach it!");
+                            trace!(self.trace, "[policy] want to flip a switch on {map} but can't reach it!");
                             self.queue.pop_front();
                             continue;
                         }
@@ -2947,7 +2989,7 @@ impl Policy for DeterministicPolicy {
                     let in_elevator = matches!(state.map.map,
                         Map::RocketHideoutElevator | Map::SilphCoElevator | Map::CeladonMartElevator);
                     if !in_elevator {
-                        println!("[policy] UseElevator but not in the elevator room ({});", state.map.map);
+                        trace!(self.trace, "[policy] UseElevator but not in the elevator room ({});", state.map.map);
                         self.queue.pop_front();
                         continue;
                     }
@@ -3004,7 +3046,7 @@ impl Policy for DeterministicPolicy {
                     if let Some(item) = next {
                         if let Some(action) = actions.iter().find(|a|
                             matches!(a, BattleAction::UseItem { item: b, .. } if b.id == item)) {
-                            println!("[policy] UseItemsInBattle: using {item:?}");
+                            trace!(self.trace, "[policy] UseItemsInBattle: using {item:?}");
                             return Some(action.clone());
                         }
                     } else {
@@ -3019,7 +3061,7 @@ impl Policy for DeterministicPolicy {
         if self.heal_return.is_some() && battle_state.battle_type == BattleType::Wild {
             // Returning to the pokemon center, run from battles.
             if let Some(center) = self.last_pokemon_center {
-                println!("[policy] PP critically low — fleeing and routing to {center} to heal");
+                trace!(self.trace, "[policy] PP critically low — fleeing and routing to {center} to heal");
             }
             return Some(BattleAction::Run);
         }
@@ -3032,11 +3074,11 @@ impl Policy for DeterministicPolicy {
             && all_damaging_moves_low_pp(&actions)
         {
             if let Some(center) = self.last_pokemon_center {
-                println!("[policy] PP critically low — fleeing and routing to {center} to heal");
+                trace!(self.trace, "[policy] PP critically low — fleeing and routing to {center} to heal");
                 self.heal_return = Some(center);
                 return Some(BattleAction::Run);
             } else {
-                println!("[policy] PP critically low but no known Pokémon Center to return to — fighting on");
+                trace!(self.trace, "[policy] PP critically low but no known Pokémon Center to return to — fighting on");
             }
         }
 
@@ -3087,7 +3129,7 @@ impl Policy for DeterministicPolicy {
                         if pokemon.current_hp as u32 * 4 > pokemon.stats.hp as u32 && pokemon.level > battle_state.player.level))
                     .max_by_key(|a| match a { BattleAction::SwitchPokemon { pokemon, .. } => pokemon.level, _ => 0 })
                 {
-                    println!("[policy] grind: trainee (slot {slot}) participated — handing off to a tank");
+                    trace!(self.trace, "[policy] grind: trainee (slot {slot}) participated — handing off to a tank");
                     self.trainee_participated = true;
                     return Some(sw.clone());
                 }
@@ -3097,7 +3139,7 @@ impl Policy for DeterministicPolicy {
                     BattleAction::SwitchPokemon { slot: s, pokemon }
                         if *s == slot && pokemon.current_hp > 0
                         && battle_state.enemy.level <= pokemon.level + 6)) {
-                    println!("[policy] training slot {slot} — switching it in to take the XP");
+                    trace!(self.trace, "[policy] training slot {slot} — switching it in to take the XP");
                     self.trainee_participated = true;
                     return Some(sw.clone());
                 }
@@ -3116,7 +3158,7 @@ impl Policy for DeterministicPolicy {
                     if potion_rank(item.id) >= 0 && *target == active))
                 .max_by_key(|a| match a { BattleAction::UseItem { item, .. } => potion_rank(item.id), _ => -1 });
             if let Some(heal_action) = heal {
-                println!("[policy] HP critical ({:.0}%) — using healing item", battle_state.player.remaining_hp() * 100.0);
+                trace!(self.trace, "[policy] HP critical ({:.0}%) — using healing item", battle_state.player.remaining_hp() * 100.0);
                 return Some(heal_action.clone());
             }
         }
@@ -3144,17 +3186,17 @@ impl Policy for DeterministicPolicy {
                             && best_pokeball.id != ItemId::MasterBall
                             && (thrown > 0 || battle_state.player.level < battle_state.enemy.level + 12) {
                             if let Some(mv) = pick_best_move(&battle_state, &actions, true) {
-                                println!("[policy] enemy HP > 50% — weakening before throwing ball");
+                                trace!(self.trace, "[policy] enemy HP > 50% — weakening before throwing ball");
                                 return Some(mv);
                             }
                         }
 
                         return Some(use_pokeball_action.clone());
                     } else {
-                        println!("[policy] want to catch a {}, but no use Pokéball actions were provided!", species);
+                        trace!(self.trace, "[policy] want to catch a {}, but no use Pokéball actions were provided!", species);
                     }
                 } else {
-                    println!("[policy] want to catch a {}, but no Pokéballs left!", species);
+                    trace!(self.trace, "[policy] want to catch a {}, but no Pokéballs left!", species);
                 }
             }
         }
@@ -3176,7 +3218,7 @@ impl Policy for DeterministicPolicy {
                         && pokemon.current_hp as u32 * 2 > pokemon.stats.hp as u32;
                     let strong_enough = pokemon.level >= battle_state.player.level;
                     if healthy_enough && strong_enough && pokemon.current_hp > battle_state.player.current_hp {
-                        println!("[policy] HP critical — switching to {} (lv{} {}/{}hp)",
+                        trace!(self.trace, "[policy] HP critical — switching to {} (lv{} {}/{}hp)",
                             pokemon.species, pokemon.level, pokemon.current_hp, pokemon.stats.hp);
                         return Some(*switch);
                     }
@@ -3199,10 +3241,10 @@ impl Policy for DeterministicPolicy {
         {
             match self.last_pokemon_center {
                 Some(center) => {
-                    println!("[policy] HP critical, no heal/switch — fleeing to {center} to heal");
+                    trace!(self.trace, "[policy] HP critical, no heal/switch — fleeing to {center} to heal");
                     self.heal_return = Some(center);
                 }
-                None => println!("[policy] HP critical and no Centre known yet — fleeing anyway"),
+                None => trace!(self.trace, "[policy] HP critical and no Centre known yet — fleeing anyway"),
             }
             return Some(BattleAction::Run);
         }
@@ -3227,7 +3269,7 @@ impl Policy for DeterministicPolicy {
                     .max_by_key(|(d, _)| *d);
                 if let Some((bench_dmg, sw)) = best_switch {
                     if bench_dmg * 2 >= active_best * 3 && (bench_dmg * 3) >= battle_state.enemy.stats.hp as u32 {
-                        println!("[policy] active out of strong moves (dmg {active_best}) — switching to a fresher attacker (dmg {bench_dmg})");
+                        trace!(self.trace, "[policy] active out of strong moves (dmg {active_best}) — switching to a fresher attacker (dmg {bench_dmg})");
                         return Some(sw.clone());
                     }
                 }
@@ -3254,7 +3296,7 @@ impl Policy for DeterministicPolicy {
             .max_by_key(|(dmg, _)| *dmg)
             .map(|(_, a)| a)
         {
-            println!("[policy] no damaging move available — switching to an attacker");
+            trace!(self.trace, "[policy] no damaging move available — switching to an attacker");
             return Some(switch.clone());
         }
 
@@ -3274,7 +3316,7 @@ impl Policy for DeterministicPolicy {
             .cloned();
         if last_resort.is_none() {
             // A `None` for ever looks like thinking and the watchdog never fires, so say so.
-            println!("[policy] no battle action to take against {} — options {:?}",
+            trace!(self.trace, "[policy] no battle action to take against {} — options {:?}",
                 battle_state.enemy.species, actions);
         }
         last_resort
@@ -3282,7 +3324,7 @@ impl Policy for DeterministicPolicy {
 
     fn pick_nickname(&mut self, _species: PokemonSpecies) -> Option<Option<String>> {
         let name = self.name_picker.pick().to_string();
-        println!("[policy] pick name={}", name);
+        trace!(self.trace, "[policy] pick name={}", name);
         Some(Some(name))
     }
 
@@ -3300,7 +3342,7 @@ impl Policy for DeterministicPolicy {
         let slot = current_moves.iter().enumerate()
             .min_by_key(|(_, m)| value(m.name))
             .map(|(i, _)| i)?;
-        println!("[policy] learning {new_move:?} — forgetting slot {slot} ({:?})",
+        trace!(self.trace, "[policy] learning {new_move:?} — forgetting slot {slot} ({:?})",
             current_moves.get(slot).map(|m| m.name));
         Some(Some(slot))
     }
@@ -3324,7 +3366,7 @@ impl Policy for DeterministicPolicy {
                         return Some(FieldMove::UseItemPc { op, item, qty, pc });
                     }
                     None => {
-                        println!("[policy] UseItemPc: {map} has no PC — skipping");
+                        trace!(self.trace, "[policy] UseItemPc: {map} has no PC — skipping");
                         self.queue.pop_front();
                         return None;
                     }
@@ -3337,7 +3379,7 @@ impl Policy for DeterministicPolicy {
                 self.queue.pop_front();
                 return match crate::pokemon::tile_map::pc_locations_for(map).first() {
                     Some(&pc) => Some(FieldMove::UsePcBox { op, pc }),
-                    None => { println!("[policy] UsePcBox: {map} has no PC — skipping"); None }
+                    None => { trace!(self.trace, "[policy] UsePcBox: {map} has no PC — skipping"); None }
                 };
             }
         }
@@ -3363,7 +3405,7 @@ impl Policy for DeterministicPolicy {
             if state.map.map == map {
                 use crate::pokemon::postgame::fishing;
                 if fishing::goal_met(state, goal, self.fish_casts) {
-                    println!("[policy] Fish: {goal:?} met after {} casts — done", self.fish_casts);
+                    trace!(self.trace, "[policy] Fish: {goal:?} met after {} casts — done", self.fish_casts);
                     self.fish_casts = 0;
                     self.queue.pop_front();
                     return None;
@@ -3371,7 +3413,7 @@ impl Policy for DeterministicPolicy {
                 match fishing::pick(state, rod) {
                     Some(field_move) => { self.fish_casts += 1; return Some(field_move); }
                     None => {
-                        println!("[policy] Fish: no water on {map} the player can stand next to — skipping");
+                        trace!(self.trace, "[policy] Fish: no water on {map} the player can stand next to — skipping");
                         self.fish_casts = 0;
                         self.queue.pop_front();
                         return None;
@@ -3386,7 +3428,7 @@ impl Policy for DeterministicPolicy {
             match items::pick(state, item, target, baseline, self.item_use_attempts) {
                 Ok(field_move) => {
                     if self.item_use_attempts >= Self::MAX_ITEM_USE_ATTEMPTS {
-                        println!("[policy] UseBagItem: gave up on {item:?} after {} attempts",
+                        trace!(self.trace, "[policy] UseBagItem: gave up on {item:?} after {} attempts",
                             self.item_use_attempts);
                         self.item_use_attempts = 0;
                         self.item_use_baseline = None;
@@ -3397,7 +3439,7 @@ impl Policy for DeterministicPolicy {
                     return Some(field_move);
                 }
                 Err(why) => {
-                    println!("[policy] UseBagItem: {why} — done");
+                    trace!(self.trace, "[policy] UseBagItem: {why} — done");
                     self.item_use_attempts = 0;
                     self.item_use_baseline = None;
                     self.queue.pop_front();
@@ -3411,7 +3453,7 @@ impl Policy for DeterministicPolicy {
         }
         if let Some(&PolicyStep::MovePokemonToFront { target }) = self.queue.front() {
             let Some(slot) = target.resolve(state) else {
-                println!("[policy] MovePokemonToFront: {target:?} is not in the party — skipping");
+                trace!(self.trace, "[policy] MovePokemonToFront: {target:?} is not in the party — skipping");
                 self.queue.pop_front();
                 return None;
             };
@@ -3425,7 +3467,7 @@ impl Policy for DeterministicPolicy {
                 && slot != 0
                 && state.pokemon.get(usize::from(slot)).is_some_and(|mon| mon.current_hp > 0)
             {
-                println!("[policy] grind: leading with slot {slot} so it takes the whole battle and the whole XP");
+                trace!(self.trace, "[policy] grind: leading with slot {slot} so it takes the whole battle and the whole XP");
                 return Some(FieldMove::ReorderParty { slot });
             }
             // Cure the tick here, or pay for it as a four-warp round trip to a Pokémon Centre.
@@ -3442,7 +3484,7 @@ impl Policy for DeterministicPolicy {
                 && (cure == ItemId::FullHeal
                     || mon.status == crate::pokemon::status::PokemonStatus::Poisoned)
             {
-                println!("[policy] grind: {:?} is {:?} — curing it with a {cure:?} rather than walking to a Centre",
+                trace!(self.trace, "[policy] grind: {:?} is {:?} — curing it with a {cure:?} rather than walking to a Centre",
                     mon.species, mon.status);
                 return Some(FieldMove::UseBagItem { item: cure,
                     target: crate::pokemon::postgame::items::UseTarget::Party { slot, evolve: true } });
@@ -3450,7 +3492,7 @@ impl Policy for DeterministicPolicy {
         }
         if let Some(&PolicyStep::UseFlash { slot }) = self.queue.front() {
             if !state.map_is_dark {
-                println!("[policy] UseFlash: {} is lit — done", state.map.map);
+                trace!(self.trace, "[policy] UseFlash: {} is lit — done", state.map.map);
                 self.queue.pop_front();
                 return None;
             }
@@ -3460,18 +3502,18 @@ impl Policy for DeterministicPolicy {
         }
         if let Some(&PolicyStep::UseStrength { target }) = self.queue.front() {
             if state.strength_active {
-                println!("[policy] UseStrength: BIT_STRENGTH_ACTIVE set — done");
+                trace!(self.trace, "[policy] UseStrength: BIT_STRENGTH_ACTIVE set — done");
                 self.queue.pop_front();
                 return None;
             }
             // "Not in the party" has two meanings and only one of them is worth waiting for.
             if self.target_was_abandoned(target) {
-                println!("[policy] UseStrength: {target:?} was never caught — skipping");
+                trace!(self.trace, "[policy] UseStrength: {target:?} was never caught — skipping");
                 self.queue.pop_front();
                 return None;
             }
             let Some(slot) = target.resolve(state) else {
-                println!("[policy] UseStrength: {target:?} is not in the party — waiting");
+                trace!(self.trace, "[policy] UseStrength: {target:?} is not in the party — waiting");
                 return None;
             };
             let (slot, move_index) = field_move_carrier(state, PokemonMoveName::Strength)
@@ -3483,7 +3525,7 @@ impl Policy for DeterministicPolicy {
             let boulder_on_switch = state.map.sprites.iter()
                 .any(|s| s.name.starts_with("Boulder") && !s.hidden && s.position == switch);
             if boulder_on_switch {
-                println!("[policy] SolveBoulders: boulder on switch {switch} — done");
+                trace!(self.trace, "[policy] SolveBoulders: boulder on switch {switch} — done");
                 self.queue.pop_front();
                 return None;
             }
@@ -3502,7 +3544,7 @@ impl Policy for DeterministicPolicy {
                 }
             };
             if done {
-                println!("[policy] DropBoulderInHole: a boulder fell into {hole} — done");
+                trace!(self.trace, "[policy] DropBoulderInHole: a boulder fell into {hole} — done");
                 self.boulder_drop_baseline = None;
                 self.queue.pop_front();
                 return None;
@@ -3518,31 +3560,31 @@ impl Policy for DeterministicPolicy {
                     .map_or(false, |p| p.moves.iter().flatten().any(|m| m.name == mv))
             });
             if already_knows {
-                println!("[policy] TeachMove: {target:?} already knows the move — done");
+                trace!(self.trace, "[policy] TeachMove: {target:?} already knows the move — done");
                 self.queue.pop_front();
                 return None;
             }
             // A TM never picked up cannot be taught, and the driver would loop looking for it.
             if !state.bag.iter().any(|b| b.id == item) {
-                println!("[policy] TeachMove: {item:?} is not in the bag — skipping");
+                trace!(self.trace, "[policy] TeachMove: {item:?} is not in the bag — skipping");
                 self.queue.pop_front();
                 return None;
             }
             // "Not in the party" has two meanings and only one of them is worth waiting for.
             if self.target_was_abandoned(target) {
-                println!("[policy] TeachMove: {target:?} was never caught — skipping");
+                trace!(self.trace, "[policy] TeachMove: {target:?} was never caught — skipping");
                 self.queue.pop_front();
                 return None;
             }
             let Some(target_slot) = resolved else {
-                println!("[policy] TeachMove: {target:?} is not in the party — waiting");
+                trace!(self.trace, "[policy] TeachMove: {target:?} is not in the party — waiting");
                 return None;
             };
             // The cartridge refuses a machine outside the learnset back into the party menu,
             // which the driver cannot leave.
             if state.pokemon.get(target_slot as usize)
                 .is_some_and(|mon| !crate::pokemon::learnset::can_learn(mon.species, item)) {
-                println!("[policy] TeachMove: {target:?} cannot learn {item:?} — skipping");
+                trace!(self.trace, "[policy] TeachMove: {target:?} cannot learn {item:?} — skipping");
                 self.queue.pop_front();
                 return None;
             }
@@ -3551,7 +3593,7 @@ impl Policy for DeterministicPolicy {
         if let Some(&PolicyStep::UseRareCandy { slot }) = self.queue.front() {
             // Done once the Rare Candy is gone (consumed).
             if !state.bag.iter().any(|b| b.id == ItemId::RareCandy) {
-                println!("[policy] UseRareCandy: consumed — done");
+                trace!(self.trace, "[policy] UseRareCandy: consumed — done");
                 self.queue.pop_front();
                 return None;
             }
@@ -3561,12 +3603,12 @@ impl Policy for DeterministicPolicy {
             match toss_for_room(state, item.id, self.queue.iter()) {
                 Ok(None) => {}
                 Ok(Some(toss)) => {
-                    println!("[policy] BuyFromMart: the bag is full, so {toss:?} goes to make room for {item}");
+                    trace!(self.trace, "[policy] BuyFromMart: the bag is full, so {toss:?} goes to make room for {item}");
                     return Some(FieldMove::TossItem { item: toss });
                 }
                 Err(()) if self.no_room_reported != Some(item.id) => {
                     self.no_room_reported = Some(item.id);
-                    println!("[policy] BuyFromMart: the bag is full and the route needs everything in it, \
+                    trace!(self.trace, "[policy] BuyFromMart: the bag is full and the route needs everything in it, \
                               so {item} from {map} has no slot to go in");
                 }
                 Err(()) => {}
@@ -3574,7 +3616,7 @@ impl Policy for DeterministicPolicy {
         }
         if let Some(&PolicyStep::TossItem { item }) = self.queue.front() {
             if !state.bag.iter().any(|b| b.id == item) {
-                println!("[policy] TossItem: no {item:?} in the bag — done");
+                trace!(self.trace, "[policy] TossItem: no {item:?} in the bag — done");
                 self.queue.pop_front();
                 return None;
             }
@@ -3584,7 +3626,7 @@ impl Policy for DeterministicPolicy {
             // Done when Dig has warped us off this map.
             match self.dig_from_map {
                 Some(from) if from != state.map.map => {
-                    println!("[policy] Dig: out of {from} → {} — done", state.map.map);
+                    trace!(self.trace, "[policy] Dig: out of {from} → {} — done", state.map.map);
                     self.dig_from_map = None;
                     self.queue.pop_front();
                     return None;
@@ -3594,12 +3636,12 @@ impl Policy for DeterministicPolicy {
             }
             // "Not in the party" has two meanings and only one of them is worth waiting for.
             if self.target_was_abandoned(target) {
-                println!("[policy] Dig: {target:?} was never caught — skipping");
+                trace!(self.trace, "[policy] Dig: {target:?} was never caught — skipping");
                 self.queue.pop_front();
                 return None;
             }
             let Some(slot) = target.resolve(state) else {
-                println!("[policy] Dig: {target:?} is not in the party — waiting");
+                trace!(self.trace, "[policy] Dig: {target:?} is not in the party — waiting");
                 return None;
             };
             let (slot, move_index) = field_move_carrier(state, PokemonMoveName::Dig)
@@ -3612,7 +3654,7 @@ impl Policy for DeterministicPolicy {
                 .map(|p| p.species);
             let Some(current) = current else {
                 // A `Species` target gone has evolved away; a `Slot` one is off the end.
-                println!("[policy] EvolveWithStone: {target:?} is not in the party — done");
+                trace!(self.trace, "[policy] EvolveWithStone: {target:?} is not in the party — done");
                 self.evolve_baseline = None;
                 self.queue.pop_front();
                 return None;
@@ -3622,7 +3664,7 @@ impl Policy for DeterministicPolicy {
             }
             let evolve_from = self.evolve_baseline.expect("just set").1;
             if current != evolve_from {
-                println!("[policy] EvolveWithStone: {target:?} is now {current:?} — done");
+                trace!(self.trace, "[policy] EvolveWithStone: {target:?} is now {current:?} — done");
                 self.evolve_baseline = None;
                 self.queue.pop_front();
                 return None;
@@ -3633,7 +3675,7 @@ impl Policy for DeterministicPolicy {
         if let Some(&PolicyStep::SolveTrashCans) = self.queue.front() {
             if let Some(puzzle) = &state.trash_cans {
                 if puzzle.second_opened {
-                    println!("[policy] SolveTrashCans: both locks open — door unlocked");
+                    trace!(self.trace, "[policy] SolveTrashCans: both locks open — door unlocked");
                     self.queue.pop_front();
                     return None;
                 }
@@ -3647,7 +3689,7 @@ impl Policy for DeterministicPolicy {
                     // Pokémon Mansion: one global switch toggles every floor's gates.
                     let baseline = *self.mansion_flip_baseline.get_or_insert(state.mansion_switch_on);
                     if state.mansion_switch_on != baseline {
-                        println!("[policy] FlipSwitch: Mansion switch toggled to {} — done", state.mansion_switch_on);
+                        trace!(self.trace, "[policy] FlipSwitch: Mansion switch toggled to {} — done", state.mansion_switch_on);
                         self.mansion_flip_baseline = None;
                         self.queue.pop_front();
                         return None;
@@ -3663,7 +3705,7 @@ impl Policy for DeterministicPolicy {
                         MetaTile::Warp { to_map, .. } if to_map == reveals)),
                 };
                 if done {
-                    println!("[policy] FlipSwitch: {reveals} passage revealed — done");
+                    trace!(self.trace, "[policy] FlipSwitch: {reveals} passage revealed — done");
                     self.queue.pop_front();
                     return None;
                 }
@@ -3686,7 +3728,7 @@ impl Policy for DeterministicPolicy {
             // Seen and now gone: the item's effect removed it (the Snorlax).
             if !present && self.collect_item_seen {
                 self.collect_item_seen = false;
-                println!("[policy] UseFieldItem: {} gone — done", target.name);
+                trace!(self.trace, "[policy] UseFieldItem: {} gone — done", target.name);
                 self.queue.pop_front();
                 return None;
             }
@@ -3698,7 +3740,7 @@ impl Policy for DeterministicPolicy {
         }
         if let Some(&PolicyStep::UseVendingMachine { at, drink }) = self.queue.front() {
             if state.bag.contains(&drink) {
-                println!("[policy] UseVendingMachine: bought {drink:?} — done");
+                trace!(self.trace, "[policy] UseVendingMachine: bought {drink:?} — done");
                 self.queue.pop_front();
                 return None;
             }
@@ -3717,11 +3759,11 @@ impl Policy for DeterministicPolicy {
                     state.money,
                     state.bag.iter().find(|entry| entry.id == item.id).map_or(0, |entry| entry.quantity),
                 ));
-                println!("[policy] BuyFromMart: {:?} (attempt {})", item, self.mart_attempts);
+                trace!(self.trace, "[policy] BuyFromMart: {:?} (attempt {})", item, self.mart_attempts);
                 Some(*item)
             }
             _ => {
-                println!("[policy] pick_mart_purchase called but no BuyFromMart step queued — returning None");
+                trace!(self.trace, "[policy] pick_mart_purchase called but no BuyFromMart step queued — returning None");
                 None
             },
         };
@@ -3738,10 +3780,16 @@ impl Policy for DeterministicPolicy {
         scripted_progress::clear(&cursor.dir);
         if let Some(dir) = run_dir { cursor.dir = dir.to_path_buf(); }
         cursor.written = usize::MAX;
+        let trace = std::mem::take(&mut self.trace);
         *self = Self::new(self.seed, cursor.full_route.iter().cloned());
         self.progress = Some(cursor);
-        println!("[policy] new run — the scripted route starts again at step 0");
+        self.trace = trace;
+        trace!(self.trace, "[policy] new run — the scripted route starts again at step 0");
         self.record_progress();
+    }
+
+    fn trace_to(&mut self, trace: Trace) {
+        self.trace = trace;
     }
 
     fn steps_remaining(&self) -> Option<usize> {
@@ -3964,6 +4012,19 @@ mod scripted_progress_tests {
         let second = resumed_policy_in(&scratch.0, route());
         assert_eq!(second.steps_remaining(), Some(2), "the route resumes at step 3 of 5");
         assert_eq!(second.queue.front(), Some(&PolicyStep::enter(Map::Route2)));
+    }
+
+    /// A host given the trace sees each line stdout does, a new run's included.
+    #[test]
+    fn the_trace_carries_each_line_across_a_restart() {
+        let scratch = Scratch::new("scripted-progress-trace");
+        let trace = Trace::listening();
+        let mut policy = DeterministicPolicy::new(42, route());
+        policy.trace_to(trace.clone());
+        let mut policy = policy.resuming_in(&scratch.0, true);
+        assert_eq!(trace.drain(), ["[policy] no scripted progress on disk — starting the route from the beginning"]);
+        policy.restart(None);
+        assert_eq!(trace.drain(), ["[policy] new run — the scripted route starts again at step 0"]);
     }
 
     /// A run with no cursor is a new game and starts at the beginning.

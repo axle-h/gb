@@ -1,116 +1,235 @@
-use std::thread::sleep;
-use std::time::{Duration, Instant};
+//! The window: the cartridge and the recreation side by side from power-on, the keyboard routed to
+//! both or either (`Tab`, or a click on the toggle), the recreation's sound alone, and both games'
+//! logs beneath.
+//!
+//! A game controller presses the pad as the keyboard does, and a state file dropped on either
+//! game's half of the window is loaded into that game. The TOUR button, or `T`, plays the grand
+//! tour on both games from a fresh game, kept together a step at a time; while it plays, neither
+//! the keyboard nor a load reaches either game.
+//!
+//! Keys besides the pad's (arrows, `X` A, `Z` B, `Return` START, right `Shift` or `Backspace`
+//! SELECT): `C` the native colour mode, `M` mute, `1`-`4` the speed (1x, 2x, 4x, as fast as the
+//! host can), `T` the tour, `F5` the emulated agent,
+//! `F8`/`F9` the emulator's quick-save, `Ctrl`+`F8`/`F9` the recreation's, held in memory alone,
+//! `F11` the window to `window.png`, and the emulator's debugging keys `F1`-`F3`, `F7`, `F10`,
+//! `F12`, `W`, `A` and `P`.
+
 use std::collections::VecDeque;
-use itertools::Itertools;
+use std::time::{Duration, Instant};
 use sdl2::audio::{AudioQueue, AudioSpecDesired};
 use sdl2::event::Event;
-use sdl2::keyboard::Keycode;
-use sdl2::pixels::Color;
+use sdl2::keyboard::{Keycode, Mod, Scancode};
+use sdl2::mouse::MouseButton;
 use sdl2::pixels::PixelFormatEnum;
-use gb::cycles::MachineCycles;
-use gb::game_boy::GameBoy;
 use gb::lcd_control::{TileDataMode, TileMapMode};
-use poke_agent::pokemon::agent::PokemonAgent;
 use poke_agent::pokemon::{PokemonApi, PokemonApiTrait};
-use poke_agent::pokemon::map_metadata::MapMetadataCache;
-use poke_agent::pokemon::options::{SERVED_OPTIONS, keep_game_options};
 use poke_agent::pokemon::policy::ConsolePolicy;
-use crate::sdl::frame_rate::FrameRate;
-use gb::ppu::{LCD_HEIGHT, LCD_WIDTH};
-use crate::sdl::font::FontTextures;
+use pokered::audio::synth::SAMPLE_RATE;
+use pokered::gfx::colour::ColourMode;
+use pokered::input::Joypad;
+use crate::sdl::controller::Controllers;
+use crate::sdl::games::{Games, Side};
+use crate::sdl::log::Source;
+use crate::sdl::speed::Speed;
+use crate::sdl::window::{Control, Layout, View};
 
-const SCALE_FACTOR: u32 = 4; // Scale the 160x144 LCD to fit the 640x480 window
-const TARGET_FRAME_TIME: Duration = Duration::from_nanos(16666666); // 60fps
-const FPS_WINDOW_SIZE: usize = 600; // 10 seconds at 60fps
-const REALTIME_CYCLE_DURATION: Duration = MachineCycles::from_m(1).to_duration();
+/// The recreation's frame, about 59.73 Hz, which the emulator's frame of cycles matches.
+const FRAME: Duration = Duration::from_nanos(16_742_706);
+/// Cycled by `C`. The border is the only one that paints more than the screen.
+const COLOUR_MODES: [ColourMode; 4] = [ColourMode::Dmg, ColourMode::Gbc, ColourMode::Sgb, ColourMode::SgbBorder];
+/// Audio queued ahead of the device, past which a fast-forward's samples are dropped.
+const MAX_QUEUED_SECONDS: f32 = 0.25;
 
 /// The save state and the battery save sit beside this crate's manifest, not in the working
 /// directory, so the window plays the same game whichever directory it is started from.
 const SAVE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/pokemon-red.bin");
 const SRAM: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/pokemon-red.sav");
 
-pub fn render() -> Result<(), String> {
-    let mut gb = GameBoy::cgb(poke_agent::pokemon::roms::POKERED);
-    let mut map_cache = MapMetadataCache::default();
-    let mut pokemon_agent = PokemonAgent::new(Box::new(ConsolePolicy::default()));
+/// The recreation's save slots, the directory `pokered-sdl` keeps them in.
+pub fn native_slots_dir() -> std::path::PathBuf {
+    std::env::var("POKERED_SAVES").unwrap_or_else(|_| "saves".to_string()).into()
+}
 
-    if let Err(e) = gb.restore_sram_from_file(SRAM) {
-        println!("Could not load save file: {}", e);
+pub const USAGE: &str = "usage: poke-agent-sdl [--emulated <gb save state>] [--native <pokered save>]";
+
+/// The keys, said into the log when the window opens.
+const HELP: &str = "Tab routing, T grand tour on both, C colours, M mute, 1-4 speed (1x, 2x, 4x, max), F5 emulated agent, \
+    F8/F9 emulator quick-save, Ctrl+F8/F9 native quick-save (in memory), F11 window.png. Drop a state on a game's half to load it.";
+
+/// What the command line asks for: a state to load into either game once both are on.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Args {
+    pub emulated: Option<std::path::PathBuf>,
+    pub native: Option<std::path::PathBuf>,
+}
+
+impl Args {
+    /// `None` when help is asked for.
+    pub fn parse(mut args: impl Iterator<Item = String>) -> Result<Option<Self>, String> {
+        let mut parsed = Self::default();
+        while let Some(arg) = args.next() {
+            let slot = match arg.as_str() {
+                "-h" | "--help" => return Ok(None),
+                "--emulated" => &mut parsed.emulated,
+                "--native" => &mut parsed.native,
+                _ => return Err(format!("unexpected argument {arg}")),
+            };
+            *slot = Some(args.next().ok_or(format!("{arg} needs a path"))?.into());
+        }
+        Ok(Some(parsed))
     }
+}
+
+/// Loads the file at `path` into `side`'s game, and says how that went.
+fn load(games: &mut Games, view: &mut View, side: Side, path: &std::path::Path) {
+    match games.load_file(side, path) {
+        Ok(()) => view.say(Source::Window, format!("loaded {} into the {} game", path.display(), side.label())),
+        Err(e) => view.say(Source::Window, e),
+    }
+}
+
+/// Starts the grand tour on both games, or stops the one playing.
+fn tour(games: &mut Games, view: &mut View) {
+    match &games.tour {
+        Some(tour) if tour.running() => tour.stop(),
+        _ => match games.start_tour() {
+            Ok(()) => view.say(Source::Window, "the grand tour is on both games from a fresh game, a step at a time".to_string()),
+            Err(e) => view.say(Source::Window, format!("could not start the tour: {e}")),
+        },
+    }
+}
+
+/// Where the cursor is over the window, for a drop, which SDL reports without a position.
+fn cursor_x(window: &sdl2::video::Window) -> i32 {
+    let (mut x, mut y) = (0, 0);
+    // SAFETY: SDL is initialised for as long as there is a window, and both pointers are live.
+    unsafe { sdl2::sys::SDL_GetGlobalMouseState(&mut x, &mut y) };
+    x - window.position().0
+}
+
+fn buttons(keys: &sdl2::keyboard::KeyboardState) -> Joypad {
+    [
+        (Scancode::X, Joypad::A), (Scancode::Z, Joypad::B), (Scancode::Return, Joypad::START),
+        (Scancode::RShift, Joypad::SELECT), (Scancode::Backspace, Joypad::SELECT), (Scancode::Up, Joypad::UP),
+        (Scancode::Down, Joypad::DOWN), (Scancode::Left, Joypad::LEFT), (Scancode::Right, Joypad::RIGHT),
+    ].into_iter().filter(|(key, _)| keys.is_scancode_pressed(*key)).fold(Joypad::empty(), |held, (_, b)| held | b)
+}
+
+pub fn render(args: Args) -> Result<(), String> {
+    let mut games = Games::power_on(
+        Some(SRAM),
+        Some(native_slots_dir()),
+        Box::new(ConsolePolicy::default()),
+        Box::new(ConsolePolicy::default()),
+    )?;
 
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
-    let audio_subsystem = sdl_context.audio()?;
+    let bounds = video_subsystem.display_usable_bounds(0)
+        .map(|bounds| (bounds.width(), bounds.height()))
+        .unwrap_or((1280, 960));
+    let fit = |native, line_height| Layout::fit(bounds, native, line_height);
+    let mut view = View::new(fit)?;
+    view.say(Source::Window, HELP.to_string());
+    for (side, path) in [(Side::Emulated, &args.emulated), (Side::Native, &args.native)] {
+        if let Some(path) = path {
+            load(&mut games, &mut view, side, path);
+        }
+    }
+    let mut controllers = Controllers::new(sdl_context.game_controller()?);
+    let mut native_state = None;
 
-    let window = video_subsystem.window("gb", LCD_WIDTH as u32 * SCALE_FACTOR, LCD_HEIGHT as u32 * SCALE_FACTOR)
+    let window = video_subsystem.window("gb", view.layout.width, view.layout.height)
         .position_centered()
         .build()
         .map_err(|e| e.to_string())?;
-
-    let mut canvas = window.into_canvas().build()
-        .map_err(|e| e.to_string())?;
-    canvas.set_draw_color(Color::RGB(0, 0, 0));
-    canvas.clear();
-    canvas.present();
-
-    let audio_queue: AudioQueue<f32> = audio_subsystem.open_queue(None,
-        &AudioSpecDesired { freq: Some(44100), channels: Some(2), samples: Some(256) }
-    )?;
-    let audio_spec = audio_queue.spec();
-    audio_queue.resume();
-
-    // The APU resamples itself, band-limited, straight to the sink's rate — see `audio::blip`.
-    gb.core_mut().mmu_mut().audio_mut().set_output_sample_rate(audio_spec.freq as u32);
-    // One UI iteration's worth of audio, with generous headroom.
-    let mut audio_scratch = vec![0.0f32; audio_spec.freq as usize / 8 * 2];
-
-    // Create texture creator for LCD rendering
+    let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
     let texture_creator = canvas.texture_creator();
-    let mut lcd_texture = texture_creator.create_texture_streaming(
-        PixelFormatEnum::RGB24, LCD_WIDTH as u32, LCD_HEIGHT as u32
-    ).map_err(|e| e.to_string())?;
-    let mut font = FontTextures::roboto_regular(
-        &texture_creator,
-        16.0,
-        Color::RGBA(255, 0, 0, 255)
+    let new_texture = |layout: &Layout| texture_creator
+        .create_texture_streaming(PixelFormatEnum::RGBA32, layout.width, layout.height)
+        .map_err(|e| e.to_string());
+    let mut texture = new_texture(&view.layout)?;
+
+    let audio_queue: AudioQueue<f32> = sdl_context.audio()?.open_queue(
+        None,
+        &AudioSpecDesired { freq: Some(SAMPLE_RATE as i32), channels: Some(2), samples: Some(512) },
     )?;
+    audio_queue.resume();
+    let max_queued = (SAMPLE_RATE as f32 * MAX_QUEUED_SECONDS) as u32 * 2 * size_of::<f32>() as u32;
+    let mut muted = false;
+    // A frame's stereo samples, with room to spare.
+    let mut samples = vec![0.0f32; SAMPLE_RATE as usize / 8 * 2];
 
-    let mut frame_rate = FrameRate::default();
     let mut event_pump = sdl_context.event_pump()?;
-
-    let mut since_last_render = Duration::ZERO;
-    let mut frame_timestamps = VecDeque::new();
-    let mut since_last_update = Duration::ZERO;
-    let mut ahead_by_cycles = MachineCycles::ZERO;
-
-    let mut iteration_count = 0;
-    let mut cycle_count = MachineCycles::ZERO;
-    let mut cycle_duration = REALTIME_CYCLE_DURATION;
-    // Watched so a speed change can be mirrored into the resampler; see below the event loop.
-    let mut applied_cycle_duration = cycle_duration;
-
+    let mut frame_times = VecDeque::new();
     let mut previous_wram = [0u8; 0x2000];
-    let mut agent_running = false;
+    let mut next = Instant::now();
     'running: loop {
-        iteration_count += 1;
-        let delta = frame_rate.update()?;
-        since_last_render += delta;
-        since_last_update += delta;
-
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit {..} |
                 Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
                     break 'running
                 },
+                Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } => match view.layout.control_at(x, y) {
+                    Some(Control::Routing(routing)) if !games.touring() => view.routing = routing,
+                    Some(Control::Tour) => tour(&mut games, &mut view),
+                    Some(Control::Speed) => view.speed = view.speed.next(),
+                    _ => {}
+                },
+                Event::DropFile { filename, .. } => {
+                    let side = view.layout.side_at(cursor_x(canvas.window()));
+                    load(&mut games, &mut view, side, std::path::Path::new(&filename));
+                }
+                Event::ControllerDeviceAdded { which, .. } => match controllers.added(which) {
+                    Ok(Some(name)) => view.say(Source::Window, format!("controller connected: {name}")),
+                    Ok(None) => {}
+                    Err(e) => view.say(Source::Window, format!("could not open a controller: {e}")),
+                },
+                Event::ControllerDeviceRemoved { which, .. } => if let Some(name) = controllers.removed(which) {
+                    view.say(Source::Window, format!("controller disconnected: {name}"));
+                },
+                Event::KeyDown { keycode: Some(keycode @ (Keycode::F8 | Keycode::F9)), keymod, repeat: false, .. }
+                    if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                    if keycode == Keycode::F8 {
+                        native_state = Some(games.native.game().save());
+                        view.say(Source::Window, "kept the native game in memory".to_string());
+                    } else if let Some(bytes) = &native_state {
+                        if let Err(e) = games.load(Side::Native, bytes) {
+                            view.say(Source::Window, format!("could not load the native game: {e}"));
+                        }
+                    } else {
+                        view.say(Source::Window, "no native game kept yet: Ctrl+F8 keeps one".to_string());
+                    }
+                }
+                Event::MouseWheel { precise_y, .. } => {
+                    view.log.scroll((precise_y * 3.0).round() as i32, view.layout.log_rows());
+                }
                 Event::KeyDown { keycode: Some(keycode), repeat: false, .. } => {
-                    use gb::joypad::JoypadButton::*;
+                    let touring = games.touring();
+                    if keycode == Keycode::T {
+                        tour(&mut games, &mut view);
+                    }
+                    let gb = &mut games.gb;
                     match keycode {
-                        Keycode::Num1 => cycle_duration = REALTIME_CYCLE_DURATION,
-                        Keycode::Num2 => cycle_duration = REALTIME_CYCLE_DURATION / 2,
-                        Keycode::Num3 => cycle_duration = REALTIME_CYCLE_DURATION / 3,
-                        Keycode::Num4 => cycle_duration = REALTIME_CYCLE_DURATION / 4,
-                        Keycode::Num5 => cycle_duration = REALTIME_CYCLE_DURATION / 5,
+                        Keycode::Tab if !touring => view.routing = view.routing.next(),
+                        Keycode::Num1 => view.speed = Speed::One,
+                        Keycode::Num2 => view.speed = Speed::Two,
+                        Keycode::Num3 => view.speed = Speed::Four,
+                        Keycode::Num4 => view.speed = Speed::Unthrottled,
+                        Keycode::C => {
+                            view.colours = COLOUR_MODES[(COLOUR_MODES.iter().position(|&m| m == view.colours).unwrap() + 1) % COLOUR_MODES.len()];
+                            let layout = fit(view.colours.size(), view.layout.line_height);
+                            if layout != view.layout {
+                                canvas.window_mut().set_size(layout.width, layout.height).map_err(|e| e.to_string())?;
+                                texture = new_texture(&layout)?;
+                                view.relayout(layout);
+                            }
+                        }
+                        Keycode::M => {
+                            muted = !muted;
+                            audio_queue.clear();
+                        }
                         Keycode::F1 => {
                             let ppu = gb.core().mmu().ppu();
                             ppu.dump_tilemap(TileMapMode::Lower, TileDataMode::Lower)
@@ -135,7 +254,7 @@ pub fn render() -> Result<(), String> {
                         Keycode::F3 => {
                             // Compare wram to previous wram
                             let current_wram = gb.core().mmu().work_ram();
-                            let diff = current_wram.into_iter()
+                            let diff = current_wram.iter()
                                 .zip(previous_wram.iter())
                                 .enumerate();
                             for (index, (&current, &previous)) in diff {
@@ -145,8 +264,13 @@ pub fn render() -> Result<(), String> {
                             }
                             previous_wram.copy_from_slice(current_wram);
                         }
+                        Keycode::F5 | Keycode::F9 if touring => {
+                            view.say(Source::Window, "a tour is playing both games: T stops it".to_string());
+                        }
                         Keycode::F5 => {
-                            agent_running = !agent_running;
+                            games.agent_running = !games.agent_running;
+                            let state = if games.agent_running { "on" } else { "off" };
+                            view.say(Source::Window, format!("the emulated agent is {state}"));
                         }
                         Keycode::F7 => {
                             // TODO write to this file on change
@@ -157,59 +281,36 @@ pub fn render() -> Result<(), String> {
                         }
                         Keycode::F9 => {
                             gb.load_state_from_file(SAVE)?;
-                            // The resampler is not serialised, so a restored state comes back at
-                            // the default output rate.
-                            gb.core_mut().mmu_mut().audio_mut().set_output_sample_rate(audio_spec.freq as u32);
+                            games.emulator_restored();
                         }
                         Keycode::F10 => {
-                            let pokemon_api = PokemonApi::new(&mut gb);
+                            let pokemon_api = PokemonApi::new(gb);
                             println!("{:?}", pokemon_api.on_screen_text(false));
                         },
+                        Keycode::F11 => view.pixels.save_png(std::path::Path::new("window.png"))?,
                         Keycode::W => {
-                            let pokemon_api = PokemonApi::new(&mut gb);
+                            let pokemon_api = PokemonApi::new(gb);
                             let menu_state = pokemon_api.menu_state().unwrap();
                             println!("{:?}", menu_state);
                         },
-                        Keycode::M => {
-                            let pokemon_api = PokemonApi::new(&mut gb);
+                        Keycode::P => {
+                            let pokemon_api = PokemonApi::new(gb);
                             let map = pokemon_api.game_state()?.map;
                             println!("{}", map);
                             println!("{:?}", map.player_position);
                             println!("{:?}", map.player_direction);
                         },
                         Keycode::A => {
-                            let pokemon_api = PokemonApi::new(&mut gb);
+                            let pokemon_api = PokemonApi::new(gb);
                             let actions = pokemon_api.game_state()?.map.actions();
                             for action in actions {
                                 println!("{}", action);
                             }
                         },
                         Keycode::F12 => {
-                            let mut pokemon_api = PokemonApi::new(&mut gb);
+                            let mut pokemon_api = PokemonApi::new(gb);
                             pokemon_api.pimp_out_pokemon()?;
                         }
-                        Keycode::Up => gb.core_mut().mmu_mut().joypad_mut().press_button(Up),
-                        Keycode::Down => gb.core_mut().mmu_mut().joypad_mut().press_button(Down),
-                        Keycode::Left => gb.core_mut().mmu_mut().joypad_mut().press_button(Left),
-                        Keycode::Right => gb.core_mut().mmu_mut().joypad_mut().press_button(Right),
-                        Keycode::X => gb.core_mut().mmu_mut().joypad_mut().press_button(A),
-                        Keycode::Z => gb.core_mut().mmu_mut().joypad_mut().press_button(B),
-                        Keycode::Return => gb.core_mut().mmu_mut().joypad_mut().press_button(Start),
-                        Keycode::Backspace => gb.core_mut().mmu_mut().joypad_mut().press_button(Select),
-                        _ => {}
-                    };
-                }
-                Event::KeyUp { keycode: Some(keycode), repeat: false, .. } => {
-                    use gb::joypad::JoypadButton::*;
-                    match keycode {
-                        Keycode::Up => gb.core_mut().mmu_mut().joypad_mut().release_button(Up),
-                        Keycode::Down => gb.core_mut().mmu_mut().joypad_mut().release_button(Down),
-                        Keycode::Left => gb.core_mut().mmu_mut().joypad_mut().release_button(Left),
-                        Keycode::Right => gb.core_mut().mmu_mut().joypad_mut().release_button(Right),
-                        Keycode::X => gb.core_mut().mmu_mut().joypad_mut().release_button(A),
-                        Keycode::Z => gb.core_mut().mmu_mut().joypad_mut().release_button(B),
-                        Keycode::Return => gb.core_mut().mmu_mut().joypad_mut().release_button(Start),
-                        Keycode::Backspace => gb.core_mut().mmu_mut().joypad_mut().release_button(Select),
                         _ => {}
                     };
                 }
@@ -217,138 +318,73 @@ pub fn render() -> Result<(), String> {
             }
         }
 
-        // Keep the resampler in step with the emulation speed, otherwise fast-forwarding just
-        // out-runs the audio device and backs its queue up.
-        if cycle_duration != applied_cycle_duration {
-            applied_cycle_duration = cycle_duration;
-            let speed = REALTIME_CYCLE_DURATION.as_secs_f64() / cycle_duration.as_secs_f64();
-            gb.core_mut().mmu_mut().audio_mut().set_emulation_speed(speed);
-            println!("emulation speed: {speed:.3}x");
+        let held = buttons(&event_pump.keyboard_state()) | controllers.held();
+        let played = Instant::now();
+        let mut frames = 0;
+        // Unthrottled, as many frames as leave the host frame time to draw.
+        while view.speed.frames().map_or(frames == 0 || played.elapsed() < FRAME.mul_f32(0.8), |n| frames < n) {
+            games.frame(view.routing, held, &mut |source, line| view.say(source, line));
+            frames += 1;
         }
 
-        let mut min_cycles = MachineCycles::ZERO;
-        while since_last_update >= cycle_duration {
-            since_last_update -= cycle_duration;
-
-            if ahead_by_cycles > MachineCycles::ZERO {
-                ahead_by_cycles -= MachineCycles::ONE;
-            } else {
-                min_cycles += MachineCycles::ONE;
-            }
-        }
-
-        if min_cycles > MachineCycles::ZERO {
-            let actual_cycles;
-            if agent_running {
-                // `agent.run`, not `gb.run` and one `update` — one agent tick per
-                // `AGENT_RESOLUTION` of emulated time rather than one per rendered frame.
-                let result;
-                (actual_cycles, result) = agent_slice(&mut pokemon_agent, &mut gb, &mut map_cache, min_cycles);
-                if let Err(agent_error) = result {
-                    println!("agent failed: {:?}", agent_error);
-                }
-            } else {
-                actual_cycles = gb.run(min_cycles);
-            }
-            cycle_count += actual_cycles;
-            ahead_by_cycles += actual_cycles - min_cycles;
-        }
-
-        // Samples are ready as soon as they are synthesised, so there is no chunk to wait for —
-        // drain whatever has accumulated since the last iteration.
+        // Drained whether or not it is heard: the samples are made either way.
         loop {
-            let frames = gb.core_mut().mmu_mut().audio_mut().read_samples_f32(&mut audio_scratch);
+            let frames = games.read_samples(&mut samples);
             if frames == 0 {
                 break;
             }
-            audio_queue.queue_audio(&audio_scratch[..frames * 2])?;
-        }
-
-        if since_last_render >= TARGET_FRAME_TIME {
-            since_last_render -= TARGET_FRAME_TIME;
-
-            canvas.clear();
-
-            // Copy LCD data to texture
-            lcd_texture.with_lock(None, |buffer: &mut [u8], pitch: usize| {
-                let lcd = gb.core().mmu().ppu().lcd();
-                for y in 0..LCD_HEIGHT {
-                    for x in 0..LCD_WIDTH {
-                        let [r, g, b] = lcd[y * LCD_WIDTH + x].to_rgb().0;
-                        let pixel_color = Color::RGB(r, g, b);
-                        let offset = y * pitch + x * 3;
-                        buffer[offset] = pixel_color.r;
-                        buffer[offset + 1] = pixel_color.g;
-                        buffer[offset + 2] = pixel_color.b;
-                    }
-                }
-            }).map_err(|e| e.to_string())?;
-            canvas.copy(&lcd_texture, None, None)
-                .map_err(|e| e.to_string())?;
-
-            frame_timestamps.push_back(Instant::now());
-            while frame_timestamps.len() > FPS_WINDOW_SIZE {
-                frame_timestamps.pop_front();
+            if !muted && audio_queue.size() < max_queued {
+                audio_queue.queue_audio(&samples[..frames * 2])?;
             }
-
-            let frame_times: Vec<Duration> = frame_timestamps.iter()
-                .tuple_windows()
-                .map(|(start, end)| end.duration_since(*start))
-                .collect();
-
-            let average_fps = frame_times.len() as f64 / frame_times.iter().sum::<Duration>().as_secs_f64();
-            font.render_text(
-                &mut canvas,
-                &format!("FPS: {:.2}", average_fps),
-                5,
-                5
-            )?;
-
-            let average_cycles_per_iteration = cycle_count.m_cycles() as f64 / iteration_count as f64;
-            font.render_text(
-                &mut canvas,
-                &format!("Cycles/Iter: {:.2}", average_cycles_per_iteration),
-                5,
-                25
-            )?;
-
-            canvas.present();
         }
 
-        sleep(Duration::from_nanos(0)); // allow other threads to run
+        frame_times.push_back(Instant::now());
+        while frame_times.len() > 120 {
+            frame_times.pop_front();
+        }
+        let fps = match (frame_times.front(), frame_times.back()) {
+            (Some(first), Some(last)) if frame_times.len() > 1 =>
+                (frame_times.len() - 1) as f64 / last.duration_since(*first).as_secs_f64(),
+            _ => 0.0,
+        };
+        let mut status = format!("{fps:.1} fps   {frames}x   sound {}", if muted { "off" } else { "on" });
+        if let Some(tour) = games.tour.as_ref().filter(|tour| tour.running()) {
+            let seconds = tour.started.elapsed().as_secs();
+            status += &format!("   tour {}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60);
+        }
+        view.status = status;
+        view.compose(&games);
+        texture.update(None, &view.pixels.rgba, view.pixels.pitch()).map_err(|e| e.to_string())?;
+        canvas.copy(&texture, None, None)?;
+        canvas.present();
+
+        next += FRAME;
+        match next.checked_duration_since(Instant::now()) {
+            Some(wait) => std::thread::sleep(wait),
+            None => next = Instant::now(),
+        }
     }
 
     Ok(())
 }
 
-/// One slice of the agent's play, on [`SERVED_OPTIONS`]. Only while the agent drives: a human at
-/// the keyboard may set the OPTION menu however they like, and the agent still copes with SHIFT.
-fn agent_slice(
-    agent: &mut PokemonAgent,
-    gb: &mut GameBoy,
-    map_cache: &mut MapMetadataCache,
-    min_cycles: MachineCycles,
-) -> (MachineCycles, Result<(), String>) {
-    keep_game_options(gb.core_mut().mmu_mut(), &SERVED_OPTIONS);
-    agent.run(gb, map_cache, min_cycles)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use poke_agent::pokemon::options::{BattleStyle, GameOptions, GameOptionsReader, GameOptionsWriter, TextSpeed};
-    use poke_agent::pokemon::policy::RandomPolicy;
+
+    fn parse(args: &[&str]) -> Result<Option<Args>, String> {
+        Args::parse(args.iter().map(|arg| arg.to_string()))
+    }
 
     #[test]
-    fn the_agent_plays_on_the_served_options() {
-        let mut gb = GameBoy::dmg(poke_agent::pokemon::roms::POKERED);
-        gb.load_state(poke_agent::pokemon::data::START_OF_GAME).expect("the start state loads");
-        let shift = GameOptions { battle_animations_on: true, battle_style: BattleStyle::Shift, text_speed: TextSpeed::Medium };
-        gb.core_mut().mmu_mut().write_game_options(&shift).expect("writable");
-
-        let mut agent = PokemonAgent::new(Box::new(RandomPolicy::default()));
-        let (_, ticked) = agent_slice(&mut agent, &mut gb, &mut MapMetadataCache::default(), MachineCycles::ONE);
-        ticked.expect("the agent ticks");
-        assert_eq!(gb.core().mmu().read_game_options(), Ok(SERVED_OPTIONS));
+    fn the_command_line_names_a_state_for_either_game() {
+        assert_eq!(parse(&[]), Ok(Some(Args::default())));
+        assert_eq!(
+            parse(&["--native", "a.pkrd", "--emulated", "b.bin"]),
+            Ok(Some(Args { emulated: Some("b.bin".into()), native: Some("a.pkrd".into()) })),
+        );
+        assert_eq!(parse(&["--emulated", "b.bin", "--help"]), Ok(None));
+        assert!(parse(&["--native"]).is_err());
+        assert!(parse(&["b.bin"]).is_err());
     }
 }

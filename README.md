@@ -70,7 +70,8 @@ cargo run --release -p poke-agent-web -- --policy deterministic --new-run
 # The web UI, played by a model.
 OPENAI_API_KEY=sk-… GB_MODEL=gpt-5 cargo run --release -p poke-agent-web
 
-# The SDL desktop window: the game from your keyboard, the policy from stdin.
+# The SDL desktop window: the cartridge and the recreation side by side, from your keyboard, or
+# both playing the grand tour together (`T`).
 cargo run --release -p poke-agent-sdl
 ```
 
@@ -234,7 +235,7 @@ All environment variables, never flags — the API key has to be one, so the res
 | `GB_PORT`, `GB_STATUS_HZ` | the server |
 | `GB_AUDIO_BITRATE` | the Opus stream's target, bits/s (`24000`); `0` turns sound off entirely |
 | `GB_HARDWARE` | which Game Boy the cartridge runs on: `dmg` (default) or `cgb` |
-| `GB_GAME` | what is played: `emulated` (default), or `native`, the recreation, whose run keeps `game.pkrd` in place of `state.gbst` and `sram.bin` |
+| `GB_GAME` | what is played: `emulated` (default), or `native`, the recreation, whose run keeps `game.pkrd` and its save slots in `slots/` in place of `state.gbst` and `sram.bin` |
 | `GB_RESTORE_HISTORY` | resume a run's conversation as well as its save (`1`); `0` starts it over |
 | `GB_ADMIN_TOKEN` | enables the three admin endpoints; unset means all three 404 |
 | `GB_REGEN_FIXTURES` | let a test overwrite the fixture it snapshots; off by default |
@@ -309,7 +310,9 @@ original C++ and its licence are vendored under `vendor/Blip_Buffer/`.
 
 The other two constrain nothing: `opus-rs` is BSD-3-Clause, a Rust port of libopus, which is BSD-3
 itself, and `rhai` is MIT OR Apache-2.0. Both are named because this paragraph is the list, and a
-dependency absent from it is one nobody checked.
+dependency absent from it is one nobody checked. Nor does the desktop window's
+`AdwaitaMono-Symbols.ttf`, five glyphs Roboto lacks cut from Adwaita Mono, which is SIL OFL 1.1 with
+no reserved name; its licence sits beside it.
 
 The ROM is not distributed and cannot be — `vendor/pokered/` is a submodule of the disassembly
 project, and the cartridge is assembled locally from it.

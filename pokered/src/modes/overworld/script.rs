@@ -18,6 +18,7 @@ use crate::modes::pc::bills_pc::BillsPc;
 use crate::modes::pc::players_pc::PlayerPc;
 use crate::modes::pokemart::Pokemart;
 use crate::modes::start_menu::StartMenu;
+use crate::save_slots::Thumbnail;
 use crate::modes::text_box::TextBox;
 use crate::modes::town_map::TownMap;
 use crate::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
@@ -1794,6 +1795,8 @@ impl Overworld {
     /// `DisplayTextID`, from `DisplayTextIDInit` to what the text id names.
     fn display_text_id(&mut self, ctx: &mut Ctx, text_id: u8) -> Flow {
         let predef = std::mem::take(&mut self.rt.text_predef);
+        // What a save slot shows: the screen before the start menu's box and font go up.
+        let under_start_menu = (text_id == 0).then(|| Thumbnail::of(&ctx.screen.frame()));
         if !self.rt.no_auto_text_box {
             if text_id == 0 {
                 let height = if ctx.world.events.is_set(poke_core::symbols::pokered_events::EVENT_GOT_POKEDEX) { 14 } else { 12 };
@@ -1824,7 +1827,7 @@ impl Overworld {
             ctx.world.location.ahead.sprite = crate::systems::overworld::sprites::sprite_in_front_of_player(&mut sprites,
                 self.num_sprites, 0x10, &mut direction) != 0;
             // `DisplayStartMenu` leaves through `CloseTextDisplay` itself.
-            return Then::block(Block::Mode(Box::new(Mode::StartMenu(StartMenu::new())))).then(Routine::AfterStartMenu);
+            return Then::block(Block::Mode(Box::new(Mode::StartMenu(StartMenu::over(under_start_menu.expect("text id 0 is the start menu")))))).then(Routine::AfterStartMenu);
         }
         match text_id {
             TEXT_MON_FAINTED => return Then::block(Block::PrintText(text_named("PokemonFaintedText")))
@@ -1994,7 +1997,7 @@ mod tests {
         let mut ctx = Ctx {
             world: &mut world, pad: &mut pad, rng: &mut rng, frame_counter: &mut counter, screen: &mut screen,
             menu: &mut menu, audio: &mut audio, events: &mut events, pacing: Pacing::Faithful,
-            update_sprites: false, menu_key_pressed: false, save: None, saved_player_id: None,
+            update_sprites: false, menu_key_pressed: false, slots: &[], slot: None,
             printed: Vec::new(),
         };
         let mut overworld = Overworld::new();

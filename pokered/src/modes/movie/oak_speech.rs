@@ -473,23 +473,24 @@ mod tests {
     use crate::world::Ruleset;
     use crate::command::{Command, Decision};
     use crate::mode::{Mode, Status};
-    use crate::modes::main_menu::NEW_GAME;
     use crate::rng::GameRng;
     use crate::world::World;
     use crate::{Game, Input, Pacing};
 
-    /// A new game started over a save made on Cycling Road.
+    /// A new game started over a world left on Cycling Road, as the credits' restart leaves one.
     fn new_game_over_a_cycling_road_save(ruleset: Ruleset) -> World {
         let mut save = World { player_id: 1, ruleset, ..World::default() };
         save.location.always_on_bike = true;
-        let mut game = Game::power_on(Some(save), GameRng::seeded(2), Pacing::Faithful);
+        let mut game = Game::new(save, GameRng::seeded(2), Pacing::Faithful);
+        game.push(Mode::Movie(crate::modes::movie::Movie::power_on()));
         for _ in 0..30_000 {
             if matches!(game.modes(), [Mode::Overworld(_)]) {
                 return game.world().clone();
             }
             let command = match game.status() {
                 Status::Waiting(Decision::TitleScreen | Decision::Text) => Some(Command::Advance),
-                Status::Waiting(Decision::MainMenu) => Some(Command::ChooseOption(NEW_GAME)),
+                // No slots, so NEW GAME is the first row.
+                Status::Waiting(Decision::MainMenu) => Some(Command::ChooseOption(0)),
                 Status::Waiting(Decision::IntroNameMenu) => Some(Command::ChooseOption(1)),
                 _ => None,
             };

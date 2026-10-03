@@ -16,8 +16,9 @@ use crate::modes::item_menu::ItemMenu;
 use crate::modes::option_menu::OptionMenu;
 use crate::modes::pokedex::PokedexMenu;
 use crate::modes::pokemon_menu::PokemonMenu;
-use crate::modes::save_menu::SaveMenu;
+use crate::modes::slot_selector::SlotSelector;
 use crate::modes::trainer_card::TrainerCard;
+use crate::save_slots::Thumbnail;
 
 /// The entries in the order `.displayMenuItem` dispatches them, which is the order they are drawn
 /// when the player has the Pokédex. Without it `POKéDEX` is missing and every row moves up one.
@@ -43,16 +44,24 @@ pub struct StartMenu {
     /// `wTileMapBackup2`. The cartridge saves it here and has each sub-menu restore it; restoring
     /// it as the sub-menu returns puts the same screen back a frame earlier.
     saved: Option<UiSurface>,
+    /// The screen as it was before the menu opened: what a save slot shows.
+    #[serde(default)]
+    thumbnail: Option<Thumbnail>,
 }
 
 impl StartMenu {
     pub fn new() -> Self {
-        Self { entries: Vec::new(), input: MenuInput::new(0, 0, (0, 0), Joypad::empty()), saved: None }
+        Self { entries: Vec::new(), input: MenuInput::new(0, 0, (0, 0), Joypad::empty()), saved: None, thumbnail: None }
     }
 
     /// The index under the cursor, counting the blank row past `EXIT` as one past the last.
     pub fn selected(&self) -> u8 {
         self.input.current
+    }
+
+    /// Over the overworld, which took `thumbnail` before it drew anything of the menu.
+    pub fn over(thumbnail: Thumbnail) -> Self {
+        Self { thumbnail: Some(thumbnail), ..Self::new() }
     }
 
     pub fn index_of(&self, entry: StartMenuEntry) -> Option<u8> {
@@ -156,7 +165,7 @@ impl ModeUpdate for StartMenu {
                 ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
                 Transition::Push(Mode::OptionMenu(OptionMenu::new()))
             }
-            Some(StartMenuEntry::SaveReset) => Transition::Push(Mode::SaveMenu(SaveMenu::new())),
+            Some(StartMenuEntry::SaveReset) => Transition::Push(Mode::SlotSelector(SlotSelector::new(self.thumbnail.clone()))),
             Some(StartMenuEntry::Pokedex) => Transition::Push(Mode::Pokedex(PokedexMenu::new())),
             Some(StartMenuEntry::Pokemon) => Transition::Push(Mode::PokemonMenu(PokemonMenu::new())),
             Some(StartMenuEntry::Item) => Transition::Push(Mode::ItemMenu(ItemMenu::new())),
@@ -171,8 +180,8 @@ impl ModeUpdate for StartMenu {
         }
         let entry = self.entries.get(self.input.current as usize).copied();
         // `StartMenu_SaveReset` ends at `HoldTextDisplayOpen` and `CloseTextDisplay` rather than
-        // `RedisplayStartMenu`: saving, or declining to, closes the menu.
-        if entry == Some(StartMenuEntry::SaveReset) {
+        // `RedisplayStartMenu`: saving closes the menu. Backing out of the slots comes back to it.
+        if entry == Some(StartMenuEntry::SaveReset) && outcome != Outcome::Cancelled {
             ctx.pad.poll();
             return Transition::Pop(Outcome::Done);
         }
@@ -361,7 +370,7 @@ mod tests {
             events.extend(game.frame(Input::None).events);
         }
         assert_eq!(events, [Event::CommandDone(command)]);
-        assert!(matches!(game.modes()[..2], [Mode::StartMenu(_), Mode::SaveMenu(_)]), "{:?}", game.modes().len());
+        assert!(matches!(game.modes()[..2], [Mode::StartMenu(_), Mode::SlotSelector(_)]), "{:?}", game.modes().len());
     }
 
     #[test]

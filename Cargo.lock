@@ -1104,8 +1104,9 @@ version = "1.0.0"
 dependencies = [
  "fontdue",
  "gb",
- "itertools 0.14.0",
+ "image",
  "poke-agent",
+ "pokered",
  "sdl2",
 ]
 

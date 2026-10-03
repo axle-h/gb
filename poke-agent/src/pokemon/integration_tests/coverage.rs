@@ -1188,7 +1188,7 @@ fn unreached_report(entered: &std::collections::BTreeSet<&String>) -> String {
 }
 
 #[cfg(feature = "slow-tests")]
-use super::completion::{classify, MapBucket};
+use crate::tour::completion::{classify, MapBucket};
 
 #[cfg(feature = "slow-tests")]
 /// Game-minutes per walk below which a sweep is a smoke run and the union checks only print.
@@ -1302,7 +1302,7 @@ fn kind_cross_check(offered: &std::collections::BTreeSet<&String>, pc_ops: usize
 /// One walk, from one [`Start`].
 #[cfg(feature = "slow-tests")]
 fn walk_from(start: &Start, minutes: u64, patience: usize, wall_secs: u64) -> WalkOutcome {
-    use crate::pokemon::integration_tests::cheats::Cheats;
+    use crate::tour::cheats::Cheats;
     use crate::pokemon::integration_tests::llm_harness::LlmRun;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;

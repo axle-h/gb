@@ -1,90 +1,105 @@
-use std::collections::BTreeMap;
-use sdl2::render::{BlendMode, Texture, TextureCreator, TextureQuery, WindowCanvas};
-use fontdue::{Font, FontSettings};
-use fontdue::layout::{Layout, TextStyle};
-use sdl2::pixels::{Color, PixelFormatEnum};
-use sdl2::rect::Rect;
-use sdl2::video::WindowContext;
+//! Text drawn into [`Pixels`]: one line at a time, clipped to a rectangle, each glyph rasterised the
+//! first time it is drawn.
 
-pub struct FontTextures<'a> {
-    layout: Layout,
+use std::collections::HashMap;
+use fontdue::{Font, FontSettings, Metrics};
+use crate::sdl::pixels::{Pixels, Rect, Rgb};
+
+pub struct Text {
+    /// Searched in order for a glyph, so the first that has one draws it.
     fonts: Vec<Font>,
-    glyphs: BTreeMap<char, (Texture<'a>, TextureQuery)>,
-    size: f32
+    size: f32,
+    ascent: f32,
+    line_height: u32,
+    /// `None` for a character no font has, an emoji in an event say, which is left out rather than
+    /// drawn as the missing-glyph box.
+    glyphs: HashMap<char, Option<(Metrics, Vec<u8>)>>,
 }
 
-impl<'a> FontTextures<'a> {
-    const GLYPHS: &'static str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789,./;:'\"[]{}\\|`~!@#$%^&*()-_=+<>?";
-
-    pub fn new(texture_creator: &'a TextureCreator<WindowContext>, font: Font, size: f32, color: Color) -> Result<Self, String> {
-        let mut glyphs = BTreeMap::new();
-        for char in Self::GLYPHS.chars() {
-            let (metrics, bitmap) = font.rasterize(char, size);
-            let mut texture = texture_creator.create_texture_streaming(
-                PixelFormatEnum::RGBA8888,
-                metrics.width as u32,
-                metrics.height as u32
-            ).map_err(|e| e.to_string())?;
-            texture.set_blend_mode(BlendMode::Blend);
-
-            texture.with_lock(None, |buffer: &mut [u8], pitch: usize| {
-                // Clear the entire texture first
-                for i in 0..buffer.len() {
-                    buffer[i] = 0;
-                }
-
-                // Copy glyph data at the correct vertical position
-                for y in 0..metrics.height {
-                    for x in 0..metrics.width {
-                        let src_idx = y * metrics.width + x;
-                        let coverage = bitmap[src_idx];
-                        let scaled_color = if coverage > 0 {
-                            let scale = coverage as f32 / 255.0;
-                            Color::RGBA(
-                                (color.r as f32 * scale).round() as u8,
-                                (color.g as f32 * scale).round() as u8,
-                                (color.b as f32 * scale).round() as u8,
-                                color.a
-                            )
-                        } else {
-                            Color::RGBA(0, 0, 0, 0)
-                        };
-
-                        let dest_idx = (y * (pitch / 4) + x) * 4;
-                        buffer[dest_idx] = scaled_color.r;
-                        buffer[dest_idx + 1] = scaled_color.g;
-                        buffer[dest_idx + 2] = scaled_color.b;
-                        buffer[dest_idx + 3] = scaled_color.a;
-                    }
-                }
-            }).map_err(|e| e.to_string())?;
-            let query = texture.query();
-            glyphs.insert(char, (texture, query));
-        }
-        let layout = Layout::new(fontdue::layout::CoordinateSystem::PositiveYDown);
-        Ok(Self { glyphs, layout, fonts: vec![font], size })
+impl Text {
+    pub fn roboto(size: f32) -> Result<Self, String> {
+        let roboto = Font::from_bytes(include_bytes!("./Roboto-Regular.ttf").as_slice(), FontSettings::default())?;
+        let lines = roboto.horizontal_line_metrics(size).ok_or("Roboto has no horizontal metrics")?;
+        // Roboto has no →, ✓, ✗, ♂ or ♀; this is Adwaita Mono cut down to those five.
+        let symbols = Font::from_bytes(include_bytes!("./AdwaitaMono-Symbols.ttf").as_slice(), FontSettings::default())?;
+        Ok(Self {
+            fonts: vec![roboto, symbols],
+            size,
+            ascent: lines.ascent,
+            line_height: lines.new_line_size.ceil() as u32,
+            glyphs: HashMap::new(),
+        })
     }
 
-    pub fn roboto_regular(texture_creator: &'a TextureCreator<WindowContext>, size: f32, color: Color) -> Result<Self, String> {
-        let font = Font::from_bytes(include_bytes!("./Roboto-Regular.ttf").to_vec(), FontSettings::default()).map_err(|e| e.to_string())?;
-        Self::new(texture_creator, font, size, color)
+    pub fn line_height(&self) -> u32 {
+        self.line_height
     }
 
-    pub fn render_text(&mut self, canvas: &mut WindowCanvas, text: &str, x: i32, y: i32) -> Result<(), String> {
-        if text.is_empty() {
-            return Ok(()); // Nothing to render
-        }
+    fn glyph(&mut self, c: char) -> Option<&(Metrics, Vec<u8>)> {
+        let fonts = &self.fonts;
+        let size = self.size;
+        self.glyphs.entry(c).or_insert_with(|| {
+            fonts.iter().find(|font| font.lookup_glyph_index(c) != 0).map(|font| font.rasterize(c, size))
+        }).as_ref()
+    }
 
-        self.layout.clear();
-        self.layout.append(&self.fonts, &TextStyle::new(text, self.size, 0));
+    /// Whether some font draws `c` rather than the missing-glyph box.
+    #[cfg(test)]
+    pub fn has_glyph(&self, c: char) -> bool {
+        self.fonts.iter().any(|font| font.lookup_glyph_index(c) != 0)
+    }
 
-        for glyph in self.layout.glyphs() {
-            if let Some((texture, _query)) = self.glyphs.get(&glyph.parent) {
-                canvas.copy(texture, None, Some(Rect::new(x + glyph.x as i32, y + glyph.y as i32, glyph.width as u32, glyph.height as u32)))
-                    .map_err(|e| e.to_string())?;
+    pub fn width(&mut self, text: &str) -> u32 {
+        text.chars().filter_map(|c| self.glyph(c).map(|(metrics, _)| metrics.advance_width)).sum::<f32>().ceil() as u32
+    }
+
+    /// `text` with its top-left at (`x`, `y`), drawn only inside `clip`.
+    pub fn draw(&mut self, pixels: &mut Pixels, text: &str, x: i32, y: i32, colour: Rgb, clip: Rect) {
+        let baseline = y as f32 + self.ascent;
+        let mut pen = x as f32;
+        for c in text.chars() {
+            let Some((metrics, coverage)) = self.glyph(c) else { continue };
+            let left = (pen + metrics.xmin as f32).round() as i32;
+            let top = (baseline - metrics.height as f32 - metrics.ymin as f32).round() as i32;
+            for row in 0..metrics.height {
+                for column in 0..metrics.width {
+                    let alpha = coverage[row * metrics.width + column];
+                    pixels.blend(left + column as i32, top + row as i32, colour, alpha, &clip);
+                }
             }
+            pen += metrics.advance_width;
         }
-        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The characters events and the game's own text use beyond ASCII.
+    #[test]
+    fn every_character_an_event_uses_has_a_glyph() {
+        let text = Text::roboto(16.0).unwrap();
+        let missing: String = "→✓✗é♂♀".chars().filter(|&c| !text.has_glyph(c)).collect();
+        assert_eq!(missing, "");
     }
 
+    #[test]
+    fn a_character_no_font_has_is_left_out() {
+        let mut text = Text::roboto(16.0).unwrap();
+        assert_eq!(text.width("🏆 won"), text.width(" won"));
+        let mut pixels = Pixels::new(64, 32);
+        text.draw(&mut pixels, "📖", 0, 0, [255, 255, 255], Rect::new(0, 0, 64, 32));
+        assert!(pixels.rgba.chunks(4).all(|pixel| pixel[0] == 0), "no missing-glyph box");
+    }
+
+    #[test]
+    fn text_is_clipped_to_its_rectangle() {
+        let mut text = Text::roboto(16.0).unwrap();
+        let mut pixels = Pixels::new(64, 32);
+        text.draw(&mut pixels, "MMMMMMMM", 0, 0, [255, 255, 255], Rect::new(0, 0, 10, 32));
+        let lit = |x: usize| (0..32).any(|y| pixels.rgba[(y * 64 + x) * 4] != 0);
+        assert!((0..10).any(lit));
+        assert!(!(10..64).any(lit));
+    }
 }

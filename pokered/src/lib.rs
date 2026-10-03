@@ -6,6 +6,7 @@ pub mod mode;
 pub mod modes;
 pub mod party;
 pub mod rng;
+pub mod save_slots;
 pub mod scripts;
 pub mod systems;
 pub mod world;
@@ -21,10 +22,11 @@ use command::{Command, Drive, Executor, Reply};
 use gfx::ui::UiSurface;
 use gfx::Screen;
 use input::{Joypad, Pad};
-use mode::{Ctx, Mode, ModeUpdate, Outcome, SaveRequest, Status, Transition};
+use mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
 use modes::menu_input::CursorMemory;
 use modes::movie::Movie;
 use rng::GameRng;
+use save_slots::{Slot, SlotAction, SlotRequest, SlotSummary, Thumbnail, AUTOSAVE};
 use world::World;
 
 pub enum Input {
@@ -56,19 +58,10 @@ pub struct Frame {
     /// This frame's register writes, for the host to play. The game holds no audio backend, so a
     /// save carries no oscillator state.
     pub audio: Vec<Write>,
-    /// What became of the game's own save this frame, for the host to keep or delete.
-    pub save: Option<Save>,
+    /// What the player asked of the save slots this frame, for the host's `SlotStore` to answer.
+    pub slot: Option<SlotRequest>,
     /// The message box as each text box left it this frame; see `Ctx::printed`.
     pub printed: Vec<UiSurface>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Save {
-    /// `SaveGameData`: what the SAVE menu, a box change and the Hall of Fame hand the host to keep.
-    /// `Game::save`'s bytes.
-    Written(Vec<u8>),
-    /// `ClearAllSRAMBanks`, from the title screen's clear-save dialogue: the host has no save now.
-    Cleared,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,11 +77,11 @@ pub struct Game {
     menu: CursorMemory,
     audio: AudioEngine,
     executor: Option<Executor>,
-    /// Whose save file the host has, for `CheckPreviousSaveFile`.
-    #[serde(default)]
-    saved_player_id: Option<u16>,
     #[serde(skip)]
     pacing: Pacing,
+    /// The host's, handed in by `set_slots`, so no save carries another.
+    #[serde(skip)]
+    slots: Vec<Option<Slot>>,
 }
 
 const SAVE_MAGIC: &[u8; 4] = b"PKRD";
@@ -110,8 +103,8 @@ impl Game {
             // `PlayMusic` carries the bank its song lives in, so whatever plays first corrects this.
             audio: AudioEngine::new(AudioBank::One),
             executor: None,
-            saved_player_id: None,
             pacing,
+            slots: Vec::new(),
         }
     }
 
@@ -120,19 +113,38 @@ impl Game {
     }
 
     /// Power on: the splash, the intro and the title screen, then the main menu into a new game, or
-    /// into `save` when there is one to continue.
-    pub fn power_on(save: Option<World>, rng: GameRng, pacing: Pacing) -> Self {
-        let saved_player_id = save.as_ref().map(|world| world.player_id);
-        let mut game = Self::new(save.unwrap_or_default(), rng, pacing);
-        game.saved_player_id = saved_player_id;
-        game.push(Mode::Movie(Movie::power_on(saved_player_id.is_some())));
+    /// into a slot when the host has handed over any.
+    pub fn power_on(rng: GameRng, pacing: Pacing) -> Self {
+        let mut game = Self::new(World::default(), rng, pacing);
+        game.push(Mode::Movie(Movie::power_on()));
         game
     }
 
-    /// Whose save file the host holds. `power_on` takes it from the save it is given, a save the
-    /// game writes replaces it, and a host with no file says `None`.
-    pub fn set_saved_player_id(&mut self, id: Option<u16>) {
-        self.saved_player_id = id;
+    /// The save slots as the host holds them: at power-on, after a load and after every write.
+    pub fn set_slots(&mut self, slots: Vec<Option<Slot>>) {
+        self.slots = slots;
+    }
+
+    pub fn slots(&self) -> &[Option<Slot>] {
+        &self.slots
+    }
+
+    pub fn pacing(&self) -> Pacing {
+        self.pacing
+    }
+
+    /// What `action` hands the host: a save is of the game as it stands.
+    pub fn slot_request(&self, action: SlotAction) -> SlotRequest {
+        match action {
+            SlotAction::Save(slot, summary) => SlotRequest::Save { slot, bytes: self.save(), summary },
+            SlotAction::Load(slot) => SlotRequest::Load(slot),
+            SlotAction::Delete(slot) => SlotRequest::Delete(slot),
+            SlotAction::Autosave => {
+                let continued = modes::movie::continued_after_hall_of_fame(self.world.clone(), self.rng.clone(), self.pacing);
+                let summary = SlotSummary::of(&continued.world, Thumbnail::of(&continued.screen.frame()));
+                SlotRequest::Save { slot: AUTOSAVE, bytes: continued.save(), summary }
+            }
+        }
     }
 
     pub fn world(&self) -> &World {
@@ -226,27 +238,16 @@ impl Game {
         self.frame_counter = self.frame_counter.saturating_sub(1);
         self.frames += 1;
 
-        let (save, printed) = self.with_ctx(&mut events, |modes, ctx| {
+        let (slot, printed) = self.with_ctx(&mut events, |modes, ctx| {
             if let Some(top) = modes.last_mut() {
                 let transition = top.update(ctx);
                 apply(modes, transition, ctx);
             }
         });
-        // `SaveGameData` or `ClearAllSRAMBanks`. A save is taken after the frame's transitions, so it
-        // holds the screen the player is looking at, and either becomes what the next
-        // `CheckPreviousSaveFile` sees.
-        let save = save.map(|save| match save {
-            SaveRequest::Write => {
-                self.saved_player_id = Some(self.world.player_id);
-                Save::Written(self.save())
-            }
-            SaveRequest::Clear => {
-                self.saved_player_id = None;
-                Save::Cleared
-            }
-        });
+        // A save is taken after the frame's transitions, so it holds the screen the player resumes on.
+        let slot = slot.map(|action| self.slot_request(action));
 
-        Frame { events, status: self.status(), reply, audio, save, printed }
+        Frame { events, status: self.status(), reply, audio, slot, printed }
     }
 
     pub fn status(&self) -> Status {
@@ -270,13 +271,14 @@ impl Game {
         }
     }
 
-    /// Runs `f`, and answers what the game asked of its save and what its text boxes printed.
-    fn with_ctx(&mut self, events: &mut Vec<Event>, f: impl FnOnce(&mut Vec<Mode>, &mut Ctx)) -> (Option<SaveRequest>, Vec<UiSurface>) {
-        let Self { world, modes, rng, pad, frame_counter, screen, menu, audio, pacing, saved_player_id, .. } = self;
+    /// Runs `f`, and answers what the game asked of its slots and what its text boxes printed.
+    fn with_ctx(&mut self, events: &mut Vec<Event>, f: impl FnOnce(&mut Vec<Mode>, &mut Ctx))
+        -> (Option<SlotAction>, Vec<UiSurface>) {
+        let Self { world, modes, rng, pad, frame_counter, screen, menu, audio, pacing, slots, .. } = self;
         audio.ruleset = world.ruleset;
         let mut ctx = Ctx { world, pad, rng, screen, menu, audio, frame_counter, events, pacing: *pacing,
-                            update_sprites: false, menu_key_pressed: false, save: None, saved_player_id: *saved_player_id,
-                            printed: Vec::new() };
+                            update_sprites: false, menu_key_pressed: false,
+                            slots, slot: None, printed: Vec::new() };
         f(modes, &mut ctx);
         if ctx.update_sprites
             && let Some(Mode::Overworld(overworld)) = modes.iter_mut().rev().find(|mode| matches!(mode, Mode::Overworld(_)))
@@ -288,7 +290,7 @@ impl Game {
         {
             overworld.disarm_turn();
         }
-        (ctx.save, ctx.printed)
+        (ctx.slot, ctx.printed)
     }
 
     pub fn save(&self) -> Vec<u8> {
@@ -402,7 +404,7 @@ mod tests {
 
     #[test]
     fn a_new_game_plays_modern() {
-        assert_eq!(Game::power_on(None, GameRng::seeded(1), Pacing::Faithful).world().ruleset, Ruleset::Modern);
+        assert_eq!(Game::power_on(GameRng::seeded(1), Pacing::Faithful).world().ruleset, Ruleset::Modern);
     }
 
     #[test]
@@ -476,13 +478,13 @@ mod tests {
         audio: Vec<Write>,
         status: Status,
         save: u64,
-        saved: Option<u64>,
+        slot: Option<SlotRequest>,
         kept: Kept,
     }
 
     /// Plays `game` for `frames` frames, feeding what `drive` picks and saving wherever `save_here`
     /// says; then loads every save and plays it on with the same inputs. Each copy must give the same
-    /// `save()` bytes, status, game save and audio writes from then on, and a backend that starts on
+    /// `save()` bytes, status, slot request and audio writes from then on, and a backend that starts on
     /// the copy with its standing writes must hold the registers no note rewrites exactly as one that
     /// heard the whole run does. Returns the frames saved at.
     fn resumes_identically(mut game: Game, frames: usize, mut drive: impl FnMut(&Game) -> Fed,
@@ -499,7 +501,7 @@ mod tests {
             let out = game.frame(fed.input());
             kept.feed(&out.audio);
             played.push(Played { fed, audio: out.audio, status: out.status, save: digest(&game.save()),
-                saved: out.save.as_ref().map(digest), kept: kept.clone() });
+                slot: out.slot, kept: kept.clone() });
         }
         assert!(!saves.is_empty(), "nowhere was saved");
         for (from, bytes) in &saves {
@@ -514,7 +516,7 @@ mod tests {
                 backend.feed(&out.audio);
                 assert_eq!(backend, original.kept, "{what}: what a backend started on the copy holds");
                 assert_eq!(out.status, original.status, "{what}: the status");
-                assert_eq!(out.save.as_ref().map(digest), original.saved, "{what}: the game's own save");
+                assert_eq!(out.slot, original.slot, "{what}: what the slots were asked");
                 assert_eq!(digest(&copy.save()), original.save, "{what}: the save bytes");
             }
         }
@@ -618,7 +620,7 @@ mod tests {
 
     #[test]
     fn the_intro_movie_saved_anywhere_resumes_identically() {
-        let game = Game::power_on(None, GameRng::seeded(1), Pacing::Faithful);
+        let game = Game::power_on(GameRng::seeded(1), Pacing::Faithful);
         let saved = resumes_identically(game, 900, |_| Fed::Nothing, |_, frame| frame % 97 == 13);
         assert_eq!(saved.len(), 10);
     }
