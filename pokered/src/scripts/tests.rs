@@ -4716,3 +4716,40 @@ fn the_game_designer_hands_the_diploma_only_to_a_complete_pokedex() {
 }
 
 
+
+/// The rival walks up and the battle starts with him still drawn: `MoveSprite` left him in
+/// `hSpriteIndex`, so `BattleTransition` keeps his OAM block while it clears the rest.
+#[test]
+fn the_rival_stays_on_screen_through_the_lab_battle_s_transition() {
+    let mut game = game(Map::OaksLab, 5, 11, SpriteFacing::Up, 3, |world| {
+        world.events.clear(EVENT_FOLLOWED_OAK_INTO_LAB);
+        world.events.set(EVENT_OAK_APPEARED_IN_PALLET);
+    });
+    play_until(&mut game, 6000, |game| game.world().events.is_set(EVENT_OAK_ASKED_TO_CHOOSE_MON) && free(game));
+    command(&mut game, Command::Face(Direction::Right));
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Interact);
+    play_answering(&mut game, 20_000, &mut vec![0, 1], |game| game.world().party.len() == 2);
+    play_answering(&mut game, 40_000, &mut vec![1], |game| game.world().events.is_set(EVENT_GOT_STARTER) && free(game));
+    let in_battle = |game: &Game| game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_)));
+    let rival = |game: &Game| game.screen().sprites[4..8].to_vec();
+    let mut before = rival(&game);
+    for _ in 0..20_000 {
+        if in_battle(&game) {
+            break;
+        }
+        before = rival(&game);
+        let input = match game.status() {
+            Status::Waiting(Decision::Overworld) => Input::Command(Command::Step(Direction::Down)),
+            Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
+            _ => Input::None,
+        };
+        game.frame(input);
+    }
+    assert!(in_battle(&game), "the rival challenges the player on the way out");
+    assert!(before.iter().all(|object| (16..160).contains(&object.y)), "the rival is drawn as the battle starts: {before:?}");
+    for frame in 0..60 {
+        game.frame(Input::None);
+        assert_eq!(rival(&game), before, "frame {frame} of the transition");
+    }
+}

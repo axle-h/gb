@@ -143,6 +143,9 @@ pub struct BattleMode {
     /// pic scrolls back in.
     #[serde(default)]
     pal_species: [u8; 2],
+    /// `wSavedTileAnimations`: `hTileAnimations` as the overworld left it, put back at the end.
+    #[serde(default)]
+    saved_tile_animations: u8,
 }
 
 fn player_side() -> crate::systems::battle::Side {
@@ -207,6 +210,7 @@ impl BattleMode {
             h_scx: 0,
             hp_bar_colours: HpBarColours::default(),
             pal_species: [0; 2],
+            saved_tile_animations: 0,
         }
     }
 
@@ -734,6 +738,35 @@ mod tests {
         let (game, seen) = lose_on(poke_core::map::Map::OaksLab, BattleMode::trainer(0x19, 1, 0, 0), &["Yeah! Am", "is out of"]);
         assert_eq!(seen, [true, false]);
         assert!(game.world().location.always_on_bike, "only a blackout gets off the bike");
+    }
+
+    /// `hTileAnimations` is zeroed once the transition has cleared the screen, because the water and
+    /// flower tiles are the enemy pic's tiles $03 and $14 there, and put back when the battle ends.
+    #[test]
+    fn the_overworld_s_tile_animations_stop_for_the_battle() {
+        const WATER_AND_FLOWERS: u8 = 2;
+        let mut world = World { player_name: encode("RED").unwrap(), rival_name: encode("BLUE").unwrap(), ..World::default() };
+        world.party = vec![Named {
+            mon: new_party_mon(PokemonSpecies::Magikarp, 2, 0, &Origin::Trainer, &mut GameRng::tape(vec![])),
+            ot: encode("RED").unwrap(),
+            nick: encode("FISH").unwrap(),
+        }];
+        world.location.map = poke_core::map::Map::OaksLab;
+        let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
+        game.screen_mut().tiles.animation.kind = WATER_AND_FLOWERS;
+        game.push(Mode::Battle(BattleMode::trainer(0x19, 1, 0, 0)));
+        assert_eq!(settle(&mut game), Some(Decision::Text), "the rival wants to fight");
+        let pic = |game: &Game| [*game.screen().tiles.bg(0x03), *game.screen().tiles.bg(0x14)];
+        let before = pic(&game);
+        for _ in 0..120 {
+            game.frame(Input::None);
+        }
+        assert_eq!(pic(&game), before, "the pic's tiles are left alone");
+        while let Some(decision) = settle(&mut game) {
+            let next = if decision == Decision::Text { Command::Advance } else { Command::Fight(0) };
+            command(&mut game, next);
+        }
+        assert_eq!(game.screen().tiles.animation.kind, WATER_AND_FLOWERS, "and the animations come back");
     }
 
     /// The first rival on Route 22 gloats and the player blacks out too.

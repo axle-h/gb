@@ -31,6 +31,8 @@ pub enum Present {
     ClearSprites,
     /// `LoadHudAndHpBarAndStatusTilePatterns`.
     LoadHudAndHpBarTiles,
+    /// `hTileAnimations` zeroed, so the water and flower tiles stop overwriting the pics' tiles.
+    StopTileAnimations,
     /// `LoadMonBackPic`'s decompressing and scaling, and `LoadPlayerBackPic`'s.
     LoadBackPic(poke_core::species::PokemonSpecies),
     LoadPlayerBackPic { old_man: bool },
@@ -265,6 +267,7 @@ impl BattleMode {
                 ctx.screen.tiles.load_hp_bar_and_status_tiles();
                 hud::load_hud_tiles(&mut ctx.screen.tiles);
             }
+            Present::StopTileAnimations => ctx.screen.tiles.animation.kind = 0,
             Present::LoadBackPic(species) => hud::load_back_pic(&mut ctx.screen.tiles, species),
             Present::LoadPlayerBackPic { old_man } => hud::load_player_back_pic(&mut ctx.screen.tiles, old_man),
             Present::Tile { x, y, tile } => ui.set(x, y, tile),

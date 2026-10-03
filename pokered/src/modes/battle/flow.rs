@@ -549,8 +549,9 @@ impl BattleMode {
     }
 
     fn init_battle(&mut self, ctx: &mut Ctx) {
-        // `InitBattleVariables`: the party's, the bag's and the battle menu's saved cursors, and the
-        // move list's, which the battle keeps.
+        // `InitBattleVariables`: the tile animations, the party's, the bag's and the battle menu's
+        // saved cursors, and the move list's, which the battle keeps.
+        self.saved_tile_animations = ctx.screen.tiles.animation.kind;
         ctx.menu.party_and_bills = 0;
         ctx.menu.bag_saved = 0;
         ctx.menu.battle_and_start = 0;
@@ -585,6 +586,7 @@ impl BattleMode {
         self.push(Present::Transition(Self::transition_choice(false, level, ctx)));
         self.push(Present::LoadHudAndHpBarTiles);
         self.push(Present::Clear { x: 0, y: 0, width: SCREEN_TILES_X, height: SCREEN_TILES_Y });
+        self.push(Present::StopTileAnimations);
         self.push(if ghost_pic { Present::LoadGhostPic } else { Present::LoadFrontPic(species) });
         self.push(Present::Pic { x: 12, y: 0, first: FRONT_PIC_TILE });
 
@@ -694,6 +696,7 @@ impl BattleMode {
         self.push(Present::Transition(Self::transition_choice(true, last_level, ctx)));
         self.push(Present::LoadHudAndHpBarTiles);
         self.push(Present::Clear { x: 0, y: 0, width: SCREEN_TILES_X, height: SCREEN_TILES_Y });
+        self.push(Present::StopTileAnimations);
         self.push(Present::LoadTrainerPic(class));
         self.push(Present::Pic { x: 12, y: 0, first: FRONT_PIC_TILE });
 
@@ -2209,12 +2212,13 @@ impl BattleMode {
     }
 
     fn finish(&mut self, ctx: &mut Ctx) -> Transition {
-        // `EndOfBattle.resetVariables`.
+        // `EndOfBattle.resetVariables`, and `_InitBattleCommon` putting the tile animations back.
         ctx.audio.end_low_health_alarm();
         ctx.menu.party_and_bills = 0;
         ctx.menu.bag_saved = 0;
         ctx.menu.battle_and_start = 0;
         ctx.menu.list_scroll = 0;
+        ctx.screen.tiles.animation.kind = self.saved_tile_animations;
         Transition::Pop(Outcome::Chosen(self.battle_result))
     }
 }

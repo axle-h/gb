@@ -1029,15 +1029,18 @@ impl Script<'_, '_> {
         self.ow.toggle_object(self.ctx, toggle, false);
     }
 
-    /// `SetSpriteFacingDirectionAndDelay`.
+    /// `SetSpriteFacingDirectionAndDelay`, which takes its sprite from `hSpriteIndex`.
     pub fn set_sprite_facing_direction_and_delay(&mut self, slot: u8, facing: u8) -> Then {
+        self.ow.rt.sprite_index = slot;
         self.ow.sprites[slot as usize].facing = facing;
         self.delay_frames(6)
     }
 
     /// `MoveSprite`: `directions` (`NPC_MOVEMENT_*`, ending in `$ff`) for the sprite to walk, a square
-    /// a time, while the player waits.
+    /// a time, while the player waits. The sprite is `hSpriteIndex`, which a battle started next
+    /// reads for the OAM block `BattleTransition` keeps.
     pub fn move_sprite(&mut self, slot: u8, directions: &[u8]) {
+        self.ow.rt.sprite_index = slot;
         self.ow.set_sprite_movement_bytes_to_ff(slot);
         self.ow.move_sprite(self.ctx, slot, directions);
     }

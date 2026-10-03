@@ -475,13 +475,13 @@ impl Default for PokedexMenu {
 
 impl ModeUpdate for PokedexMenu {
     fn enter(&mut self, ctx: &mut Ctx) {
+        // `GBPalWhiteOut`, `ClearScreen` and `UpdateSprites`, which hides every sprite on the map.
+        ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
+        ctx.update_sprites = true;
         if self.page_only {
-            ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
             return;
         }
-        // `GBPalWhiteOut`, `ClearScreen` and `UpdateSprites`; the palettes and the sprites are
-        // other chunks'. `hJoy7` is what gives the list its held-key repeat.
-        ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
+        // `hJoy7` is what gives the list its held-key repeat.
         ctx.pad.repeat_held = true;
         ctx.menu.last_item = 0;
         self.scroll = 0;

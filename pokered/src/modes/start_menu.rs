@@ -68,7 +68,8 @@ impl StartMenu {
         self.entries.iter().position(|&e| e == entry).map(|index| index as u8)
     }
 
-    /// `RedisplayStartMenu`: the box, the entries and a fresh `HandleMenuInput`.
+    /// `RedisplayStartMenu`: the box, the entries, `UpdateSprites` to hide what the box covers and
+    /// show what a full screen hid, and a fresh `HandleMenuInput`.
     fn redisplay(&mut self, ctx: &mut Ctx) {
         let has_pokedex = ctx.world.events.is_set(EVENT_GOT_POKEDEX as u16);
         self.entries = [StartMenuEntry::Pokedex, StartMenuEntry::Pokemon, StartMenuEntry::Item,
@@ -93,6 +94,7 @@ impl StartMenu {
         self.input = MenuInput::new(ctx.menu.battle_and_start, self.entries.len() as u8, (11, 2), watched);
         ctx.menu.last_item = ctx.menu.battle_and_start;
         self.input.call(ctx);
+        ctx.update_sprites = true;
     }
 
     /// `CloseStartMenu`. Its wait for A to be let go ends inside the frame it starts, because an
@@ -163,6 +165,7 @@ impl ModeUpdate for StartMenu {
         match self.entries.get(self.input.current as usize) {
             Some(StartMenuEntry::Option) => {
                 ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
+                ctx.update_sprites = true;
                 Transition::Push(Mode::OptionMenu(OptionMenu::new()))
             }
             Some(StartMenuEntry::SaveReset) => Transition::Push(Mode::SlotSelector(SlotSelector::new(self.thumbnail.clone()))),
@@ -416,6 +419,70 @@ mod tests {
         for frame in 0..60 {
             let (a, b) = (whole.frame(Input::None), restored.frame(Input::None));
             assert_eq!((whole.ui(), a.events), (restored.ui(), b.events), "frame {frame}");
+        }
+    }
+
+    /// Pallet Town with the fisher wandering near the right edge, under where the menu's box goes.
+    fn over_pallet_town() -> Game {
+        use poke_core::map::Map;
+        use poke_core::sprite::SpriteFacing;
+        use poke_core::symbols::pokered_events::EVENT_FOLLOWED_OAK_INTO_LAB;
+        use crate::modes::overworld::Overworld;
+        use crate::systems::overworld::Location;
+        let mut world = World { player_name: encode("RED").unwrap(), ..World::default() };
+        world.location = Location { map: Map::PalletTown, x: 10, y: 12, facing: SpriteFacing::Down, last_map: Map::PalletTown,
+                                    ..Location::default() };
+        world.events.set(EVENT_FOLLOWED_OAK_INTO_LAB);
+        world.events.set(EVENT_GOT_POKEDEX as u16);
+        let mut game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::Overworld(Overworld::new()));
+        until(&mut game, Decision::Overworld);
+        game.frame(Input::Command(Command::OpenStartMenu));
+        until(&mut game, Decision::StartMenu);
+        game
+    }
+
+    fn until(game: &mut Game, decision: Decision) {
+        for _ in 0..300 {
+            if game.status() == Status::Waiting(decision.clone()) {
+                return;
+            }
+            game.frame(Input::None);
+        }
+        panic!("never waited for {decision:?}, stuck at {:?}", game.status());
+    }
+
+    /// The objects on screen, as `(x, y)` in OAM's coordinates.
+    fn objects(game: &Game) -> Vec<(u8, u8)> {
+        game.screen().sprites.iter().filter(|object| (1..160).contains(&object.y)).map(|object| (object.x, object.y)).collect()
+    }
+
+    /// `UpdateSprites` after `DrawStartMenu` hides whatever stands under the box, and leaves the
+    /// player beside it.
+    fn assert_beside_the_box(game: &Game) {
+        let objects = objects(game);
+        assert!(!objects.is_empty(), "the player is beside the box");
+        let under: Vec<_> = objects.iter().filter(|&&(x, y)| x > 8 * 10 && y < 16 + 8 * 16).collect();
+        assert!(under.is_empty(), "objects under the box: {under:?}");
+    }
+
+    /// `ClearScreen` then `UpdateSprites`, on the way into each full screen the menu reaches, and
+    /// `RedisplayStartMenu`'s `UpdateSprites` on the way back.
+    #[test]
+    fn a_full_screen_hides_the_overworld_sprites_and_the_menu_brings_them_back() {
+        for (entry, decision, back) in [
+            (StartMenuEntry::Option, Decision::Options, Input::Command(Command::CloseOptions)),
+            (StartMenuEntry::Pokedex, Decision::Pokedex, Input::Command(Command::CloseDex)),
+            (StartMenuEntry::TrainerInfo, Decision::TrainerCard, Input::Buttons(Joypad::B)),
+        ] {
+            let mut game = over_pallet_town();
+            assert_beside_the_box(&game);
+            game.frame(Input::Command(Command::ChooseStartMenuEntry(entry)));
+            until(&mut game, decision.clone());
+            assert_eq!(objects(&game), [], "{decision:?}");
+            game.frame(back);
+            until(&mut game, Decision::StartMenu);
+            assert_beside_the_box(&game);
         }
     }
 }

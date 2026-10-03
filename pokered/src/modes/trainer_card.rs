@@ -190,6 +190,7 @@ impl ModeUpdate for TrainerCard {
     /// pad in that same frame.
     fn open(&mut self, ctx: &mut Ctx) -> Transition {
         ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
+        ctx.update_sprites = true;
         self.tile_animations = ctx.screen.tiles.animation.kind;
         ctx.screen.tiles.animation.kind = 0;
         Self::draw_trainer_info(ctx);
