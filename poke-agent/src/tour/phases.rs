@@ -391,9 +391,12 @@ pub fn to_the_poke_flute() -> Vec<Step> {
         GoTo("RocketHideoutB1F"),
         Explore { maps: &["RocketHideoutB1F", "RocketHideoutB2F", "RocketHideoutB3F", "RocketHideoutB4F"],
                   patience: 900 },
+        // The Lift Key drops only when its Rocket is spoken to after his battle, which the
+        // exploring does only if he saw the player first and cut the walk to him short.
+        GoTo("RocketHideoutB4F"), Talk("Rocket3"), Explore { maps: &["RocketHideoutB4F"], patience: 60 },
         // Each floor's lift lobby is a room of its own, and B4F's is the only way into Giovanni's
         // half of that floor, so the lift is both the ride and the route.
-        GoTo("RocketHideoutB4F"), GoTo("RocketHideoutElevator"),
+        GoTo("RocketHideoutElevator"),
         Field(r#"{"move":"elevator","map":"RocketHideoutB1F"}"#),
         // The lobby has a Rocket in it, and beating him is what opens its door.
         Talk("Rocket5"),

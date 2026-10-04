@@ -262,6 +262,8 @@ pub struct SpriteEnv<'a> {
     pub beyond: Option<&'a [u8]>,
     /// `World::ruleset`.
     pub ruleset: Ruleset,
+    /// `World::cartridge_sprite_window`.
+    pub cartridge_window: bool,
 }
 
 impl SpriteEnv<'_> {
@@ -398,8 +400,11 @@ pub fn update_npc_sprite(sprites: &mut Sprites, slot: usize, env: &SpriteEnv, pa
         return;
     }
     // `InitializeSpriteScreenPosition`.
-    sprite.y_pixels = sprite.map_y.wrapping_sub(env.y).rotate_left(4).wrapping_sub(4);
-    sprite.x_pixels = sprite.map_x.wrapping_sub(env.x).rotate_left(4);
+    // `swap a` is a square's pixels only for one at most 15 below or right of the screen's corner;
+    // the margin's squares above and left of it are at -1.
+    let pixels = |squares: u8| if env.cartridge_window { squares.rotate_left(4) } else { squares.wrapping_mul(16) };
+    sprite.y_pixels = pixels(sprite.map_y.wrapping_sub(env.y)).wrapping_sub(4);
+    sprite.x_pixels = pixels(sprite.map_x.wrapping_sub(env.x));
     let mut at = tile_sprite_stands_on(sprite);
     let random = if sprite.movement1 < WALK {
         // `MoveSprite`'s path: movement byte 1 is the index of the next direction.
@@ -621,17 +626,20 @@ fn not_yet_moving(sprite: &mut SpriteState) {
 /// `CheckSpriteAvailability`: `false`, with the sprite hidden, for one that is toggled off, outside
 /// the squares around the player, or standing on a text box.
 fn check_sprite_availability(sprite: &mut SpriteState, slot: usize, env: &SpriteEnv) -> bool {
+    // The cartridge's squares are exactly the screen's, and the player's coordinates move only when
+    // a step ends, so a wanderer scrolled in by a step appears when it stops. A block's margin, as
+    // Gen 2 keeps, has the wanderer already showing when the step starts.
+    let margin = if env.cartridge_window { 0 } else { 1 };
+    let outside = |player: u8, at: u8, span: u8| {
+        let (first, last) = (player.saturating_sub(margin), player.wrapping_add(span + margin));
+        at != first && (first > at || last < at)
+    };
     let visible = (|| {
         if env.hidden[slot] {
             return None;
         }
-        if sprite.movement1 >= WALK {
-            if env.y != sprite.map_y && (env.y > sprite.map_y || env.y.wrapping_add(8) < sprite.map_y) {
-                return None;
-            }
-            if env.x != sprite.map_x && (env.x > sprite.map_x || env.x.wrapping_add(9) < sprite.map_x) {
-                return None;
-            }
+        if sprite.movement1 >= WALK && (outside(env.y, sprite.map_y, 8) || outside(env.x, sprite.map_x, 9)) {
+            return None;
         }
         let at = tile_sprite_stands_on(sprite);
         let corners = [env.tile(at), env.tile(at + 1), env.tile(at - 20)];
@@ -677,9 +685,12 @@ pub fn sprite_in_front_of_player(sprites: &mut Sprites, num_sprites: u8, range: 
 }
 
 /// `PrepareOAMData`, which VBlank runs from the slots every frame. With a ledge being jumped the
-/// last four objects are the shadow and are left alone.
-pub fn prepare_oam(sprites: &mut Sprites, objects: &mut Vec<Object>, ledge: bool) {
+/// last four objects are the shadow and are left alone. With `clip`, everywhere but the cartridge's
+/// sprite window, a sprite with no object on the screen takes none, and what the margin around it
+/// shows beyond OAM's 40 goes after them.
+pub fn prepare_oam(sprites: &mut Sprites, objects: &mut Vec<Object>, ledge: bool, clip: bool) {
     objects.resize(40, Object { y: OAM_HIDDEN_Y, ..Object::default() });
+    let end = if ledge { 36 } else { 40 };
     let mut next = 0;
     for sprite in sprites.iter_mut() {
         if sprite.picture_id == 0 {
@@ -696,22 +707,35 @@ pub fn prepare_oam(sprites: &mut Sprites, objects: &mut Vec<Object>, ledge: bool
         let (tiles, layout) = poke_core::tables::SPRITE_FACING_AND_ANIMATION_TABLE[entry as usize];
         let slot = image >> 4;
         let first_tile = if slot == 0x0B { 0x0A * 12 + 4 } else { slot * 12 };
+        let mut quadrants = Vec::with_capacity(4);
         for quadrant in 0..4 {
             let [dy, dx, flags] = layout[quadrant];
             let attributes = if flags & UNDER_GRASS != 0 { sprite.grass_priority & OAM_PRIO | flags } else { flags };
-            objects[next] = Object {
+            quadrants.push(Object {
                 y: sprite.y_pixels.wrapping_add(0x10).wrapping_add(dy),
                 x: sprite.x_pixels.wrapping_add(8).wrapping_add(dx),
                 tile: first_tile.wrapping_add(tiles[quadrant]),
                 attributes,
-            };
-            next += 1;
+            });
             if attributes & FACING_END != 0 {
                 break;
             }
         }
+        if clip && !quadrants.iter().any(|o| (9..=159).contains(&o.y) && (1..=167).contains(&o.x)) {
+            continue;
+        }
+        for object in quadrants {
+            if clip && next == end {
+                next = 40;
+            }
+            if next == objects.len() {
+                objects.push(object);
+            } else {
+                objects[next] = object;
+            }
+            next += 1;
+        }
     }
-    let end = if ledge { 36 } else { 40 };
     for object in &mut objects[next.min(end)..end] {
         object.y = OAM_HIDDEN_Y;
     }
@@ -867,7 +891,7 @@ mod tests {
             let env = SpriteEnv {
                 tiles: &tiles, x, y, walk_counter, font_loaded: false, collision: &collision, grass_tile: 0x52,
                 hidden: [false; NUM_SPRITES], no_face_player: false, player_direction, moving_direction: 0, spinning: false,
-                simulating: false, beyond: None, ruleset: Ruleset::Gen1,
+                simulating: false, beyond: None, ruleset: Ruleset::Gen1, cartridge_window: true,
             };
             let mut tape = GameRng::tape(rng.clone());
             update_npc_sprite(&mut sprites, 1, &env, &mut NpcPaths::default(), &mut tape);
@@ -902,7 +926,7 @@ mod tests {
             let env = SpriteEnv {
                 tiles: &tiles, x: 0, y: 0, walk_counter: 0, font_loaded: false, collision: &collision, grass_tile: 0x52,
                 hidden: [false; NUM_SPRITES], no_face_player: false, player_direction: 0, moving_direction: 0, spinning: false,
-                simulating: false, beyond: None, ruleset,
+                simulating: false, beyond: None, ruleset, cartridge_window: false,
             };
             let mut sprites = [SpriteState::default(); NUM_SPRITES];
             sprites[1] = SpriteState { movement1: WALK, y_displacement: y, x_displacement: x, ..walker(0x3C, 0x40, dy, dx) };
@@ -921,6 +945,71 @@ mod tests {
             assert_eq!(walks(home, step, Ruleset::Modern), fixed, "{home:?} {step:?}");
             assert_eq!(walks(home, step, Ruleset::Gen1), cartridge, "the cartridge, {home:?} {step:?}");
         }
+    }
+
+    #[test]
+    fn a_wanderer_a_block_off_the_screen_is_shown_outside_the_cartridge_s_window() {
+        let collision = poke_core::tilesets::collision_tiles(poke_core::map_header::TileSetId::Overworld);
+        let tiles: TileMap = std::array::from_fn(|_| 0);
+        let (x, y) = (20, 20);
+        let shown = |(map_y, map_x): (u8, u8), cartridge_window: bool| {
+            let env = SpriteEnv {
+                tiles: &tiles, x, y, walk_counter: 0, font_loaded: false, collision: &collision, grass_tile: 0x52,
+                hidden: [false; NUM_SPRITES], no_face_player: false, player_direction: 0, moving_direction: 0, spinning: false,
+                simulating: false, beyond: None, ruleset: Ruleset::Gen1, cartridge_window,
+            };
+            let mut sprite = SpriteState { movement1: WALK, map_y, map_x, ..walker(0x3C, 0x40, 0, 0) };
+            check_sprite_availability(&mut sprite, 1, &env)
+        };
+        // A sprite's map coordinates are 4 on from the player's. The screen runs 4 blocks above,
+        // below and left of the player, and 5 right.
+        for (at, ours, cartridge) in [
+            ((y + 4 - 4, x + 4 + 5), true, true),
+            ((y + 4 - 5, x + 4), true, false),
+            ((y + 4 + 5, x + 4), true, false),
+            ((y + 4, x + 4 - 5), true, false),
+            ((y + 4, x + 4 + 6), true, false),
+            ((y + 4 - 6, x + 4), false, false),
+            ((y + 4 + 6, x + 4), false, false),
+            ((y + 4, x + 4 - 6), false, false),
+            ((y + 4, x + 4 + 7), false, false),
+        ] {
+            assert_eq!(shown(at, false), ours, "{at:?}");
+            assert_eq!(shown(at, true), cartridge, "the cartridge, {at:?}");
+        }
+    }
+
+    #[test]
+    fn a_sprite_in_the_margin_above_and_left_of_the_screen_is_placed_on_its_square() {
+        let collision = poke_core::tilesets::collision_tiles(poke_core::map_header::TileSetId::Overworld);
+        let tiles: TileMap = std::array::from_fn(|_| 0);
+        let beyond = [0; 480];
+        let (x, y) = (20, 20);
+        let env = SpriteEnv {
+            tiles: &tiles, x, y, walk_counter: 0, font_loaded: false, collision: &collision, grass_tile: 0x52,
+            hidden: [false; NUM_SPRITES], no_face_player: false, player_direction: 0, moving_direction: 0, spinning: false,
+            simulating: false, beyond: Some(&beyond), ruleset: Ruleset::Gen1, cartridge_window: false,
+        };
+        let mut sprites = [SpriteState::default(); NUM_SPRITES];
+        sprites[1] = SpriteState {
+            movement_status: 1, movement1: STAY, movement2: SPRITE_FACING_RIGHT, map_y: y - 1, map_x: x - 1, image_base_offset: 2,
+            ..walker(0, 0, 0, 0)
+        };
+        update_npc_sprite(&mut sprites, 1, &env, &mut NpcPaths::default(), &mut GameRng::tape(vec![0; 8]));
+        assert_eq!((sprites[1].y_pixels, sprites[1].x_pixels), (0xEC, 0xF0), "a square up and left of the screen's corner");
+    }
+
+    #[test]
+    fn oam_skips_a_sprite_off_the_screen_and_holds_eleven_on_it() {
+        let mut sprites = [SpriteState::default(); NUM_SPRITES];
+        for slot in 0..11 {
+            sprites[slot] = SpriteState { image_base_offset: 1, ..walker(0x3C, 0x10 * slot as u8 % 0xA0, 0, 0) };
+        }
+        sprites[11] = SpriteState { image_base_offset: 1, ..walker(0x3C, 0xA0, 0, 0) };
+        let mut objects = Vec::new();
+        prepare_oam(&mut sprites, &mut objects, false, true);
+        assert_eq!(objects.len(), 44);
+        assert!(objects.iter().all(|o| o.x < 0xA8), "nothing for the sprite right of the screen");
     }
 
     #[test]

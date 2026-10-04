@@ -95,6 +95,10 @@ pub struct World {
     /// the cartridge plays Gen 1.
     #[serde(default, alias = "cartridge_bugs", deserialize_with = "ruleset_or_cartridge_bugs")]
     pub ruleset: Ruleset,
+    /// The cartridge's sprite window, exactly the screen, for the comparisons with it alone: the
+    /// player always has the margin around it. Never saved.
+    #[serde(skip)]
+    pub cartridge_sprite_window: bool,
 }
 
 /// A save from before the ruleset kept `ruleset: Ruleset`, which set is Gen 1.

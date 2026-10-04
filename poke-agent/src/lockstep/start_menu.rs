@@ -38,7 +38,7 @@ fn the_world(gb: &GameBoy) -> World {
             options::BattleStyle::Shift => BattleStyle::Shift,
         },
     };
-    let mut world = World { player_name, options, ruleset: Ruleset::Gen1, ..World::default() };
+    let mut world = World { player_name, options, ruleset: Ruleset::Gen1, cartridge_sprite_window: true, ..World::default() };
     let events = pokered_symbols::wEventFlags.address;
     for event in 0..NUM_EVENTS as u16 {
         if mmu.read(events + event / 8) & 1 << (event % 8) != 0 {

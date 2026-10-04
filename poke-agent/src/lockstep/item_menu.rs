@@ -81,6 +81,7 @@ pub(super) fn the_world(gb: &GameBoy) -> World {
         money: mmu.read_slice(sym::wPlayerMoney.address, 3).try_into().unwrap(),
         coins: mmu.read_slice(sym::wPlayerCoins.address, 2).try_into().unwrap(),
         ruleset: Ruleset::Gen1,
+        cartridge_sprite_window: true,
         ..World::default()
     };
     world.options.text_speed = match mmu.read_game_options().expect("the fixture's options").text_speed {

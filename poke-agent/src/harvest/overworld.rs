@@ -439,6 +439,7 @@ fn recreated_npc(input: &NpcInput, rng: &[u8]) -> Vec<SpriteState> {
         simulating: false,
         beyond: None,
         ruleset: Ruleset::Gen1,
+        cartridge_window: true,
     };
     sprites::update_npc_sprite(&mut sprites, 1, &env, &mut sprites::NpcPaths::default(), &mut GameRng::tape(rng.to_vec()));
     sprites[..3].to_vec()

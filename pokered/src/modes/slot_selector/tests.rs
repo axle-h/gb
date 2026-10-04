@@ -64,6 +64,7 @@ impl Host {
     }
 
     fn open(&mut self) {
+        self.until(Decision::Overworld);
         self.command(Command::OpenStartMenu, Decision::StartMenu);
         self.command(Command::ChooseStartMenuEntry(StartMenuEntry::SaveReset), Decision::SlotSelector);
     }

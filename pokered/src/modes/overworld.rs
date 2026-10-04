@@ -430,6 +430,7 @@ impl Overworld {
             simulating: self.scripted,
             beyond: Some(&surrounding),
             ruleset: ctx.world.ruleset,
+            cartridge_window: ctx.world.cartridge_sprite_window,
         };
         sprites::update_sprites(&mut self.sprites, &env, &mut self.rt.paths, ctx.rng);
         if std::mem::take(&mut self.rt.paths.path_ended) {
@@ -450,7 +451,7 @@ impl Overworld {
         self.update_sprites(ctx);
         if !self.rt.sprites_frozen {
             let mut objects = std::mem::take(&mut ctx.screen.sprites);
-            sprites::prepare_oam(&mut self.sprites, &mut objects, self.jumping);
+            sprites::prepare_oam(&mut self.sprites, &mut objects, self.jumping, !ctx.world.cartridge_sprite_window);
             ctx.screen.sprites = objects;
         }
     }
@@ -458,7 +459,7 @@ impl Overworld {
     fn present(&mut self, ctx: &mut Ctx) {
         if !self.rt.sprites_frozen {
             let mut objects = std::mem::take(&mut ctx.screen.sprites);
-            sprites::prepare_oam(&mut self.sprites, &mut objects, self.jumping);
+            sprites::prepare_oam(&mut self.sprites, &mut objects, self.jumping, !ctx.world.cartridge_sprite_window);
             ctx.screen.sprites = objects;
         }
         let (mut x, mut y) = self.view.camera();

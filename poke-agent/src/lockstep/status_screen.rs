@@ -89,6 +89,7 @@ pub(super) fn the_world(gb: &GameBoy) -> World {
         party: the_party(gb),
         options,
         ruleset: Ruleset::Gen1,
+        cartridge_sprite_window: true,
         ..World::default()
     };
     let events = pokered_symbols::wEventFlags.address;

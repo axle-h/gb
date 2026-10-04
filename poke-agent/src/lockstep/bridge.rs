@@ -324,6 +324,7 @@ pub(super) fn world(gb: &GameBoy) -> World {
         no_text_delay: flag(&sym::wStatusFlags5, BIT_NO_TEXT_DELAY),
         location: location(gb),
         ruleset: Ruleset::Gen1,
+        cartridge_sprite_window: true,
         ..World::default()
     };
 

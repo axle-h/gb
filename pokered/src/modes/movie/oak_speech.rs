@@ -157,7 +157,7 @@ impl OakSpeech {
     pub fn update(&mut self, ctx: &mut Ctx) -> Transition {
         if self.sprites {
             let mut sprites = player_sprite();
-            prepare_oam(&mut sprites, &mut ctx.screen.sprites, false);
+            prepare_oam(&mut sprites, &mut ctx.screen.sprites, false, true);
         }
         if self.child {
             return Transition::Stay;

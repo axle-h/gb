@@ -70,7 +70,8 @@ impl Overworld {
     /// `TrainerEngage`: a trainer on screen, in line with the player, facing them, near enough.
     fn trainer_engage(&mut self, ctx: &mut Ctx, slot: u8, distance: u8) -> bool {
         let sprite = self.sprites[slot as usize];
-        if sprite.image_index == 0xFF {
+        // The margin around the screen shows a trainer before he scrolls on; he sees only from on it.
+        if sprite.image_index == 0xFF || sprite.y_pixels.wrapping_add(4) >= 0x90 || sprite.x_pixels >= 0xA0 {
             return false;
         }
         let facing = sprite.facing;
