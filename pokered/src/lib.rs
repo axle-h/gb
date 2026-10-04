@@ -277,13 +277,13 @@ impl Game {
         let Self { world, modes, rng, pad, frame_counter, screen, menu, audio, pacing, slots, .. } = self;
         audio.ruleset = world.ruleset;
         let mut ctx = Ctx { world, pad, rng, screen, menu, audio, frame_counter, events, pacing: *pacing,
-                            update_sprites: false, menu_key_pressed: false,
+                            sprite_update: None, menu_key_pressed: false,
                             slots, slot: None, printed: Vec::new() };
         f(modes, &mut ctx);
-        if ctx.update_sprites
+        if let Some(update) = ctx.sprite_update.take()
             && let Some(Mode::Overworld(overworld)) = modes.iter_mut().rev().find(|mode| matches!(mode, Mode::Overworld(_)))
         {
-            overworld.update_sprites_under(&mut ctx);
+            overworld.update_sprites_under(&mut ctx, update);
         }
         if ctx.menu_key_pressed
             && let Some(Mode::Overworld(overworld)) = modes.iter_mut().rev().find(|mode| matches!(mode, Mode::Overworld(_)))

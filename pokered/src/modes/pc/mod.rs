@@ -317,7 +317,7 @@ pub(crate) fn print_off_screen(label: &str, shown: UiSurface, ctx: &mut Ctx) -> 
 
 /// `UpdateSprites`, which hides whatever sprite a box now covers.
 pub(crate) fn update_sprites(ctx: &mut Ctx) {
-    ctx.update_sprites = true;
+    ctx.update_sprites();
 }
 
 /// `PlaceString` of a `db` string, ligatures expanded.

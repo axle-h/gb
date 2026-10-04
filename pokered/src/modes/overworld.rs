@@ -46,9 +46,9 @@ use crate::audio::data::{sounds, AudioBank, Sound, SoundId};
 use crate::command::{Decision, Drive, Refusal};
 use crate::gfx::layers::Object;
 use crate::gfx::sgb::{OverworldPalette, PaletteCommand};
-use crate::gfx::ui::SCREEN_TILES_X;
+use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
-use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
+use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, SpriteUpdate, Status, Transition};
 use crate::systems::map_data::tile_block_map;
 use crate::systems::overworld::bike_surf::{collision_check_on_water, forced_bike_or_surf, OnWater};
 use crate::systems::overworld::collision::{self, ExtraWarp};
@@ -441,14 +441,27 @@ impl Overworld {
         }
     }
 
-    /// `PrepareOAMData` and the screen's view of the map, which VBlank takes every frame.
     /// `UpdateSprites` for a mode drawn over the overworld, and the objects into OAM.
-    pub(crate) fn update_sprites_under(&mut self, ctx: &mut Ctx) {
+    pub(crate) fn update_sprites_under(&mut self, ctx: &mut Ctx, update: SpriteUpdate) {
         // A battle clears `wUpdateSpritesEnabled`, so its bag's list updates nothing.
         if self.rt.waiting == Waiting::Battle {
             return;
         }
-        self.update_sprites(ctx);
+        match update {
+            SpriteUpdate::Drawn => self.update_sprites(ctx),
+            SpriteUpdate::Cleared => {
+                let mut blank = UiSurface::default();
+                blank.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
+                let drawn = std::mem::replace(&mut ctx.screen.ui, blank);
+                self.update_sprites(ctx);
+                ctx.screen.ui = drawn;
+            }
+        }
+        self.prepare_oam(ctx);
+    }
+
+    /// `PrepareOAMData`, which VBlank runs every frame whatever is drawn over the map.
+    fn prepare_oam(&mut self, ctx: &mut Ctx) {
         if !self.rt.sprites_frozen {
             let mut objects = std::mem::take(&mut ctx.screen.sprites);
             sprites::prepare_oam(&mut self.sprites, &mut objects, self.jumping, !ctx.world.cartridge_sprite_window);
@@ -456,12 +469,19 @@ impl Overworld {
         }
     }
 
-    fn present(&mut self, ctx: &mut Ctx) {
-        if !self.rt.sprites_frozen {
-            let mut objects = std::mem::take(&mut ctx.screen.sprites);
-            sprites::prepare_oam(&mut self.sprites, &mut objects, self.jumping, !ctx.world.cartridge_sprite_window);
-            ctx.screen.sprites = objects;
+    /// The frame's screen, or only its objects when a mode goes up over the map: the `UpdateSprites`
+    /// that `DisplayTextIDInit` or `PrintText` ran just before is otherwise never seen.
+    fn present_under(&mut self, ctx: &mut Ctx, transition: &Transition) {
+        match transition {
+            Transition::Stay => self.present(ctx),
+            Transition::Push(_) if self.rt.waiting != Waiting::Battle => self.prepare_oam(ctx),
+            _ => {}
         }
+    }
+
+    /// `PrepareOAMData` and the screen's view of the map, which VBlank takes every frame.
+    fn present(&mut self, ctx: &mut Ctx) {
+        self.prepare_oam(ctx);
         let (mut x, mut y) = self.view.camera();
         if self.walk_counter != 0 {
             // `hSCX`/`hSCY`: the view has already moved a half block, the scroll catches it up.
@@ -1555,9 +1575,7 @@ impl ModeUpdate for Overworld {
         if next_polls && self.on_cycling_road_slope(ctx.world) {
             self.polled = true;
         }
-        if matches!(transition, Transition::Stay) {
-            self.present(ctx);
-        }
+        self.present_under(ctx, &transition);
         transition
     }
 
@@ -1566,9 +1584,7 @@ impl ModeUpdate for Overworld {
             return Transition::Stay;
         }
         let transition = self.script_resume(outcome, ctx);
-        if matches!(transition, Transition::Stay) {
-            self.present(ctx);
-        }
+        self.present_under(ctx, &transition);
         transition
     }
 

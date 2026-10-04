@@ -4753,3 +4753,38 @@ fn the_rival_stays_on_screen_through_the_lab_battle_s_transition() {
         assert_eq!(rival(&game), before, "frame {frame} of the transition");
     }
 }
+
+/// `ShowPokedexData` blanks the screen and runs `UpdateSprites` before the picture goes up, so the
+/// table's Pokédexes, standing where the picture is drawn, are hidden with the rest; `PrintText`'s
+/// `UpdateSprites` after the page brings every one of them back.
+#[test]
+fn a_starter_s_dex_page_hides_the_lab_s_sprites_and_its_offer_shows_them_again() {
+    let mut game = game(Map::OaksLab, 5, 11, SpriteFacing::Up, 3, |world| {
+        world.events.clear(EVENT_FOLLOWED_OAK_INTO_LAB);
+        world.events.set(EVENT_OAK_APPEARED_IN_PALLET);
+    });
+    play_until(&mut game, 6000, |game| game.world().events.is_set(EVENT_OAK_ASKED_TO_CHOOSE_MON) && free(game));
+    command(&mut game, Command::Face(Direction::Right));
+    play_until(&mut game, 600, free);
+    let objects = |game: &Game| {
+        let mut objects: Vec<_> = game.screen().sprites.iter().filter(|o| (1..160).contains(&o.y)).map(|o| (o.x, o.y)).collect();
+        objects.sort();
+        objects
+    };
+    let before = objects(&game);
+    assert!(before.len() > 8, "Oak, the rival, the player, the balls and the Pokédexes: {before:?}");
+    command(&mut game, Command::Interact);
+    play_until(&mut game, 600, |game| game.status() == Status::Waiting(Decision::PokedexData));
+    assert_eq!(objects(&game), [], "the dex page");
+    // Charmander's entry runs to a second page.
+    for frame in 0..600 {
+        if game.status() == Status::Waiting(Decision::Text) {
+            break;
+        }
+        let page = game.status() == Status::Waiting(Decision::PokedexData) && frame % 2 == 0;
+        game.frame(if page { Input::Buttons(crate::input::Joypad::A) } else { Input::None });
+    }
+    assert_eq!(game.status(), Status::Waiting(Decision::Text), "the offer");
+    // The rival has turned to face the player, so only where each object stands is compared.
+    assert_eq!(objects(&game), before, "the offer, whose box covers none of them");
+}

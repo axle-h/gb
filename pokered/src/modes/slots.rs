@@ -666,7 +666,7 @@ mod tests {
             let Self { machine, modes, world, rng, pad, frame_counter, screen, menu, audio, .. } = self;
             let mut events: Vec<Event> = Vec::new();
             let mut ctx = Ctx { world, pad, rng, screen, menu, audio, frame_counter, events: &mut events,
-                                pacing: Pacing::Instant, update_sprites: false, menu_key_pressed: false, slots: &[], slot: None,
+                                pacing: Pacing::Instant, sprite_update: None, menu_key_pressed: false, slots: &[], slot: None,
                                 printed: Vec::new() };
             self.left |= f(machine, modes, &mut ctx);
         }

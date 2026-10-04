@@ -296,7 +296,7 @@ impl ModeUpdate for ListMenu {
         ctx.world.no_text_delay = true;
         ctx.screen.ui.text_box_border(4, 2, 14, 9);
         // `UpdateSprites`, which hides the sprites the box covers.
-        ctx.update_sprites = true;
+        ctx.update_sprites();
     }
 
     fn open(&mut self, ctx: &mut Ctx) -> Transition {

@@ -475,9 +475,8 @@ impl Default for PokedexMenu {
 
 impl ModeUpdate for PokedexMenu {
     fn enter(&mut self, ctx: &mut Ctx) {
-        // `GBPalWhiteOut`, `ClearScreen` and `UpdateSprites`, which hides every sprite on the map.
-        ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
-        ctx.update_sprites = true;
+        // `GBPalWhiteOut`, `ClearScreen` and `UpdateSprites`.
+        ctx.clear_screen_and_update_sprites();
         if self.page_only {
             return;
         }

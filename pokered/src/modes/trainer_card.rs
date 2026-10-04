@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::command::Decision;
 use crate::gfx::sgb::PaletteCommand;
 use crate::gfx::tiles::{V_CHARS1, V_CHARS2};
-use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
+use crate::gfx::ui::{UiSurface, SCREEN_TILES_X};
 use crate::input::Joypad;
 use crate::mode::{Ctx, ModeUpdate, Outcome, Status, Transition};
 use crate::systems::pokedex::pic_tiles;
@@ -189,8 +189,7 @@ impl ModeUpdate for TrainerCard {
     /// Everything up to the wait happens in the frame the card is pushed, and the wait reads the
     /// pad in that same frame.
     fn open(&mut self, ctx: &mut Ctx) -> Transition {
-        ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
-        ctx.update_sprites = true;
+        ctx.clear_screen_and_update_sprites();
         self.tile_animations = ctx.screen.tiles.animation.kind;
         ctx.screen.tiles.animation.kind = 0;
         Self::draw_trainer_info(ctx);

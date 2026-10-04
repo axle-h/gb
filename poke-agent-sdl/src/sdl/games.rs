@@ -2,6 +2,7 @@
 //! frame together so a press routed to both lands on the same frame of each. They drift apart
 //! anyway, by the cartridge's lag frames and the loading the recreation drops.
 
+use std::path::Path;
 use gb::cycles::MachineCycles;
 use gb::game_boy::GameBoy;
 use poke_agent::pokemon::PokemonApi;
@@ -284,14 +285,42 @@ impl Games {
 
     /// Replaces `side`'s game with the state in the file at `path`. A file that holds the other
     /// game's state, or neither's, is refused with the reason, and the game left as it was.
-    pub fn load_file(&mut self, side: Side, path: &std::path::Path) -> Result<(), String> {
-        let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
-        let bytes = std::fs::read(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
-        match Side::of_file(&bytes) {
-            Some(kind) if kind == side => self.load(side, &bytes).map_err(|e| format!("could not load {name}: {e}")),
-            Some(kind) => Err(format!("{name} is a {} state, for the {} half", kind.label(), kind.label())),
-            None => Err(format!("{name} is neither an emulator save state nor a pokered save")),
+    pub fn load_file(&mut self, side: Side, path: &Path) -> Result<(), String> {
+        self.load_files(&[(side, path)])
+    }
+
+    /// Replaces each `(side, path)`'s game with the state in its file. Every file is read and its
+    /// kind checked before either game is touched, so a missing or wrong one loads neither.
+    pub fn load_files(&mut self, files: &[(Side, &Path)]) -> Result<(), String> {
+        let states = files.iter().map(|&(side, path)| {
+            let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
+            let bytes = std::fs::read(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+            match Side::of_file(&bytes) {
+                Some(kind) if kind == side => Ok((side, name, bytes)),
+                Some(kind) => Err(format!("{name} is a {} state, for the {} half", kind.label(), kind.label())),
+                None => Err(format!("{name} is neither an emulator save state nor a pokered save")),
+            }
+        }).collect::<Result<Vec<_>, String>>()?;
+        for (side, name, bytes) in states {
+            self.load(side, &bytes).map_err(|e| format!("could not load {name}: {e}"))?;
         }
+        Ok(())
+    }
+
+    /// `side`'s game as the kind of file [`Side::of_file`] tells apart.
+    pub fn save(&self, side: Side) -> Result<Vec<u8>, String> {
+        match side {
+            Side::Emulated => self.gb.save_state(),
+            Side::Native => Ok(self.native.game().save()),
+        }
+    }
+
+    /// Writes each `(side, path)`'s game to its file.
+    pub fn save_files(&self, files: &[(Side, &Path)]) -> Result<(), String> {
+        for &(side, path) in files {
+            std::fs::write(path, self.save(side)?).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+        }
+        Ok(())
     }
 
     /// Replaces `side`'s game with the state in `bytes`, of the kind [`Side::of_file`] names.
@@ -438,6 +467,31 @@ pub mod tests {
         games.load_file(Side::Native, &state.0).unwrap();
         assert_eq!(games.native.game().save(), saved);
         tap_a(&mut games, 60, 40, &mut |_, _| {});
+    }
+
+    /// The quick-save: both games written together and read back together, and a pair with a file
+    /// missing loads neither.
+    #[test]
+    fn both_games_save_to_files_and_load_back_together() {
+        let mut games = fresh();
+        tap_a(&mut games, 300, 40, &mut |_, _| {});
+        let emulated = TempFile::new("both.gbst", b"");
+        let native = TempFile::new("both.pkrd", b"");
+        let files = [(Side::Emulated, emulated.0.as_path()), (Side::Native, native.0.as_path())];
+        games.save_files(&files).unwrap();
+        let (wram, saved) = (games.gb.core().mmu().work_ram().to_vec(), games.native.game().save());
+        tap_a(&mut games, 300, 40, &mut |_, _| {});
+        let (moved_wram, moved) = (games.gb.core().mmu().work_ram().to_vec(), games.native.game().save());
+        assert_ne!(moved_wram, wram);
+        assert_ne!(moved, saved);
+
+        let missing = Path::new("/nonexistent/x.pkrd");
+        assert!(games.load_files(&[(Side::Emulated, emulated.0.as_path()), (Side::Native, missing)]).is_err());
+        assert_eq!(games.gb.core().mmu().work_ram(), moved_wram.as_slice(), "the emulated game left as it was");
+
+        games.load_files(&files).unwrap();
+        assert_eq!(games.gb.core().mmu().work_ram(), wram.as_slice());
+        assert_eq!(games.native.game().save(), saved);
     }
 
     #[test]

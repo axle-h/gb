@@ -43,7 +43,7 @@ pub fn item_use_bicycle(ctx: &mut Ctx) -> Used {
         return Used::failed("NoCyclingAllowedHereText");
     }
     ctx.screen.ui.uncover(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y);
-    ctx.update_sprites = true;
+    ctx.update_sprites();
     let text = if getting_on {
         ctx.pad.held = Joypad::empty();
         ctx.world.location.walk_bike_surf = BIKING;

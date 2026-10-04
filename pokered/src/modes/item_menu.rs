@@ -318,7 +318,7 @@ impl ItemMenu {
     /// which the start menu closes whether anything was found or not.
     fn itemfinder(&mut self, ctx: &mut Ctx) -> Transition {
         ctx.screen.ui.uncover(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y);
-        ctx.update_sprites = true;
+        ctx.update_sprites();
         if !hidden_item_near(ctx) {
             return self.text("ItemfinderFoundNothingText", After::CloseMenu);
         }

@@ -298,7 +298,7 @@ impl SlotSelector {
             ctx.screen.tiles.load_tileset(tileset);
         }
         ctx.screen.tiles.animation.kind = tile_animations;
-        ctx.update_sprites = true;
+        ctx.update_sprites();
         Transition::Pop(outcome)
     }
 }

@@ -10,11 +10,12 @@
 //! Keys besides the pad's (arrows, `X` A, `Z` B, `Return` START, right `Shift` or `Backspace`
 //! SELECT): `C` the native colour mode, `M` mute, `1`-`4` the speed (1x, 2x, 4x, as fast as the
 //! host can), `T` the tour, `F5` the emulated agent,
-//! `F8`/`F9` the emulator's quick-save, `Ctrl`+`F8`/`F9` the recreation's, held in memory alone,
-//! `F11` the window to `window.png`, and the emulator's debugging keys `F1`-`F3`, `F7`, `F10`,
-//! `F12`, `W`, `A` and `P`.
+//! `F8`/`F9` quick-save and quick-load both games, `Shift` the emulator's alone and `Ctrl` the
+//! recreation's, `F11` the window to `window.png`, and the emulator's debugging keys `F1`-`F3`,
+//! `F7`, `F10`, `F12`, `W`, `A` and `P`.
 
 use std::collections::VecDeque;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use sdl2::audio::{AudioQueue, AudioSpecDesired};
 use sdl2::event::Event;
@@ -44,6 +45,7 @@ const MAX_QUEUED_SECONDS: f32 = 0.25;
 /// directory, so the window plays the same game whichever directory it is started from.
 const SAVE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/pokemon-red.bin");
 const SRAM: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/pokemon-red.sav");
+const NATIVE_SAVE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/pokemon-red.pkrd");
 
 /// The recreation's save slots, the directory `pokered-sdl` keeps them in.
 pub fn native_slots_dir() -> std::path::PathBuf {
@@ -54,7 +56,7 @@ pub const USAGE: &str = "usage: poke-agent-sdl [--emulated <gb save state>] [--n
 
 /// The keys, said into the log when the window opens.
 const HELP: &str = "Tab routing, T grand tour on both, C colours, M mute, 1-4 speed (1x, 2x, 4x, max), F5 emulated agent, \
-    F8/F9 emulator quick-save, Ctrl+F8/F9 native quick-save (in memory), F11 window.png. Drop a state on a game's half to load it.";
+    F8/F9 quick-save/load both, Shift+F8/F9 emulated alone, Ctrl+F8/F9 native alone, F11 window.png. Drop a state on a game's half to load it.";
 
 /// What the command line asks for: a state to load into either game once both are on.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -86,6 +88,29 @@ fn load(games: &mut Games, view: &mut View, side: Side, path: &std::path::Path) 
         Ok(()) => view.say(Source::Window, format!("loaded {} into the {} game", path.display(), side.label())),
         Err(e) => view.say(Source::Window, e),
     }
+}
+
+/// `F8` or `F9`: the quick-save of both games, or with `Shift` the emulator's alone and with `Ctrl`
+/// the recreation's, written or read in the files beside the battery save.
+fn quick_save(games: &mut Games, view: &mut View, keymod: Mod, load: bool) {
+    let both = [(Side::Emulated, Path::new(SAVE)), (Side::Native, Path::new(NATIVE_SAVE))];
+    let files = if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) {
+        &both[1..]
+    } else if keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) {
+        &both[..1]
+    } else {
+        &both[..]
+    };
+    let games_named = match files {
+        [(side, _)] => format!("the {} game", side.label()),
+        _ => "both games".to_string(),
+    };
+    let said = match (load, if load { games.load_files(files) } else { games.save_files(files) }) {
+        (_, Err(e)) => e,
+        (true, Ok(())) => format!("loaded {games_named}"),
+        (false, Ok(())) => format!("saved {games_named}"),
+    };
+    view.say(Source::Window, said);
 }
 
 /// Starts the grand tour on both games, or stops the one playing.
@@ -137,7 +162,6 @@ pub fn render(args: Args) -> Result<(), String> {
         }
     }
     let mut controllers = Controllers::new(sdl_context.game_controller()?);
-    let mut native_state = None;
 
     let window = video_subsystem.window("gb", view.layout.width, view.layout.height)
         .position_centered()
@@ -189,18 +213,8 @@ pub fn render(args: Args) -> Result<(), String> {
                 Event::ControllerDeviceRemoved { which, .. } => if let Some(name) = controllers.removed(which) {
                     view.say(Source::Window, format!("controller disconnected: {name}"));
                 },
-                Event::KeyDown { keycode: Some(keycode @ (Keycode::F8 | Keycode::F9)), keymod, repeat: false, .. }
-                    if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
-                    if keycode == Keycode::F8 {
-                        native_state = Some(games.native.game().save());
-                        view.say(Source::Window, "kept the native game in memory".to_string());
-                    } else if let Some(bytes) = &native_state {
-                        if let Err(e) = games.load(Side::Native, bytes) {
-                            view.say(Source::Window, format!("could not load the native game: {e}"));
-                        }
-                    } else {
-                        view.say(Source::Window, "no native game kept yet: Ctrl+F8 keeps one".to_string());
-                    }
+                Event::KeyDown { keycode: Some(keycode @ (Keycode::F8 | Keycode::F9)), keymod, repeat: false, .. } => {
+                    quick_save(&mut games, &mut view, keymod, keycode == Keycode::F9);
                 }
                 Event::MouseWheel { precise_y, .. } => {
                     view.log.scroll((precise_y * 3.0).round() as i32, view.layout.log_rows());
@@ -264,7 +278,7 @@ pub fn render(args: Args) -> Result<(), String> {
                             }
                             previous_wram.copy_from_slice(current_wram);
                         }
-                        Keycode::F5 | Keycode::F9 if touring => {
+                        Keycode::F5 if touring => {
                             view.say(Source::Window, "a tour is playing both games: T stops it".to_string());
                         }
                         Keycode::F5 => {
@@ -275,13 +289,6 @@ pub fn render(args: Args) -> Result<(), String> {
                         Keycode::F7 => {
                             // TODO write to this file on change
                             gb.dump_sram_to_file(SRAM)?;
-                        }
-                        Keycode::F8 => {
-                            gb.save_state_to_file(SAVE)?;
-                        }
-                        Keycode::F9 => {
-                            gb.load_state_from_file(SAVE)?;
-                            games.emulator_restored();
                         }
                         Keycode::F10 => {
                             let pokemon_api = PokemonApi::new(gb);

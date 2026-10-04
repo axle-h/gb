@@ -181,7 +181,7 @@ impl TownMap {
         let tileset = ctx.screen.map.tileset.unwrap_or_default();
         load_player_sprite_graphics(&mut ctx.screen.tiles, &mut ctx.world.location, tileset);
         ctx.screen.tiles.load_font();
-        ctx.update_sprites = true;
+        ctx.update_sprites();
         ctx.screen.sgb.run(&PaletteCommand::Default);
     }
 

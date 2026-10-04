@@ -8,7 +8,7 @@ use poke_core::symbols::pokered_events::EVENT_GOT_POKEDEX;
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
 use crate::gfx::mon_icons::clear_sprites;
-use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
+use crate::gfx::ui::UiSurface;
 use crate::input::Joypad;
 use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
 use crate::modes::menu_input::MenuInput;
@@ -94,7 +94,7 @@ impl StartMenu {
         self.input = MenuInput::new(ctx.menu.battle_and_start, self.entries.len() as u8, (11, 2), watched);
         ctx.menu.last_item = ctx.menu.battle_and_start;
         self.input.call(ctx);
-        ctx.update_sprites = true;
+        ctx.update_sprites();
     }
 
     /// `CloseStartMenu`. Its wait for A to be let go ends inside the frame it starts, because an
@@ -164,8 +164,7 @@ impl ModeUpdate for StartMenu {
         self.saved = Some(ctx.screen.ui.clone());
         match self.entries.get(self.input.current as usize) {
             Some(StartMenuEntry::Option) => {
-                ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
-                ctx.update_sprites = true;
+                ctx.clear_screen_and_update_sprites();
                 Transition::Push(Mode::OptionMenu(OptionMenu::new()))
             }
             Some(StartMenuEntry::SaveReset) => Transition::Push(Mode::SlotSelector(SlotSelector::new(self.thumbnail.clone()))),

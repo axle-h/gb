@@ -54,8 +54,8 @@ pub struct Ctx<'a> {
     pub events: &'a mut Vec<Event>,
     pub pacing: Pacing,
     /// `UpdateSprites`, asked for by a mode drawn over the overworld: the overworld under it runs it
-    /// once the frame's transitions have applied.
-    pub update_sprites: bool,
+    /// once the frame's transitions have applied. The last request in a frame is the one that runs.
+    pub sprite_update: Option<SpriteUpdate>,
     /// `HandleMenuInput` took a key, which zeroes `wCheckFor180DegreeTurn`: the overworld under
     /// the menu disarms its turn once the frame's transitions have applied.
     pub menu_key_pressed: bool,
@@ -67,6 +67,30 @@ pub struct Ctx<'a> {
     /// The UI surface each time a text box was about to take back what it printed, by scrolling a
     /// line away or ending: a line printed and taken back within one frame is on no frame's screen.
     pub printed: Vec<crate::gfx::ui::UiSurface>,
+}
+
+impl Ctx<'_> {
+    /// `UpdateSprites` over the screen as the frame leaves it.
+    pub fn update_sprites(&mut self) {
+        self.sprite_update = Some(SpriteUpdate::Drawn);
+    }
+
+    /// `ClearScreen` then `UpdateSprites`, which hides every sprite on the map before anything is
+    /// drawn over the blank screen.
+    pub fn clear_screen_and_update_sprites(&mut self) {
+        self.screen.ui.fill(0, 0, crate::gfx::ui::SCREEN_TILES_X, crate::gfx::ui::SCREEN_TILES_Y, crate::gfx::ui::UiSurface::BLANK);
+        self.sprite_update = Some(SpriteUpdate::Cleared);
+    }
+}
+
+/// The screen a requested `UpdateSprites` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpriteUpdate {
+    /// The screen as the frame's transitions leave it.
+    Drawn,
+    /// The blank screen `ClearScreen` left, whatever a full screen draws over it later that frame:
+    /// a picture's low tile ids would otherwise read as map tiles and show the sprites on them.
+    Cleared,
 }
 
 pub enum Transition {
