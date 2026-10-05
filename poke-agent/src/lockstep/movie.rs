@@ -14,6 +14,7 @@ use poke_core::species::PokemonSpecies;
 use pokered::command::Decision;
 use pokered::input::Joypad;
 use pokered::mode::{Mode, Status};
+use pokered::modes::movie::TITLE_VERSION_ROW;
 use pokered::rng::GameRng;
 use pokered::systems::hall_of_fame::{HallOfFameMon, HOF_TEAM_CAPACITY};
 use pokered::{Game, Input, Pacing};
@@ -79,6 +80,10 @@ fn pack(shades: &[u8]) -> Vec<u8> {
 
 fn unpack(packed: &[u8]) -> Vec<u8> {
     packed.iter().flat_map(|&byte| (0..4).map(move |i| byte >> (i * 2) & 3)).collect()
+}
+
+fn is_white(picture: &[u8]) -> bool {
+    picture.iter().all(|&b| b == 0)
 }
 
 fn hash(shades: &[u8]) -> u64 {
@@ -213,6 +218,7 @@ fn the_splash_the_intro_and_the_title_match_the_lcd_frame_for_frame() {
         game.frame(Input::None);
         film.recreation_frame(&game);
     }
+    film.without_version(|pictures| pictures.iter().rposition(|p| is_white(p)).expect("the intro's fade to white") + 1..pictures.len());
     film.check(60, 3, "power-on");
 }
 
@@ -342,9 +348,23 @@ impl Film {
         self.recreation_pictures.push(pack(&shades));
     }
 
+    /// The recreation's title names its own version: that row blanked on both sides, in the frames
+    /// `title` picks out of each side's pictures as the title's.
+    fn without_version(&mut self, title: impl Fn(&[Vec<u8>]) -> std::ops::Range<usize>) {
+        let lines = TITLE_VERSION_ROW * 8 * 160..(TITLE_VERSION_ROW + 1) * 8 * 160;
+        for (pictures, hashes) in [(&mut self.cartridge_pictures, &mut self.cartridge), (&mut self.recreation_pictures, &mut self.recreation)] {
+            for frame in title(pictures) {
+                let mut shades = unpack(&pictures[frame]);
+                shades[lines.clone()].fill(0);
+                hashes[frame] = hash(&shades);
+                pictures[frame] = pack(&shades);
+            }
+        }
+    }
+
     /// Both films without their first frames, up to the first all-white one on each side.
     fn from_white(mut self) -> Self {
-        let white = |pictures: &[Vec<u8>]| pictures.iter().position(|p| p.iter().all(|&b| b == 0)).expect("a white frame");
+        let white = |pictures: &[Vec<u8>]| pictures.iter().position(|p| is_white(p)).expect("a white frame");
         let (c, r) = (white(&self.cartridge_pictures), white(&self.recreation_pictures));
         self.cartridge.drain(..c);
         self.cartridge_pictures.drain(..c);
@@ -404,7 +424,15 @@ fn play(gb: &mut GameBoy, game: &mut Game, film: &mut Film, since: Option<u32>, 
         assert_eq!(game.status(), Status::Waiting(decision.clone()), "poll {poll}");
         // Below these the recreation's option screen has the ruleset, which the cartridge has not.
         let rows = if decision == Decision::Options { pokered::modes::option_menu::CARTRIDGE_ROWS } else { 18 };
-        assert_eq!(screen(gb)[..rows], ours(game)[..rows], "the tile map at poll {poll}, {decision:?}");
+        // And the title names its own version.
+        let compared = |mut map: Vec<Vec<u8>>| {
+            map.truncate(rows);
+            if decision == Decision::TitleScreen {
+                map.remove(TITLE_VERSION_ROW);
+            }
+            map
+        };
+        assert_eq!(compared(screen(gb)), compared(ours(game)), "the tile map at poll {poll}, {decision:?}");
         if let Some(recreation) = recreation {
             assert_in_time(cartridge, recreation, late, &format!("poll {poll}, {decision:?}"));
         }
@@ -437,6 +465,7 @@ fn a_new_game_from_the_title_to_reds_room_matches_the_cartridge() {
         cartridge += 1;
     }
     assert_late(cartridge, recreation, INTO_THE_MAP, "into the overworld");
+    film.without_version(|pictures| 0..pictures.iter().position(|p| is_white(p)).expect("the title's white-out"));
     film.check(0, 3, "a new game");
 
     let mmu = gb.core().mmu();

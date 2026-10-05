@@ -16,6 +16,7 @@ mod screen;
 mod title;
 mod wait;
 
+pub use title::TITLE_VERSION_ROW;
 use poke_core::map::Map;
 use poke_core::map_objects::fly_warp;
 use serde::{Deserialize, Serialize};

@@ -1,5 +1,6 @@
 //! `DisplayTitleScreen` (`title.asm`, `title2.asm`): the logo bouncing in, the version sliding in
-//! under a scroll split, and a new mon scrolled in every 200 frames until A or START.
+//! under a scroll split, and a new mon scrolled in every 200 frames until A or START. The version
+//! is "Rust Version", in the cartridge's own lettering.
 //!
 //! The screen is two pictures. `vBGMap0` holds the title with the mon, `vBGMap1` the title without,
 //! and the window shows `vBGMap1` over `vBGMap0` while the mon on `vBGMap0` is changed; the logo's
@@ -21,7 +22,7 @@ use crate::gfx::ui::UiSurface;
 use crate::gfx::layers::TileMap;
 use crate::mode::Ctx;
 use crate::rng::Rng;
-use super::intro::{pal_normal, place_string_lines, white_out};
+use super::intro::{pal_normal, white_out};
 use super::screen::{clear_screen, copy_pic_to_tile_map, load_mon_pic, Dest, MovieScreen, WINDOW_HIDDEN};
 use super::wait::{Tick, Wait};
 
@@ -176,8 +177,7 @@ impl Title {
         let logo = gfx::title::POKEMON_LOGO;
         tiles.load(V_CHARS1, &logo[..0x60 * 16]);
         tiles.load(TITLE_LOGO2, &logo[0x60 * 16..0x70 * 16]);
-        let version = gfx::title::RED_VERSION;
-        tiles.load_1bpp(V_CHARS2 + 0x60 + (10 * 16 - version.len() * 2) / 2 / 16, version);
+        tiles.load_1bpp(V_CHARS2 + 0x60, &rust_version());
         screen.maps = [TileMap::filled(UiSurface::BLANK), TileMap::filled(UiSurface::BLANK)];
 
         let ui = &mut ctx.screen.ui;
@@ -366,8 +366,65 @@ fn load_title_mon(ctx: &mut Ctx, species: PokemonSpecies) {
     copy_pic_to_tile_map(&mut ctx.screen.ui, 5, 10, 0, false);
 }
 
-/// `PrintGameVersionOnTitleScreen`.
+/// The tile row `PrintGameVersionOnTitleScreen` writes the version on.
+pub const TITLE_VERSION_ROW: usize = 8;
+
+/// `PrintGameVersionOnTitleScreen`, a column left of Red's for the third tile "Rust" takes.
 fn print_version(ui: &mut UiSurface) {
-    place_string_lines(ui, 7, 8, &poke_core::tables::Chars::encode(poke_core::tables::VERSION_ON_TITLE_SCREEN_TEXT));
+    ui.place(6, TITLE_VERSION_ROW, &[0x60, 0x61, 0x62, 0x7F, 0x65, 0x66, 0x67, 0x68, 0x69]);
 }
 
+/// `Version_GFX` reading "Rust Version": Red's strip with "Red" redrawn as "Rust". The
+/// letters are the cartridge's, a column apart as Red's are: R and s from Red's strip, u from
+/// Blue's, t from "Nintendo" in the copyright line, whose letters sit two rows higher. "Rust" ends
+/// on the column "Red" does, so "Version" keeps its place.
+fn rust_version() -> [u8; 80] {
+    use gfx::{splash::COPYRIGHT, title::{BLUE_VERSION, RED_VERSION}};
+    let copyright_dark_plane: Vec<u8> = COPYRIGHT.iter().skip(1).step_by(2).copied().collect();
+    // Each letter's source strip, its columns there, and how far it moves down.
+    let letters: [(&[u8], std::ops::Range<usize>, usize); 4] = [
+        (RED_VERSION, 0..5, 0),
+        (BLUE_VERSION, 9..13, 0),
+        (RED_VERSION, 57..62, 0),
+        (&copyright_dark_plane, 55..59, 2),
+    ];
+    let mut strip = *RED_VERSION;
+    strip[..5 * 8].fill(0);
+    let mut to = 3;
+    for (from, columns, down) in letters {
+        for x in columns {
+            for y in down..8 {
+                let lit = from[x / 8 * 8 + y - down] >> (7 - x % 8) & 1;
+                strip[to / 8 * 8 + y] |= lit << (7 - to % 8);
+            }
+            to += 1;
+        }
+        to += 1;
+    }
+    strip
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_version_reads_rust_version() {
+        let strip = rust_version();
+        let row = |y: usize, columns: std::ops::Range<usize>| -> String {
+            columns.map(|x| if strip[x / 8 * 8 + y] >> (7 - x % 8) & 1 != 0 { '#' } else { '.' }).collect()
+        };
+        let rust: Vec<String> = (0..8).map(|y| row(y, 0..40)).collect();
+        assert_eq!(rust, [
+            "........................................",
+            "........................................",
+            "........................................",
+            "...####..............##.................",
+            "...##.##.##.#..####.####................",
+            "...####..##.#.###....##.................",
+            "...##.##.##.#...###..##.................",
+            "...##.##..###.####...##.................",
+        ]);
+        assert_eq!(strip[5 * 8..], gfx::title::RED_VERSION[5 * 8..], "Red's \"Version\"");
+    }
+}
