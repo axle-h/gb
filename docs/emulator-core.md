@@ -10,6 +10,11 @@ arguments are in the module docs named below; this is the list of what not to br
   `halt_bug` and `oam_bug` ROMs were carried as permanently-ignored expected failures and are gone.
   `interrupt_time` stays, and passes.
 
+## Super Game Boy
+
+- `gb/src/sgb.rs` colours the PPU's finished DMG frame by reading its greys back as shades, so the
+  DMG ramp in `DMGColor::to_lcd` is the SGB's input as well as the committed screenshots'.
+
 ## Mappers
 
 - Every mapper resolves its bank register differently. MBC1 remaps a zero selection *then* wraps,

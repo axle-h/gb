@@ -8,6 +8,8 @@ pub enum Model {
     #[default]
     Dmg,
     Cgb,
+    /// A Super Game Boy: a DMG to the cartridge, with the SNES listening on `P1`.
+    Sgb,
 }
 
 impl Model {
@@ -32,7 +34,7 @@ pub enum ColorMode {
 impl ColorMode {
     pub fn of(model: Model, header: &CartHeader) -> Self {
         match (model, header.cgb_mode()) {
-            (Model::Dmg, _) => ColorMode::Dmg,
+            (Model::Dmg | Model::Sgb, _) => ColorMode::Dmg,
             (Model::Cgb, CGBMode::None) => ColorMode::CgbCompat,
             (Model::Cgb, _) => ColorMode::Cgb,
         }

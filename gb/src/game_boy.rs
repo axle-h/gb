@@ -26,6 +26,11 @@ impl GameBoy {
         Self::new(cart, Model::Cgb)
     }
 
+    /// A Super Game Boy, without its border.
+    pub fn sgb(cart: &[u8]) -> Self {
+        Self::new(cart, Model::Sgb)
+    }
+
     pub fn new(cart: &[u8], model: Model) -> Self {
         Self {
             core: Core::new(cart, model)

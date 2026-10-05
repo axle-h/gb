@@ -2,6 +2,7 @@
 //! and a status line across the top, the emulated screen left of the native one, each under its
 //! title and the tour's standing on it, and the log beneath.
 
+use gb::model::Model;
 use gb::ppu::{LCD_HEIGHT, LCD_WIDTH};
 use pokered::gfx::colour::ColourMode;
 use crate::sdl::font::Text;
@@ -141,7 +142,7 @@ pub struct View {
 impl View {
     pub fn new(fit: impl Fn((usize, usize), u32) -> Layout) -> Result<Self, String> {
         let text = Text::roboto(FONT_SIZE)?;
-        let colours = ColourMode::Dmg;
+        let colours = ColourMode::Sgb;
         let layout = fit(colours.size(), text.line_height());
         Ok(Self {
             routing: Routing::default(),
@@ -208,7 +209,12 @@ impl View {
             ColourMode::Sgb => "SGB",
             ColourMode::SgbBorder => "SGB, border",
         };
-        let emulated_title = if games.agent_running { "EMULATED   agent".to_string() } else { "EMULATED".to_string() };
+        let hardware = match games.gb.core().mmu().model() {
+            Model::Dmg => "DMG",
+            Model::Cgb => "GBC",
+            Model::Sgb => "SGB",
+        };
+        let emulated_title = format!("EMULATED   {hardware}{}", if games.agent_running { "   agent" } else { "" });
         for (side, rect, title) in [(Side::Emulated, layout.emulated, emulated_title), (Side::Native, layout.native, format!("NATIVE   {mode}"))] {
             let title_y = rect.y - TITLE_HEIGHT as i32;
             let clip = Rect::new(rect.x, title_y, rect.width, TITLE_HEIGHT);
@@ -221,7 +227,7 @@ impl View {
                 text.draw(pixels, &said, x, title_y, ink, clip);
             }
         }
-        let lcd: Vec<u8> = games.gb.core().mmu().ppu().lcd().iter().flat_map(|pixel| {
+        let lcd: Vec<u8> = games.gb.core().mmu().display().iter().flat_map(|pixel| {
             let [r, g, b] = pixel.to_rgb().0;
             [r, g, b, 0xff]
         }).collect();

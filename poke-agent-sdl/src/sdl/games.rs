@@ -84,7 +84,7 @@ impl Games {
         mut emulated_policy: Box<dyn Policy>,
         mut native_policy: Box<dyn Policy>,
     ) -> Result<Self, String> {
-        let mut gb = Box::new(GameBoy::cgb(poke_agent::pokemon::roms::POKERED));
+        let mut gb = Box::new(GameBoy::sgb(poke_agent::pokemon::roms::POKERED));
         if let Some(sram) = sram && let Err(e) = gb.restore_sram_from_file(sram) {
             println!("Could not load save file: {e}");
         }

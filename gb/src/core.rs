@@ -78,7 +78,7 @@ impl Core {
     pub fn try_new(cart: &[u8], model: Model) -> Result<Self, LoadError> {
         let mmu = MMU::new(cart, model)?;
         Ok(Self {
-            registers: RegisterSet::boot(mmu.color_mode(), cart),
+            registers: RegisterSet::boot(mmu.model(), mmu.color_mode(), cart),
             mmu,
             interrupts_enabled: false,
             mode: CoreMode::Normal,
@@ -91,7 +91,7 @@ impl Core {
     pub fn reset(&mut self) {
         // `mmu.data()` is the padded image, but the header bytes the boot register file depends
         // on are all inside the first bank, so padding is irrelevant here.
-        self.registers = RegisterSet::boot(self.mmu.color_mode(), &self.mmu.data().to_vec());
+        self.registers = RegisterSet::boot(self.mmu.model(), self.mmu.color_mode(), &self.mmu.data().to_vec());
         self.interrupts_enabled = false;
         self.interrupts_enabled_on_next_instruction = false;
         self.mode = CoreMode::Normal;

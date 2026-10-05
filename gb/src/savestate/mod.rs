@@ -39,6 +39,8 @@ pub mod labels {
     pub const IRQ: &str = "irq";
     /// Joypad register.
     pub const JOYP: &str = "joyp";
+    /// The Super Game Boy's packets, palettes and attributes.
+    pub const SGB: &str = "sgb";
 
     // --- Reserved.
     pub const CGB: &str = "cgb";

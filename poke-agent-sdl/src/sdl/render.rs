@@ -1,6 +1,6 @@
-//! The window: the cartridge and the recreation side by side from power-on, the keyboard routed to
-//! both or either (`Tab`, or a click on the toggle), the recreation's sound alone, and both games'
-//! logs beneath.
+//! The window: the cartridge on a Super Game Boy and the recreation in its SGB colours, side by side
+//! from power-on, the keyboard routed to both or either (`Tab`, or a click on the toggle), the
+//! recreation's sound alone, and both games' logs beneath.
 //!
 //! A game controller presses the pad as the keyboard does, and a state file dropped on either
 //! game's half of the window is loaded into that game. The TOUR button, or `T`, plays the grand

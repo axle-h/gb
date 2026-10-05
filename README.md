@@ -32,6 +32,9 @@ RAM, BG map attributes, OAM-index sprite priority, KEY1 double speed, HDMA/GDMA.
 CGB gets compatibility mode including the boot ROM's title-derived palette, which is why Pokémon Red
 comes out red-tinted here exactly as it does on real hardware.
 
+**Super Game Boy** palettes, without the border: the packets, the check Pokémon makes for one, the
+palette and attribute commands and the VRAM transfers. The desktop window plays the cartridge on one.
+
 **The game.** The agent layer plays Pokémon Red from a fresh save to the credits, because the
 emulator runs at roughly 50× real time with the agent on top: the scripted route reaches eight badges
 in about four minutes of wall clock and the Hall of Fame in about twenty-six.

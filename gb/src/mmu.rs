@@ -10,11 +10,13 @@ use crate::hdma::{Hdma, HdmaRequest};
 use crate::interrupt::{InterruptFlags, InterruptFlagsSnapshot, InterruptType};
 use crate::joypad::JoypadRegister;
 use crate::model::{ColorMode, Model};
-use crate::ppu::{CGB_SECTION_VERSION, PPU};
+use crate::lcd_palette::LcdColor;
+use crate::ppu::{CGB_SECTION_VERSION, LCD_HEIGHT, LCD_WIDTH, PPU};
 use crate::ram::{RAM, ROM};
 use crate::savestate::{labels, SectionReader, SectionWriter};
 use crate::schedule::{Ev, Schedule};
 use crate::serial::{Serial, SerialSnapshot};
+use crate::sgb::Sgb;
 use crate::timer::{Timer, TimerSnapshot};
 use crate::divider::DividerSnapshot;
 
@@ -105,6 +107,8 @@ pub struct MMU {
     interrupt_enable_upper: u8,
     interrupt_request: InterruptFlags,
     joypad_register: JoypadRegister,
+    /// On a [`Model::Sgb`], the SNES side.
+    sgb: Option<Box<Sgb>>,
     audio: Audio,
     now: u64,
     /// `(now, address, value)` for every sound register write, while capturing.
@@ -220,6 +224,9 @@ impl MMU {
             })
         })?;
         self.ppu.write_sections(writer)?;
+        if let Some(sgb) = &self.sgb {
+            sgb.write_section(writer)?;
+        }
         self.audio.write_sections(writer)
     }
 
@@ -289,6 +296,9 @@ impl MMU {
             }
         }
         self.ppu.read_sections(reader)?;
+        if let Some(sgb) = &mut self.sgb {
+            sgb.read_section(reader)?;
+        }
         self.audio.read_sections(reader)?;
         // Last, and after the `cgb` section has been read, so it overwrites whatever palette RAM
         // the state carried.
@@ -324,6 +334,7 @@ impl MMU {
             header.ram_banks()
         };
         let ram_banks = Vec::from_iter((0..ram_bank_count).map(|_| [0xFF; RAM_BANK_SIZE]));
+        let cart = data;
         let data = pad_rom(data);
         let mapper = Mapper::new(header.cart_type(), BankCounts {
             rom: (data.len() / ROM_BANK_SIZE).max(2),
@@ -360,6 +371,7 @@ impl MMU {
             interrupt_enable_upper: 0,
             interrupt_request: InterruptFlags::default(),
             joypad_register: JoypadRegister::default(),
+            sgb: (model == Model::Sgb).then(|| Box::new(Sgb::new(cart))),
             serial: Serial::default(),
             divider: Divider::default(),
             timer: Timer::default(),
@@ -399,6 +411,19 @@ impl MMU {
         self.color_mode
     }
 
+    pub fn model(&self) -> Model {
+        self.model
+    }
+
+    pub fn sgb(&self) -> Option<&Sgb> {
+        self.sgb.as_deref()
+    }
+
+    /// The picture a player sees: the LCD, or on a Super Game Boy what the SNES paints from it.
+    pub fn display(&self) -> &[LcdColor; LCD_WIDTH * LCD_HEIGHT] {
+        self.sgb.as_ref().map_or(self.ppu.lcd(), |sgb| sgb.screen())
+    }
+
     pub fn is_double_speed(&self) -> bool {
         self.double_speed
     }
@@ -434,6 +459,9 @@ impl MMU {
         self.interrupt_enable_upper = 0;
         self.interrupt_request = InterruptFlags::default();
         self.joypad_register = JoypadRegister::default();
+        if self.sgb.is_some() {
+            self.sgb = Some(Box::new(Sgb::new(&self.data)));
+        }
         self.audio = Audio::default();
         // The clock restarts with the machine.
         self.now = 0;
@@ -814,7 +842,13 @@ impl MMU {
             let interrupt_pending = match interrupt {
                 InterruptType::Joypad => self.joypad_register.consume_pending_activation(),
                 InterruptType::LcdStatus => self.ppu.lcd_status_mut().consume_pending_activation(),
-                InterruptType::VBlank => self.ppu.consume_pending_activation(),
+                InterruptType::VBlank => {
+                    let pending = self.ppu.consume_pending_activation();
+                    if pending && let Some(sgb) = &mut self.sgb {
+                        sgb.vblank(self.ppu.lcd());
+                    }
+                    pending
+                }
                 InterruptType::Serial => self.serial.consume_pending_activation(),
                 InterruptType::Timer => self.timer.consume_pending_activation(),
             };
@@ -924,7 +958,11 @@ impl MMU {
             0xFEA0..=0xFEFF => {
                 if self.model.is_cgb() { self.unusable[unusable_offset(address)] } else { 0x00 }
             }
-            0xFF00 => 0xC0 | self.joypad_register.get(), // joypad register — bits 6-7 unused, read 1
+            // Joypad register — bits 6-7 unused, read 1.
+            0xFF00 => 0xC0 | match &self.sgb {
+                Some(sgb) => sgb.read_joypad(self.joypad_register.get()),
+                None => self.joypad_register.get(),
+            },
             // Mid-transfer, `SB` shows the bits already shifted out.
             0xFF01 => self.serial.data_at(self.now, self.serial_fast),
             // SC: bits 1-6 read 1 on DMG.
@@ -1020,7 +1058,12 @@ impl MMU {
                     self.unusable[unusable_offset(address)] = value;
                 }
             }
-            0xFF00 => self.joypad_register.set(value),
+            0xFF00 => {
+                self.joypad_register.set(value);
+                if let Some(sgb) = &mut self.sgb {
+                    sgb.write_joypad(value);
+                }
+            }
             0xFF01 => self.serial.set_data(value), // serial data register
             0xFF02 => {
                 if self.model.is_cgb() {

@@ -96,6 +96,7 @@ impl Console {
                     colours: match model {
                         Model::Dmg => ColourMode::Dmg,
                         Model::Cgb => ColourMode::Gbc,
+                        Model::Sgb => ColourMode::Sgb,
                     },
                     synth: None,
                     slots,

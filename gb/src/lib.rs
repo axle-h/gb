@@ -27,6 +27,7 @@ pub mod rtc;
 pub mod savestate;
 pub mod schedule;
 pub mod serial;
+pub mod sgb;
 pub mod timer;
 
 #[cfg(test)]

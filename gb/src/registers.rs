@@ -43,8 +43,11 @@ pub struct RegisterSet {
 
 impl RegisterSet {
     /// The register file the boot ROM leaves behind.
-    pub fn boot(color_mode: crate::model::ColorMode, cart: &[u8]) -> Self {
-        use crate::model::ColorMode;
+    pub fn boot(model: crate::model::Model, color_mode: crate::model::ColorMode, cart: &[u8]) -> Self {
+        use crate::model::{ColorMode, Model};
+        if model == Model::Sgb {
+            return Self::sgb();
+        }
         match color_mode {
             ColorMode::Dmg => Self::dmg(cart),
             // A CGB-aware cartridge: the boot ROM's own final block, untouched by `EmulateDMG`.
@@ -78,6 +81,22 @@ impl RegisterSet {
                     pc: 0x0100,
                 }
             }
+        }
+    }
+
+    /// The SGB boot ROM's final register block.
+    pub fn sgb() -> Self {
+        Self {
+            a: 0x01,
+            flags: FlagsRegister { z: false, n: false, h: false, c: false },
+            b: 0x00,
+            c: 0x14,
+            d: 0x00,
+            e: 0x00,
+            h: 0xC0,
+            l: 0x60,
+            sp: 0xFFFE,
+            pc: 0x0100,
         }
     }
 
@@ -294,7 +313,7 @@ mod tests {
     fn the_boot_register_file_matches_the_boot_rom() {
         use crate::model::ColorMode;
 
-        let dmg = RegisterSet::boot(ColorMode::Dmg, crate::test_fixtures::POKERED);
+        let dmg = RegisterSet::boot(crate::model::Model::Dmg, ColorMode::Dmg, crate::test_fixtures::POKERED);
         assert_eq!(dmg, RegisterSet::dmg(crate::test_fixtures::POKERED));
         assert_eq!(dmg.a, 0x01);
         // `F` is header-derived, and pokered's checksum of 0x20 makes it 0x90 — see
@@ -302,7 +321,7 @@ mod tests {
         assert_eq!(dmg.flags.to_byte(), 0x90);
 
         // A CGB-aware cartridge: the boot ROM's own final block.
-        let cgb = RegisterSet::boot(ColorMode::Cgb, crate::roms::cgb_acid::ROM);
+        let cgb = RegisterSet::boot(crate::model::Model::Cgb, ColorMode::Cgb, crate::roms::cgb_acid::ROM);
         assert_eq!(cgb.a, 0x11, "a CGB identifies itself in A");
         assert_eq!(cgb.flags.to_byte(), 0x80, "Z only, from the `xor a` before the handoff");
         assert_eq!((cgb.b, cgb.c), (0x00, 0x00));
@@ -312,7 +331,7 @@ mod tests {
 
         // ...and compatibility mode, which is a *different* file: `EmulateDMG` overwrites DE and
         // L on its way out, and B carries the title checksum.
-        let compat = RegisterSet::boot(ColorMode::CgbCompat, crate::test_fixtures::POKERED);
+        let compat = RegisterSet::boot(crate::model::Model::Cgb, ColorMode::CgbCompat, crate::test_fixtures::POKERED);
         assert_eq!(compat.a, 0x11, "still CGB hardware");
         assert_eq!(compat.flags.to_byte(), 0x80);
         assert_eq!(compat.b, 0x14, "Pokemon Red's title checksum, via hTitleChecksum");
@@ -331,11 +350,11 @@ mod tests {
         use crate::model::ColorMode;
 
         let mut rom = crate::test_fixtures::POKERED.to_vec();
-        assert_eq!(RegisterSet::boot(ColorMode::CgbCompat, &rom).b, 0x14);
+        assert_eq!(RegisterSet::boot(crate::model::Model::Cgb, ColorMode::CgbCompat, &rom).b, 0x14);
 
         rom[0x14B] = 0x9C; // some other publisher
-        assert_eq!(RegisterSet::boot(ColorMode::CgbCompat, &rom).b, 0x00);
-        assert_eq!(RegisterSet::boot(ColorMode::CgbCompat, &rom).hl(), 0x007C);
+        assert_eq!(RegisterSet::boot(crate::model::Model::Cgb, ColorMode::CgbCompat, &rom).b, 0x00);
+        assert_eq!(RegisterSet::boot(crate::model::Model::Cgb, ColorMode::CgbCompat, &rom).hl(), 0x007C);
     }
 
     /// The two cartridges whose palette entry carries SameBoy's `$80` flag get the DMG boot
@@ -353,13 +372,13 @@ mod tests {
         }
 
         for checksum in [0x43u8, 0x58] {
-            let registers = RegisterSet::boot(ColorMode::CgbCompat, &cart_with_checksum(checksum));
+            let registers = RegisterSet::boot(crate::model::Model::Cgb, ColorMode::CgbCompat, &cart_with_checksum(checksum));
             assert_eq!(registers.b, checksum);
             assert_eq!(registers.hl(), 0x991A, "checksum {checksum:#04X}");
         }
         // A neighbouring checksum takes the ordinary path.
         assert_eq!(
-            RegisterSet::boot(ColorMode::CgbCompat, &cart_with_checksum(0x44)).hl(),
+            RegisterSet::boot(crate::model::Model::Cgb, ColorMode::CgbCompat, &cart_with_checksum(0x44)).hl(),
             0x007C
         );
     }
