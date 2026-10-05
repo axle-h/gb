@@ -357,6 +357,9 @@ pub(super) struct Runtime {
     pub cur_map_loaded: [bool; 2],
     /// `wTileMapBackup`, for `AskName` to put back.
     pub saved_screen: Option<UiSurface>,
+    /// `wUpdateSpritesEnabled` as `AskName` found it, for it to put back after the naming screen.
+    #[serde(default)]
+    pub sprites_frozen_before_naming: Option<bool>,
     /// `wTileMapBackup2`: `SaveScreenTilesToBuffer2`.
     #[serde(default)]
     pub saved_screen2: Option<UiSurface>,
@@ -1489,9 +1492,19 @@ impl Script<'_, '_> {
 
     /// `RestoreScreenTilesAndReloadTilePatterns`.
     pub fn restore_screen_tiles(&mut self) {
-        if let Some(screen) = self.ow.rt.saved_screen2.take() {
+        if let Some(screen) = self.ow.rt.saved_screen2.clone() {
             self.ctx.screen.ui = screen;
         }
+    }
+
+    /// `RestoreScreenTilesAndReloadTilePatterns` after a full screen that loaded its own sprite
+    /// patterns: OAM cleared, sprite updates back on and the map's patterns loaded again.
+    pub fn restore_screen_tiles_and_reload_sprites(&mut self) {
+        crate::gfx::mon_icons::clear_sprites(&mut self.ctx.screen.sprites);
+        self.ow.rt.sprites_frozen = false;
+        self.ow.reload_map_sprite_tile_patterns(self.ctx);
+        self.restore_screen_tiles();
+        self.ctx.screen.tiles.load_text_box_tiles();
     }
 
     /// `CeladonMartRoofScript_GiveDrinkToGirl`'s menu: the drinks the bag holds, two rows apart in a
@@ -1585,6 +1598,9 @@ impl Script<'_, '_> {
     pub fn name_rater_screen(&mut self, slot: u8) -> Then {
         let species = self.ctx.world.party[slot as usize].mon.mon.species;
         self.ctx.world.text.strings.insert(TextBuffer::StringBuffer, Vec::new());
+        // `wUpdateSpritesEnabled` zeroed: VBlank hides every sprite once and redraws none.
+        self.ow.rt.sprites_frozen = true;
+        crate::gfx::mon_icons::clear_sprites(&mut self.ctx.screen.sprites);
         let screen = crate::modes::naming_screen::NamingScreen::new(
             crate::modes::naming_screen::NamingScreenType::Mon, Some(species));
         Then::block(Block::Mode(Box::new(Mode::NamingScreen(screen))))

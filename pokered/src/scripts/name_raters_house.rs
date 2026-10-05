@@ -64,10 +64,13 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             false => Flow::Jump(Label::DidNotRename.into()),
         },
         Label::NameAsked(slot) => rt.name_rater_screen(slot).then(Label::Named(slot)),
-        Label::Named(slot) => match rt.rename_party_mon(slot) {
-            true => rt.print_text(text_named("NameRatersHouseNameRaterText.PokemonHasBeenRenamedText")).ret(),
-            false => Flow::Jump(Label::DidNotRename.into()),
-        },
+        Label::Named(slot) => {
+            rt.restore_screen_tiles_and_reload_sprites();
+            match rt.rename_party_mon(slot) {
+                true => rt.print_text(text_named("NameRatersHouseNameRaterText.PokemonHasBeenRenamedText")).ret(),
+                false => Flow::Jump(Label::DidNotRename.into()),
+            }
+        }
         Label::DidNotRename => rt.print_text(text_named("NameRatersHouseNameRaterText.ComeAnyTimeYouLikeText")).ret(),
     }
 }

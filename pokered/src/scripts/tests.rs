@@ -1272,6 +1272,34 @@ fn the_name_rater_renames_only_the_players_own_mon() {
 
 }
 
+/// `DisplayNameRaterScreen` zeroes `wUpdateSpritesEnabled`, so the rater is hidden behind the naming
+/// screen, and `RestoreScreenTilesAndReloadTilePatterns` after it loads his patterns back.
+#[test]
+fn the_name_rater_s_naming_screen_hides_him_and_puts_his_tiles_back() {
+    let mut game = game(Map::NameRatersHouse, 6, 3, SpriteFacing::Left, 6, |world| world.player_id = 1);
+    play_until(&mut game, 600, free);
+    let sprite_tiles = |game: &Game| (0..0x80u8).map(|id| *game.screen().tiles.obj(id)).collect::<Vec<_>>();
+    let before = sprite_tiles(&game);
+    command(&mut game, Command::Interact);
+    play_until(&mut game, 4000, |game| game.status() == Status::Waiting(Decision::TwoOption));
+    command(&mut game, Command::ChooseOption(0));
+    play_until(&mut game, 4000, |game| game.status() == Status::Waiting(Decision::PartyMenu));
+    command(&mut game, Command::ChooseOption(0));
+    play_until(&mut game, 4000, |game| game.status() == Status::Waiting(Decision::TwoOption));
+    command(&mut game, Command::ChooseOption(0));
+    play_until(&mut game, 8000, |game| game.status() == Status::Waiting(Decision::NamingScreen));
+    let objects: Vec<_> = game.screen().sprites.iter().filter(|o| (1..160).contains(&o.y)).map(|o| (o.x, o.y)).collect();
+    assert!(objects.iter().all(|&(x, y)| x < 32 && y < 40), "only the icon at the top left: {objects:?}");
+    command(&mut game, Command::EnterName(encode("FRED").unwrap()));
+    play_until(&mut game, 20_000, free);
+    let after = sprite_tiles(&game);
+    let drawn: Vec<u8> = game.screen().sprites.iter().filter(|o| (1..160).contains(&o.y)).map(|o| o.tile).collect();
+    assert!(drawn.len() >= 8, "the player and the rater drawn again: {drawn:?}");
+    for tile in drawn {
+        assert_eq!(after[tile as usize], before[tile as usize], "the pattern of sprite tile {tile:#04x}, back as it was");
+    }
+}
+
 /// `NameRatersHouseCheckMonOTScript`: the OT name and the OT id both have to be the player's, so a
 /// traded mon is praised and left alone.
 #[test]
@@ -4752,6 +4780,104 @@ fn the_rival_stays_on_screen_through_the_lab_battle_s_transition() {
         game.frame(Input::None);
         assert_eq!(rival(&game), before, "frame {frame} of the transition");
     }
+}
+
+/// `EndOfBattle` ends on `GBPalWhiteOut`, so from the battle's last frame the screen is white, and
+/// the map's sprites never stand over the battle's picture while the map loads behind it.
+#[test]
+fn the_lab_battle_ends_on_a_white_screen_rather_than_the_map_s_sprites_over_the_battle() {
+    let mut game = game(Map::OaksLab, 5, 11, SpriteFacing::Up, 3, |world| {
+        world.events.clear(EVENT_FOLLOWED_OAK_INTO_LAB);
+        world.events.set(EVENT_OAK_APPEARED_IN_PALLET);
+    });
+    play_until(&mut game, 6000, |game| game.world().events.is_set(EVENT_OAK_ASKED_TO_CHOOSE_MON) && free(game));
+    command(&mut game, Command::Face(Direction::Right));
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Interact);
+    play_answering(&mut game, 20_000, &mut vec![0, 1], |game| game.world().party.len() == 2);
+    play_answering(&mut game, 40_000, &mut vec![1], |game| game.world().events.is_set(EVENT_GOT_STARTER) && free(game));
+    let in_battle = |game: &Game| game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_)));
+    for _ in 0..20_000 {
+        if in_battle(&game) {
+            break;
+        }
+        let input = match game.status() {
+            Status::Waiting(Decision::Overworld) => Input::Command(Command::Step(Direction::Down)),
+            Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
+            _ => Input::None,
+        };
+        game.frame(input);
+    }
+    assert!(in_battle(&game), "the rival challenges the player on the way out");
+    play_until(&mut game, 40_000, |game| !in_battle(game));
+    // `.battleOccurred`'s ten frames, before the map is loaded and faded in.
+    for frame in 0..10 {
+        let shades = game.screen().frame().shades;
+        assert!(shades.iter().all(|&shade| shade == 0), "frame {frame} after the battle is white");
+        game.frame(Input::None);
+    }
+}
+
+/// `AskName` zeroes `wUpdateSpritesEnabled` before the naming screen, so VBlank hides every sprite
+/// and only the mon's icon is drawn over the letters; after it `ReloadMapSpriteTilePatterns` loads
+/// the map's sprites back over the icon's, in every slot one of them draws from.
+#[test]
+fn a_starter_s_naming_screen_hides_the_lab_s_sprites_and_puts_their_tiles_back() {
+    let mut game = game(Map::OaksLab, 5, 11, SpriteFacing::Up, 3, |world| {
+        world.events.clear(EVENT_FOLLOWED_OAK_INTO_LAB);
+        world.events.set(EVENT_OAK_APPEARED_IN_PALLET);
+    });
+    play_until(&mut game, 6000, |game| game.world().events.is_set(EVENT_OAK_ASKED_TO_CHOOSE_MON) && free(game));
+    command(&mut game, Command::Face(Direction::Right));
+    play_until(&mut game, 600, free);
+    let sprite_tiles = |game: &Game| (0..0x80u8).map(|id| *game.screen().tiles.obj(id)).collect::<Vec<_>>();
+    let before = sprite_tiles(&game);
+    command(&mut game, Command::Interact);
+    play_answering(&mut game, 20_000, &mut vec![0], |game| game.status() == Status::Waiting(Decision::NamingScreen));
+    let objects: Vec<_> = game.screen().sprites.iter().filter(|o| (1..160).contains(&o.y)).map(|o| (o.x, o.y)).collect();
+    assert!(objects.iter().all(|&(x, y)| x < 32 && y < 40), "only the icon at the top left: {objects:?}");
+    command(&mut game, Command::EnterName(encode("AL").unwrap()));
+    play_answering(&mut game, 20_000, &mut vec![1], |game| game.world().party.len() == 2 && free(game));
+    let after = sprite_tiles(&game);
+    let drawn: Vec<u8> = game.screen().sprites.iter().filter(|o| (1..160).contains(&o.y)).map(|o| o.tile).collect();
+    assert!(drawn.len() > 8, "the lab's sprites drawn again: {drawn:?}");
+    for tile in drawn {
+        assert_eq!(after[tile as usize], before[tile as usize], "the pattern of sprite tile {tile:#04x}, back as it was");
+    }
+}
+
+/// The lab's tileset animates its water and flower tiles, whose ids the dex page's picture reuses:
+/// `ShowPokedexDataInternal` stops the animation while the page is up and starts it again after.
+#[test]
+fn a_starter_s_dex_page_stops_the_lab_s_tile_animations_over_its_picture() {
+    let mut game = game(Map::OaksLab, 5, 11, SpriteFacing::Up, 3, |world| {
+        world.events.clear(EVENT_FOLLOWED_OAK_INTO_LAB);
+        world.events.set(EVENT_OAK_APPEARED_IN_PALLET);
+    });
+    play_until(&mut game, 6000, |game| game.world().events.is_set(EVENT_OAK_ASKED_TO_CHOOSE_MON) && free(game));
+    command(&mut game, Command::Face(Direction::Right));
+    play_until(&mut game, 600, free);
+    let animated = game.screen().tiles.animation.kind;
+    assert_ne!(animated, 0, "the lab's tileset animates");
+    command(&mut game, Command::Interact);
+    play_until(&mut game, 600, |game| game.status() == Status::Waiting(Decision::PokedexData));
+    // Long enough for the water to shift twice and the flower to change.
+    for _ in 0..120 {
+        game.frame(Input::None);
+    }
+    let picture = crate::systems::pokedex::front_pic_tiles(PokemonSpecies::Charmander, true);
+    for (id, tile) in picture.iter().enumerate() {
+        assert_eq!(game.screen().tiles.bg(id as u8), tile, "the picture's tile {id:#04x}");
+    }
+    for frame in 0..600 {
+        if game.status() == Status::Waiting(Decision::Text) {
+            break;
+        }
+        let page = game.status() == Status::Waiting(Decision::PokedexData) && frame % 2 == 0;
+        game.frame(if page { Input::Buttons(crate::input::Joypad::A) } else { Input::None });
+    }
+    assert_eq!(game.status(), Status::Waiting(Decision::Text), "the offer");
+    assert_eq!(game.screen().tiles.animation.kind, animated, "the animation back on after the page");
 }
 
 /// `ShowPokedexData` blanks the screen and runs `UpdateSprites` before the picture goes up, so the

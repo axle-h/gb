@@ -3,6 +3,7 @@
 
 use poke_core::species::PokemonSpecies;
 use poke_core::text_script::TextBuffer;
+use crate::gfx::mon_icons::clear_sprites;
 use crate::mode::{Ctx, Mode, Outcome};
 use crate::modes::naming_screen::{NamingScreen, NamingScreenType};
 use crate::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
@@ -90,14 +91,25 @@ impl Overworld {
         if self.rt.outcome != Some(Outcome::Chosen(0)) {
             return Flow::Jump(Routine::GivePokemonNamed(species, level).into());
         }
+        // `wUpdateSpritesEnabled` zeroed: VBlank hides every sprite once and redraws none.
+        self.rt.sprites_frozen_before_naming = Some(self.rt.sprites_frozen);
+        self.rt.sprites_frozen = true;
+        clear_sprites(&mut ctx.screen.sprites);
         let screen = NamingScreen::new(NamingScreenType::Mon, Some(species));
         Then::block(Block::Mode(Box::new(Mode::NamingScreen(screen)))).then(Routine::GivePokemonNamed(species, level))
     }
 
     /// The rest of `_AddPartyMon`: the name, or the species' own for none, and the mon made.
     pub(super) fn give_pokemon_named(&mut self, ctx: &mut Ctx, species: PokemonSpecies, level: u8) -> Flow {
+        let named = self.rt.sprites_frozen_before_naming.take();
+        if named.is_some() {
+            self.reload_map_sprite_tile_patterns(ctx);
+        }
         if let Some(screen) = self.rt.saved_screen.take() {
             ctx.screen.ui = screen;
+        }
+        if let Some(frozen) = named {
+            self.rt.sprites_frozen = frozen;
         }
         let typed = ctx.world.text.string(TextBuffer::StringBuffer);
         let nick = if typed.is_empty() { species.name() } else { typed };

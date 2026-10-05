@@ -2214,6 +2214,9 @@ impl BattleMode {
     fn finish(&mut self, ctx: &mut Ctx) -> Transition {
         // `EndOfBattle.resetVariables`, and `_InitBattleCommon` putting the tile animations back.
         ctx.audio.end_low_health_alarm();
+        // `GBPalWhiteOut`: the battle is not seen again, nor the map's sprites over it as the map loads.
+        let effects = &mut ctx.screen.effects;
+        (effects.bgp, effects.obp0, effects.obp1) = (0, 0, 0);
         ctx.menu.party_and_bills = 0;
         ctx.menu.bag_saved = 0;
         ctx.menu.battle_and_start = 0;

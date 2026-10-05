@@ -96,6 +96,10 @@ pub struct PokedexMenu {
     /// and the page closes the mode.
     #[serde(default)]
     page_only: bool,
+    /// `hTileAnimations` while the data page is up, which stops the animation: the picture's tile
+    /// ids are the water's and the flower's.
+    #[serde(default)]
+    tile_animations: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +129,7 @@ impl PokedexMenu {
             answered: 0,
             answers: 0,
             page_only: false,
+            tile_animations: 0,
         }
     }
 
@@ -367,6 +372,8 @@ impl PokedexMenu {
         ctx.audio.no_audio_fade_out = true;
         ctx.audio.set_master_volume(QUIET);
         ctx.screen.sgb.run(&PaletteCommand::Pokedex { mon: determine_palette_id_out_of_battle(index) });
+        self.tile_animations = ctx.screen.tiles.animation.kind;
+        ctx.screen.tiles.animation.kind = 0;
         let ui = &mut ctx.screen.ui;
         ui.fill(0, 0, SCREEN_TILES_X, 1, 0x64);
         ui.fill(0, 17, SCREEN_TILES_X, 1, 0x6F);
@@ -452,6 +459,7 @@ impl PokedexMenu {
     /// is cleared and the text box tiles go back over the dex's own.
     fn wait_for_button(&mut self, ctx: &mut Ctx) -> Transition {
         if ctx.pad.low_sensitivity(ctx.frame_counter).intersects(Joypad::A | Joypad::B) {
+            ctx.screen.tiles.animation.kind = self.tile_animations;
             ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
             ctx.screen.sgb.run(&PaletteCommand::Default);
             ctx.screen.tiles.load_text_box_tiles();

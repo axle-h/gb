@@ -460,6 +460,18 @@ impl Overworld {
         self.prepare_oam(ctx);
     }
 
+    /// `ReloadMapSpriteTilePatterns`: the map's sprites, the player's and the font loaded again over
+    /// whatever a full screen left in their tiles, then `UpdateSprites`.
+    pub(crate) fn reload_map_sprite_tile_patterns(&mut self, ctx: &mut Ctx) {
+        self.sprite_set.id = 0;
+        let location = &ctx.world.location;
+        sprites::init_map_sprites(&mut self.sprites, &mut self.sprite_set, location.map, location.x, location.y,
+            self.num_sprites, false, &mut ctx.screen.tiles);
+        sprites::load_player_sprite_graphics(&mut ctx.screen.tiles, &mut ctx.world.location, self.view.tileset);
+        ctx.screen.tiles.load_font();
+        self.update_sprites(ctx);
+    }
+
     /// `PrepareOAMData`, which VBlank runs every frame whatever is drawn over the map.
     fn prepare_oam(&mut self, ctx: &mut Ctx) {
         if !self.rt.sprites_frozen {
