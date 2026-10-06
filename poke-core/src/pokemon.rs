@@ -78,8 +78,10 @@ impl Pokemon {
     }
 
     fn stat0(&self, base_stat: u16, iv: u16, ev: u16) -> u16 {
-        // Floor((((B + I) × 2 + floor(ceil(sqrt(E)) ÷ 4)) × L) ÷ 100)
-        ((2 * (base_stat + iv) + (ev as f64).sqrt().ceil() as u16 / 4) * self.level as u16) / 100
+        // Floor((((B + I) × 2 + floor(ceil(sqrt(E)) ÷ 4)) × L) ÷ 100), where `CalcStat`'s square
+        // root stops counting at 255.
+        let root = ((ev as f64).sqrt().ceil() as u16).min(255);
+        ((2 * (base_stat + iv) + root / 4) * self.level as u16) / 100
     }
 
     fn stat(&self, base_stat: u16, iv: u16, ev: u16) -> u16 {
@@ -346,5 +348,19 @@ impl PokemonType {
             }
         }
 
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `CalcStat`'s square root of the stat experience stops at 255, so a full 65535 adds 63 to a
+    /// stat rather than the 64 its true root would.
+    #[test]
+    fn a_maxed_mon_s_stats_are_the_cartridge_s() {
+        let moves = [PokemonMoveName::Psychic; 4];
+        let mewtwo = Pokemon::maxed(PokemonSpecies::Mewtwo, "MEWTWO", moves, "RED", 1);
+        assert_eq!(mewtwo.stats.hp, 415);
+        assert_eq!(mewtwo.stats.special, (2 * (154 + 15) + 63) + 5);
     }
 }
