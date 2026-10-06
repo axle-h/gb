@@ -1607,6 +1607,9 @@ fn the_thirsty_girl_trades_a_tm_for_each_drink() {
     play_until(&mut game, 4000, |game| game.status() == Status::Waiting(Decision::TwoOption));
     command(&mut game, Command::ChooseOption(0));
     play_until(&mut game, 4000, |game| game.status() == Status::Waiting(Decision::CursorMenu));
+    // Two rows for each drink inside its border, the last drink's row clear of the bottom edge.
+    let ui = &game.screen().ui;
+    assert_eq!((ui.cover(0, 5), ui.cover(11, 4)), (Some(0x7D), Some(crate::gfx::ui::UiSurface::BLANK)), "the menu's box");
     // The menu lists the drinks in the bag in the cartridge's own order, so Fresh Water is first.
     command(&mut game, Command::ChooseOption(1));
     play_until(&mut game, 8000, |game| game.world().events.is_set(EVENT_GOT_TM48) && free(game));
@@ -4720,6 +4723,24 @@ fn the_game_corner_clerk_sells_coins_only_to_a_player_who_can_take_them() {
     assert_eq!((sold.world().money, sold.world().coins), ([0x00, 0x00, 0x00], [0x99, 0x99]), "9989 still has room");
 }
 
+/// `GameCornerDrawCoinBox` prints both figures without their leading zeroes.
+#[test]
+fn the_game_corner_clerk_s_box_shows_no_coins_as_a_single_zero() {
+    let mut game = game(Map::GameCorner, 5, 7, SpriteFacing::Up, 5, |world| {
+        world.bag.add(ItemId::CoinCase, 1);
+        world.money = [0x00, 0x10, 0x00];
+        world.coins = [0x00, 0x00];
+    });
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Interact);
+    play_until(&mut game, 4000, |game| game.status() == Status::Waiting(Decision::TwoOption));
+    let ui = &game.screen().ui;
+    let row = |y: usize| (12..19).map(|x| ui.cover(x, y).unwrap_or(0)).collect::<Vec<_>>();
+    let blank = crate::gfx::ui::UiSurface::BLANK;
+    assert_eq!(row(3), [blank, blank, 0xF0, 0xF7, 0xF6, 0xF6, 0xF6], "¥1000");
+    assert_eq!(row(5), [blank, blank, blank, blank, blank, blank, 0xF6], "0 coins");
+}
+
 /// `CeladonMansion3FGameDesignerText`: the diploma is for every mon but Mew, and one short of that
 /// hears only his usual words.
 #[test]
@@ -4846,6 +4867,43 @@ fn a_starter_s_naming_screen_hides_the_lab_s_sprites_and_puts_their_tiles_back()
     }
 }
 
+/// Blue stops the player on the way out of the lab with the two scientists standing where his text
+/// box goes up: `CheckSpriteAvailability` hides a sprite standing on the box's tiles.
+#[test]
+fn the_lab_s_scientists_are_hidden_behind_blue_s_challenge() {
+    let mut game = game(Map::OaksLab, 5, 11, SpriteFacing::Up, 3, |world| {
+        world.events.clear(EVENT_FOLLOWED_OAK_INTO_LAB);
+        world.events.set(EVENT_OAK_APPEARED_IN_PALLET);
+    });
+    play_until(&mut game, 6000, |game| game.world().events.is_set(EVENT_OAK_ASKED_TO_CHOOSE_MON) && free(game));
+    command(&mut game, Command::Face(Direction::Right));
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Interact);
+    play_answering(&mut game, 20_000, &mut vec![0], |game| game.status() == Status::Waiting(Decision::NamingScreen));
+    command(&mut game, Command::EnterName(encode("AL").unwrap()));
+    play_answering(&mut game, 20_000, &mut vec![1], |game| game.world().party.len() == 2 && free(game));
+    while free(&game) {
+        command(&mut game, Command::Step(Direction::Down));
+        for _ in 0..40 {
+            if game.status() == Status::Waiting(Decision::Text) {
+                break;
+            }
+            game.frame(Input::None);
+        }
+    }
+    for _ in 0..600 {
+        if game.status() == Status::Waiting(Decision::Text) {
+            break;
+        }
+        game.frame(Input::None);
+    }
+    assert_eq!(game.status(), Status::Waiting(Decision::Text), "Blue's challenge");
+    assert_eq!(game.world().location.y, 6);
+    let on_box: Vec<_> = game.screen().sprites.iter().filter(|o| (1..160).contains(&o.y) && o.y - 16 + 8 > 96)
+        .map(|o| (o.x, o.y, o.tile)).collect();
+    assert!(on_box.is_empty(), "objects over the text box: {on_box:?}");
+}
+
 /// The lab's tileset animates its water and flower tiles, whose ids the dex page's picture reuses:
 /// `ShowPokedexDataInternal` stops the animation while the page is up and starts it again after.
 #[test]
@@ -4913,4 +4971,54 @@ fn a_starter_s_dex_page_hides_the_lab_s_sprites_and_its_offer_shows_them_again()
     assert_eq!(game.status(), Status::Waiting(Decision::Text), "the offer");
     // The rival has turned to face the player, so only where each object stands is compared.
     assert_eq!(objects(&game), before, "the offer, whose box covers none of them");
+}
+
+/// A trainer's battle opens with the map wiped away under the player and the trainer: with the
+/// Modern margin, the Lass standing just off the left edge takes no OAM block, so the Hiker's block
+/// is counted without her.
+#[test]
+fn the_hiker_who_spots_the_player_stays_drawn_through_the_battle_s_wipe() {
+    let mut game = game(Map::Route25, 24, 8, SpriteFacing::Left, 3, |world| world.cartridge_sprite_window = false);
+    command(&mut game, Command::Step(Direction::Left));
+    for _ in 0..2000 {
+        if game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_))) {
+            break;
+        }
+        let input = match game.status() {
+            Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
+            _ => Input::None,
+        };
+        game.frame(input);
+    }
+    assert!(game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_))), "the Hiker's battle");
+    for _ in 0..20 {
+        game.frame(Input::None);
+    }
+    let objects: Vec<_> = game.screen().sprites.iter().filter(|o| (1..160).contains(&o.y)).map(|o| (o.x, o.y)).collect();
+    assert!(objects.contains(&(72, 92)), "the Hiker, below the player: {objects:?}");
+}
+
+/// The Viridian Gym's Blackbelt at (10, 1), spoken to from his right: slot 7, with slots before it
+/// drawn and not, stays drawn through his battle's wipe.
+#[test]
+fn the_viridian_gym_blackbelt_spoken_to_stays_drawn_through_the_battle_s_wipe() {
+    let mut game = game(Map::ViridianGym, 11, 1, SpriteFacing::Left, 3, |world| world.cartridge_sprite_window = false);
+    play_until(&mut game, 600, free);
+    command(&mut game, Command::Interact);
+    for _ in 0..2000 {
+        if game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_))) {
+            break;
+        }
+        let input = match game.status() {
+            Status::Waiting(Decision::Text) => Input::Command(Command::Advance),
+            _ => Input::None,
+        };
+        game.frame(input);
+    }
+    assert!(game.modes().iter().any(|mode| matches!(mode, Mode::Battle(_))), "the Blackbelt's battle");
+    for _ in 0..20 {
+        game.frame(Input::None);
+    }
+    let objects: Vec<_> = game.screen().sprites.iter().filter(|o| (1..160).contains(&o.y)).map(|o| (o.x, o.y)).collect();
+    assert!(objects.contains(&(56, 76)), "the Blackbelt, left of the player: {objects:?}");
 }

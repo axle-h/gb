@@ -449,6 +449,7 @@ impl Overworld {
         }
         match update {
             SpriteUpdate::Drawn => self.update_sprites(ctx),
+            SpriteUpdate::Reloaded => self.reload_map_sprite_tile_patterns(ctx),
             SpriteUpdate::Cleared => {
                 let mut blank = UiSurface::default();
                 blank.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);

@@ -19,7 +19,6 @@ use crate::gfx::mon_icons::clear_sprites;
 use crate::mode::{Mode, Outcome};
 use crate::modes::two_option_menu::{TwoOptionMenu, TwoOptionMenuId};
 use crate::systems::events::hidden_events::HiddenEvent;
-use crate::systems::overworld::sprites;
 use super::script::{text_named, Block, Flow, Script, Then};
 
 pub use hidden::predef_text;
@@ -359,9 +358,7 @@ fn save_screen_tiles_to_buffer2(s: &mut Script) {
 fn restore_screen_tiles_and_reload_tile_patterns(s: &mut Script) {
     clear_sprites(&mut s.ctx.screen.sprites);
     s.ow.rt.sprites_frozen = false;
-    let location = &s.ctx.world.location;
-    sprites::init_map_sprites(&mut s.ow.sprites, &mut s.ow.sprite_set, location.map, location.x, location.y,
-        s.ow.num_sprites, false, &mut s.ctx.screen.tiles);
+    s.ow.reload_map_sprite_tile_patterns(s.ctx);
     if let Some(saved) = s.ow.rt.saved_screen2.clone() {
         s.ctx.screen.ui = saved;
     }

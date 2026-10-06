@@ -364,8 +364,9 @@ pub(super) fn recreation_with(gb: &GameBoy, opponent: Opponent, lead: Lead, tape
         ..CursorMemory::default()
     };
     let mode = match opponent {
-        Opponent::Wild(species, level) if lead.old_man => BattleMode::old_man(species, level),
-        Opponent::Wild(species, level) => BattleMode::wild(species, level),
+        // The cartridge's wild mon is named in `wCurOpponent` too.
+        Opponent::Wild(species, level) if lead.old_man => BattleMode::old_man(species, level).with_cur_opponent(),
+        Opponent::Wild(species, level) => BattleMode::wild(species, level).with_cur_opponent(),
         Opponent::Trainer(class, number) => BattleMode::trainer(class, number,
             mmu.read_pointer(&sym::wLoneAttackNo), mmu.read_pointer(&sym::wRivalStarter)),
     };

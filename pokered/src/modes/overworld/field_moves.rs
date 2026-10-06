@@ -57,7 +57,7 @@ impl Overworld {
     }
 
     /// `UsedCut` from `.canCut`'s text on. Everything before it, the whiteout and the map view put
-    /// back under the menu, is loading.
+    /// back under the menu, is loading; the start menu reloaded the sprites' patterns on its way out.
     fn used_cut(&mut self, ctx: &mut Ctx, tile: u8) -> Flow {
         ctx.screen.ui.uncover(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y);
         self.cut_tile = tile;
@@ -380,6 +380,36 @@ mod tests {
         let changed: Vec<usize> = (0..before.len()).filter(|&i| before[i] != after[i]).collect();
         assert_eq!(changed.len(), 1, "one block swapped");
         assert_eq!((before[changed[0]], after[changed[0]]), TREE_BLOCK);
+    }
+
+    /// `UsedCut`'s `RestoreScreenTilesAndReloadTilePatterns`: the map's sprites drawn from their own
+    /// patterns again after the party menu's icons, not from whatever the menu left.
+    #[test]
+    fn cut_reloads_the_map_s_sprites_over_the_party_menu_s_icons() {
+        let mut game = cutting(SpriteFacing::Up, ALL_BADGES);
+        let standing = |game: &Game| (0..0x80u8).map(|id| *game.screen().tiles.obj(id)).collect::<Vec<_>>();
+        let before = standing(&game);
+        use_the_field_move(&mut game);
+        until(&mut game, Decision::Text);
+        assert!(standing(&game) == before, "the sprites' patterns under the text");
+    }
+
+    /// Backing out of the party's screens to the map: the map's sprites drawn from their own
+    /// patterns again, as `RestoreScreenTilesAndReloadTilePatterns` loads them.
+    #[test]
+    fn backing_out_of_the_party_menu_reloads_the_map_s_sprites() {
+        let mut game = cutting(SpriteFacing::Up, ALL_BADGES);
+        let standing = |game: &Game| (0..0x80u8).map(|id| *game.screen().tiles.obj(id)).collect::<Vec<_>>();
+        let before = standing(&game);
+        game.frame(Input::Command(Command::OpenStartMenu));
+        until(&mut game, Decision::StartMenu);
+        game.frame(Input::Command(Command::ChooseStartMenuEntry(StartMenuEntry::Pokemon)));
+        until(&mut game, Decision::PartyMenu);
+        game.frame(Input::Command(Command::CancelOption));
+        until(&mut game, Decision::StartMenu);
+        game.frame(Input::Command(Command::CloseStartMenu));
+        settle(&mut game);
+        assert!(standing(&game) == before, "the sprites' patterns");
     }
 
     /// The swap is to the loaded block map alone, so leaving the map and coming back grows it again.

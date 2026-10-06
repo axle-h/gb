@@ -575,8 +575,9 @@ impl BattleMode {
         self.enemy_nick = species.name();
         self.battle = Some(battle);
         self.pal_species = [0, species as u8];
-        // `RESTLESS_SOUL` is Marowak's own constant, so every Marowak is shown as a ghost.
-        let ghost_pic = species == PokemonSpecies::Marowak || self.is_ghost_battle(ctx);
+        // `RESTLESS_SOUL` is Marowak's own constant, so a Marowak in `wCurOpponent` is shown as a
+        // ghost; a random encounter leaves `wCurOpponent` at 0.
+        let ghost_pic = self.cur_opponent && species == PokemonSpecies::Marowak || self.is_ghost_battle(ctx);
         if ghost_pic {
             self.enemy_nick = poke_core::charmap::encode("GHOST").expect("encodes");
         }

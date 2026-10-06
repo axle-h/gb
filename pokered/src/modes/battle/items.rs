@@ -396,9 +396,12 @@ impl BattleMode {
                 strings: vec![(TextBuffer::EnemyMonNick, self.enemy_nick.clone())],
                 numbers: vec![],
             });
+            // The ball, still drawn where it caught the mon, goes before the page and the question.
+            self.push(Present::ClearSprites);
             let dex = species.metadata().pokedex_number;
             self.push(Present::Push(Box::new(Mode::Pokedex(PokedexMenu::data_page(dex)))));
         }
+        self.push(Present::ClearSprites);
         let enemy = &self.b().enemy.mon;
         let origin = Origin::Caught { dvs: enemy.dvs, hp: enemy.hp, status: enemy.status, stats: enemy.stats };
         self.catch = Some(Catch { species, level: enemy.level, origin, enemy: enemy.clone() });
@@ -434,6 +437,9 @@ impl BattleMode {
     }
 
     pub(super) fn nickname_entered(&mut self, ctx: &mut Ctx) {
+        // `DisplayNamingScreen` leaves a battle through `LoadHudTilePatterns`: its text box tiles
+        // share ids with the HUD's lines.
+        super::hud::load_hud_tiles(&mut ctx.screen.tiles);
         self.outcome = None;
         let name = ctx.world.text.string(TextBuffer::StringBuffer);
         self.add_caught_mon((!name.is_empty()).then_some(name), ctx);

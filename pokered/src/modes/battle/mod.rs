@@ -92,6 +92,10 @@ pub struct BattleMode {
     /// `wBattleType`.
     #[serde(default)]
     battle_type: BattleType,
+    /// `wCurOpponent` named the wild mon, as a script or a static encounter does, rather than being
+    /// left at 0 for `TryDoWildEncounter` to pick one.
+    #[serde(default)]
+    cur_opponent: bool,
     /// `wPlayerName` as the old man's demo found it, kept while he is named instead.
     #[serde(default)]
     saved_player_name: Option<Vec<u8>>,
@@ -189,6 +193,7 @@ impl BattleMode {
             outcome: None,
             menu: None,
             battle_type: BattleType::Normal,
+            cur_opponent: false,
             saved_player_name: None,
             ran: false,
             party_before: None,
@@ -217,6 +222,12 @@ impl BattleMode {
     /// The trainer's words on being beaten, printed between the prize and the pic scrolling back in.
     pub fn with_end_battle_text(mut self, commands: Vec<poke_core::text_script::TextCommand>) -> Self {
         self.end_battle_text = Some(commands);
+        self
+    }
+
+    /// A wild mon `wCurOpponent` names, which is `RESTLESS_SOUL` when it is a Marowak.
+    pub fn with_cur_opponent(mut self) -> Self {
+        self.cur_opponent = true;
         self
     }
 
@@ -555,6 +566,86 @@ mod tests {
         assert!(game.world().party[1].mon.mon.exp > exp_before, "RAT fought and gained experience");
         assert!(game.world().party[0].mon.mon.exp > new_party_mon(PokemonSpecies::Pidgey, 50, 0, &Origin::Trainer,
             &mut GameRng::tape(vec![])).mon.exp, "BIRD fought too, and shares it");
+    }
+
+    /// A new catch's Pokédex page and the nickname question come up over a screen with no objects:
+    /// the ball drawn where it caught the mon is cleared first.
+    #[test]
+    fn the_ball_that_caught_a_mon_is_gone_from_its_dex_page_and_the_nickname_question() {
+        use poke_core::item::ItemId;
+        let mut game = game(BattleMode::wild(PokemonSpecies::Machop, 5));
+        let world = game.world_mut();
+        world.options.battle_animation = true;
+        world.bag.add(ItemId::MasterBall, 1);
+        assert_eq!(settle(&mut game), Some(Decision::Text));
+        command(&mut game, Command::Advance);
+        assert_eq!(settle(&mut game), Some(Decision::BattleMenu));
+        assert_eq!(command(&mut game, Command::UseItem { item: ItemId::MasterBall, target: None }), Reply::Accepted);
+        let mut seen = Vec::new();
+        for _ in 0..3000 {
+            match game.status() {
+                Status::Waiting(decision @ (Decision::PokedexData | Decision::TwoOption)) => {
+                    let objects = game.screen().sprites.iter().filter(|o| (1..160).contains(&o.y)).count();
+                    assert_eq!(objects, 0, "objects over {decision:?}");
+                    seen.push(decision.clone());
+                    if decision == Decision::TwoOption {
+                        break;
+                    }
+                    game.frame(Input::Command(Command::CloseDex));
+                }
+                Status::Waiting(Decision::Text) => { game.frame(Input::Command(Command::Advance)); }
+                _ => { game.frame(Input::None); }
+            }
+        }
+        assert_eq!(seen, [Decision::PokedexData, Decision::TwoOption]);
+    }
+
+    /// A nickname typed in a battle comes back to the HUD's own corner and line tiles, which the
+    /// naming screen's text box tiles had replaced.
+    #[test]
+    fn naming_a_catch_puts_back_the_hud_s_tiles() {
+        use poke_core::item::ItemId;
+        let mut game = game(BattleMode::wild(PokemonSpecies::Machop, 5));
+        let world = game.world_mut();
+        world.bag.add(ItemId::MasterBall, 1);
+        world.pokedex.set_owned(PokemonSpecies::Machop);
+        assert_eq!(settle(&mut game), Some(Decision::Text));
+        command(&mut game, Command::Advance);
+        assert_eq!(settle(&mut game), Some(Decision::BattleMenu));
+        let hud = |game: &Game| (0x6Du8..0x80).map(|id| *game.screen().tiles.bg(id)).collect::<Vec<_>>();
+        let before = hud(&game);
+        assert_eq!(command(&mut game, Command::UseItem { item: ItemId::MasterBall, target: None }), Reply::Accepted);
+        let mut named = false;
+        for _ in 0..5000 {
+            match game.status() {
+                Status::Waiting(Decision::TwoOption) => { game.frame(Input::Command(Command::ChooseOption(0))); }
+                Status::Waiting(Decision::NamingScreen) => {
+                    game.frame(Input::Command(Command::EnterName(encode("AL").unwrap())));
+                    named = true;
+                }
+                Status::Waiting(Decision::Text) if named => break,
+                Status::Waiting(Decision::Text) => { game.frame(Input::Command(Command::Advance)); }
+                _ => { game.frame(Input::None); }
+            }
+        }
+        assert!(named, "the naming screen came up");
+        assert!(hud(&game) == before, "the HUD's tiles");
+    }
+
+    /// A Marowak met in the grass is a Marowak: only one `wCurOpponent` names, the tower's restless
+    /// soul, is drawn as the ghost.
+    #[test]
+    fn only_a_named_marowak_is_a_ghost() {
+        let nick = |mode: BattleMode| {
+            let mut game = game(mode);
+            settle(&mut game);
+            game.modes().iter().find_map(|mode| match mode {
+                Mode::Battle(battle) => Some(battle.enemy_nick.clone()),
+                _ => None,
+            }).expect("the battle")
+        };
+        assert_eq!(nick(BattleMode::wild(PokemonSpecies::Marowak, 50)), encode("MAROWAK").unwrap());
+        assert_eq!(nick(BattleMode::wild(PokemonSpecies::Marowak, 50).with_cur_opponent()), encode("GHOST").unwrap());
     }
 
     /// Trapped, FIGHT takes the turn without a move list, so the command ends there: carried on, it

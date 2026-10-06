@@ -1427,9 +1427,10 @@ impl Script<'_, '_> {
         let ui = &mut self.ctx.screen.ui;
         ui.fill(12, 1, 7, 4, UiSurface::BLANK);
         ui.place(12, 2, &poke_core::charmap::encode("MONEY").expect("charmap"));
-        print_bcd(ui, 3 * SCREEN_TILES_X + 12, &money, BcdFormat { money_sign: true, ..Default::default() });
+        let format = BcdFormat { skip_leading_zeroes: true, ..Default::default() };
+        print_bcd(ui, 3 * SCREEN_TILES_X + 12, &money, BcdFormat { money_sign: true, ..format });
         ui.place(12, 4, &poke_core::charmap::encode("COIN").expect("charmap"));
-        print_bcd(ui, 5 * SCREEN_TILES_X + 15, &coins, BcdFormat::default());
+        print_bcd(ui, 5 * SCREEN_TILES_X + 15, &coins, format);
     }
 
     /// `HasEnoughMoney`.
@@ -1510,7 +1511,7 @@ impl Script<'_, '_> {
     /// `CeladonMartRoofScript_GiveDrinkToGirl`'s menu: the drinks the bag holds, two rows apart in a
     /// box of their own. It watches A and B, so backing out leaves no choice.
     pub fn drink_menu(&mut self, drinks: &[ItemId]) -> Then {
-        self.ctx.screen.ui.text_box_border(0, 0, 12, drinks.len() * 2 - 1);
+        self.ctx.screen.ui.text_box_border(0, 0, 12, drinks.len() * 2);
         self.update_sprites();
         for (row, &drink) in drinks.iter().enumerate() {
             self.ctx.screen.ui.place(2, 2 + 2 * row, &poke_core::item::name(drink));
@@ -1712,7 +1713,9 @@ impl Overworld {
                 Some(Transition::Stay)
             }
             Block::PrintText(commands) => {
-                // `PrintText`'s `UpdateSprites` before its text; the `Delay3` after the box is loading.
+                // `PrintText`: `DisplayTextBoxID`'s box, then `UpdateSprites`, which hides whoever
+                // stands on it; the `Delay3` after the box is loading.
+                ctx.screen.ui.text_box_border(0, 12, 18, 4);
                 self.update_sprites(ctx);
                 self.rt.waiting = Waiting::Child;
                 Some(Transition::Push(Mode::TextBox(TextBox::script(commands))))

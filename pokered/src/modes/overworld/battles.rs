@@ -73,11 +73,11 @@ impl Overworld {
             return Some(match self.rt.old_man_battle {
                 true => BattleMode::old_man(species, level),
                 false => BattleMode::wild(species, level),
-            });
+            }.with_cur_opponent());
         }
         let mut battle = BattleMode::trainer(opponent - OPP_ID_OFFSET, self.rt.trainer_no, self.rt.gym_leader_no,
             ctx.world.scripts.rival_starter);
-        if let Some(block) = self.trainer_oam_block() {
+        if let Some(block) = self.trainer_oam_block(&ctx.screen.sprites, ctx.world.cartridge_sprite_window) {
             battle = battle.with_trainer_oam_block(block);
         }
         Some(match self.rt.end_battle_text.filter(|_| self.rt.print_end_battle_text) {
@@ -89,12 +89,18 @@ impl Overworld {
     /// `BattleTransition`'s count of the OAM block the trainer in `hSpriteIndex` is drawn in: one block
     /// for each slot before it drawn at all, the player's included. A value that is no sprite slot
     /// runs the cartridge's count on through the rest of WRAM, which is not modelled: no block is kept.
-    fn trainer_oam_block(&self) -> Option<u8> {
+    /// Outside the cartridge's sprite window the count can disagree with the OAM on the screen, whose
+    /// slots a text box hid and margin slots took none of, so the block is found there instead.
+    fn trainer_oam_block(&self, objects: &[crate::gfx::layers::Object], cartridge_window: bool) -> Option<u8> {
         let slot = self.rt.sprite_index as usize;
         if !(1..self.sprites.len()).contains(&slot) {
             return None;
         }
-        Some(self.sprites[..slot].iter().filter(|sprite| sprite.image_index != 0xFF).count() as u8)
+        if cartridge_window {
+            return Some(self.sprites[..slot].iter().filter(|sprite| sprite.image_index != 0xFF).count() as u8);
+        }
+        let drawn = crate::systems::overworld::sprites::sprite_objects(&self.sprites[slot])?;
+        objects.chunks(4).position(|block| block.first() == drawn.first()).map(|block| block as u8)
     }
 
     /// `.lastRepelStep`'s `DisplayTextID`, which `NewBattle` shows before it returns to `then`.

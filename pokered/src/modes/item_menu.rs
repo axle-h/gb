@@ -436,6 +436,7 @@ impl ModeUpdate for ItemMenu {
             // are loading and not modelled.
             (After::PartyMenuPath, _) => {
                 crate::gfx::mon_icons::clear_sprites(&mut ctx.screen.sprites);
+                ctx.reload_map_sprite_tile_patterns();
                 if let Some(saved) = &self.saved {
                     ctx.screen.ui = saved.clone();
                 }

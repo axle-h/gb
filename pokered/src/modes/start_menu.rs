@@ -188,9 +188,10 @@ impl ModeUpdate for StartMenu {
             return Transition::Pop(Outcome::Done);
         }
         // `RestoreScreenTilesAndReloadTilePatterns`, on the way out of the party's screens, takes the
-        // mon icons down.
+        // mon icons down and loads the map's sprites' patterns over the ones they replaced.
         if entry == Some(StartMenuEntry::Pokemon) {
             clear_sprites(&mut ctx.screen.sprites);
+            ctx.reload_map_sprite_tile_patterns();
         }
         // An item or a field move that was used answers with what it was and closes the menu for the
         // overworld under it: `CloseStartMenu`, or `.goBackToMap`.

@@ -173,6 +173,32 @@ fn the_underground_path_girl_trades_a_nidoran_female_for_a_male() {
     assert!(game.world().pokedex.is_owned(PokemonSpecies::NidoranFemale));
 }
 
+/// `RestoreScreenTilesAndReloadTilePatterns` after a trade's party menu: the text that follows has
+/// the player's sprite and the font back from under the menu's icons.
+#[test]
+fn a_trade_puts_back_the_player_s_sprite_and_the_font() {
+    let mut game = game(Map::UndergroundPathRoute5, 2, 4, SpriteFacing::Up, |world| {
+        for species in [PokemonSpecies::Mewtwo, PokemonSpecies::Lapras, PokemonSpecies::Abra, PokemonSpecies::Geodude] {
+            world.party.push(mon(species, 30));
+        }
+        world.party.push(mon(PokemonSpecies::NidoranMale, 7));
+    });
+    play_until(&mut game, 60, &mut |_| 0, free);
+    let player = |game: &Game| (0..0x0Cu8).map(|id| *game.screen().tiles.obj(id)).collect::<Vec<_>>();
+    let before = player(&game);
+    game.frame(Input::Command(Command::Interact));
+    let mut chosen = false;
+    play_until(&mut game, 5000, &mut |game| if game.status() == Status::Waiting(Decision::PartyMenu) { 5 } else { 0 },
+        |game| {
+            chosen |= game.status() == Status::Waiting(Decision::PartyMenu);
+            chosen && game.status() == Status::Waiting(Decision::Text)
+        });
+    assert!(player(&game) == before, "the player's sprite");
+    let mut font = game.screen().tiles.clone();
+    font.load_font();
+    assert!((0x80..=0xFFu8).all(|id| font.bg(id) == game.screen().tiles.bg(id)), "the font");
+}
+
 #[test]
 fn the_day_care_takes_a_mon_and_gives_it_back_grown_for_its_price() {
     let mut game = game(Map::Daycare, 2, 4, SpriteFacing::Up, |world| {

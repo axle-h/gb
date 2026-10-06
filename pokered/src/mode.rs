@@ -72,7 +72,15 @@ pub struct Ctx<'a> {
 impl Ctx<'_> {
     /// `UpdateSprites` over the screen as the frame leaves it.
     pub fn update_sprites(&mut self) {
-        self.sprite_update = Some(SpriteUpdate::Drawn);
+        if self.sprite_update != Some(SpriteUpdate::Reloaded) {
+            self.sprite_update = Some(SpriteUpdate::Drawn);
+        }
+    }
+
+    /// `ReloadMapSpriteTilePatterns`, which ends in `UpdateSprites`: the map's sprites, the
+    /// player's and the font loaded again over whatever a full screen left in their tiles.
+    pub fn reload_map_sprite_tile_patterns(&mut self) {
+        self.sprite_update = Some(SpriteUpdate::Reloaded);
     }
 
     /// `ClearScreen` then `UpdateSprites`, which hides every sprite on the map before anything is
@@ -91,6 +99,8 @@ pub enum SpriteUpdate {
     /// The blank screen `ClearScreen` left, whatever a full screen draws over it later that frame:
     /// a picture's low tile ids would otherwise read as map tiles and show the sprites on them.
     Cleared,
+    /// The patterns loaded again first, as `ReloadMapSpriteTilePatterns` does.
+    Reloaded,
 }
 
 pub enum Transition {

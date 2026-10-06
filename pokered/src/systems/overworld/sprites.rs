@@ -641,6 +641,12 @@ fn check_sprite_availability(sprite: &mut SpriteState, slot: usize, env: &Sprite
         if sprite.movement1 >= WALK && (outside(env.y, sprite.map_y, 8) || outside(env.x, sprite.map_x, 9)) {
             return None;
         }
+        // The margin's sprites stand beyond the cartridge's squares, where the test below reads no
+        // text box: one partly on the screen is hidden when that part is under a box or menu.
+        if margin != 0 && (outside_cartridge_squares(env.y, sprite.map_y, 8) || outside_cartridge_squares(env.x, sprite.map_x, 9))
+            && covers_text_box(sprite, env) {
+            return None;
+        }
         let at = tile_sprite_stands_on(sprite);
         let corners = [env.tile(at), env.tile(at + 1), env.tile(at - 20)];
         let top_right = env.tile(at - 19);
@@ -659,6 +665,25 @@ fn check_sprite_availability(sprite: &mut SpriteState, slot: usize, env: &Sprite
         sprite.grass_priority = if top_right == env.grass_tile { OAM_PRIO } else { 0 };
     }
     true
+}
+
+/// Whether `at` is outside the cartridge's squares around `player`, `span` wide.
+fn outside_cartridge_squares(player: u8, at: u8, span: u8) -> bool {
+    at != player && (player > at || player.wrapping_add(span) < at)
+}
+
+/// Whether a tile of the screen under `sprite`'s 16 pixels square is a text box's or a menu's.
+fn covers_text_box(sprite: &SpriteState, env: &SpriteEnv) -> bool {
+    // Above or left of the screen the pixel coordinates have wrapped below zero.
+    let signed = |pixels: u8| if pixels >= 0xD0 { pixels as i16 - 0x100 } else { pixels as i16 };
+    let (top, left) = (signed(sprite.y_pixels), signed(sprite.x_pixels));
+    if top + 15 < 0 || top > 143 || left + 15 < 0 || left > 159 {
+        return false;
+    }
+    let rows = (top.max(0) / 8)..=((top + 15).min(143) / 8);
+    let columns = (left.max(0) / 8)..=((left + 15).min(159) / 8);
+    rows.flat_map(|row| columns.clone().map(move |column| row as usize * 20 + column as usize))
+        .any(|i| env.tiles[i] >= MAP_TILESET_SIZE)
 }
 
 /// `IsSpriteInFrontOfPlayer2`: the slot within `range` pixels the way the player faces, which is
@@ -696,32 +721,11 @@ pub fn prepare_oam(sprites: &mut Sprites, objects: &mut Vec<Object>, ledge: bool
         if sprite.picture_id == 0 {
             continue;
         }
-        let image = sprite.image_index;
         // `GetSpriteScreenXY`.
         sprite.y_adjusted = sprite.y_pixels.wrapping_add(4) & 0xF0;
         sprite.x_adjusted = sprite.x_pixels & 0xF0;
-        if image == 0xFF {
-            continue;
-        }
-        let entry = if image >= 0xA0 { (image & 0x0F) + 0x10 } else { image & 0x0F };
-        let (tiles, layout) = poke_core::tables::SPRITE_FACING_AND_ANIMATION_TABLE[entry as usize];
-        let slot = image >> 4;
-        let first_tile = if slot == 0x0B { 0x0A * 12 + 4 } else { slot * 12 };
-        let mut quadrants = Vec::with_capacity(4);
-        for quadrant in 0..4 {
-            let [dy, dx, flags] = layout[quadrant];
-            let attributes = if flags & UNDER_GRASS != 0 { sprite.grass_priority & OAM_PRIO | flags } else { flags };
-            quadrants.push(Object {
-                y: sprite.y_pixels.wrapping_add(0x10).wrapping_add(dy),
-                x: sprite.x_pixels.wrapping_add(8).wrapping_add(dx),
-                tile: first_tile.wrapping_add(tiles[quadrant]),
-                attributes,
-            });
-            if attributes & FACING_END != 0 {
-                break;
-            }
-        }
-        if clip && !quadrants.iter().any(|o| (9..=159).contains(&o.y) && (1..=167).contains(&o.x)) {
+        let Some(quadrants) = sprite_objects(sprite) else { continue };
+        if clip && !on_screen(&quadrants) {
             continue;
         }
         for object in quadrants {
@@ -739,6 +743,37 @@ pub fn prepare_oam(sprites: &mut Sprites, objects: &mut Vec<Object>, ledge: bool
     for object in &mut objects[next.min(end)..end] {
         object.y = OAM_HIDDEN_Y;
     }
+}
+
+fn on_screen(quadrants: &[Object]) -> bool {
+    quadrants.iter().any(|o| (9..=159).contains(&o.y) && (1..=167).contains(&o.x))
+}
+
+/// The objects `PrepareOAMData` writes for `sprite`, or `None` for one not drawn.
+pub fn sprite_objects(sprite: &SpriteState) -> Option<Vec<Object>> {
+    let image = sprite.image_index;
+    if image == 0xFF {
+        return None;
+    }
+    let entry = if image >= 0xA0 { (image & 0x0F) + 0x10 } else { image & 0x0F };
+    let (tiles, layout) = poke_core::tables::SPRITE_FACING_AND_ANIMATION_TABLE[entry as usize];
+    let slot = image >> 4;
+    let first_tile = if slot == 0x0B { 0x0A * 12 + 4 } else { slot * 12 };
+    let mut quadrants = Vec::with_capacity(4);
+    for quadrant in 0..4 {
+        let [dy, dx, flags] = layout[quadrant];
+        let attributes = if flags & UNDER_GRASS != 0 { sprite.grass_priority & OAM_PRIO | flags } else { flags };
+        quadrants.push(Object {
+            y: sprite.y_pixels.wrapping_add(0x10).wrapping_add(dy),
+            x: sprite.x_pixels.wrapping_add(8).wrapping_add(dx),
+            tile: first_tile.wrapping_add(tiles[quadrant]),
+            attributes,
+        });
+        if attributes & FACING_END != 0 {
+            break;
+        }
+    }
+    Some(quadrants)
 }
 
 /// The sprite set outside, which `InitOutsideMapSprites` keeps: `wSpriteSetID` and `wSpriteSet`.
@@ -977,6 +1012,28 @@ mod tests {
             assert_eq!(shown(at, false), ours, "{at:?}");
             assert_eq!(shown(at, true), cartridge, "the cartridge, {at:?}");
         }
+    }
+
+    #[test]
+    fn a_sprite_in_the_margin_below_the_screen_is_hidden_behind_a_text_box() {
+        let collision = poke_core::tilesets::collision_tiles(poke_core::map_header::TileSetId::Overworld);
+        let open: TileMap = std::array::from_fn(|_| 0);
+        let mut boxed = open;
+        boxed[12 * 20..].fill(0x7A);
+        let beyond = [0; 480];
+        let (x, y) = (20, 20);
+        let shown = |tiles: &TileMap| {
+            let env = SpriteEnv {
+                tiles, x, y, walk_counter: 0, font_loaded: false, collision: &collision, grass_tile: 0x52,
+                hidden: [false; NUM_SPRITES], no_face_player: false, player_direction: 0, moving_direction: 0, spinning: false,
+                simulating: false, beyond: Some(&beyond), ruleset: Ruleset::Gen1, cartridge_window: false,
+            };
+            // Five blocks below the player: its top four rows of pixels are the screen's last.
+            let mut sprite = SpriteState { movement1: STAY, map_y: y + 4 + 5, map_x: x + 4, ..walker(0x3C + 5 * 16, 0x40, 0, 0) };
+            check_sprite_availability(&mut sprite, 1, &env)
+        };
+        assert!(shown(&open), "the margin shows it peeking in");
+        assert!(!shown(&boxed), "but not over the text box's bottom edge");
     }
 
     #[test]
