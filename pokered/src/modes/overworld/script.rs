@@ -1012,12 +1012,16 @@ impl Script<'_, '_> {
         self.ow.view.tile(column, row)
     }
 
-    /// `ReplaceTileBlock`: block `(x, y)` of the map, counted in blocks, becomes `block`. The screen
-    /// draws from the blocks, so what `RedrawMapView` would show is shown.
+    /// `ReplaceTileBlock`: block `(x, y)` of the map, counted in blocks, becomes `block`, and the
+    /// screen's blocks with it, as `RedrawMapView` redraws at once: a text put up in the same pass
+    /// stops the overworld presenting until it closes, and is drawn over the new block.
     pub fn replace_tile_block(&mut self, x: u8, y: u8, block: u8) {
         let stride = self.ow.view.stride() as usize;
         let at = stride * 3 + 3 + stride * y as usize + x as usize;
         self.ow.view.blocks[at] = block;
+        if self.ctx.screen.map.blocks.len() == self.ow.view.blocks.len() {
+            self.ctx.screen.map.blocks[at] = block;
+        }
     }
 
     // ---- Objects and sprites ----

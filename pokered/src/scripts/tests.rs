@@ -4469,6 +4469,41 @@ fn beating_lorelei_opens_her_exit_and_it_stays_open() {
     assert_eq!(block_at(&reloaded, 2, 0), 0x05);
 }
 
+/// `ReplaceTileBlock` redraws the map view at once. After Bruno's battle the first pass shuts his
+/// exit over the open one his room's blocks hold and puts his words up in the same pass, so they go
+/// up over it drawn shut; it opens after them.
+#[test]
+fn brunos_exit_is_drawn_shut_under_his_words_after_the_battle() {
+    let mut game = game(Map::BrunosRoom, 5, 3, SpriteFacing::Up, 5, |world| {
+        champion_party(world);
+        world.events.set(EVENT_AUTOWALKED_INTO_BRUNOS_ROOM);
+    });
+    // The row of squares the exit is in, which nobody walks across.
+    let exit_row = |game: &Game| game.screen().frame().shades[160 * 16..160 * 32].to_vec();
+    play_until(&mut game, 600, free);
+    let shut = exit_row(&game);
+    command(&mut game, Command::Interact);
+    play_until(&mut game, 20_000, in_battle);
+    play_until(&mut game, 200_000, |game| !in_battle(game));
+    let mut words = 0;
+    play_until(&mut game, 2_000, |game| {
+        if !matches!(game.modes(), [Mode::Overworld(_), Mode::TextBox(_)]) {
+            return words > 0;
+        }
+        words += 1;
+        assert_eq!(block_at(game, 2, 0), 0x24);
+        assert!(exit_row(game) == shut, "drawn shut under his words");
+        false
+    });
+    assert!(words > 0);
+    play_until(&mut game, 600, free);
+    for _ in 0..10 {
+        game.frame(Input::None);
+    }
+    assert_eq!(block_at(&game, 2, 0), 0x05);
+    assert!(exit_row(&game) != shut, "drawn open after them");
+}
+
 /// `AgathasRoomAgathaEndBattleScript` arms the champion's room once her words are over, so the rival
 /// is waiting when the player climbs into it.
 #[test]
