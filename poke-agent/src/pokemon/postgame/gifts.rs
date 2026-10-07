@@ -2,7 +2,7 @@
 
 use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
-use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent};
+use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent, Reach};
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::{Map, MapSprite};
@@ -415,18 +415,19 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PartyScriptSt
 
     if game_mode == GameMode::Overworld && !s.entered_menu {
         let gs = agent.observe_state(api)?;
-        match gs.map.route_to_face_dir(s.stand, Some(s.facing)).as_deref() {
-            Some([]) => {
+        match agent.face_or_wait(&gs.map, s.stand, Some(s.facing)) {
+            Reach::Facing => {
                 api.release_all_buttons();
                 if s.press { api.press_button(JoypadButton::A); }
                 agent.set_state(AgentState::UsingPartyScript(PartyScriptState { press: !s.press, ticks: s.ticks + 1, ..s }));
             }
-            Some(&[btn, ..]) => {
+            Reach::Step(btn) => {
                 api.release_all_buttons();
                 api.press_button(btn);
                 agent.set_state(AgentState::UsingPartyScript(PartyScriptState { press: true, ticks: s.ticks + 1, ..s }));
             }
-            _ => abort(agent, api, format!("can't reach the NPC at {}", s.stand)),
+            Reach::Wait => api.release_all_buttons(),
+            Reach::OutOfReach => abort(agent, api, format!("can't reach the NPC at {}", s.stand)),
         }
         return Ok(());
     }

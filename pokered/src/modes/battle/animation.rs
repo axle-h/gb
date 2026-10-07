@@ -827,7 +827,8 @@ impl Animation {
                     }
                     self.ops.extend([Op::Wait(5), Op::ScxBy(0xF8)]);
                 }
-                self.ops.extend([Op::Clear { x: 0, y: 0, width: SCREEN_TILES_X, height: SCREEN_TILES_Y }, Op::Wait(3)]);
+                // `ClearScreen`, whose `Delay3` is loading.
+                self.op(Op::Clear { x: 0, y: 0, width: SCREEN_TILES_X, height: SCREEN_TILES_Y });
             }
             anim::TOSS_ANIM | anim::GREATTOSS_ANIM | anim::ULTRATOSS_ANIM => self.ball_toss_special_effects(counter),
             anim::SHAKE_ANIM => {

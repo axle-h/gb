@@ -1,7 +1,7 @@
 //! Pokémon storage in the PC boxes: reading the open box, and the Bill's PC menu driver.
 
 use gb::mmu::MMU;
-use crate::pokemon::agent::PokemonAgent;
+use crate::pokemon::agent::{PokemonAgent, Reach};
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::status::PokemonStatus;
@@ -212,18 +212,19 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PcBoxState) -
 
     if game_mode == GameMode::Overworld {
         let gs = agent.observe_state(api)?;
-        match gs.map.route_to_face_dir(s.pc, Some(PlayerFacingDirection::Up)).as_deref() {
-            Some([]) => {
+        match agent.face_or_wait(&gs.map, s.pc, Some(PlayerFacingDirection::Up)) {
+            Reach::Facing => {
                 api.release_all_buttons();
                 if s.press { api.press_button(JoypadButton::A); }
                 agent.set_state(AgentState::UsingPcBox(PcBoxState { press: !s.press, ticks: s.ticks + 1, ..s }));
             }
-            Some(&[btn, ..]) => {
+            Reach::Step(btn) => {
                 api.release_all_buttons();
                 api.press_button(btn);
                 agent.set_state(AgentState::UsingPcBox(PcBoxState { press: true, ticks: s.ticks + 1, ..s }));
             }
-            _ => abort(agent, api, format!("can't reach the PC at {}", s.pc)),
+            Reach::Wait => api.release_all_buttons(),
+            Reach::OutOfReach => abort(agent, api, format!("can't reach the PC at {}", s.pc)),
         }
         return Ok(());
     }

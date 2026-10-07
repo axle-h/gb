@@ -31,6 +31,17 @@ fn route(route: &'static [(Action, &'static str)], done: impl Fn(&Seen) -> bool 
     }
 }
 
+/// `lockstep`, or on a Super Game Boy `lockstep_on_sgb`.
+fn lockstep_or_on_sgb(on_sgb: bool, state: &[u8], prepare: impl FnOnce(&mut Cartridge),
+    choose: impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>)
+{
+    if on_sgb {
+        super::scripts::lockstep_on_sgb(state, prepare, choose);
+    } else {
+        lockstep(state, prepare, choose);
+    }
+}
+
 /// `choose`, asserting when it ends that a prompt showed `text` on the box's first line.
 fn seeing_text(mut choose: impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>, text: &'static str)
     -> impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>
@@ -253,6 +264,16 @@ fn a_vending_machine_sells_a_drink_as_the_cartridge_does() {
 /// three, asks ¥400 and hands it back at level 33.
 #[test]
 fn the_day_care_takes_a_mon_and_gives_it_back_grown_as_the_cartridge_does() {
+    day_care(false);
+}
+
+/// The same on a Super Game Boy, where the party menu and the screen put back after it send palettes.
+#[test]
+fn the_day_care_sends_the_cartridge_s_palettes_on_a_super_game_boy() {
+    day_care(true);
+}
+
+fn day_care(on_sgb: bool) {
     const SLOT: u16 = 5;
     const EXP: u32 = 33 * 33 * 33;
     const ROUTE: &[(Action, &str)] = &[
@@ -269,7 +290,7 @@ fn the_day_care_takes_a_mon_and_gives_it_back_grown_as_the_cartridge_does() {
         }
         cartridge.write(sym::wPartyAndBillsPCSavedMenuItem.address, SLOT as u8);
     };
-    lockstep(include_bytes!("../pokemon/data/postgame-daycare.bin"), prepare,
+    lockstep_or_on_sgb(on_sgb, include_bytes!("../pokemon/data/postgame-daycare.bin"), prepare,
         route(ROUTE, |seen| seen.settled().day_care.is_none()
             && seen.settled().party.last() == Some(&(PokemonSpecies::Hitmonlee, 33))));
 }
@@ -306,6 +327,17 @@ fn poison_walks_the_party_to_a_blackout_as_the_cartridge_does() {
 /// the party menu opening on it: in, up to her, yes, the lead, and the Nidoran♀ back.
 #[test]
 fn an_in_game_trade_as_the_cartridge_does() {
+    in_game_trade(false);
+}
+
+/// The same on a Super Game Boy, where the party menu, the screen put back after it, the movie and
+/// the screen put back after that each send palettes.
+#[test]
+fn an_in_game_trade_sends_the_cartridge_s_palettes_on_a_super_game_boy() {
+    in_game_trade(true);
+}
+
+fn in_game_trade(on_sgb: bool) {
     const ROUTE: &[(Action, &str)] = &[
         walk(Joypad::UP, "up into the path's entrance"),
         walk(Joypad::UP, "up"), walk(Joypad::UP, "up"), walk(Joypad::UP, "up to (3, 4)"), walk(Joypad::LEFT, "left below the girl"),
@@ -321,7 +353,7 @@ fn an_in_game_trade_as_the_cartridge_does() {
         cartridge.write(sym::wPartyMon1.address, nidoran);
         cartridge.write(sym::wPartyAndBillsPCSavedMenuItem.address, 0);
     };
-    lockstep(include_bytes!("../pokemon/data/postgame-trades.bin"), prepare,
+    lockstep_or_on_sgb(on_sgb, include_bytes!("../pokemon/data/postgame-trades.bin"), prepare,
         route(ROUTE, |seen| seen.settled().trades & 1 << 9 != 0
             && seen.settled().party.last().is_some_and(|&(species, _)| species == PokemonSpecies::NidoranFemale)));
 }

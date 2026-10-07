@@ -1,4 +1,5 @@
-//! `engine/movie`: the game from power-on to the overworld, and the Hall of Fame into the credits.
+//! `engine/movie`: the game from power-on to the overworld, the Hall of Fame into the credits, and
+//! the trade.
 //!
 //! [`Movie::power_on`] is `Init` to `EnterMap`: the splash and the intro, the title screen, the main
 //! menu, and for a new game Oak's speech. It ends by replacing itself with the overworld, so what
@@ -8,12 +9,15 @@
 //! game and restarts the console rather than returning to the overworld it took the place of. Its
 //! save is the autosave slot, holding the game as the cartridge's CONTINUE resumed it: in Pallet
 //! Town, since the room the ceremony is in has no way out.
+//!
+//! [`Movie::trade`] is `InternalClockTradeAnim`, which an in-game trade pushes and is popped back to.
 
 mod hall_of_fame;
 mod intro;
 mod oak_speech;
 mod screen;
 mod title;
+pub mod trade;
 mod wait;
 
 pub use title::TITLE_VERSION_ROW;
@@ -35,6 +39,7 @@ use intro::Intro;
 use oak_speech::OakSpeech;
 use screen::MovieScreen;
 use title::Title;
+use trade::{TradeData, TradeMovie};
 use wait::{Tick, Wait};
 
 /// `StartNewGame`'s hold after Oak's speech, and `SpecialEnterMap`'s before `EnterMap`.
@@ -52,6 +57,8 @@ pub enum Movie {
     /// `HallOfFameResetEventsAndSaveScript`: `HallOfFamePC`'s ceremony and credits, then the save
     /// and the restart the script ends with.
     HallOfFame(Ceremony),
+    /// `InternalClockTradeAnim`, which returns to the in-game trade that played it.
+    Trade(TradeMovie),
 }
 
 impl Movie {
@@ -63,6 +70,16 @@ impl Movie {
     /// ends it with `jp Init`, so the mode replaces itself with power-on.
     pub fn hall_of_fame() -> Self {
         Self::HallOfFame(Ceremony::default())
+    }
+
+    pub fn trade(data: TradeData) -> Self {
+        Self::Trade(TradeMovie::new(data))
+    }
+
+    /// The trade movie plays inside the trade the player is making and hands back to it, where a
+    /// host plays the other movies through itself.
+    pub fn is_trade(&self) -> bool {
+        matches!(self, Self::Trade(_))
     }
 
     /// `HallOfFamePC` has returned and its script is saving, which is where a driver watching the
@@ -77,6 +94,7 @@ impl Movie {
         match self {
             Self::PowerOn(power_on) => power_on.title.answered(),
             Self::HallOfFame(ceremony) => ceremony.answered,
+            Self::Trade(_) => 0,
         }
     }
 
@@ -90,10 +108,18 @@ impl Movie {
 }
 
 impl ModeUpdate for Movie {
+    fn open(&mut self, ctx: &mut Ctx) -> Transition {
+        match self {
+            Self::Trade(trade) => trade.open(ctx),
+            _ => Transition::Stay,
+        }
+    }
+
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
         match self {
             Self::PowerOn(power_on) => power_on.update(ctx),
             Self::HallOfFame(ceremony) => ceremony.update(ctx),
+            Self::Trade(trade) => trade.update(ctx),
         }
     }
 
@@ -101,6 +127,7 @@ impl ModeUpdate for Movie {
         match self {
             Self::PowerOn(power_on) => power_on.resume(outcome, ctx),
             Self::HallOfFame(ceremony) => ceremony.hall_of_fame.resume(ctx),
+            Self::Trade(trade) => trade.resume(ctx),
         }
     }
 
@@ -108,6 +135,7 @@ impl ModeUpdate for Movie {
         match self {
             Self::PowerOn(power_on) => power_on.status(),
             Self::HallOfFame(ceremony) => ceremony.status(),
+            Self::Trade(_) => Status::Busy,
         }
     }
 }

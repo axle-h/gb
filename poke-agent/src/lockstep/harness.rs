@@ -95,7 +95,11 @@ impl Start {
     }
 
     pub(super) fn game(&self, tape: Vec<u8>) -> Game {
-        let mut game = Game::new(self.world.clone(), GameRng::tape(tape), Pacing::Faithful);
+        self.game_with(GameRng::tape(tape))
+    }
+
+    pub(super) fn game_with(&self, rng: GameRng) -> Game {
+        let mut game = Game::new(self.world.clone(), rng, Pacing::Faithful);
         let menu = game.menu_mut();
         [menu.battle_and_start, menu.party_and_bills, menu.bag_saved, menu.list_scroll] = self.menus;
         seed_sfx_note_delays(&mut game, self.sfx_note_delays);

@@ -3,7 +3,7 @@
 use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
 use crate::pokemon::actions::OverworldAction;
-use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent};
+use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent, Reach};
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::BagItem;
@@ -244,18 +244,19 @@ pub fn sell_tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: SellStat
 
     if game_mode == GameMode::Overworld {
         let gs = agent.observe_state(api)?;
-        match gs.map.route_to_face_dir(s.clerk, Some(s.facing)).as_deref() {
-            Some([]) => {
+        match agent.face_or_wait(&gs.map, s.clerk, Some(s.facing)) {
+            Reach::Facing => {
                 api.release_all_buttons();
                 if s.press { api.press_button(JoypadButton::A); }
                 agent.set_state(AgentState::SellingToMart(SellState { press: !s.press, ticks: s.ticks + 1, ..s }));
             }
-            Some(&[btn, ..]) => {
+            Reach::Step(btn) => {
                 api.release_all_buttons();
                 api.press_button(btn);
                 agent.set_state(AgentState::SellingToMart(SellState { press: true, ticks: s.ticks + 1, ..s }));
             }
-            _ => abort(agent, api, format!("can't reach the clerk at {}", s.clerk)),
+            Reach::Wait => api.release_all_buttons(),
+            Reach::OutOfReach => abort(agent, api, format!("can't reach the clerk at {}", s.clerk)),
         }
         return Ok(());
     }

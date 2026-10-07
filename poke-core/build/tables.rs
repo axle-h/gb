@@ -1150,6 +1150,7 @@ fn strings_and_lists(asm: &mut Asm, out: &mut String) {
         ("engine/pokemon/bills_pc.asm", "WithdrawPCText"),
         ("engine/pokemon/bills_pc.asm", "StatsCancelPCText"),
         ("engine/movie/hall_of_fame.asm", "HoFMonInfoText"),
+        ("engine/movie/trade2.asm", "Trade_MonInfoText"),
         ("engine/movie/credits.asm", "TheEndTextString"),
         ("engine/menus/save.asm", "BoxNames"),
         ("engine/menus/save.asm", "BoxNoText"),

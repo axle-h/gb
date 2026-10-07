@@ -258,7 +258,7 @@ impl LlmPolicy {
                     DecisionKind::Battle => tools::battle_menu(state),
                     DecisionKind::MartPurchase => tools::mart_menu(&self.snapshot, state),
                     DecisionKind::ForgetMove => match context {
-                        TurnContext::ForgetMove { current, .. } => tools::forget_menu(current),
+                        TurnContext::ForgetMove { current, .. } => tools::forget_menu(current, state.ruleset),
                         _ => Vec::new(),
                     },
                     // The naming screen offers no choices; the tool's own arguments are the menu.

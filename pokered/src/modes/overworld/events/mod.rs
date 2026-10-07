@@ -147,6 +147,8 @@ pub enum Label {
     InGameTradeAnswered,
     InGameTradeChoseMon,
     InGameTradeConnected(u8),
+    /// After the movie: the slot given and the received mon's OT ID.
+    InGameTradeTraded { slot: u8, ot_id: u16 },
     InGameTradeText,
 
     // `DaycareGentlemanText`.
@@ -306,6 +308,7 @@ pub fn resume(s: &mut Script, label: Label) -> Flow {
         InGameTradeAnswered => trades::answered(s),
         InGameTradeChoseMon => trades::chose_mon(s),
         InGameTradeConnected(slot) => trades::connected(s, slot),
+        InGameTradeTraded { slot, ot_id } => trades::traded(s, slot, ot_id),
         InGameTradeText => trades::print_text(s),
 
         DayCare => day_care::day_care(s),
@@ -354,7 +357,7 @@ fn save_screen_tiles_to_buffer2(s: &mut Script) {
 }
 
 /// `RestoreScreenTilesAndReloadTilePatterns`: the party menu's icons down, the map's sprites loaded
-/// again, and the screen from `wTileMapBackup2`. Its `Delay3` is loading.
+/// again, the screen from `wTileMapBackup2` and `SET_PAL_DEFAULT`. Its `Delay3` is loading.
 fn restore_screen_tiles_and_reload_tile_patterns(s: &mut Script) {
     clear_sprites(&mut s.ctx.screen.sprites);
     s.ow.rt.sprites_frozen = false;
@@ -363,6 +366,7 @@ fn restore_screen_tiles_and_reload_tile_patterns(s: &mut Script) {
         s.ctx.screen.ui = saved;
     }
     s.ctx.screen.tiles.load_text_box_tiles();
+    s.ctx.screen.sgb.run(&crate::gfx::sgb::PaletteCommand::Default);
     s.ctx.screen.tiles.load_tileset(s.ow.view.tileset);
 }
 

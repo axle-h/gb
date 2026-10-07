@@ -56,6 +56,29 @@ pub(crate) fn to_vblank(gb: &mut GameBoy) {
     assert_eq!(stop, Stop::Breakpoint(vblank), "no VBlank within two frames");
 }
 
+/// The cartridge on a Super Game Boy with `state` loaded. Every fixture is a DMG capture, with no SGB
+/// section and `wOnSGB` clear, so the console is booted as far as `LoadSGB`'s return first, which
+/// leaves it holding the cartridge's palettes for the state to load over, and `wOnSGB` is set as
+/// `LoadSGB` sets it. No palette has been sent for what the state shows.
+pub(crate) fn on_sgb(state: &[u8]) -> GameBoy {
+    use gb::ram::RAM;
+    use crate::pokemon::symbols::pokered_symbols as sym;
+    let mut gb = GameBoy::sgb(crate::pokemon::roms::POKERED);
+    let load_sgb = breakpoint(sym::LoadSGB);
+    assert_eq!(gb.run_until(&[load_sgb], MachineCycles::PER_FRAME * 60).0, Stop::Breakpoint(load_sgb));
+    assert!(matches!(gb.run_to_return(MachineCycles::PER_FRAME * 600).0, Stop::Returned { .. }), "LoadSGB never returned");
+    assert_eq!(gb.core().mmu().read(sym::wOnSGB.address), 1, "the cartridge did not find the SGB");
+    gb.load_state(state).unwrap();
+    gb.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
+    gb.core_mut().mmu_mut().write(sym::wOnSGB.address, 1);
+    gb
+}
+
+/// What a player sees, `R, G, B` a pixel: the LCD, or on an SGB what the SNES painted it with.
+pub(crate) fn display_rgb(gb: &GameBoy) -> Vec<u8> {
+    gb.core().mmu().display().iter().flat_map(|colour| colour.to_rgb().0).collect()
+}
+
 pub(crate) fn tile_row(gb: &GameBoy, y: u16) -> Vec<u8> {
     let tile_map = crate::pokemon::symbols::pokered_symbols::wTileMap.address;
     (0..20).map(|x| gb.core().mmu().read(tile_map + y * 20 + x)).collect()

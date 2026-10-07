@@ -3,7 +3,7 @@
 
 use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
-use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent};
+use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent, Reach};
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map_metadata::PlayerFacingDirection;
@@ -92,18 +92,19 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: ItemPcState) 
 
     if game_mode == GameMode::Overworld {
         let gs = agent.observe_state(api)?;
-        match gs.map.route_to_face_dir(s.pc, Some(PlayerFacingDirection::Up)).as_deref() {
-            Some([]) => {
+        match agent.face_or_wait(&gs.map, s.pc, Some(PlayerFacingDirection::Up)) {
+            Reach::Facing => {
                 api.release_all_buttons();
                 if s.press { api.press_button(JoypadButton::A); }
                 agent.set_state(AgentState::UsingItemPc(ItemPcState { press: !s.press, ..s }));
             }
-            Some(&[btn, ..]) => {
+            Reach::Step(btn) => {
                 api.release_all_buttons();
                 api.press_button(btn);
                 agent.set_state(AgentState::UsingItemPc(ItemPcState { press: true, ..s }));
             }
-            _ => {
+            Reach::Wait => api.release_all_buttons(),
+            Reach::OutOfReach => {
                 agent.event(AgentEvent::TextBox { message: format!("Can't reach the PC at {}", s.pc) });
                 api.release_all_buttons();
                 agent.set_state(AgentState::Idle);

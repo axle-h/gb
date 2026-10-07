@@ -91,6 +91,7 @@ Every element of any `moves` array, and `battle.best_move`.
 | `name` | string | `"Vine Whip"` |
 | `move_type` | string | `"Grass"`. **Not `type`** |
 | `power` | number | 0 for a status move |
+| `effect` | string | what else it does: `"NoAdditionalEffect"`, `"Sleep"`, `"AttackDown1"`, `"BurnSideEffect1"`. `.contains("Down")` finds a stat drop |
 | `accuracy` | number | out of 255 |
 | `pp` | number | left now |
 | `max_pp` | number | |

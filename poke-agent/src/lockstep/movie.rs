@@ -1,5 +1,6 @@
 //! Power-on to the overworld, the cartridge booted cold beside `Game::power_on` with no save: a new
-//! game. And `HallOfFamePC` to THE END beside `Movie::hall_of_fame`.
+//! game. `HallOfFamePC` to THE END beside `Movie::hall_of_fame`. And an in-game trade's
+//! `InternalClockTradeAnim` beside `Movie::trade`.
 //!
 //! The splash, the intro and the title are compared pixel for pixel on every frame. The cartridge
 //! is late wherever the recreation leaves loading out, so the frames are walked with an offset that
@@ -7,7 +8,7 @@
 //! way through a transfer the recreation makes whole, and only a short run of those is allowed.
 
 use gb::cycles::MachineCycles;
-use gb::game_boy::{GameBoy, Stop};
+use gb::game_boy::{Breakpoint, GameBoy, Stop};
 use gb::joypad::JoypadButtonState;
 use poke_core::item::ItemId;
 use poke_core::species::PokemonSpecies;
@@ -594,4 +595,344 @@ fn the_hall_of_fame_and_the_credits_match_the_cartridge_frame_for_frame() {
     let party: Vec<_> = world.party.iter().map(|named| (named.mon.mon.species, named.mon.level, named.nick.clone())).collect();
     let last: Vec<_> = recorded.last().expect("a team recorded").iter().map(|mon| (mon.species, mon.level, mon.nick.clone())).collect();
     assert_eq!(last, party, "the team recorded is the party");
+}
+
+/// What the trade movie waits on that the recreation leaves out, besides `CopyVideoData` and the
+/// pictures' decompression: `DisableLCD`'s frame, the `Delay3` of `ClearScreen`, of
+/// `Trade_CopyTileMapToVRAM` and of `PrintText`'s box, `CopyScreenTileBufferToVRAM`'s three frames,
+/// and the `Delay3` after the cable's last copy.
+const TRADE_LOADING: [(crate::pokemon::symbols::DmgPointer, u32); 6] = [
+    (sym::DisableLCD, 1), (sym::ClearScreen, DELAY3), (sym::Trade_CopyTileMapToVRAM, DELAY3), (sym::PrintText, BOX),
+    (sym::CopyScreenTileBufferToVRAM, DELAY3), (local::Trade_AnimateBallEnteringLinkCable::ballSpriteReachedEdgeOfScreen, DELAY3),
+];
+
+const TRADES: &[u8] = include_bytes!("../pokemon/data/postgame-trades.bin");
+
+/// The Underground Path girl's trade as `events.rs` makes it, a Nidoran♂ written into the lead slot:
+/// the cartridge on `gb`, with `TRADES` loaded, walked in, talked to her and A pressed until
+/// `InternalClockTradeAnim` begins.
+fn cartridge_at_the_trade_movie(mut gb: GameBoy) -> GameBoy {
+    use gb::ram::RAM;
+    use poke_core::map::Map;
+    gb.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
+    let mmu = gb.core_mut().mmu_mut();
+    let at = sym::wCompletedInGameTradeFlags.address + 1;
+    mmu.write(at, mmu.read(at) & !(1 << 1));
+    let nidoran = PokemonSpecies::NidoranMale as u8;
+    mmu.write(sym::wPartySpecies.address, nidoran);
+    mmu.write(sym::wPartyMon1.address, nidoran);
+    mmu.write(sym::wPartyAndBillsPCSavedMenuItem.address, 0);
+    let (vblank, movie) = (breakpoint(sym::VBlank), breakpoint(sym::InternalClockTradeAnim));
+    for frame in 0..6000u32 {
+        let mmu = gb.core().mmu();
+        let (map, x, y) = (mmu.read_pointer(&sym::wCurMap), mmu.read_pointer(&sym::wXCoord), mmu.read_pointer(&sym::wYCoord));
+        let button = if map != Map::UndergroundPathRoute5 as u8 || y > 4 {
+            Joypad::UP
+        } else if x > 2 {
+            Joypad::LEFT
+        } else if frame % 4 < 2 {
+            // Up turns to face her, then A talks and answers everything after.
+            if mmu.read_pointer(&sym::wSpritePlayerStateData1FacingDirection) != 4 { Joypad::UP } else { Joypad::A }
+        } else {
+            Joypad::empty()
+        };
+        gb.hold_buttons(joypad(button));
+        match gb.run_until(&[vblank, movie], MachineCycles::PER_FRAME * 120).0 {
+            Stop::Breakpoint(hit) if hit == movie => {
+                gb.hold_buttons(JoypadButtonState::default());
+                return gb;
+            }
+            Stop::Breakpoint(_) => {}
+            stop => panic!("{stop:?}"),
+        }
+    }
+    panic!("the trade movie never began");
+}
+
+/// What `InternalClockTradeAnim` reads, as `InGameTrade_PrepareTradeData` left it.
+fn trade_data(gb: &GameBoy) -> pokered::modes::movie::trade::TradeData {
+    use pokered::modes::movie::trade::{TradeData, TradedMon};
+    let mmu = gb.core().mmu();
+    let name = |at: u16| (0..11).map(|i| mmu.read(at + i)).take_while(|&b| b != 0x50).collect::<Vec<u8>>();
+    let species = |at: u16| PokemonSpecies::from_repr(mmu.read(at)).expect("a species");
+    let id = |at: u16| u16::from_be_bytes([mmu.read(at), mmu.read(at + 1)]);
+    TradeData {
+        player: TradedMon { species: species(sym::wTradedPlayerMonSpecies.address), ot: name(sym::wTradedPlayerMonOT.address),
+                            ot_id: id(sym::wTradedPlayerMonOTID.address) },
+        enemy: TradedMon { species: species(sym::wTradedEnemyMonSpecies.address), ot: name(sym::wTradedEnemyMonOT.address),
+                           ot_id: id(sym::wTradedEnemyMonOTID.address) },
+        enemy_trainer: name(sym::wLinkEnemyTrainerName.address),
+        // `FadePal4`, as `LoadGBPal` finds it on a map that is not dark.
+        palettes: [0b1110_0100, 0b1101_0000, 0b1110_0000],
+    }
+}
+
+/// The recreation where the cartridge stands at `InternalClockTradeAnim`, with what the movie reads.
+fn recreation_at_the_trade_movie(gb: &GameBoy) -> (Game, pokered::modes::movie::trade::TradeData) {
+    let data = trade_data(gb);
+    assert_eq!((data.player.species, data.enemy.species), (PokemonSpecies::NidoranMale, PokemonSpecies::NidoranFemale));
+    let mut world = super::status_screen::the_world(gb);
+    world.text.strings.insert(poke_core::text_script::TextBuffer::LinkEnemyTrainerName, data.enemy_trainer.clone());
+    let mut game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+    let mmu = gb.core().mmu();
+    let screen = game.screen_mut();
+    screen.tiles.load(0, &mmu.read_vram_slice(0x8000, 384 * 16).unwrap().to_vec());
+    screen.effects.bgp = mmu.read(0xFF47);
+    screen.effects.obp0 = mmu.read(0xFF48);
+    screen.effects.obp1 = mmu.read(0xFF49);
+    (game, data)
+}
+
+/// Writes recreation and cartridge frames side by side as PNGs into `dir`, every `every` frames of
+/// the alignment.
+fn dump_side_by_side(film: &Film, alignment: &Alignment, dir: &str, every: usize) {
+    std::fs::create_dir_all(dir).unwrap();
+    let shade = |s: u8| [0xFF, 0xAA, 0x55, 0x00][s as usize];
+    for (r, &(c, _)) in alignment.frames.iter().enumerate().step_by(every) {
+        let (ours, theirs) = (unpack(&film.recreation_pictures[r]), unpack(&film.cartridge_pictures[c]));
+        let picture = image::GrayImage::from_fn(2 * 160 + 4, 144, |x, y| {
+            let x = x as usize;
+            image::Luma([match x {
+                0..160 => shade(ours[y as usize * 160 + x]),
+                160..164 => 0x80,
+                _ => shade(theirs[y as usize * 160 + x - 164]),
+            }])
+        });
+        picture.save(format!("{dir}/trade-{r:04}-vs-{c:04}.png")).unwrap();
+    }
+}
+
+/// `InternalClockTradeAnim` beside `Movie::trade`, from the predef's entry to `RemovePokemon` after
+/// it, frame for frame, and each routine of the sequence timed against the loading the cartridge
+/// entered in it. `GB_TRADE_FRAMES` names a directory for every `GB_TRADE_EVERY`th (40th) pair as
+/// PNGs, the recreation on the left.
+#[test]
+fn the_trade_movie_matches_the_cartridge_frame_for_frame() {
+    use pokered::modes::movie::Movie;
+    let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
+    gb.load_state(TRADES).unwrap();
+    let mut gb = cartridge_at_the_trade_movie(gb);
+    let (mut game, data) = recreation_at_the_trade_movie(&gb);
+
+    let mut film = Film::default();
+    let (vblank, done, routine) = (breakpoint(sym::VBlank), breakpoint(sym::RemovePokemon), breakpoint(local::TradeAnimCommon::r#loop));
+    let (copy_video_data, picture) = (breakpoint(sym::CopyVideoData), breakpoint(sym::LoadFrontSpriteByMonIndex));
+    let named: Vec<(Breakpoint, u32)> = TRADE_LOADING.iter().map(|&(at, frames)| (breakpoint(at), frames)).collect();
+    let (jump, clear_screen) = (breakpoint(sym::TradeJumpPokeball), breakpoint(sym::ClearScreen));
+    let mut points = vec![vblank, done, routine, copy_video_data, picture, jump];
+    points.extend(named.iter().map(|&(at, _)| at));
+    // Each routine's start on the cartridge, and the loading it entered.
+    let (mut starts, mut loading) = (Vec::new(), Vec::new());
+    let mut decompressing: Option<Breakpoint> = None;
+    // `TradeJumpPokeball` ends in `ClearScreen`, whose `Delay3` passes while `MoveAnimation` waits
+    // for the ball's last `SFX_SWAP` anyway.
+    let mut jumping = false;
+    loop {
+        let hit = match gb.run_until(&points, MachineCycles::PER_FRAME * 600).0 {
+            Stop::Breakpoint(hit) => hit,
+            stop => panic!("{stop:?}"),
+        };
+        if hit == vblank {
+            film.cartridge_frame(&gb);
+            if decompressing.is_some() {
+                *loading.last_mut().unwrap() += 1;
+            }
+        } else if hit == done {
+            break;
+        } else if hit == routine {
+            starts.push(film.cartridge.len());
+            loading.push(0);
+        } else if hit == copy_video_data {
+            // The picture's own copy is inside its span.
+            if decompressing.is_none() {
+                *loading.last_mut().unwrap() += gb.core().registers().c as u32 / 8 + 1;
+            }
+        } else if hit == picture {
+            let back = gb.return_address();
+            let back = Breakpoint::new(gb.core().mmu().rom_bank() as u8, back);
+            decompressing = Some(back);
+            points.push(back);
+        } else if decompressing == Some(hit) {
+            decompressing = None;
+            points.pop();
+        } else if hit == jump {
+            jumping = true;
+        } else if hit == clear_screen && jumping {
+            jumping = false;
+        } else {
+            *loading.last_mut().unwrap() += named.iter().find(|&&(at, _)| at == hit).unwrap().1;
+        }
+        assert!(film.cartridge.len() < MOVIE_FRAMES, "the cartridge never finished the movie");
+    }
+    // The last start is `TradeAnimCommon` reading the sequence's end.
+    starts.pop();
+    loading.pop();
+    starts.push(film.cartridge.len());
+
+    let begun = |game: &Game| game.modes().iter().find_map(|mode| match mode {
+        Mode::Movie(Movie::Trade(trade)) => Some(trade.routines_begun()),
+        _ => None,
+    });
+    let mut recreation_starts = Vec::new();
+    game.push(Mode::Movie(Movie::trade(data)));
+    loop {
+        film.recreation_frame(&game);
+        let Some(now) = begun(&game) else { break };
+        while recreation_starts.len() < now {
+            recreation_starts.push(film.recreation.len() - 1);
+        }
+        game.frame(Input::None);
+        assert!(film.recreation.len() < MOVIE_FRAMES, "the movie never ended");
+    }
+    let last = film.recreation.len() - 1;
+    recreation_starts.resize(loading.len(), last);
+    recreation_starts.push(last);
+    println!("the cartridge {} frames and the recreation {}", film.cartridge.len(), film.recreation.len());
+    if let Ok(dir) = std::env::var("GB_TRADE_FRAMES") {
+        let every = std::env::var("GB_TRADE_EVERY").map_or(40, |n| n.parse().unwrap());
+        dump_side_by_side(&film, &Alignment::new(&film.cartridge, &film.recreation, 0), &dir, every);
+    }
+    for (i, loading) in loading.iter().enumerate() {
+        let (cartridge, recreation) = (starts[i + 1] - starts[i], recreation_starts[i + 1] - recreation_starts[i]);
+        assert_late(cartridge as u32, recreation as u32, *loading, &format!("routine {i} of the sequence"));
+    }
+    film.check(0, 3, "the trade");
+}
+
+/// Both sides' pictures in colour, every frame, as `R, G, B` a pixel. Each distinct picture is kept
+/// once, deflated, where a mismatch or a dump wants it.
+#[derive(Default)]
+struct ColourFilm {
+    cartridge: Vec<u64>,
+    recreation: Vec<u64>,
+    pictures: std::collections::HashMap<u64, Vec<u8>>,
+}
+
+impl ColourFilm {
+    fn keep(&mut self, rgb: Vec<u8>) -> u64 {
+        use std::io::Write;
+        let key = hash(&rgb);
+        self.pictures.entry(key).or_insert_with(|| {
+            let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(&rgb).unwrap();
+            encoder.finish().unwrap()
+        });
+        key
+    }
+
+    fn picture(&self, key: u64) -> Vec<u8> {
+        use std::io::Read;
+        let mut rgb = Vec::new();
+        flate2::read::DeflateDecoder::new(&self.pictures[&key][..]).read_to_end(&mut rgb).unwrap();
+        rgb
+    }
+
+    fn cartridge_frame(&mut self, gb: &GameBoy) {
+        let key = self.keep(super::display_rgb(gb));
+        self.cartridge.push(key);
+    }
+
+    fn recreation_frame(&mut self, game: &Game, colours: pokered::gfx::colour::ColourMode) {
+        let rgb = colours.rgba(game.screen()).chunks_exact(4).flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect();
+        let key = self.keep(rgb);
+        self.recreation.push(key);
+    }
+
+    /// `Film::check` in colour: every recreation picture matched in order, but for runs of
+    /// `transfer` frames the cartridge spends getting there.
+    fn check(&self, transfer: usize, what: &str) -> Alignment {
+        let alignment = Alignment::new(&self.cartridge, &self.recreation, 0);
+        let mut run = 0;
+        for (r, &(c, matched)) in alignment.frames.iter().enumerate() {
+            run = if matched == Match::Different { run + 1 } else { 0 };
+            if matched == Match::Different {
+                let (ours, theirs) = (self.picture(self.recreation[r]), self.picture(self.cartridge[c]));
+                let wrong: Vec<(usize, usize)> = (0..ours.len() / 3).filter(|&i| ours[i * 3..i * 3 + 3] != theirs[i * 3..i * 3 + 3])
+                    .map(|i| (i % 160, i / 160)).collect();
+                println!("{what}: recreation frame {r} is not cartridge frame {c}: {} pixels, first {:?}", wrong.len(), &wrong[..wrong.len().min(6)]);
+            }
+            assert!(run <= transfer, "{what}: {run} frames running match nothing, the last recreation frame {r}");
+        }
+        alignment
+    }
+
+    /// Recreation and cartridge side by side as PNGs into `dir`, the frames `pick` names.
+    fn dump(&self, alignment: &Alignment, dir: &str, prefix: &str, pick: impl Iterator<Item = usize>) {
+        std::fs::create_dir_all(dir).unwrap();
+        for r in pick {
+            let c = alignment.frames[r].0;
+            let (ours, theirs) = (self.picture(self.recreation[r]), self.picture(self.cartridge[c]));
+            let picture = image::RgbImage::from_fn(2 * 160 + 4, 144, |x, y| {
+                let (x, y) = (x as usize, y as usize);
+                let at = |rgb: &[u8], x: usize| image::Rgb([rgb[(y * 160 + x) * 3], rgb[(y * 160 + x) * 3 + 1], rgb[(y * 160 + x) * 3 + 2]]);
+                match x {
+                    0..160 => at(&ours, x),
+                    160..164 => image::Rgb([0x80; 3]),
+                    _ => at(&theirs, x - 164),
+                }
+            });
+            picture.save(format!("{dir}/{prefix}-{r:04}-vs-{c:04}.png")).unwrap();
+        }
+    }
+}
+
+/// The trade movie in `colours` beside the cartridge on `gb`, `TRADES` loaded, from the predef's
+/// entry to `RemovePokemon`, frame for frame. `GB_TRADE_FRAMES` names a directory for every
+/// `GB_TRADE_EVERY`th (40th) pair as PNGs, the recreation on the left.
+fn the_trade_movie_in_colour(gb: GameBoy, colours: pokered::gfx::colour::ColourMode, what: &str) {
+    use pokered::modes::movie::Movie;
+    let mut gb = cartridge_at_the_trade_movie(gb);
+    let (mut game, data) = recreation_at_the_trade_movie(&gb);
+    if colours == pokered::gfx::colour::ColourMode::Sgb {
+        // What `InGameTrade_RestoreScreen`'s `SET_PAL_DEFAULT` left after the party menu.
+        use pokered::gfx::sgb::{OverworldPalette, PaletteCommand};
+        let mmu = gb.core().mmu();
+        let palette = OverworldPalette {
+            map: poke_core::map::Map::from_repr(mmu.read_pointer(&sym::wCurMap)).unwrap(),
+            tileset: poke_core::map_header::TileSetId::from_repr(mmu.read_pointer(&sym::wCurMapTileset)).unwrap(),
+            last_map: poke_core::map::Map::from_repr(mmu.read_pointer(&sym::wLastMap)).unwrap(),
+        };
+        game.screen_mut().sgb.run(&PaletteCommand::Overworld(palette));
+    }
+    let mut film = ColourFilm::default();
+    let (vblank, done) = (breakpoint(sym::VBlank), breakpoint(sym::RemovePokemon));
+    loop {
+        match gb.run_until(&[vblank, done], MachineCycles::PER_FRAME * 600).0 {
+            Stop::Breakpoint(hit) if hit == vblank => film.cartridge_frame(&gb),
+            Stop::Breakpoint(_) => break,
+            stop => panic!("{stop:?}"),
+        }
+        assert!(film.cartridge.len() < MOVIE_FRAMES, "the cartridge never finished the movie");
+    }
+    game.push(Mode::Movie(Movie::trade(data)));
+    loop {
+        film.recreation_frame(&game, colours);
+        if !game.modes().iter().any(|mode| matches!(mode, Mode::Movie(Movie::Trade(_)))) {
+            break;
+        }
+        game.frame(Input::None);
+        assert!(film.recreation.len() < MOVIE_FRAMES, "the movie never ended");
+    }
+    println!("{what}: the cartridge {} frames and the recreation {}", film.cartridge.len(), film.recreation.len());
+    let alignment = film.check(3, what);
+    if let Ok(dir) = std::env::var("GB_TRADE_FRAMES") {
+        let every = std::env::var("GB_TRADE_EVERY").map_or(40, |n| n.parse().unwrap());
+        film.dump(&alignment, &dir, what, (0..film.recreation.len()).step_by(every));
+    }
+}
+
+/// On a Super Game Boy: the palette commands sent where the cartridge sends them, and each picture
+/// painted as the SNES paints it.
+#[test]
+fn the_trade_movie_matches_the_cartridge_on_a_super_game_boy() {
+    the_trade_movie_in_colour(super::on_sgb(TRADES), pokered::gfx::colour::ColourMode::Sgb, "sgb");
+}
+
+/// On a Game Boy Color, in compatibility mode: each pixel through the palette register it was
+/// drawn with, into the boot ROM's colours.
+#[test]
+fn the_trade_movie_matches_the_cartridge_on_a_game_boy_color() {
+    let mut gb = GameBoy::cgb(crate::pokemon::roms::POKERED);
+    gb.load_state(TRADES).unwrap();
+    the_trade_movie_in_colour(gb, pokered::gfx::colour::ColourMode::Gbc, "gbc");
 }

@@ -273,6 +273,7 @@ impl NativeGame {
             map,
             bag,
             battle: battle_state(&self.game),
+            ruleset: world.ruleset,
             boxed_pokemon: world.boxes.get(world.current_box as usize)
                 .map_or_else(Vec::new, |mons| mons.iter().map(boxed).collect()),
             current_box: world.current_box,

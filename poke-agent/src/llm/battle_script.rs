@@ -251,6 +251,8 @@ fn move_map(slot: usize, battle_move: &crate::pokemon::move_name::PokemonMove, m
     // `move_type`, because `type` is a reserved word in rhai.
     map.insert("move_type".into(), Dynamic::from(metadata.move_type.to_string()));
     map.insert("power".into(), Dynamic::from(metadata.power.unwrap_or(0) as i64));
+    // The variant's name, since two variants display as "Confusion".
+    map.insert("effect".into(), Dynamic::from(format!("{:?}", metadata.effect)));
     map.insert("accuracy".into(), Dynamic::from(metadata.accuracy as i64));
     map.insert("pp".into(), Dynamic::from(battle_move.pp as i64));
     map.insert("max_pp".into(), Dynamic::from(metadata.pp as i64));
@@ -1159,7 +1161,7 @@ mod tests {
             assert!(pokemon.contains(&format!("`{field}`")), "`{field}` is missing from the Pokemon table");
         }
         let a_move = section("### A Move");
-        for field in ["slot", "name", "move_type", "power", "accuracy", "pp", "max_pp", "damage", "effectiveness", "usable"] {
+        for field in ["slot", "name", "move_type", "power", "effect", "accuracy", "pp", "max_pp", "damage", "effectiveness", "usable"] {
             let outcome = decide(&format!("let x = battle.me.moves[0].{field}; battle.ask();"), &wild());
             assert_eq!(outcome, Outcome::Ask, "`mv.{field}` does not parse or does not exist");
             assert!(a_move.contains(&format!("`{field}`")), "`{field}` is missing from the Move table");
@@ -1170,6 +1172,18 @@ mod tests {
             let outcome = decide(&format!("battle.{call};"), &scenarios::hurt_wild());
             assert!(!matches!(outcome, Outcome::Failed(_)), "`battle.{call}` failed: {outcome:?}");
         }
+    }
+
+    /// `effect` tells a stat drop from an attack, which `power` alone cannot say of a damaging move.
+    #[test]
+    fn a_script_picks_a_move_by_what_it_does() {
+        let first_stat_drop = r#"for mv in battle.moves { if mv.effect.contains("Down") { battle.fight(mv); } } battle.ask();"#;
+        let Outcome::Action(BattleAction::Fight { battle_move, .. }) = decide(first_stat_drop, &wild())
+        else { panic!("a Charmander knowing Growl has a stat drop") };
+        assert_eq!(battle_move.name, crate::pokemon::move_name::PokemonMoveName::Growl);
+
+        let effects = r#"let e = battle.moves.map(|m| m.effect); if e == ["NoAdditionalEffect", "BurnSideEffect1", "AttackDown1", "DefenseDown1"] { battle.run(); } battle.ask();"#;
+        assert_eq!(decide(effects, &wild()), Outcome::Action(BattleAction::Run), "Scratch, Ember, Growl, Leer");
     }
 
     /// A potion goes to the one out unless the script names another, and nowhere it would do nothing.
@@ -1605,7 +1619,7 @@ mod tests {
     /// The docs stay in the context once read, so they are bounded like a guide chapter.
     #[test]
     fn the_docs_stay_within_what_they_cost_to_carry() {
-        assert!(DOCS.len() < 9_500, "the docs are {} bytes", DOCS.len());
+        assert!(DOCS.len() < 9_700, "the docs are {} bytes", DOCS.len());
         for name in ["battle.fight", "battle.switch", "battle.use_item", "battle.run", "battle.ask"] {
             assert!(DOCS.contains(name), "the docs never mention {name}");
         }

@@ -92,7 +92,11 @@ pub fn native_ceremony(agent: &mut NativeAgent, slots: &mut pokered::save_slots:
     use pokered::command::{Command, Decision};
     use pokered::mode::{Mode, Status};
     use pokered::save_slots::{newest, SavedAt, SlotRequest, SlotStore};
-    let Some(Mode::Movie(_) | Mode::MainMenu(_)) = agent.game().modes().last() else { return false };
+    match agent.game().modes().last() {
+        Some(Mode::Movie(movie)) if !movie.is_trade() => {}
+        Some(Mode::MainMenu(_)) => {}
+        _ => return false,
+    }
     agent.host_took_the_screen();
     let saved_at = SavedAt::from_system_time(std::time::SystemTime::now(), 0);
     let continued = match agent.game().status() {

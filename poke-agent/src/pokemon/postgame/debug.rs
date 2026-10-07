@@ -166,6 +166,29 @@ impl<'a> PokemonApi<'a> {
         self.mmu_mut().write(pokered_symbols::wObtainedBadges.address, badges.bits());
     }
 
+    pub fn debug_set_event(&mut self, flag: u16) {
+        let byte = pokered_symbols::wEventFlags.address + flag / 8;
+        let value = self.mmu().read(byte) | 1 << (flag % 8);
+        self.mmu_mut().write(byte, value);
+    }
+
+    /// Stand the sprite in `slot` on the map square `at`, wandering (`WALK`, `ANY_DIR`) when
+    /// `wanders`, as though it had walked there.
+    pub fn debug_move_sprite(&mut self, slot: u16, at: poke_core::geometry::Point8, wanders: bool) {
+        let (data1, data2) = (pokered_symbols::wSpriteStateData1.address + slot * 0x10,
+                              pokered_symbols::wSpriteStateData2.address + slot * 0x10);
+        let (y, x) = (self.mmu().read(pokered_symbols::wYCoord.address), self.mmu().read(pokered_symbols::wXCoord.address));
+        // `MAPY` and `MAPX` count from 4; the screen draws the player at (0x40, 0x3C), 16 pixels a square.
+        self.mmu_mut().write(data2 + 4, at.y + 4);
+        self.mmu_mut().write(data2 + 5, at.x + 4);
+        self.mmu_mut().write(data1 + 4, (0x3C + 16 * (at.y as i32 - y as i32)) as u8);
+        self.mmu_mut().write(data1 + 6, (0x40 + 16 * (at.x as i32 - x as i32)) as u8);
+        if wanders {
+            self.mmu_mut().write(data2 + 6, 0xFE);
+            self.mmu_mut().write(pokered_symbols::wMapSpriteData.address + (slot - 1) * 2, 0x00);
+        }
+    }
+
     pub fn debug_heal_party(&mut self) -> Result<(), String> {
         let mut party = self.mmu().read_player_pokemon_party()?;
         for index in 0..party.len() {

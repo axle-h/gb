@@ -437,6 +437,9 @@ pub fn situation(
                 },
                 metadata.pp,
             ));
+            if let Some(effect) = crate::llm::tools::move_effect(new, state.ruleset) {
+                out.push_str(&format!("{new}: {effect}\n\n"));
+            }
             if current.iter().any(|m| crate::llm::tools::hm_move(m.name).is_some()) {
                 out.push_str(
                     "⚠️ One of the four is an HM move. An HM cannot be un-taught and cannot be \
@@ -1045,7 +1048,7 @@ mod tests {
                 DecisionKind::Overworld => tools::overworld_menu(&state, snapshot.arrival),
                 DecisionKind::Battle => tools::battle_menu(&state),
                 DecisionKind::MartPurchase => tools::mart_menu(&snapshot, &state),
-                DecisionKind::ForgetMove => tools::forget_menu(&party_moves),
+                DecisionKind::ForgetMove => tools::forget_menu(&party_moves, state.ruleset),
                 DecisionKind::Nickname | DecisionKind::Stuck => Vec::new(),
             };
 
@@ -1587,6 +1590,33 @@ mod tests {
         ] {
             assert!(SYSTEM_PROMPT.contains(phrase), "the system prompt no longer says {phrase:?}");
         }
+    }
+
+    /// The move on offer says what it does by the run's rules, as the four it would replace do.
+    #[test]
+    fn a_move_being_learnt_says_what_it_does() {
+        use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
+        let mut fixture = crate::pokemon::integration_tests::fixture::TestFixture::new(
+            include_bytes!("../pokemon/data/at-celadon.bin"),
+            std::time::Duration::from_secs(10),
+            vec![],
+        );
+        let mut state = fixture.game_state();
+        assert_eq!(state.ruleset, poke_core::ruleset::Ruleset::Gen1, "the cartridge plays Gen 1");
+        let current = [PokemonMove { name: PokemonMoveName::Tackle, pp: 35 }; 4];
+        let turn = |state: &GameState, new| situation(
+            DecisionKind::ForgetMove, state, &ApiSnapshot::default(), &[],
+            &crate::llm::tools::forget_menu(&current, state.ruleset),
+            TurnContext::ForgetMove { slot: 0, current: &current, new }, &[],
+        );
+
+        let gen1 = turn(&state, PokemonMoveName::FocusEnergy);
+        assert!(gen1.contains("\nFocus Energy: Bug: quarters the critical-hit rate"), "{gen1}");
+        state.ruleset = poke_core::ruleset::Ruleset::Modern;
+        let modern = turn(&state, PokemonMoveName::FocusEnergy);
+        assert!(modern.contains("\nFocus Energy: Doubles the user's critical-hit rate.\n"), "{modern}");
+        let tackle = turn(&state, PokemonMoveName::Tackle);
+        assert!(!tackle.contains("Tackle:") && !tackle.contains("additional"), "a plain attack says nothing more: {tackle}");
     }
 
     /// A party line that names only the nickname stops naming the Pokémon at all.

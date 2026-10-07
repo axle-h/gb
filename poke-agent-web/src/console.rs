@@ -396,7 +396,12 @@ impl Native {
                 *self.agent.game_mut() = game;
                 self.agent.host_took_the_screen();
             }
-            if let Some(Mode::Movie(_) | Mode::MainMenu(_)) = self.agent.game().modes().last() {
+            let host_plays = match self.agent.game().modes().last() {
+                Some(Mode::Movie(movie)) => !movie.is_trade(),
+                Some(Mode::MainMenu(_)) => true,
+                _ => false,
+            };
+            if host_plays {
                 self.agent.host_took_the_screen();
                 let continued = match self.agent.game().status() {
                     Status::Waiting(Decision::MainMenu) => pokered::save_slots::newest(self.agent.game().slots()),

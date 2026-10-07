@@ -1440,15 +1440,43 @@ impl MetaTileMap {
             MetaTile::Sprite(name) => Some(name),
             _ => None,
         };
+        self.without_people(|_, who| Some(who) == subject)
+            .is_some_and(|cleared| cleared.actions().iter().any(|action| action.tile.is_same_row_as(&row)))
+    }
+
+    /// True when [`Self::route_to_face_dir`] finds no way to face `target` only because people
+    /// stand in the way: with everyone but whoever stands on `target` put back, it finds one.
+    pub fn face_blocked_by_people(&self, target: Point8, required: Option<PlayerFacingDirection>) -> bool {
+        self.without_people(|at, _| at == target)
+            .is_some_and(|cleared| cleared.route_to_face_dir(target, required).is_some())
+    }
+
+    /// True when [`Self::boulder_push_refusal`] refuses the shove only because people stand on the
+    /// square it is pushed from, the square it lands on or the way round: with everyone put back, it
+    /// is allowed.
+    pub fn push_blocked_by_people(&self, boulder: Point8, dir: JoypadButton) -> bool {
+        self.without_people(|_, _| false)
+            .is_some_and(|cleared| cleared.boulder_push_refusal(boulder, dir).is_none())
+    }
+
+    /// True when [`Self::solve_boulder_push_for`] finds no plan only because people stand in the
+    /// way: with everyone put back, it finds one.
+    pub fn goal_blocked_by_people(&self, boulder: Point8, target: Point8) -> bool {
+        self.without_people(|_, _| false)
+            .is_some_and(|cleared| cleared.solve_boulder_push_for(boulder, target).is_some())
+    }
+
+    /// This map with everyone `keep` does not name put back `underfoot`, or none when nobody would
+    /// be. A boulder is a sprite and is not a person.
+    fn without_people(&self, keep: impl Fn(Point8, &str) -> bool) -> Option<Self> {
         let lift: Vec<(Point8, MetaTile)> = self.underfoot.iter().copied()
             .filter(|(p, _)| match self.tile_at(*p) {
-                // A boulder is a sprite and is not a person.
-                MetaTile::Sprite(who) => Some(who) != subject && !who.starts_with("Boulder"),
+                MetaTile::Sprite(who) => !keep(*p, who) && !who.starts_with("Boulder"),
                 _ => true,
             })
             .collect();
         if lift.is_empty() {
-            return false;
+            return None;
         }
         let mut cleared = self.clone();
         // `walkable_bits` must be recomputed for the cleared floor.
@@ -1458,7 +1486,7 @@ impl MetaTileMap {
         }
         cleared.warp_targets = warp_targets_of(&cleared.meta_tiles);
         cleared.connection_targets = connection_targets_of(&cleared.meta_tiles);
-        cleared.actions().iter().any(|action| action.tile.is_same_row_as(&row))
+        Some(cleared)
     }
 
     /// The first square in reading order whose tile passes `pred`, with anyone standing on one put
@@ -2172,6 +2200,69 @@ mod boulder_solver_tests {
         };
         assert_eq!(ids_from(&stand_on_the_edge(2), Point8 { x: 3, y: 4 }), top, "a person does not split the opening");
         assert_eq!(ids_from(&stand_on_the_edge(1), Point8 { x: 3, y: 4 }), top, "nor move the square it is keyed on");
+    }
+
+    /// A counter at (2, 1) faced from below, with someone standing on (2, 2), the one square that
+    /// faces it, and the player at (1, 3).
+    fn a_counter_someone_stands_in_front_of() -> MetaTileMap {
+        let (mut map, _) = from_ascii(&["#####", "##=##", "#...#", "#P..#", "#####"]);
+        let at = Point8 { x: 2, y: 2 };
+        map.underfoot = vec![(at, map.tile_at(at))];
+        map.meta_tiles[at.x as usize + at.y as usize * map.width] = MetaTile::Sprite("Beauty");
+        map
+    }
+
+    #[test]
+    fn a_counter_only_people_keep_out_of_reach_is_told_from_one_nobody_reaches() {
+        let map = a_counter_someone_stands_in_front_of();
+        let counter = Point8 { x: 2, y: 1 };
+        assert_eq!(map.route_to_face_dir(counter, Some(PlayerFacingDirection::Up)), None);
+        assert!(map.face_blocked_by_people(counter, Some(PlayerFacingDirection::Up)));
+        assert!(!map.face_blocked_by_people(Point8 { x: 0, y: 0 }, Some(PlayerFacingDirection::Up)), "a wall nobody faces");
+        // Whoever stands on the target is what is faced, never lifted out of the way.
+        assert!(!map.face_blocked_by_people(Point8 { x: 2, y: 2 }, Some(PlayerFacingDirection::Down)));
+    }
+
+    /// The emulated drivers wait on a person in the way as long as a walk does, and give up a target
+    /// nobody reaches at once.
+    #[test]
+    fn a_driver_waits_on_people_in_the_way_and_not_on_a_wall() {
+        use crate::pokemon::agent::{PokemonAgent, Reach, MAX_ROUTE_BLOCKED_TICKS};
+        let map = a_counter_someone_stands_in_front_of();
+        let (mut agent, up, counter) = (PokemonAgent::default(), Some(PlayerFacingDirection::Up), Point8 { x: 2, y: 1 });
+        for _ in 0..MAX_ROUTE_BLOCKED_TICKS - 1 {
+            assert_eq!(agent.face_or_wait(&map, counter, up), Reach::Wait);
+        }
+        // The count is consecutive: a tick with a way there starts it over.
+        assert_eq!(agent.face_or_wait(&map, Point8 { x: 1, y: 2 }, up), Reach::Step(JoypadButton::Up));
+        let waits = std::iter::repeat_with(|| agent.face_or_wait(&map, counter, up))
+            .take_while(|reach| *reach == Reach::Wait)
+            .count();
+        assert_eq!(waits, MAX_ROUTE_BLOCKED_TICKS as usize);
+        assert_eq!(agent.face_or_wait(&map, Point8 { x: 0, y: 0 }, up), Reach::OutOfReach);
+    }
+
+    /// A boulder at (2, 2) on its way to a switch at (4, 2), with someone standing at (1, 2), the
+    /// one square it is pushed right from, and the player at (1, 1).
+    fn a_boulder_someone_stands_behind() -> (MetaTileMap, Point8) {
+        let (mut map, switch) = from_ascii(&["######", "#P...#", "#.1.S#", "######"]);
+        let at = Point8 { x: 1, y: 2 };
+        map.underfoot = vec![(at, map.tile_at(at))];
+        map.meta_tiles[at.x as usize + at.y as usize * map.width] = MetaTile::Sprite("Hiker");
+        (map, switch)
+    }
+
+    #[test]
+    fn a_push_only_people_keep_from_being_made_is_told_from_one_nobody_can_make() {
+        let (map, switch) = a_boulder_someone_stands_behind();
+        let boulder = Point8 { x: 2, y: 2 };
+        assert!(map.boulder_push_refusal(boulder, JoypadButton::Right).is_some());
+        assert!(map.push_blocked_by_people(boulder, JoypadButton::Right), "pushed from where she stands");
+        assert!(map.push_blocked_by_people(boulder, JoypadButton::Left), "pushed onto where she stands");
+        assert!(!map.push_blocked_by_people(boulder, JoypadButton::Down), "pushed into a wall");
+        assert_eq!(map.solve_boulder_push_for(boulder, switch), None);
+        assert!(map.goal_blocked_by_people(boulder, switch));
+        assert!(!map.goal_blocked_by_people(boulder, Point8 { x: 2, y: 1 }), "a square it can never be pushed onto");
     }
 
     /// A map offers its grass once, so the row names no square: the nearest blade moves with every

@@ -70,8 +70,23 @@ const MAX_MOVEMENT_SILENCE: Duration = Duration::from_secs(60);
 /// Consecutive ticks the chosen row may be missing from `actions()` before a `NoRoute` abort.
 pub(crate) const MAX_ROUTE_LOST_TICKS: u16 = 250;
 
-/// The same bound once `MetaTileMap::row_blocked_by_people` says someone is standing on the route.
+/// The same bound once `MetaTileMap::row_blocked_by_people` says someone is standing on the route,
+/// and the one a driver waits on people keeping it from what it faces or pushes
+/// (`PokemonAgent::wait_on_people`).
 pub(crate) const MAX_ROUTE_BLOCKED_TICKS: u16 = 1500;
+
+/// What a driver walking up to something it faces does this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reach {
+    /// Standing beside it, facing it.
+    Facing,
+    /// The first press of the way there.
+    Step(JoypadButton),
+    /// People stand in every way there: press nothing.
+    Wait,
+    /// No square faces it, people or none: give it up.
+    OutOfReach,
+}
 
 /// Ticks of successful pacing in grass or on cave floor before giving up on an encounter.
 const PACING_BUDGET_TICKS: u16 = 3000;
@@ -704,6 +719,8 @@ pub struct PokemonAgent {
     /// `MetaTileMap::row_blocked_by_people` for this walk's row, asked once when
     /// [`MAX_ROUTE_LOST_TICKS`] runs out and remembered until the row comes back.
     route_lost_to_people: bool,
+    /// Consecutive ticks a driver has waited on people in its way ([`Self::wait_on_people`]).
+    people_wait_ticks: u16,
     /// The map the agent was last on, to detect warp and connection landings.
     last_map: Option<Map>,
     /// The naming screen open now follows a catch, so its closing is the battle's end.
@@ -808,6 +825,7 @@ impl PokemonAgent {
             boulder_push_row: None,
             route_lost_ticks: 0,
             route_lost_to_people: false,
+            people_wait_ticks: 0,
             last_map: None,
             naming_after_battle: false,
             blocked_tiles: std::collections::HashSet::new(),
@@ -1338,6 +1356,34 @@ impl PokemonAgent {
             self.route_lost_to_people = map.row_blocked_by_people(row);
         }
         self.route_lost_to_people && self.route_lost_ticks <= MAX_ROUTE_BLOCKED_TICKS
+    }
+
+    /// A driver's way up to `target`, facing it as `required` says. A target no square reaches is
+    /// given up at once, but one only people keep out of reach is waited on as a walk waits on them.
+    pub(crate) fn face_or_wait(&mut self, map: &crate::pokemon::tile_map::MetaTileMap, target: Point8,
+                               required: Option<crate::pokemon::map_metadata::PlayerFacingDirection>) -> Reach {
+        let reach = match map.route_to_face_dir(target, required).as_deref() {
+            Some([]) => Reach::Facing,
+            Some(&[button, ..]) => Reach::Step(button),
+            None if self.wait_on_people(|| map.face_blocked_by_people(target, required)) => return Reach::Wait,
+            None => return Reach::OutOfReach,
+        };
+        self.getting_on();
+        reach
+    }
+
+    /// Whether a driver held up waits this tick: only while `people` says people are all that is in
+    /// its way, and for at most [`MAX_ROUTE_BLOCKED_TICKS`] in a row. A tick that does not wait
+    /// starts the count over.
+    pub(crate) fn wait_on_people(&mut self, people: impl FnOnce() -> bool) -> bool {
+        let wait = self.people_wait_ticks < MAX_ROUTE_BLOCKED_TICKS && people();
+        self.people_wait_ticks = if wait { self.people_wait_ticks + 1 } else { 0 };
+        wait
+    }
+
+    /// A driver getting on, which starts [`Self::wait_on_people`]'s count over.
+    fn getting_on(&mut self) {
+        self.people_wait_ticks = 0;
     }
 
     /// Close the walk a Surf mount was carrying when the mount has ended on a different map.
@@ -1942,8 +1988,10 @@ CascadeBadge; not cutting".to_string(),
                         }
                         Some(crate::pokemon::policy::FieldMove::PushBoulder { boulder, dir }) => {
                             api.release_all_buttons();
-                            // The same last line of defence as `CutTree`.
-                            if let Some(refusal) = game_state.map.boulder_push_refusal(boulder, dir) {
+                            // The same last line of defence as `CutTree`; people in the way are
+                            // `PushingBoulder`'s to wait on.
+                            if let Some(refusal) = game_state.map.boulder_push_refusal(boulder, dir)
+                                && !game_state.map.push_blocked_by_people(boulder, dir) {
                                 self.event(AgentEvent::TextBox { message: refusal });
                                 self.set_state(AgentState::Idle);
                                 return Ok(());
@@ -2212,8 +2260,10 @@ CascadeBadge; not cutting".to_string(),
                                 }
                                 if let MetaTile::BoulderPush { boulder, dir } = destination {
                                     api.release_all_buttons();
-                                    // The same last line of defence as `CutTree`.
-                                    if let Some(refusal) = game_state.map.boulder_push_refusal(boulder, dir) {
+                                    // The same last line of defence as `CutTree`; people in the way
+                                    // are `PushingBoulder`'s to wait on.
+                                    if let Some(refusal) = game_state.map.boulder_push_refusal(boulder, dir)
+                                        && !game_state.map.push_blocked_by_people(boulder, dir) {
                                         self.event(AgentEvent::TextBox { message: refusal });
                                         self.set_state(AgentState::Idle);
                                         return Ok(());
@@ -3420,8 +3470,14 @@ CascadeBadge; not cutting".to_string(),
                 match plan.and_then(|plan| plan.into_iter().next())
                 {
                     Some((boulder, push)) => {
+                        self.getting_on();
                         api.release_all_buttons();
                         self.set_state(AgentState::PushingBoulder { boulder, dir: push, armed: false });
+                    }
+                    // People in the way are waited on, with the plan asked again every tick.
+                    None if self.wait_on_people(|| game_state.map.goal_blocked_by_people(which, target)) => {
+                        api.release_all_buttons();
+                        self.set_state(AgentState::SolvingBoulderPuzzle { boulder: which, target, hole, pushes, settle });
                     }
                     // No solution from this layout.
                     None => {
@@ -3467,9 +3523,12 @@ CascadeBadge; not cutting".to_string(),
                     }
                     return Ok(());
                 }
-                // Asked every tick: it ends this state on anything but success.
+                // Asked every tick: it ends this state on anything but success, or people moving on.
                 if let Some(refusal) = map.boulder_push_refusal(boulder, dir) {
                     api.release_all_buttons();
+                    if self.wait_on_people(|| map.push_blocked_by_people(boulder, dir)) {
+                        return Ok(());
+                    }
                     self.event(AgentEvent::TextBox { message: refusal });
                     // A refused shove ends the goal rather than re-planning into it.
                     let at = map.player_position;
@@ -3526,7 +3585,8 @@ CascadeBadge; not cutting".to_string(),
 
                 if map.player_position != behind {
                     match map.route_to_push_tile(behind).and_then(|r| r.first().copied()) {
-                        Some(btn) => { api.release_all_buttons(); api.press_button(btn); }
+                        Some(btn) => { self.getting_on(); api.release_all_buttons(); api.press_button(btn); }
+                        None if self.wait_on_people(|| map.push_blocked_by_people(boulder, dir)) => api.release_all_buttons(),
                         None => {
                             api.release_all_buttons();
                             let row = MetaTile::BoulderPush { boulder, dir };
@@ -3535,6 +3595,7 @@ CascadeBadge; not cutting".to_string(),
                         }
                     }
                 } else {
+                    self.getting_on();
                     api.release_all_buttons();
                     api.press_button(dir);
                 }
@@ -3562,18 +3623,19 @@ CascadeBadge; not cutting".to_string(),
                     return Ok(());
                 }
                 let gs = self.observe_state(api)?;
-                match gs.map.route_to_face_dir(target, facing).as_deref() {
-                    Some([]) => {
+                match self.face_or_wait(&gs.map, target, facing) {
+                    Reach::Facing => {
                         api.release_all_buttons();
                         if press { api.press_button(JoypadButton::A); }
                         self.set_state(AgentState::CheckingTrashCan { target, checked, press: !press, facing });
                     }
-                    Some(&[btn, ..]) => {
+                    Reach::Step(btn) => {
                         api.release_all_buttons();
                         api.press_button(btn);
                         self.set_state(AgentState::CheckingTrashCan { target, checked, press: true, facing });
                     }
-                    _ => {
+                    Reach::Wait => api.release_all_buttons(),
+                    Reach::OutOfReach => {
                         // No reachable tile beside the target.
                         let what = gs.map.tile_at_checked(target)
                             .map(|tile| format!("{tile}"))
@@ -3679,18 +3741,19 @@ CascadeBadge; not cutting".to_string(),
                 }
                 if game_mode == GameMode::Overworld {
                     let gs = self.observe_state(api)?;
-                    match gs.map.route_to_face(target).as_deref() {
-                        Some([]) => {
+                    match self.face_or_wait(&gs.map, target, None) {
+                        Reach::Facing => {
                             api.release_all_buttons();
                             if press { api.press_button(JoypadButton::Start); }
                             self.set_state(AgentState::UsingFieldItem { item, target, press: !press, entered_menu, backing_out });
                         }
-                        Some(&[btn, ..]) => {
+                        Reach::Step(btn) => {
                             api.release_all_buttons();
                             api.press_button(btn);
                             self.set_state(AgentState::UsingFieldItem { item, target, press: true, entered_menu, backing_out });
                         }
-                        _ => {
+                        Reach::Wait => api.release_all_buttons(),
+                        Reach::OutOfReach => {
                             self.event(AgentEvent::TextBox { message: format!("Can't reach the field-item target at {target}") });
                             api.release_all_buttons();
                             self.set_state(AgentState::Idle);

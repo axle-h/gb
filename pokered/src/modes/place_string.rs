@@ -11,6 +11,8 @@ use crate::Pacing;
 /// `<POKE>` and `<PKMN>` are one byte in the cartridge's text and several tiles on the screen.
 pub const POKE_TILES: [u8; 4] = [0x8F, 0x8E, 0x8A, 0xBA];
 pub const PKMN_TILES: [u8; 2] = [0xE1, 0xE2];
+/// `<TRAINER>`, the OT and the name of every in-game trade's other side.
+pub const TRAINER_TILES: [u8; 7] = [0x93, 0x91, 0x80, 0x88, 0x8D, 0x84, 0x91];
 
 /// The tiles a byte draws as, for the one caller that is not pacing a string: `None` is a byte that
 /// draws as the tile it names.
@@ -18,6 +20,7 @@ pub fn ligature(byte: u8) -> Option<&'static [u8]> {
     match byte {
         ch::POKE => Some(&POKE_TILES),
         ch::PKMN => Some(&PKMN_TILES),
+        ch::TRAINER => Some(&TRAINER_TILES),
         _ => None,
     }
 }
@@ -228,7 +231,7 @@ impl PlaceString {
                 ch::PKMN => self.splice(&PKMN_TILES),
                 ch::PC => self.splice(&[0x8F, 0x82]),
                 ch::TM => self.splice(&[0x93, 0x8C]),
-                ch::TRAINER => self.splice(&[0x93, 0x91, 0x80, 0x88, 0x8D, 0x84, 0x91]),
+                ch::TRAINER => self.splice(&TRAINER_TILES),
                 ch::ROCKET => self.splice(&[0x91, 0x8E, 0x82, 0x8A, 0x84, 0x93]),
                 ch::SIX_DOTS => self.splice(&[0x75, 0x75]),
                 0x00 | 0x59 | 0x5A => panic!("text byte ${byte:02X} is not supported outside battle yet"),

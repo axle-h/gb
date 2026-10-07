@@ -102,6 +102,11 @@ impl Sgb {
         &self.screen
     }
 
+    /// The four colours the 8x8 cell at `column`, `row` is painted with from the next frame on.
+    pub fn cell_palette(&self, column: usize, row: usize) -> [u16; 4] {
+        self.state.palettes[usize::from(self.state.attributes[row * COLUMNS + column])]
+    }
+
     /// `P1` as read: with both lines high and more than one player, the low nibble is the joypad
     /// number, `F` for the first; a pad other than the first has nothing held.
     pub fn read_joypad(&self, value: u8) -> u8 {

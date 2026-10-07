@@ -1220,6 +1220,31 @@ impl NativeAgent {
             Task::Talk(TalkUse { what: Talk::Prize(_), .. }) => PRIZE_BLOCKED_POLLS,
             _ => MAX_TASK_BLOCKED_POLLS,
         };
+        self.wait_out(task, why, bound)
+    }
+
+    /// A task no square faces the target of: waited on while people are what stands in the way, as
+    /// long as the emulated agent's `face_or_wait` waits, and given up at once otherwise.
+    fn out_of_reach(&mut self, task: Task, people: bool, why: String) -> Result<(), String> {
+        match people {
+            true => self.wait_out(task, why, MAX_ROUTE_BLOCKED_POLLS),
+            false => {
+                self.give_up(&why);
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether a boulder push held up waits this poll: only while `people` says people are all that
+    /// is in its way, and for at most [`MAX_ROUTE_BLOCKED_POLLS`] in a row, as the emulated agent's
+    /// `wait_on_people` waits. A command taken starts the count over.
+    fn wait_on_people(&mut self, people: impl FnOnce() -> bool) -> bool {
+        let wait = self.task_blocked < MAX_ROUTE_BLOCKED_POLLS && people();
+        self.task_blocked = if wait { self.task_blocked + 1 } else { 0 };
+        wait
+    }
+
+    fn wait_out(&mut self, task: Task, why: String, bound: u32) -> Result<(), String> {
         self.task_blocked += 1;
         if self.task_blocked > bound {
             self.task_blocked = 0;
@@ -1471,7 +1496,9 @@ impl NativeAgent {
                         };
                         match talk.what {
                             Talk::Prize(_) => self.task_blocked(Task::Talk(talk), why)?,
-                            _ => self.give_up(&why),
+                            // The emulated lift's budget counts every tick, so it never waits.
+                            Talk::Elevator { .. } => self.give_up(&why),
+                            _ => self.out_of_reach(Task::Talk(talk), state.map.face_blocked_by_people(talk.at, talk.facing), why)?,
                         }
                         return Ok(None);
                     }
@@ -1631,7 +1658,8 @@ impl NativeAgent {
                     }
                     Some(&[button, ..]) => self.step_or_face(button)?,
                     None => {
-                        self.give_up(&format!("sell: can't reach the clerk at {at}"));
+                        let people = state.map.face_blocked_by_people(at, Some(facing));
+                        self.out_of_reach(Task::Mart(mart), people, format!("sell: can't reach the clerk at {at}"))?;
                         return Ok(None);
                     }
                 }
@@ -1777,10 +1805,12 @@ impl NativeAgent {
                     }
                     Some(&[button, ..]) => self.step_or_face(button)?,
                     None => {
-                        self.give_up(&match pc.job {
+                        let why = match pc.job {
                             PcJob::Items { .. } => format!("Can't reach the PC at {}", pc.at),
                             PcJob::Box(_) => format!("PC box: can't reach the PC at {}", pc.at),
-                        });
+                        };
+                        let people = state.map.face_blocked_by_people(pc.at, Some(PlayerFacingDirection::Up));
+                        self.out_of_reach(Task::Pc(pc), people, why)?;
                         return Ok(None);
                     }
                 }
@@ -1923,7 +1953,8 @@ impl NativeAgent {
                         }
                         Some(&[button, ..]) => self.step_or_face(button)?,
                         None => {
-                            self.give_up(&format!("Can't reach the field-item target at {target}"));
+                            let people = state.map.face_blocked_by_people(target, None);
+                            self.out_of_reach(Task::Bag(bag), people, format!("Can't reach the field-item target at {target}"))?;
                             return Ok(None);
                         }
                     }
@@ -2240,6 +2271,11 @@ impl NativeAgent {
                 self.task = Some(Task::Push(Push { boulder, dir, armed: false, goal: true }));
                 self.push_step(state)
             }
+            // People in the way are waited on, with the plan asked again every poll.
+            None if self.wait_on_people(|| state.map.goal_blocked_by_people(goal.which, goal.target)) => {
+                self.boulder_goal = Some(goal);
+                Ok(None)
+            }
             None => {
                 self.boulder_goal = None;
                 self.abort(OverworldActionAbortedReason::PuzzleUnsolvable, Some(state.map.player_position));
@@ -2328,6 +2364,9 @@ impl NativeAgent {
             return Ok(None);
         }
         if let Some(refusal) = map.boulder_push_refusal(push.boulder, push.dir) {
+            if self.wait_on_people(|| map.push_blocked_by_people(push.boulder, push.dir)) {
+                return Ok(None);
+            }
             self.task = None;
             // A refused shove ends the goal rather than re-planning into it.
             self.boulder_goal = None;
@@ -2355,6 +2394,7 @@ impl NativeAgent {
         }
         match behind.and_then(|behind| map.route_to_push_tile(behind)).and_then(|route| route.first().copied()) {
             Some(button) => Ok(Some(Command::Step(direction(button).ok_or_else(|| format!("a route pressed {button:?}"))?))),
+            None if self.wait_on_people(|| map.push_blocked_by_people(push.boulder, push.dir)) => Ok(None),
             None => {
                 self.task = None;
                 self.boulder_goal = None;
@@ -3359,6 +3399,52 @@ mod tests {
         given_up_at_once(game, items, "Can't reach the PC at");
     }
 
+    /// Celadon's Pokémon Centre with the Beauty, who wanders, standing on the one square that faces
+    /// the PC. People move only on the screen around the player, so she is waited for from a few
+    /// squares along the counter.
+    fn beauty_in_front_of_the_pc() -> (Game, Point8) {
+        let pc = crate::pokemon::tile_map::pc_locations_for(Map::CeladonPokecenter)[0];
+        let below = Point8 { x: pc.x, y: pc.y + 1 };
+        for x in (pc.x - 5..pc.x).rev() {
+            let game = game_at(Map::CeladonPokecenter, x, below.y, |world| world.party.push(level(PokemonSpecies::Pidgey, 5)));
+            let mut native = NativeGame::new(game).unwrap();
+            for _ in 0..60 * 60 * 10 {
+                native.game_mut().frame(Input::None);
+                let state = native.game_state().unwrap();
+                if state.map.sprites.iter().any(|sprite| sprite.name == "Beauty" && sprite.position == below) {
+                    assert_eq!(state.map.route_to_face_dir(pc, Some(PlayerFacingDirection::Up)), None);
+                    return (native.game().clone(), pc);
+                }
+            }
+        }
+        panic!("the Beauty never stood in front of the PC");
+    }
+
+    /// Someone standing where the PC is used from is waited on rather than taken for a wall.
+    #[test]
+    fn a_pc_someone_stands_in_front_of_is_used_once_they_move_on() {
+        let (game, pc) = beauty_in_front_of_the_pc();
+        let (agent, events) = ask(game, FieldMove::UsePcBox { op: PcBoxOp::Deposit { slot: 1 }, pc }, None);
+        assert_eq!(agent.game().world().party.len(), 1, "{events:#?}");
+        assert!(says(&events, "PC box: Deposit { slot: 1 } done"), "{events:#?}");
+    }
+
+    /// A person who never moves off the only square is waited on as long as a walk waits on people,
+    /// and the PC is then given up in the words it is given up in at once.
+    #[test]
+    fn a_pc_someone_stands_in_front_of_for_good_is_waited_on_before_it_is_given_up() {
+        let (game, _) = pokecenter(|world| world.party.push(level(PokemonSpecies::Pidgey, 5)));
+        // The Cooltrainer stands for good below the counter at (4, 2).
+        let counter = Point8 { x: 4, y: 2 };
+        let (mut agent, log) = agent(game, vec![Goal::Field(FieldMove::UsePcBox { op: PcBoxOp::Deposit { slot: 1 }, pc: counter })]);
+        let start = agent.game().frames();
+        run(&mut agent, &log, settled);
+        let (frames, events) = (agent.game().frames() - start, log.borrow().events.clone());
+        assert!(frames > MAX_ROUTE_BLOCKED_POLLS as u64, "given up after {frames} frames: {events:#?}");
+        assert!(says(&events, "PC box: can't reach the PC at (4, 2)"), "{events:#?}");
+        assert_eq!(agent.game().world().party.len(), 2);
+    }
+
     #[test]
     fn a_clerk_out_of_reach_is_given_up_at_once() {
         let game = pewter_mart([0; 3], |world| { world.bag.add(ItemId::Potion, 4); });
@@ -3618,6 +3704,77 @@ mod tests {
         let (moved, moved_id) = machine(&blocked);
         assert_ne!(free, moved, "the row is pressed from another side");
         assert_eq!(id, moved_id);
+    }
+
+    /// Victory Road 1F's first boulder, at (5, 15), with the player at (8, 16) and Strength to arm,
+    /// and the Cooltrainer who stands at (7, 5) moved to (5, 16), the one square it is pushed up
+    /// from: standing for good, or wandering off it when `wanders`.
+    fn someone_below_the_first_boulder(wanders: bool) -> Game {
+        let below = Point8 { x: 5, y: 16 };
+        let game = game_at(Map::VictoryRoad1F, 8, 16, |world| {
+            world.badges = 0xFF;
+            world.party[0] = named(PokemonSpecies::Mewtwo, [None, Some(PokemonMoveName::Strength), None, None]);
+            world.location.repel_steps = 250;
+            world.events.set(poke_core::symbols::pokered_events::EVENT_BEAT_VICTORY_ROAD_1_TRAINER_0);
+        });
+        let mut native = NativeGame::new(game).unwrap();
+        while native.game().status() != Status::Waiting(Decision::Overworld) {
+            native.game_mut().frame(Input::None);
+        }
+        let Some(Mode::Overworld(overworld)) = native.game().modes().last() else { panic!("not on the overworld") };
+        let mut sprites = *overworld.sprites();
+        let cooltrainer = &mut sprites[1];
+        assert_eq!((cooltrainer.map_x, cooltrainer.map_y), (7 + 4, 5 + 4), "the Cooltrainer's slot");
+        (cooltrainer.map_x, cooltrainer.map_y) = (below.x + 4, below.y + 4);
+        // The player's sprite is drawn at (0x40, 0x3C), and every square away is 16 pixels.
+        (cooltrainer.x_pixels, cooltrainer.y_pixels) = (0x40 - 3 * 16, 0x3C);
+        if wanders {
+            // `WALK` and `ANY_DIR`.
+            (cooltrainer.movement1, cooltrainer.movement2) = (0xFE, 0x00);
+        }
+        let standing = pokered::modes::overworld::Standing { destination_warp: 0xFF, check_for_180_degree_turn: 1, ..Default::default() };
+        let mut game = Game::new(native.game().world().clone(), GameRng::seeded(11), Pacing::Instant);
+        game.push(Mode::Overworld(Overworld::standing(sprites, overworld.num_sprites(), standing)));
+        let state = NativeGame::new(game.clone()).unwrap().game_state().unwrap();
+        assert_eq!(state.map.tile_at(below), MetaTile::Sprite("Cooltrainer Female"));
+        game
+    }
+
+    const FIRST_BOULDER: Point8 = Point8 { x: 5, y: 15 };
+
+    fn boulder_at(agent: &NativeAgent, at: Point8) -> bool {
+        agent.native.game_state().unwrap().map.boulders().contains(&at)
+    }
+
+    /// Someone standing where a boulder is pushed from is waited on, and the push made once they
+    /// wander off.
+    #[test]
+    fn a_boulder_someone_stands_behind_is_pushed_once_they_move_on() {
+        let push = FieldMove::PushBoulder { boulder: FIRST_BOULDER, dir: JoypadButton::Up };
+        let (agent, events) = ask(someone_below_the_first_boulder(true), push, None);
+        assert!(boulder_at(&agent, Point8 { x: 5, y: 14 }), "{events:#?}");
+    }
+
+    /// A person who never moves off the square is waited on as long as a walk waits on people,
+    /// and the push is then given up in the words it is given up in at once.
+    #[test]
+    fn a_boulder_someone_stands_behind_for_good_is_waited_on_before_it_is_given_up() {
+        let push = FieldMove::PushBoulder { boulder: FIRST_BOULDER, dir: JoypadButton::Up };
+        let (mut agent, log) = agent(someone_below_the_first_boulder(false), vec![Goal::Field(push)]);
+        let start = agent.game().frames();
+        run(&mut agent, &log, settled);
+        let (frames, events) = (agent.game().frames() - start, log.borrow().events.clone());
+        assert!(frames > MAX_ROUTE_BLOCKED_POLLS as u64, "given up after {frames} frames: {events:#?}");
+        assert!(says(&events, "Boulder 1 at (5, 15) will not push up: Cooltrainer Female is standing at (5, 16)"), "{events:#?}");
+        assert!(boulder_at(&agent, FIRST_BOULDER));
+    }
+
+    /// A push into a wall is given up at once, whoever else is standing about.
+    #[test]
+    fn a_boulder_push_nobody_can_make_is_given_up_at_once() {
+        let push = FieldMove::PushBoulder { boulder: FIRST_BOULDER, dir: JoypadButton::Right };
+        let agent = given_up_at_once(someone_below_the_first_boulder(false), push, "Boulder 1 at (5, 15) will not push right");
+        assert!(boulder_at(&agent, FIRST_BOULDER));
     }
 
     #[test]

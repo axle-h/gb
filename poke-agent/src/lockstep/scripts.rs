@@ -26,6 +26,7 @@ use pokered::gfx::tiles::V_CHARS2;
 use pokered::input::Joypad;
 use pokered::mode::{Mode, ModeUpdate, Status};
 use pokered::systems::overworld::sprites::{SpriteState, Sprites, MAP_TILESET_SIZE};
+use pokered::rng::GameRng;
 use pokered::{Game, Input};
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointer, DmgPointerRead};
 use super::{breakpoint, joypad};
@@ -33,8 +34,8 @@ use super::harness::{clear_badge, clear_events, make_room, overworld, recreated_
     BIT_NO_BATTLES};
 
 const PARTY_STRUCT: u16 = 44;
-/// The routines both sides skip: the trade's animation is the movie's to recreate.
-const SEAMS: [DmgPointer; 3] = [sym::BattleTransition, sym::MoveAnimation, sym::InternalClockTradeAnim];
+/// The routines both sides skip.
+const SEAMS: [DmgPointer; 2] = [sym::BattleTransition, sym::MoveAnimation];
 /// Callers of `Random` that read `hRandomSub` as well, which the recreation takes as a second byte.
 const READS_RANDOM_SUB: [(DmgPointer, DmgPointer); 1] = [(sym::InGameTrade_PrepareTradeData, sym::InGameTrade_CopyData)];
 const BUDGET: u32 = 6000;
@@ -87,6 +88,8 @@ pub(super) struct Seen {
     /// At an overworld poll: the sprite slots, and the LCD two frames on with the animated tiles.
     pub sprites: Option<(u8, Sprites)>,
     lcd: Option<(Vec<u8>, Vec<u8>)>,
+    /// On a Super Game Boy, the colours each screen cell is painted with, row by row.
+    sgb: Option<Vec<[u16; 4]>>,
     /// At an overworld poll after a battle: `wAudioFadeOutCounterReloadValue` and `wLastMusicSoundID`.
     music: Option<(u8, u8)>,
     /// The cartridge's loading on the way here.
@@ -134,6 +137,9 @@ pub(super) struct Cartridge {
     /// has cleared the rest.
     play_transition: bool,
     transition_oam: Option<Vec<[u8; 4]>>,
+    /// The people's draws left off the tape: they draw by the frame, and on an SGB the frames its
+    /// packets take move them.
+    people_untaped: bool,
 }
 
 /// What the cartridge does between two points that the recreation leaves out, each entry to one of
@@ -196,6 +202,8 @@ enum Loading {
     ReloadMapData,
     /// A battle, whose interior is the battle lockstep's to time.
     InitBattle,
+    /// The trade movie, whose interior the movie lockstep times.
+    TradeMovie,
     /// A step begun, `.noCollision`: its first pass can run a frame long on the cartridge, which is
     /// lag, allowed rather than counted.
     Step,
@@ -212,7 +220,7 @@ const LOADING: &[(Loading, DmgPointer)] = &[
     (Loading::DisplayTextIdInit, sym::DisplayTextIDInit), (Loading::PrintText, sym::PrintText),
     (Loading::Arrow, sym::ProtectedDelay3), (Loading::EmotionBubble, sym::EmotionBubble),
     (Loading::CloseTextDisplay(false), sym::CloseTextDisplay), (Loading::LoadMapData, sym::LoadMapData),
-    (Loading::InitBattle, sym::InitBattleCommon), (Loading::Step, local::OverworldLoopLessDelay::noCollision),
+    (Loading::InitBattle, sym::InitBattleCommon), (Loading::TradeMovie, sym::InternalClockTradeAnim), (Loading::Step, local::OverworldLoopLessDelay::noCollision),
     (Loading::DisableLcd, sym::DisableLCD), (Loading::ClearScreen, sym::ClearScreen), (Loading::HandleMenuInput, sym::HandleMenuInput_),
     (Loading::DisplayListMenuId, sym::DisplayListMenuID), (Loading::WhiteOut, sym::GBPalWhiteOutWithDelay3),
     (Loading::ReloadMapData, sym::ReloadMapData), (Loading::PartyMenuDrawn, local::RedrawPartyMenu_::done),
@@ -293,7 +301,7 @@ impl Loading {
             Loading::WhiteOut | Loading::PartyMenuDrawn => super::DELAY3,
             Loading::DisableLcd => 1,
             Loading::ClearScreen => super::DELAY3,
-            Loading::LoadMapData | Loading::InitBattle | Loading::ReloadMapData => return None,
+            Loading::LoadMapData | Loading::InitBattle | Loading::TradeMovie | Loading::ReloadMapData => return None,
         })
     }
 }
@@ -317,10 +325,14 @@ impl Cartridge {
     pub fn from_state(state: &[u8]) -> Self {
         let mut gb = GameBoy::dmg(crate::pokemon::roms::POKERED);
         gb.load_state(state).unwrap();
+        Self::on(gb)
+    }
+
+    fn on(mut gb: GameBoy) -> Self {
         gb.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
         let map = gb.core().mmu().read(sym::wCurMap.address);
         Self { gb, tape: Vec::new(), map, entered: Vec::new(), text: 0, acting: 0, lagging: None, spanning: None, fought: false,
-            play_transition: false, transition_oam: None }
+            play_transition: false, transition_oam: None, people_untaped: false }
     }
 
     pub fn read(&self, at: u16) -> u8 {
@@ -419,7 +431,9 @@ impl Cartridge {
                     let (stop, _) = self.gb.run_to_return(MachineCycles::PER_FRAME * 10);
                     assert!(matches!(stop, Stop::Returned { .. }));
                     let vblank = sym::VBlank.address;
-                    if !(vblank..vblank + 0x80).contains(&caller) {
+                    let people = sym::UpdateNPCSprite.address..sym::DoScriptedNPCMovement.address;
+                    let wandering = people.contains(&caller) && self.gb.core().mmu().rom_bank() as u8 == sym::UpdateNPCSprite.bank.id();
+                    if !(vblank..vblank + 0x80).contains(&caller) && !(wandering && self.people_untaped) {
                         self.tape.push(self.gb.core().registers().a);
                         if READS_RANDOM_SUB.iter().any(|&(from, to)| (from.address..to.address).contains(&caller)) {
                             self.tape.push(self.read(sym::hRandomSub.address));
@@ -582,6 +596,7 @@ impl Cartridge {
             held: self.held(),
             sprites: None,
             lcd: None,
+            sgb: mmu.sgb().map(|sgb| cells(|column, row| sgb.cell_palette(column, row))),
             music: None,
             entered: std::mem::take(&mut self.entered),
         };
@@ -618,6 +633,11 @@ impl Cartridge {
     pub fn world(&self) -> pokered::world::World {
         super::bridge::world(&self.gb)
     }
+}
+
+/// A palette per screen cell, row by row.
+fn cells(palette: impl Fn(usize, usize) -> [u16; 4]) -> Vec<[u16; 4]> {
+    (0..18).flat_map(|row| (0..20).map(move |column| (column, row))).map(|(column, row)| palette(column, row)).collect()
 }
 
 fn recreation_frame(game: &mut Game, input: Input) {
@@ -723,6 +743,7 @@ fn recreation_seen(game: &mut Game, kind: Kind, frames: u32) -> (Seen, Option<po
         held: Some(held(world, world.party.iter().map(|mon| mon.mon.mon.hp).collect())),
         sprites: None,
         lcd: None,
+        sgb: Some(cells(|column, row| game.screen().sgb.cell_palette(column, row))),
         music: None,
         entered: Vec::new(),
     };
@@ -748,7 +769,16 @@ fn recreation_seen(game: &mut Game, kind: Kind, frames: u32) -> (Seen, Option<po
 /// Runs `choose` on the cartridge from `state` until it returns `None`, then replays its presses into
 /// the recreation, comparing every poll. `prepare` edits the cartridge first.
 pub(super) fn lockstep(state: &[u8], prepare: impl FnOnce(&mut Cartridge), choose: impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>) {
-    lockstep_from(state, prepare, true, Joypad::empty(), choose);
+    lockstep_from(Cartridge::from_state(state), prepare, true, Joypad::empty(), choose);
+}
+
+/// `lockstep` with the cartridge on a Super Game Boy, comparing the palettes in force at every poll
+/// from the first map loaded on, which is the first palette the fixture's cartridge sends. Untimed:
+/// each palette sent is frames of the cartridge bit-banging packets, which the recreation leaves out.
+pub(super) fn lockstep_on_sgb(state: &[u8], prepare: impl FnOnce(&mut Cartridge),
+    choose: impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>)
+{
+    lockstep_from(Cartridge::on(super::on_sgb(state)), prepare, true, Joypad::empty(), choose);
 }
 
 /// `lockstep`, with `held` down until the start's poll: Cycling Road's slope rolls a rider who holds
@@ -756,16 +786,17 @@ pub(super) fn lockstep(state: &[u8], prepare: impl FnOnce(&mut Cartridge), choos
 pub(super) fn lockstep_holding(state: &[u8], held: Joypad, prepare: impl FnOnce(&mut Cartridge),
     choose: impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>)
 {
-    lockstep_from(state, prepare, true, held, choose);
+    lockstep_from(Cartridge::from_state(state), prepare, true, held, choose);
 }
 
 /// `lockstep`, started where the fixture stands when `from_poll` is false: a map script about to run
 /// on the next pass leaves no overworld poll before it. The start is then neither compared nor timed,
 /// since neither machine knows how far into its pass the other is.
-fn lockstep_from(state: &[u8], prepare: impl FnOnce(&mut Cartridge), from_poll: bool, held: Joypad,
+fn lockstep_from(mut cartridge: Cartridge, prepare: impl FnOnce(&mut Cartridge), from_poll: bool, held: Joypad,
     mut choose: impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>)
 {
-    let mut cartridge = Cartridge::from_state(state);
+    let on_sgb = cartridge.gb.core().mmu().sgb().is_some();
+    cartridge.people_untaped = on_sgb;
     // The SET style, so a trainer's next mon asks nothing a pressed A would answer by switching.
     let options = cartridge.read(sym::wOptions.address);
     cartridge.write(sym::wOptions.address, options | 1 << 6);
@@ -791,14 +822,34 @@ fn lockstep_from(state: &[u8], prepare: impl FnOnce(&mut Cartridge), from_poll: 
         polls.push(cartridge.seen(kind, frames));
         assert!(script.len() < 2000, "the scenario never ended");
     }
-    let mut game = start.game(cartridge.tape.clone());
-    let (seen, screen) = recreation_seen(&mut game, Kind::Overworld, 0);
+    let mut game = if on_sgb {
+        start.game_with(GameRng::Split { main: Box::new(GameRng::tape(cartridge.tape.clone())), wander: Box::new(GameRng::seeded(0)) })
+    } else {
+        start.game(cartridge.tape.clone())
+    };
+    // On an SGB, what moves with the frames the packets take is left to the DMG's lockstep: the
+    // sprites and the picture.
+    let seen_at = |game: &mut Game, kind: Kind, frames: u32, palettes: bool| {
+        let (mut seen, screen) = recreation_seen(game, kind, frames);
+        if !palettes {
+            seen.sgb = None;
+        }
+        if on_sgb {
+            seen.sprites = None;
+            return (seen, None);
+        }
+        (seen, screen)
+    };
+    let (seen, screen) = seen_at(&mut game, Kind::Overworld, 0, false);
     if from_poll {
         compare(&polls[0], &seen, screen, "the start");
     }
+    let mut map_loaded = false;
     for (i, &(action, what)) in script.iter().enumerate() {
         let (kind, frames) = recreation_act(&mut game, action);
-        let (seen, screen) = recreation_seen(&mut game, kind, frames);
+        // The frame `wCurMap` changes is before the cartridge's `LoadMapData` sends the new map's.
+        let (seen, screen) = seen_at(&mut game, kind, frames, map_loaded && kind != Kind::MapChange);
+        map_loaded |= kind == Kind::MapChange;
         if std::env::var("LOG_LOCKSTEP").is_ok() {
             let next = &polls[i + 1];
             let text = |y: usize| next.screen.get(y).map(|row| super::battle::letters(row)).unwrap_or_default();
@@ -806,7 +857,7 @@ fn lockstep_from(state: &[u8], prepare: impl FnOnce(&mut Cartridge), from_poll: 
                 next.frames as i64 - frames as i64, text(14), text(16));
         }
         compare(&polls[i + 1], &seen, screen, &format!("{i}: {what}"));
-        if from_poll || i > 0 {
+        if (from_poll || i > 0) && !on_sgb {
             time(&polls[i], &polls[i + 1], frames, action, &game, &format!("{i}: {what}"));
         }
     }
@@ -869,6 +920,12 @@ fn compare(cartridge: &Seen, recreation: &Seen, screen: Option<pokered::gfx::Scr
     }
     if cartridge.music.is_some() {
         assert_eq!(recreation.music, cartridge.music, "{what}: the fade after the battle and `wLastMusicSoundID`");
+    }
+    if let (Some(theirs), Some(ours)) = (&cartridge.sgb, &recreation.sgb)
+        && let Some(cell) = (0..ours.len()).find(|&cell| ours[cell] != theirs[cell])
+    {
+        panic!("{what}: SGB cell ({}, {}) is painted {:04X?} on the cartridge and {:04X?} here", cell % 20, cell / 20,
+            theirs[cell], ours[cell]);
     }
     if let (Some((count, theirs)), Some((_, ours))) = (&cartridge.sprites, &recreation.sprites) {
         let compared = |sprites: &Sprites| sprites.iter().take(*count as usize + 1)

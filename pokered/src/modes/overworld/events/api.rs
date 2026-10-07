@@ -1085,7 +1085,7 @@ fn diploma(s: &mut Script) -> Flow {
         }
     }
     tiles_load(s, V_CHARS2 + 0x76, poke_core::gfx::trainer_card::TRAINER_INFO);
-    // `SET_PAL_GENERIC`, which nothing puts back until the next map's `SET_PAL_OVERWORLD`.
+    // `SET_PAL_GENERIC`, which `RestoreScreenTilesAndReloadTilePatterns` puts back.
     s.ctx.screen.sgb.run(&PaletteCommand::Generic);
     s.ctx.screen.effects = Default::default();
     s.ctx.screen.effects.obp0 = 0x90;

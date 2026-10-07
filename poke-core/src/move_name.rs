@@ -450,7 +450,7 @@ pub enum PokemonMoveEffect {
 }
 
 /// What Gen 1's descriptions of the stat-lowering moves add, which Modern does not play.
-const ENEMY_STAT_DOWN_MISS: &str = " In single-player, has an extra ~25% miss chance.";
+const ENEMY_STAT_DOWN_MISS: &str = " The enemy's copy misses an extra 25% of the time.";
 
 impl PokemonMoveEffect {
     pub fn description(&self, ruleset: Ruleset) -> &'static str {
@@ -469,8 +469,8 @@ impl PokemonMoveEffect {
             Self::NoAdditionalEffect    => "No additional effect.",
             Self::PoisonSideEffect1     => "20% chance of poisoning the opponent. Cannot poison Poison-types, already-statused Pokémon, or those behind a substitute.",
             Self::DrainHp               => "Recovers HP equal to half the damage dealt (minimum 1).",
-            Self::BurnSideEffect1       => "10% chance of burning the opponent. Cannot burn a Pokémon whose type matches the move type, or an already-statused Pokémon behind a substitute.",
-            Self::FreezeSideEffect1     => "10% chance of freezing the opponent. Cannot freeze Ice-types. A Fire-type move thaws a frozen target instead.",
+            Self::BurnSideEffect1       => "10% chance of burning the opponent. Cannot burn a Pokémon whose type matches the move type, one already statused, or one behind a substitute.",
+            Self::FreezeSideEffect1     => "10% chance of freezing the opponent. Cannot freeze Ice-types.",
             Self::ParalyzeSideEffect1   => "10% chance of paralyzing the opponent. Cannot paralyze a Pokémon whose type matches the move type.",
             Self::Explode               => "User faints immediately; its HP and status are set to zero.",
             Self::DreamEater            => "Only works on sleeping targets; recovers HP equal to half the damage dealt.",
@@ -483,16 +483,16 @@ impl PokemonMoveEffect {
             Self::EvasionUp1            => "Raises the user's Evasion by 1 stage (max +6).",
             Self::PayDay                => "Scatters coins worth 2× the user's level.",
             Self::Swift                 => "Always hits; bypasses accuracy and evasion.",
-            Self::AttackDown1           => "Lowers the opponent's Attack by 1 stage. In single-player, has an extra ~25% miss chance.",
-            Self::DefenseDown1          => "Lowers the opponent's Defense by 1 stage. In single-player, has an extra ~25% miss chance.",
-            Self::SpeedDown1            => "Lowers the opponent's Speed by 1 stage. In single-player, has an extra ~25% miss chance.",
-            Self::SpecialDown1          => "Lowers the opponent's Special by 1 stage. In single-player, has an extra ~25% miss chance.",
-            Self::AccuracyDown1         => "Lowers the opponent's Accuracy by 1 stage. In single-player, has an extra ~25% miss chance.",
-            Self::EvasionDown1          => "Lowers the opponent's Evasion by 1 stage. In single-player, has an extra ~25% miss chance.",
+            Self::AttackDown1           => "Lowers the opponent's Attack by 1 stage. The enemy's copy misses an extra 25% of the time.",
+            Self::DefenseDown1          => "Lowers the opponent's Defense by 1 stage. The enemy's copy misses an extra 25% of the time.",
+            Self::SpeedDown1            => "Lowers the opponent's Speed by 1 stage. The enemy's copy misses an extra 25% of the time.",
+            Self::SpecialDown1          => "Lowers the opponent's Special by 1 stage. The enemy's copy misses an extra 25% of the time.",
+            Self::AccuracyDown1         => "Lowers the opponent's Accuracy by 1 stage. The enemy's copy misses an extra 25% of the time.",
+            Self::EvasionDown1          => "Lowers the opponent's Evasion by 1 stage. The enemy's copy misses an extra 25% of the time.",
             Self::Conversion            => "Changes the user's types to match the opponent's current types.",
             Self::Haze                  => "Resets all stat stages for both Pokémon; cures all volatile statuses and the opponent's non-volatile status.",
             Self::Bide                  => "User stores energy for 2–3 turns, then deals double the total damage received during that time.",
-            Self::ThrashPetalDance      => "User attacks for 2–3 turns at random, then becomes confused.",
+            Self::ThrashPetalDance      => "User attacks for 3–4 turns at random, then becomes confused.",
             Self::SwitchAndTeleport     => "Whirlwind/Roar force the wild opponent to flee; Teleport lets the user escape. Both fail in trainer battles. Success chance scales with the level difference.",
             Self::TwoToFiveAttacks      => "Hits 2–5 times: 3/8 chance each for 2 or 3 hits, 1/8 chance each for 4 or 5 hits.",
             Self::FlinchSideEffect1     => "10% chance of making the opponent flinch and lose its turn. Cannot affect Pokémon behind a substitute.",
@@ -505,10 +505,10 @@ impl PokemonMoveEffect {
             Self::Charge                => "User charges for one turn (invulnerable if Fly or Dig), then attacks on the following turn.",
             Self::SuperFang             => "Deals damage equal to half the opponent's current HP.",
             Self::SpecialDamage         => "Deals a fixed amount of damage regardless of stats (Seismic Toss/Night Shade: user's level; Sonic Boom: 20; Dragon Rage: 40; Psywave: random 1–1.5× user's level).",
-            Self::Trapping              => "Traps and damages the opponent for 2–5 turns (same distribution as TwoToFiveAttacks). The opponent cannot act while trapped.",
+            Self::Trapping              => "Traps and damages the opponent for 2–5 turns, 2 or 3 most often. The opponent cannot act while trapped.",
             Self::Fly                   => "User flies up (invulnerable) for one turn, then strikes on the following turn.",
             Self::AttackTwice           => "Always hits exactly 2 times.",
-            Self::JumpKick              => "If the move misses, the user takes recoil damage instead.",
+            Self::JumpKick              => "If the move misses, the user takes 1 HP of crash damage.",
             Self::Mist                  => "Protects the user's stats from being lowered by the opponent for the rest of the battle.",
             Self::FocusEnergy           => "Bug: quarters the critical-hit rate instead of raising it as intended.",
             Self::Recoil                => "User takes recoil damage equal to 1/4 of the damage dealt (Struggle: 1/2); minimum 1 HP.",
@@ -539,8 +539,8 @@ impl PokemonMoveEffect {
             Self::Twineedle             => "Hits exactly twice; each hit has a 20% chance to poison the opponent.",
             Self::Substitute            => "User sacrifices 1/4 of its max HP to create a substitute with that much HP that absorbs attacks. Fails if the user's HP is too low.",
             Self::HyperBeam             => "User must skip its next turn to recharge, unless the opponent faints.",
-            Self::Rage                  => "User enters rage; its Attack rises by 1 stage each time it is hit while raging.",
-            Self::Mimic                 => "Copies a random move from the opponent for the rest of the battle.",
+            Self::Rage                  => "User enters rage; its Attack rises by 1 stage each time it is hit, and it uses nothing but Rage until it faints or the battle ends.",
+            Self::Mimic                 => "Replaces Mimic with one of the opponent's moves for the rest of the battle.",
             Self::Metronome             => "Randomly selects and uses any move.",
             Self::LeechSeed             => "Seeds the opponent; drains 1/16 of its max HP each turn and transfers it to the user. Fails against Grass-types.",
             Self::Splash                => "Does nothing.",

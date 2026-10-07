@@ -107,6 +107,10 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
 - A refused boulder push is refused in silence, so all three seams ask `boulder_push_refusal` first —
   the solver, the tool, and `PushingBoulder` on every tick. `reachable_tiles` includes a wall touching
   floor, so a stand tile must be walkable as well as reachable.
+- A shove or a goal that only people keep from being made waits on them as long as a walk does
+  (`wait_on_people` on both agents, `push_blocked_by_people`, `goal_blocked_by_people`), and is
+  given up at once when lifting them changes nothing. A wait spends no shove, so the goal's bounds
+  never see it.
 - The boulder code routes with `push_search`, not `bfs_from_player`: a warp tile is standable there,
   and Victory Road 1F is unsolvable otherwise.
 - A goal row's search is memoised on `PlanKey`, or `actions()` runs a capped BFS over boulder layouts
@@ -231,9 +235,12 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
 - A walk is bounded on progress as well as on a lost route (`MAX_STALE_STEPS`: a current takes back
   every step). A task's refused step waits `MAX_TASK_BLOCKED_POLLS` for whoever stands in it to move,
   a prize counter with no route the emulated agent's `BLOCKED_TICKS`, and any other task with no
-  route is given up at once (`NativeAgent::give_up`), as the emulated drivers do.
+  route is given up at once (`NativeAgent::give_up`), as the emulated drivers do, unless lifting the
+  people brings the route back: both agents then wait as a walk waits on them (`face_or_wait`,
+  `NativeAgent::out_of_reach`).
 - A harness that drives the game itself (the credits) calls `host_took_the_screen`, or the agent waits
-  for ever on a command that will never report back.
+  for ever on a command that will never report back. The trade movie is not one of those: it plays
+  inside the agent's own trade, and taking it drops the trade (`Movie::is_trade`).
 - It asks for an overworld action only once the overworld has stood free for the emulated agent's
   shortest wait (`ASK_AFTER_FRAMES`): a script can free the player for a frame or two, as Oak's lab
   does before Blue speaks. Waiting the emulated agent's second instead runs action for action out

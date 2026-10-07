@@ -1,9 +1,13 @@
-//! `DoInGameTradeDialogue`: the offer, yes or no, the party menu, and the mon that comes back with
-//! another trainer's name on it. The trade animation (`InternalClockTradeAnim`) is the movie's to
-//! recreate, and the trade goes through without it.
+//! `DoInGameTradeDialogue`: the offer, yes or no, the party menu, the trade movie, and the mon that
+//! comes back with another trainer's name on it.
+//!
+//! `InGameTrade_CheckForTradeEvo` is left out: it evolves a mon received whose name begins with `G`
+//! or `SP`, and no trade in `TradeMons` gives one.
 
 use poke_core::text_script::TextBuffer;
 use crate::mode::{Mode, Outcome};
+use crate::modes::movie::trade::{TradeData, TradedMon};
+use crate::modes::movie::Movie;
 use crate::modes::party_menu::{PartyMenu, PartyMenuType};
 use crate::party::Named;
 use crate::rng::Rng;
@@ -69,12 +73,26 @@ pub(super) fn chose_mon(s: &mut Script) -> Flow {
     print("ConnectCableText").then(Label::InGameTradeConnected(slot))
 }
 
-/// `InGameTrade_PrepareTradeData`'s OT ID, then the mons exchanged: the one given goes, and the one
-/// received is made at its level and put last, with the trade's nickname and `<TRAINER>` for an OT.
+/// `LoadHpBarAndStatusTilePatterns`, `InGameTrade_PrepareTradeData` and the movie.
 pub(super) fn connected(s: &mut Script, slot: u8) -> Flow {
     let trade = trade(s);
-    let level = s.ctx.world.party[slot as usize].mon.level;
+    s.ctx.screen.tiles.load_hp_bar_and_status_tiles();
     let ot_id = u16::from_be_bytes([s.ctx.rng.random(), s.ctx.rng.random()]);
+    let given = &s.ctx.world.party[slot as usize];
+    let data = TradeData {
+        player: TradedMon { species: given.mon.mon.species, ot: given.ot.clone(), ot_id: given.mon.mon.ot_id },
+        enemy: TradedMon { species: trade.receive, ot: vec![TRAINER], ot_id },
+        enemy_trainer: vec![TRAINER],
+        palettes: crate::modes::overworld::fade_palette(4 - s.ow.map_pal_offset() / 3),
+    };
+    Then::block(Block::Mode(Box::new(Mode::Movie(Movie::trade(data))))).then(Label::InGameTradeTraded { slot, ot_id })
+}
+
+/// The mons exchanged: the one given goes, and the one received is made at its level and put last,
+/// with the trade's nickname and `<TRAINER>` for an OT. Then `InGameTrade_RestoreScreen`.
+pub(super) fn traded(s: &mut Script, slot: u8, ot_id: u16) -> Flow {
+    let trade = trade(s);
+    let level = s.ctx.world.party[slot as usize].mon.level;
     s.ctx.world.party.remove(slot as usize);
     let world = &mut *s.ctx.world;
     let mut mon = new_party_mon(trade.receive, level, world.player_id, &Origin::Given, s.ctx.rng);

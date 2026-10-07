@@ -484,6 +484,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             safari: postgame::safari::read_state(mmu),
             map,
             battle: mmu.read_battle_state(),
+            ruleset: poke_core::ruleset::Ruleset::Gen1,
             bag,
             boxed_pokemon: postgame::pc_box::read_current_box(mmu),
             current_box: postgame::pc_box::current_box_num(mmu),
@@ -726,6 +727,8 @@ pub struct GameState {
     pub bag: Bag,
     /// Populated whenever `mode` is `WildBattle` or `TrainerBattle`.
     pub battle: Option<BattleState>,
+    /// The rules the run plays by, in or out of a battle.
+    pub ruleset: poke_core::ruleset::Ruleset,
     /// The open PC box only; see [`postgame::pc_box::read_current_box`] for why.
     pub boxed_pokemon: Vec<postgame::pc_box::BoxedPokemon>,
     /// Which box is open, 0-based (`wCurrentBoxNum`).

@@ -47,6 +47,11 @@ pub struct MovieScreen {
     pub transfer: Option<Dest>,
     /// `LCDC`'s background map bit: which of `maps` the background shows.
     pub bg_map: usize,
+    /// `LCDC`'s window map bit and window enable bit.
+    #[serde(default = "window_map")]
+    pub window_map: usize,
+    #[serde(default = "window_on")]
+    pub window_on: bool,
     /// `hSCX`, `hSCY` and `hWY`, which `VBlank` copies into the registers.
     pub scx: u8,
     pub scy: u8,
@@ -61,6 +66,14 @@ pub struct MovieScreen {
     pub oam: Vec<Object>,
 }
 
+fn window_map() -> usize {
+    1
+}
+
+fn window_on() -> bool {
+    true
+}
+
 impl Default for MovieScreen {
     /// `Init`: the maps cleared with the rest of VRAM, the window moved off the screen.
     fn default() -> Self {
@@ -68,6 +81,8 @@ impl Default for MovieScreen {
             maps: [TileMap::filled(0), TileMap::filled(0)],
             transfer: Some(Dest::BG_MAP1),
             bg_map: 0,
+            window_map: 1,
+            window_on: true,
             scx: 0,
             scy: 0,
             wy: 144,
@@ -99,8 +114,8 @@ impl MovieScreen {
     /// The end of a frame: the compositor given both maps as they now stand.
     pub fn present(&mut self, ctx: &mut Ctx) {
         ctx.screen.background = Some(self.maps[self.bg_map].clone());
-        ctx.screen.window = (self.latched_wy < 144 && self.wx < 167)
-            .then(|| Window { x: self.wx, y: self.latched_wy, tiles: self.maps[1].clone() });
+        ctx.screen.window = (self.window_on && self.latched_wy < 144 && self.wx < 167)
+            .then(|| Window { x: self.wx, y: self.latched_wy, tiles: self.maps[self.window_map].clone() });
     }
 
     /// `hAutoBGTransferDest` moved and the transfer let run until it has copied all of `wTileMap`
@@ -110,8 +125,9 @@ impl MovieScreen {
         self.copy_tile_map(ui, dest);
     }
 
-    /// `AutoBgMapTransfer`, all three thirds at once: each row is 20 tiles, then 12 skipped.
-    fn copy_tile_map(&mut self, ui: &UiSurface, dest: Dest) {
+    /// `AutoBgMapTransfer`, all three thirds at once: each row is 20 tiles, then 12 skipped. Also
+    /// `CopyScreenTileBufferToVRAM`, without its three frames.
+    pub fn copy_tile_map(&mut self, ui: &UiSurface, dest: Dest) {
         for row in 0..SCREEN_TILES_Y {
             for column in 0..SCREEN_TILES_X {
                 let at = dest.offset + row * TileMap::SIZE + column;

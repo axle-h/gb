@@ -444,6 +444,70 @@ impl crate::pokemon::policy::Policy for PushOnce {
     }
 }
 
+/// Victory Road 1F's first boulder, at (5, 15), shoved `dir`, with the Cooltrainer who stands at
+/// (7, 5) beaten and moved to (5, 14), the one square it is shoved down from: standing for good, or
+/// wandering off it when `wanders`.
+fn someone_behind_the_first_boulder(dir: JoypadButton, wanders: bool) -> TestFixture {
+    let behind = Point8 { x: 5, y: 14 };
+    let push = PushOnce::new(Point8 { x: 5, y: 15 }, dir);
+    let mut fixture = TestFixture::with_policy(VR1F_STRENGTH, Duration::from_mins(2), Box::new(push));
+    let mut api = fixture.api();
+    api.debug_set_event(crate::pokemon::symbols::pokered_events::EVENT_BEAT_VICTORY_ROAD_1_TRAINER_0);
+    api.debug_move_sprite(1, behind, wanders);
+    assert_eq!(fixture.game_state().map.tile_at(behind), MetaTile::Sprite("Cooltrainer Female"));
+    fixture
+}
+
+/// Ticks until the boulder at (5, 15) has moved or the push has been refused, and what was said.
+fn push_the_first_boulder(fixture: &mut TestFixture) -> (bool, Option<String>) {
+    let moved = |fixture: &mut TestFixture| !fixture.game_state().map.boulders().contains(&Point8 { x: 5, y: 15 });
+    let mut refusal = None;
+    while refusal.is_none() && !moved(fixture) {
+        // Nothing here answers a wild battle.
+        fixture.api().debug_set_repel_steps(u8::MAX);
+        fixture.step();
+        refusal = fixture.agent.drain_events().into_iter().find_map(|event| match event {
+            AgentEvent::TextBox { message } if message.contains("will not push") => Some(message),
+            _ => None,
+        });
+    }
+    (moved(fixture), refusal)
+}
+
+/// Someone standing where a boulder is shoved from is waited on, and the shove made once they
+/// wander off.
+#[test]
+fn a_shove_someone_stands_behind_is_made_once_they_move_on() {
+    let mut fixture = someone_behind_the_first_boulder(JoypadButton::Down, true);
+    let (moved, refusal) = push_the_first_boulder(&mut fixture);
+    assert!(moved && refusal.is_none(), "refused: {refusal:?}");
+}
+
+/// A person who never moves off the square is waited on as long as a walk waits on people, and
+/// the shove is then given up in the words it is given up in at once.
+#[test]
+fn a_shove_someone_stands_behind_for_good_is_waited_on_before_it_is_given_up() {
+    use crate::pokemon::agent::MAX_ROUTE_BLOCKED_TICKS;
+    let mut fixture = someone_behind_the_first_boulder(JoypadButton::Down, false);
+    let (moved, refusal) = push_the_first_boulder(&mut fixture);
+    let took = fixture.total_cycles.to_duration();
+    assert!(!moved);
+    let refusal = refusal.expect("the shove given up");
+    assert!(refusal.starts_with("Boulder 1 at (5, 15) will not push down: Cooltrainer Female is standing at (5, 14)"), "{refusal}");
+    assert!(took >= AGENT_RESOLUTION.to_duration() * MAX_ROUTE_BLOCKED_TICKS as u32, "given up after {took:?}");
+}
+
+/// A shove into rock is given up at once, whoever else is standing about.
+#[test]
+fn a_shove_nobody_can_make_is_given_up_at_once() {
+    let mut fixture = someone_behind_the_first_boulder(JoypadButton::Left, false);
+    let (moved, refusal) = push_the_first_boulder(&mut fixture);
+    let took = fixture.total_cycles.to_duration();
+    assert!(!moved);
+    assert!(refusal.is_some_and(|refusal| refusal.starts_with("Boulder 1 at (5, 15) will not push left")));
+    assert!(took < Duration::from_secs(5), "given up after {took:?}");
+}
+
 /// Leaving a map puts its boulders back, the way out the refusal names.
 #[test]
 fn leaving_a_map_puts_its_boulders_back() {

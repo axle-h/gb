@@ -1953,7 +1953,8 @@ pub fn battle_id(action: &BattleAction) -> String {
     }
 }
 
-/// The battle menu, with every `fight:` row costed against the Pokémon actually in front of you.
+/// The battle menu, with every `fight:` row costed against the Pokémon actually in front of you and
+/// saying what its move does.
 pub fn battle_menu(state: &GameState) -> Vec<MenuItem> {
     let sides = state.battle.as_ref().map(|battle| (&battle.player, &battle.enemy, battle.ruleset));
     battle_options(state)
@@ -1962,7 +1963,7 @@ pub fn battle_menu(state: &GameState) -> Vec<MenuItem> {
         .map(|action| {
             let mut description = format!("{action}");
             if let (BattleAction::Fight { battle_move, .. }, Some((me, foe, ruleset))) = (action, sides) {
-                description.push_str(&fight_row_note(battle_move.name, me, foe, ruleset));
+                description.push_str(&fight_row_notes(battle_move.name, me, foe, ruleset));
             }
             if let BattleAction::UseItem { item, target: Some(target), .. } = action
                 && let Some(mon) = state.pokemon.get(*target as usize)
@@ -2004,6 +2005,30 @@ fn fight_row_note(
     }
 }
 
+/// What a move does besides its damage, under `ruleset`. A plain attack's "No additional effect."
+/// is none, as it would be on most rows of every menu.
+pub fn move_effect(name: crate::pokemon::move_name::PokemonMoveName, ruleset: poke_core::ruleset::Ruleset) -> Option<&'static str> {
+    match &name.metadata().effect {
+        crate::pokemon::move_name::PokemonMoveEffect::NoAdditionalEffect => None,
+        effect => Some(effect.description(ruleset)),
+    }
+}
+
+/// A `fight:` row's damage estimate, then what the move does besides under the battle's own rules.
+fn fight_row_notes(
+    name: crate::pokemon::move_name::PokemonMoveName,
+    me: &crate::pokemon::pokemon::PokemonSummary,
+    foe: &crate::pokemon::pokemon::PokemonSummary,
+    ruleset: poke_core::ruleset::Ruleset,
+) -> String {
+    let damage = fight_row_note(name, me, foe, ruleset);
+    match move_effect(name, ruleset) {
+        None => damage,
+        Some(effect) if damage.is_empty() => format!(" — {effect}"),
+        Some(effect) => format!("{damage}. {effect}"),
+    }
+}
+
 /// Damage as a share of the defender's maximum HP, so a two-hit kill reads as one.
 fn percent_of(damage: u16, max_hp: u16) -> u16 {
     match max_hp {
@@ -2038,8 +2063,9 @@ pub fn mart_menu(snapshot: &ApiSnapshot, state: &GameState) -> Vec<MenuItem> {
         .collect()
 }
 
-/// The four moves the forget prompt chooses between, keyed on slot as `forget_move` takes.
-pub fn forget_menu(current: &[PokemonMove]) -> Vec<MenuItem> {
+/// The four moves the forget prompt chooses between, keyed on slot as `forget_move` takes, each
+/// saying what it does by the run's rules.
+pub fn forget_menu(current: &[PokemonMove], ruleset: poke_core::ruleset::Ruleset) -> Vec<MenuItem> {
     current
         .iter()
         .enumerate()
@@ -2048,7 +2074,7 @@ pub fn forget_menu(current: &[PokemonMove]) -> Vec<MenuItem> {
             MenuItem {
                 id: slot.to_string(),
                 description: format!(
-                    "{} — {}, {}, {}/{} pp{}",
+                    "{} — {}, {}, {}/{} pp{}{}",
                     known.name,
                     metadata.move_type,
                     match metadata.power {
@@ -2057,6 +2083,7 @@ pub fn forget_menu(current: &[PokemonMove]) -> Vec<MenuItem> {
                     },
                     known.pp,
                     metadata.pp,
+                    move_effect(known.name, ruleset).map_or(String::new(), |effect| format!(". {effect}")),
                     match hm_move(known.name) {
                         Some(_) => " — ⚠️ an HM move, and it cannot be re-learnt",
                         None => "",
@@ -2595,6 +2622,31 @@ mod tests {
     }
 
     #[test]
+    fn a_fight_row_says_what_its_move_does_by_the_battles_rules() {
+        use crate::pokemon::pokemon::PokemonType::*;
+        use crate::pokemon::species::PokemonSpecies;
+
+        let me = summary(PokemonSpecies::Charmander, [Fire, Fire],
+                         &[PokemonMoveName::Ember, PokemonMoveName::Scratch, PokemonMoveName::FocusEnergy]);
+        let foe = summary(PokemonSpecies::Bulbasaur, [Grass, Poison], &[PokemonMoveName::Tackle]);
+
+        let ember = fight_row_notes(PokemonMoveName::Ember, &me, &foe, Gen1);
+        assert!(ember.starts_with(&fight_row_note(PokemonMoveName::Ember, &me, &foe, Gen1)), "the estimate first: {ember}");
+        assert!(ember.contains("super effective. 10% chance of burning the opponent."), "{ember}");
+
+        let scratch = fight_row_notes(PokemonMoveName::Scratch, &me, &foe, Gen1);
+        assert_eq!(scratch, fight_row_note(PokemonMoveName::Scratch, &me, &foe, Gen1),
+                   "a plain attack says nothing more");
+        assert!(!scratch.contains("additional"), "{scratch}");
+
+        // A status move has no estimate, so its description is the whole note.
+        let gen1 = fight_row_notes(PokemonMoveName::FocusEnergy, &me, &foe, Gen1);
+        assert!(gen1.starts_with(" — ") && gen1.contains("quarters the critical-hit rate"), "{gen1}");
+        let modern = fight_row_notes(PokemonMoveName::FocusEnergy, &me, &foe, Modern);
+        assert_eq!(modern, " — Doubles the user's critical-hit rate.");
+    }
+
+    #[test]
     fn only_a_dual_type_is_doubly_super_effective() {
         use crate::pokemon::pokemon::PokemonType::*;
         use crate::pokemon::species::PokemonSpecies;
@@ -2651,13 +2703,35 @@ mod tests {
             PokemonMove { name: PokemonMoveName::Cut, pp: 30 },
             PokemonMove { name: PokemonMoveName::Growl, pp: 40 },
         ];
-        let rows = forget_menu(&moves);
+        let rows = forget_menu(&moves, Gen1);
         assert!(rows[0].description.contains("Normal") && rows[0].description.contains("power"),
                 "type and power: {}", rows[0].description);
         assert!(rows[1].description.contains("HM move"), "the HM is marked: {}", rows[1].description);
         assert!(!rows[0].description.contains("HM move"), "and only the HM is");
         assert!(rows[2].description.contains("no damage"),
                 "a status move says so rather than showing 0 power: {}", rows[2].description);
+    }
+
+    #[test]
+    fn a_forget_row_says_what_its_move_does_by_the_runs_rules() {
+        let moves = [
+            PokemonMove { name: PokemonMoveName::Tackle, pp: 35 },
+            PokemonMove { name: PokemonMoveName::Cut, pp: 30 },
+            PokemonMove { name: PokemonMoveName::Growl, pp: 40 },
+            PokemonMove { name: PokemonMoveName::FocusEnergy, pp: 30 },
+        ];
+        let gen1 = forget_menu(&moves, Gen1);
+        assert_eq!(gen1[0].description, "Tackle — Normal, 35 power, 35/35 pp", "a plain attack says nothing more");
+        assert!(gen1[1].description.ends_with("30/30 pp — ⚠️ an HM move, and it cannot be re-learnt"),
+                "the HM flag stays last: {}", gen1[1].description);
+        assert!(gen1[2].description.ends_with(
+            "no damage, 40/40 pp. Lowers the opponent's Attack by 1 stage. The enemy's copy misses an extra 25% of the time."),
+            "{}", gen1[2].description);
+        assert!(gen1[3].description.contains("quarters the critical-hit rate"), "{}", gen1[3].description);
+
+        let modern = forget_menu(&moves, Modern);
+        assert!(modern[2].description.ends_with("40/40 pp. Lowers the opponent's Attack by 1 stage."), "{}", modern[2].description);
+        assert!(modern[3].description.ends_with("Doubles the user's critical-hit rate."), "{}", modern[3].description);
     }
 
     #[test]
