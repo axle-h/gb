@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { Completion } from '../api';
+import { gameName, type Completion } from '../api';
 
 /** What the overlay asks for. The server clamps anything larger. */
 const LIMIT = 10;
@@ -67,6 +67,7 @@ function Table({ rows }: { rows: Completion[] }) {
           <tr>
             <th>#</th>
             <th>finished</th>
+            <th>game</th>
             <th className="num">time</th>
             <th className="agent">agent</th>
           </tr>
@@ -76,6 +77,7 @@ function Table({ rows }: { rows: Completion[] }) {
             <tr key={`${row.archive}`}>
               <td className="dim">{index + 1}</td>
               <td title={runDetail(row)}>{day(row.completed_at)}</td>
+              <td>{gameName(row.game)}</td>
               <td className="num" title={row.playtime_maxed ? 'the game’s clock stopped at 255:59:59' : row.playtime}>
                 {row.playtime_maxed ? '255:59:59+' : row.playtime}
               </td>

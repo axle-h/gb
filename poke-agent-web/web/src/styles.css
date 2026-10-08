@@ -871,7 +871,7 @@ header .trophy:hover {
 
   .leaderboard tbody tr {
     display: grid;
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto auto 1fr auto;
     align-items: baseline;
     padding: 7px 0;
     border-bottom: 1px solid var(--line);

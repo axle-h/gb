@@ -328,6 +328,8 @@ fn unknown() -> Side {
 pub(crate) fn intent(action: &BattleAction) -> String {
     match action {
         BattleAction::Fight { battle_move, .. } => format!("used {}", battle_move.name),
+        BattleAction::UseItem { item, target: Some(target), target_move: Some(target_move), .. } =>
+            format!("used a {} on move slot {target_move} of party slot {target}", item.id),
         BattleAction::UseItem { item, target: Some(target), .. } => format!("used a {} on party slot {target}", item.id),
         BattleAction::UseItem { item, .. } => format!("used a {}", item.id),
         BattleAction::SwitchPokemon { pokemon, .. } => format!("sent out {}", pokemon.species),

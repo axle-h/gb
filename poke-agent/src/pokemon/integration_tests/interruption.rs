@@ -21,6 +21,7 @@ enum Question {
     Nickname,
     Mart,
     ForgetMove,
+    Mimic,
 }
 
 /// One turn that was thrown away, and everything needed to say why.
@@ -153,6 +154,13 @@ impl Policy for SlowPolicy {
     {
         match self.advance(Question::ForgetMove, "a forget-move prompt".to_string()) {
             true => self.inner.pick_move_to_forget(slot, current, new_move),
+            false => None,
+        }
+    }
+
+    fn pick_move_to_mimic(&mut self, state: &GameState, enemy_moves: &[PokemonMove]) -> Option<usize> {
+        match self.advance(Question::Mimic, describe(state)) {
+            true => self.inner.pick_move_to_mimic(state, enemy_moves),
             false => None,
         }
     }

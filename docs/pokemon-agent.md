@@ -55,6 +55,11 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   on wherever the cursor was left.
 - Each gated loop — the PC menus, the START menu, a TM outside its learnset, a refused key item, a
   mart open while the policy thinks — is a frame-timing change only `full_playthrough` can price.
+- An Ether's move menu leaves the party's HP slashes on screen, so `UsingItem` tells it by its
+  geometry before it asks whether the party menu is up, and keeps both off its last message.
+- Mimic's menu has no B and an A copies whatever the cursor is on, so both agents ask
+  `pick_move_to_mimic` (`drive_mimic_menu`, `NativeAgent::mimic_answer`). The emulated one finds it
+  by its WHICH TECHNIQUE? line: `wMoveMenuType` and the geometry outlive it.
 - A teach whose move-to-forget is declined is over. The bag reopens where the use started, so a
   driver that reads "not done yet" and begins the chain again asks the same question for ever.
 - A slot machine's bet is placed only by a slots row's `SlotSession`, never above the coins held:
@@ -169,8 +174,9 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   (`toss_for_room`), sparing whatever `items_used` or `used_unnamed` names.
 - Two arms over one decision must share a damage model: a 0-PP move scoring 122 livelocked the
   Elite-Four switch tactic.
-- A battle item that asks which Pokémon has a row per member it would help (`helps_in_battle`), so
-  rows of one item compare equal; a scripted heal pins `target` to the one out, or its choice moves.
+- A battle item that asks which Pokémon has a row per member it would help (`helps_in_battle`), and
+  an Ether one per move short of PP (`restores_pp`), so rows of one item compare equal; a scripted
+  heal pins `target` to the one out, or its choice moves.
 - A wedged scripted run is silent — no watchdog, and `/api/events` goes on looking healthy.
 - `route_toward` scores every row, which is every reachable opening into a neighbour, or a route
   out of a pocket takes the pocket's own crossing back in for ever. The nearest is first, because
@@ -245,6 +251,9 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   shortest wait (`ASK_AFTER_FRAMES`): a script can free the player for a frame or two, as Oak's lab
   does before Blue speaks. Waiting the emulated agent's second instead runs action for action out
   of tape, because the cartridge's wait starts sooner.
+- Every menu it did not open is backed out of in `decide`'s dispatch, a battle's party list too
+  unless a faint opened it. "No native answer yet" is left for the title, the main menu, the intro
+  and naming anything but a mon.
 - The native watchdog's clock is reset by `NativeAgent::asked`, called beside every `pick_*`; a new
   call site without it wakes the policy on a healthy run.
 - A walk, or a task's walk up to what it faces and out of a lift (`task_walking`), carries a held

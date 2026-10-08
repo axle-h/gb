@@ -122,7 +122,7 @@ Exactly one of these, and **calling one ends the script immediately** — nothin
 ```rhai
 battle.fight(mv)         // a Move object, its name, or its slot number
 battle.switch_to(mon)    // a Pokemon object, its name, or its slot number
-battle.use_item(name)    // a string; a potion or Revive goes to the one out
+battle.use_item(name)    // a string; a potion or Revive goes to the one out, an Ether to its first move short of PP
 battle.use_item(name, mon) // ...or to mon; fails where it would do nothing
 battle.run()             // wild battles only
 battle.ask()             // hand THIS turn to yourself, and stay installed

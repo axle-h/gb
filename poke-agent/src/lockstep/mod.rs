@@ -59,10 +59,13 @@ pub(crate) fn to_vblank(gb: &mut GameBoy) {
 /// The cartridge on a Super Game Boy with `state` loaded. Every fixture is a DMG capture, with no SGB
 /// section and `wOnSGB` clear, so the console is booted as far as `LoadSGB`'s return first, which
 /// leaves it holding the cartridge's palettes for the state to load over, and `wOnSGB` is set as
-/// `LoadSGB` sets it. No palette has been sent for what the state shows.
+/// `LoadSGB` sets it. No palette has been sent for what the state shows, and `wDefaultPaletteCommand`,
+/// which on a DMG nothing claims, is set to the overworld's, as a map loaded on an SGB leaves it: every
+/// fixture this is given stands in the overworld.
 pub(crate) fn on_sgb(state: &[u8]) -> GameBoy {
     use gb::ram::RAM;
     use crate::pokemon::symbols::pokered_symbols as sym;
+    const SET_PAL_OVERWORLD: u8 = 0x09;
     let mut gb = GameBoy::sgb(crate::pokemon::roms::POKERED);
     let load_sgb = breakpoint(sym::LoadSGB);
     assert_eq!(gb.run_until(&[load_sgb], MachineCycles::PER_FRAME * 60).0, Stop::Breakpoint(load_sgb));
@@ -71,6 +74,7 @@ pub(crate) fn on_sgb(state: &[u8]) -> GameBoy {
     gb.load_state(state).unwrap();
     gb.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
     gb.core_mut().mmu_mut().write(sym::wOnSGB.address, 1);
+    gb.core_mut().mmu_mut().write(sym::wDefaultPaletteCommand.address, SET_PAL_OVERWORLD);
     gb
 }
 

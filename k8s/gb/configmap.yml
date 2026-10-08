@@ -14,24 +14,28 @@ data:
 
   # Any OpenAI-compatible endpoint; unset means api.openai.com. The Secret's key must be valid here.
   OPENAI_BASE_URL: "https://openrouter.ai/api/v1"
-  # `:floor` is OpenRouter's sort-by-price routing shortcut, which selects the flex service tier.
-  GB_MODEL: "openai/gpt-5.4-nano:floor"
+  # OpenRouter's free router: a different free model per request, so no spend, and a per-day quota
+  # whose 429 pauses the run until it resets.
+  GB_MODEL: "openrouter/free"
 
-  # Tokens of history carried before compacting; every token under it is paid for on every request.
-  GB_CONTEXT_LIMIT: "100000"
+  # What is played: `emulated`, the cartridge, or `native`, the recreation. A run is resumed only by
+  # a process playing its kind, so changing this starts a new game.
+  GB_GAME: "native"
+
+  # Tokens of history carried before compacting. The free router advertises 200k but routes to models
+  # as small as 64k, so this is the pool's floor rather than any one model's window.
+  GB_CONTEXT_LIMIT: "60000"
   # How full the window gets before compacting; the headroom must fit an in-flight turn and the summary.
   GB_COMPACT_ABOVE: "0.85"
-  # The GPT-5 family accepts only 1.0; the field is always sent, so it must be a value both ends ignore.
-  GB_TEMPERATURE: "1.0"
   GB_MAX_TOOL_STEPS: "16"
 
-  # A timeout is not retried, and the flex tier queues requests for minutes, so this is well above 180.
+  # A timeout is not retried, and the free router queues requests for minutes, so this is well above 180.
   GB_REQUEST_TIMEOUT_SECS: "600"
 
   # Ceiling on one completion, so a repetition loop cannot run until the context window fills.
   GB_MAX_TOKENS: "8192"
 
-  # Passed through unvalidated as `reasoning_effort`; `none` makes this model worse at the game.
+  # Passed through unvalidated as `reasoning_effort`; a model without reasoning ignores it.
   GB_REASONING_EFFORT: "low"
 
   # Emulated seconds with no decision point before the model is asked for a nudge; `0` turns it off.

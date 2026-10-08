@@ -796,8 +796,11 @@ impl NativeAgent {
             Status::Waiting(Decision::List) => Some(Command::CancelList),
             Status::Waiting(Decision::StartMenu) => Some(Command::CloseStartMenu),
             Status::Waiting(Decision::Options) => Some(Command::CloseOptions),
-            Status::Waiting(Decision::PartyMenu | Decision::UseToss | Decision::MoveMenu | Decision::TownMap
-                            | Decision::FlyDestination) if !self.battle_is_up() => Some(Command::CancelOption),
+            Status::Waiting(Decision::PartyMenu) if !self.battle_is_up() => Some(Command::CancelOption),
+            Status::Waiting(Decision::UseToss | Decision::MoveMenu | Decision::TownMap | Decision::FlyDestination
+                            | Decision::SwitchStatsCancel | Decision::FieldMoveMenu | Decision::ForgetMove
+                            | Decision::SlotSelector) => Some(Command::CancelOption),
+            Status::Waiting(Decision::Quantity) => Some(Command::CancelQuantity),
             Status::Waiting(Decision::TrainerCard | Decision::StatusScreen) => Some(Command::Advance),
             Status::Waiting(Decision::Pokedex | Decision::PokedexSideMenu | Decision::PokedexData) => Some(Command::CloseDex),
             // A clerk the policy walked up to.
@@ -809,10 +812,13 @@ impl NativeAgent {
             }
             Status::Waiting(Decision::Overworld) => self.overworld()?,
             Status::Waiting(Decision::BattleMenu | Decision::BattleMoves) => self.battle()?,
-            Status::Waiting(Decision::PartyMenu) if self.battle_is_up() => match self.forced_switch()? {
-                Some(slot) => Some(Command::ChooseOption(slot)),
-                None => self.battle()?,
-            },
+            Status::Waiting(Decision::MimicMove) => self.mimic_answer()?,
+            // A party list in a battle is the agent's to answer only after a faint, as on the
+            // emulated side; the battle menu behind it is where the policy is asked.
+            Status::Waiting(Decision::PartyMenu) => Some(match self.forced_switch()? {
+                Some(slot) => Command::ChooseOption(slot),
+                None => Command::CancelOption,
+            }),
             Status::Waiting(decision) => return Err(format!("no native answer yet for {decision:?}")),
         };
         self.issue_or_wait(command)
@@ -2421,6 +2427,17 @@ impl NativeAgent {
         Ok(state.pokemon.iter().position(|mon| mon.current_hp > 0).map(|slot| slot as u8))
     }
 
+    /// Mimic's menu of the enemy's moves, which cannot be left: the policy's row, or the first
+    /// for a row the menu lacks.
+    fn mimic_answer(&mut self) -> Result<Option<Command>, String> {
+        let state = self.native.game_state()?;
+        let enemy: Vec<_> = state.battle.as_ref()
+            .map(|battle| battle.enemy.moves.iter().flatten().copied().collect()).unwrap_or_default();
+        self.asked();
+        let Some(row) = self.policy.pick_move_to_mimic(&state, &enemy) else { return Ok(None) };
+        Ok(Some(Command::ChooseOption(if row < enemy.len() { row as u8 } else { 0 })))
+    }
+
     fn battle(&mut self) -> Result<Option<Command>, String> {
         let state = self.native.game_state()?;
         self.asked();
@@ -2428,7 +2445,7 @@ impl NativeAgent {
         self.event(AgentEvent::battle_action_started(&state, action));
         Ok(Some(match action {
             BattleAction::Fight { slot, .. } => Command::Fight(slot),
-            BattleAction::UseItem { item, target, .. } => Command::UseItem { item: item.id, target },
+            BattleAction::UseItem { item, target, target_move, .. } => Command::UseItem { item: item.id, target, target_move },
             BattleAction::SwitchPokemon { slot, .. } => Command::SwitchPokemon(slot),
             BattleAction::Run => Command::Run,
             BattleAction::SafariBall => Command::SafariBall,
@@ -2858,11 +2875,10 @@ mod tests {
             }
             panic!("never reached {decision:?}: {:?}", game.status());
         };
+        // The title's menu, which no agent answers, over the overworld it backs out to.
         let mut game = pallet_town();
-        game.push(Mode::PokemonMenu(pokered::modes::pokemon_menu::PokemonMenu::new()));
-        until(&mut game, Decision::PartyMenu);
-        game.frame(Input::Command(Command::ChooseOption(0)));
-        until(&mut game, Decision::FieldMoveMenu);
+        game.push(Mode::MainMenu(pokered::modes::main_menu::MainMenu::new()));
+        until(&mut game, Decision::MainMenu);
 
         let policy = Nudges::default();
         let (jams, overworld_asks) = (policy.jams.clone(), policy.overworld_asks.clone());
@@ -2876,13 +2892,209 @@ mod tests {
                 break;
             }
         }
-        assert!(failed > 0, "the agent answered the field-move menu itself");
+        assert!(failed > 0, "the agent answered the main menu itself");
         assert_eq!(agent.game().frames() - started, ticks, "a failed tick still plays its frame");
         let jams = jams.borrow();
         assert!(jams.first().is_some_and(|stuck| *stuck >= std::time::Duration::from_secs(1)), "never woken: {jams:?}");
         let fired = agent.drain_events().into_iter().filter(|event| matches!(event, AgentEvent::WatchdogFired { .. })).count();
         assert_eq!(fired, 1, "reported once per timeout");
         assert!(*overworld_asks.borrow() > 0, "the nudge never got back to the overworld: {:?}", agent.game().status());
+    }
+
+    /// Frames until the game waits on `decision`, every text on the way advanced.
+    fn until(game: &mut Game, decision: Decision) {
+        for _ in 0..6000 {
+            match game.status() {
+                Status::Waiting(waiting) if waiting == decision => return,
+                Status::Waiting(Decision::Text) => game.frame(Input::Command(Command::Advance)),
+                _ => game.frame(Input::None),
+            };
+        }
+        panic!("never reached {decision:?}: {:?}", game.status());
+    }
+
+    /// `game` with each command answered in turn, each run until the game waits on the decision
+    /// beside it.
+    fn opened(mut game: Game, steps: &[(Command, Decision)]) -> Game {
+        for (command, decision) in steps {
+            while !matches!(game.status(), Status::Waiting(_)) {
+                game.frame(Input::None);
+            }
+            let settled = game.status();
+            assert!(matches!(settled, Status::Waiting(_)), "{command:?} at {settled:?}");
+            assert_eq!(game.frame(Input::Command(command.clone())).reply, Some(Reply::Accepted), "{command:?} at {settled:?}");
+            until(&mut game, decision.clone());
+        }
+        game
+    }
+
+    /// A wild Rattata, the kind with TACKLE and TAIL WHIP, over Pallet Town.
+    fn rattata(edit: impl FnOnce(&mut World)) -> Game {
+        let mut game = game_at(Map::PalletTown, 5, 6, edit);
+        game.push(Mode::Battle(pokered::modes::battle::BattleMode::wild(PokemonSpecies::Rattata, 5)));
+        until(&mut game, Decision::BattleMenu);
+        game
+    }
+
+    /// Fights with the first move that has PP, and copies `row` of whatever Mimic offers.
+    struct Mimics {
+        row: usize,
+        offered: Rc<RefCell<Vec<Vec<PokemonMoveName>>>>,
+    }
+
+    impl Policy for Mimics {
+        fn name(&self) -> &'static str { "mimics" }
+
+        fn pick_overworld_action(&mut self, _: &GameState, _: &WorldGraph) -> Option<OverworldAction> {
+            None
+        }
+
+        fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+            state.battle?.player.available_battle_moves().into_iter().next()
+        }
+
+        fn pick_move_to_mimic(&mut self, _: &GameState, enemy_moves: &[crate::pokemon::move_name::PokemonMove]) -> Option<usize> {
+            self.offered.borrow_mut().push(enemy_moves.iter().map(|known| known.name).collect());
+            Some(self.row)
+        }
+    }
+
+    /// Mimic's menu is the policy's question, asked once with the enemy's moves, and the row it
+    /// names is the move copied.
+    #[test]
+    fn mimic_copies_the_enemy_move_the_policy_names() {
+        let game = rattata(|world| {
+            world.party[0].mon.mon.moves = [Some(PokemonMoveName::Mimic), Some(PokemonMoveName::Tackle), None, None];
+            world.party[0].mon.mon.pp = [10, 35, 0, 0];
+        });
+        let offered = Rc::new(RefCell::new(Vec::new()));
+        let mut agent = NativeAgent::new(game, Box::new(Mimics { row: 1, offered: offered.clone() })).unwrap();
+        let copied = |agent: &NativeAgent| agent.game().modes().iter().find_map(|mode| match mode {
+            Mode::Battle(battle) => battle.battle().and_then(|battle| battle.player.mon.moves[0]),
+            _ => None,
+        });
+        for _ in 0..60 * 60 {
+            agent.tick().unwrap();
+            if copied(&agent) == Some(PokemonMoveName::TailWhip) {
+                break;
+            }
+        }
+        assert_eq!(copied(&agent), Some(PokemonMoveName::TailWhip), "offered {:?}", offered.borrow());
+        assert_eq!(*offered.borrow(), [vec![PokemonMoveName::Tackle, PokemonMoveName::TailWhip]]);
+    }
+
+    /// Uses the first battle row `pick` takes, once, and fights with the first move after.
+    struct UsesRow {
+        pick: fn(&BattleAction) -> bool,
+        used: bool,
+    }
+
+    impl Policy for UsesRow {
+        fn name(&self) -> &'static str { "uses-row" }
+
+        fn pick_overworld_action(&mut self, _: &GameState, _: &WorldGraph) -> Option<OverworldAction> {
+            None
+        }
+
+        fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+            let rows = crate::pokemon::policy::battle_options(state)?;
+            if std::mem::replace(&mut self.used, true) {
+                return rows.into_iter().find(|row| matches!(row, BattleAction::Fight { .. }));
+            }
+            let row = rows.iter().copied().find(|row| (self.pick)(row));
+            assert!(row.is_some(), "no such row among {rows:?}");
+            row
+        }
+    }
+
+    /// A PP item in a battle is used on the mon its row names and, for an Ether, the move: the
+    /// move menu it opens is answered rather than backed out of.
+    #[test]
+    fn a_pp_item_in_a_battle_restores_the_move_its_row_names() {
+        let cases: [(ItemId, fn(&BattleAction) -> bool, [u8; 2]); 4] = [
+            (ItemId::Ether, |row| matches!(row, BattleAction::UseItem { target_move: Some(0), .. }), [15, 0]),
+            (ItemId::Ether, |row| matches!(row, BattleAction::UseItem { target_move: Some(1), .. }), [5, 10]),
+            (ItemId::Elixer, |row| matches!(row, BattleAction::UseItem { target: Some(0), .. }), [15, 10]),
+            (ItemId::MaxElixer, |row| matches!(row, BattleAction::UseItem { target: Some(0), .. }), [35, 30]),
+        ];
+        for (item, pick, want) in cases {
+            let game = rattata(|world| {
+                world.party[0].mon.mon.moves = [Some(PokemonMoveName::Tackle), Some(PokemonMoveName::TailWhip), None, None];
+                world.party[0].mon.mon.pp = [5, 0, 0, 0];
+                world.bag.add(item, 1);
+            });
+            let mut agent = NativeAgent::new(game, Box::new(UsesRow { pick, used: false })).unwrap();
+            for _ in 0..60 * 60 {
+                agent.tick().unwrap();
+                if bag_quantity(agent.game().world(), item) == 0 {
+                    break;
+                }
+            }
+            assert_eq!(bag_quantity(agent.game().world(), item), 0, "the {item:?} was used");
+            assert_eq!(agent.game().world().party[0].mon.mon.pp[..2], want, "the {item:?}");
+        }
+    }
+
+    /// The overworld's menus a press-buttons left open are closed, to the overworld, with nothing
+    /// in them chosen.
+    #[test]
+    fn menus_the_agent_did_not_open_are_backed_out_of() {
+        let mut field_moves = pallet_town();
+        field_moves.push(Mode::PokemonMenu(pokered::modes::pokemon_menu::PokemonMenu::new()));
+        until(&mut field_moves, Decision::PartyMenu);
+        let field_moves = opened(field_moves, &[(Command::ChooseOption(0), Decision::FieldMoveMenu)]);
+        let toss = opened(with_bag(&[(ItemId::Potion, 3)], |_| {}), &[
+            (Command::OpenStartMenu, Decision::StartMenu),
+            (Command::ChooseStartMenuEntry(StartMenuEntry::Item), Decision::List),
+            (Command::ChooseListEntry(0), Decision::UseToss),
+            (Command::ChooseOption(1), Decision::Quantity),
+        ]);
+        let slots = opened(pallet_town(), &[
+            (Command::OpenStartMenu, Decision::StartMenu),
+            (Command::ChooseStartMenuEntry(StartMenuEntry::SaveReset), Decision::SlotSelector),
+        ]);
+        for game in [field_moves, toss, slots] {
+            let (up, potions) = (game.status(), bag_quantity(game.world(), ItemId::Potion));
+            let (mut agent, log) = agent(game, vec![]);
+            run(&mut agent, &log, |agent, _| matches!(agent.game().modes(), [Mode::Overworld(_)])
+                && agent.game().status() == Status::Waiting(Decision::Overworld));
+            assert_eq!(quantity(&agent, ItemId::Potion), potions, "nothing tossed, from {up:?}");
+        }
+    }
+
+    /// A menu a press-buttons opened inside a battle is backed out of to the battle menu, where the
+    /// policy is asked, with nothing in it chosen.
+    #[test]
+    fn menus_opened_in_a_battle_are_backed_out_of_to_the_battle_menu() {
+        let mut ether = rattata(|world| { world.bag.add(ItemId::Ether, 1); });
+        for button in [Joypad::DOWN, Joypad::A] {
+            ether.frame(Input::Buttons(button));
+            ether.frame(Input::None);
+        }
+        until(&mut ether, Decision::List);
+        let ether = opened(ether, &[(Command::ChooseListEntry(0), Decision::PartyMenu),
+                                    (Command::ChooseOption(0), Decision::MoveMenu)]);
+        let mut submenu = rattata(|world| world.party.push(level(PokemonSpecies::Pidgey, 10)));
+        for button in [Joypad::RIGHT, Joypad::A] {
+            submenu.frame(Input::Buttons(button));
+            submenu.frame(Input::None);
+        }
+        until(&mut submenu, Decision::PartyMenu);
+        submenu.frame(Input::Buttons(Joypad::A));
+        submenu.frame(Input::None);
+        until(&mut submenu, Decision::SwitchStatsCancel);
+        for game in [ether, submenu] {
+            let up = game.status();
+            let (mut agent, log) = agent(game, vec![]);
+            run(&mut agent, &log, |_, log| log.events.iter().any(|event| event.starts_with("BattleActionStarted")));
+            let world = agent.game().world();
+            assert_eq!(bag_quantity(world, ItemId::Ether), u8::from(up == Status::Waiting(Decision::MoveMenu)), "from {up:?}");
+            let out = agent.game().modes().iter().find_map(|mode| match mode {
+                Mode::Battle(battle) => battle.battle().map(|battle| battle.player_mon_number),
+                _ => None,
+            });
+            assert_eq!(out, Some(0), "nobody was switched in, from {up:?}");
+        }
     }
 
     /// The modes a step reads as, frame by frame, until the game waits on something again.

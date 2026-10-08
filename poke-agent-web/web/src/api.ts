@@ -42,6 +42,14 @@ export type RunStatus =
   | { state: 'throttled'; until_ms: number; message: string }
   | { state: 'error'; message: string };
 
+/** `GB_GAME`: the cartridge on the emulator, or the recreation. */
+export type GameKind = 'emulated' | 'native';
+
+/** The name after "Pokémon"; the recreation's title screen reads "Rust Version". */
+export function gameName(kind: GameKind | undefined): string {
+  return kind === 'native' ? 'Rust Version' : 'Red';
+}
+
 export interface Status {
   wall_ms: number;
   /** Not a speed over `wall_ms`: the host drops overrun time. See `EventStream.speed`. */
@@ -53,6 +61,7 @@ export interface Status {
   policy: string;
   /** `GB_MODEL`, or `null` under any policy that is not an LLM. */
   model: string | null;
+  game_kind: GameKind;
   agent_state: string;
   frame_seq: number;
   game: GameView | null;
@@ -182,6 +191,7 @@ export interface Completion {
   archive: string;
   run_id: string;
   teams: number;
+  game: GameKind;
   completed_at: string;
   started_at: string;
   app_version: string;

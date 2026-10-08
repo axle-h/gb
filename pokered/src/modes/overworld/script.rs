@@ -1495,7 +1495,7 @@ impl Script<'_, '_> {
         self.ow.rt.saved_screen2 = Some(self.ctx.screen.ui.clone());
     }
 
-    /// `RestoreScreenTilesAndReloadTilePatterns`.
+    /// The screen [`Script::save_screen_tiles`] saved, put back.
     pub fn restore_screen_tiles(&mut self) {
         if let Some(screen) = self.ow.rt.saved_screen2.clone() {
             self.ctx.screen.ui = screen;
@@ -1503,13 +1503,15 @@ impl Script<'_, '_> {
     }
 
     /// `RestoreScreenTilesAndReloadTilePatterns` after a full screen that loaded its own sprite
-    /// patterns: OAM cleared, sprite updates back on and the map's patterns loaded again.
+    /// patterns: OAM cleared, sprite updates back on, the map's patterns loaded again and
+    /// `SET_PAL_DEFAULT`.
     pub fn restore_screen_tiles_and_reload_sprites(&mut self) {
         crate::gfx::mon_icons::clear_sprites(&mut self.ctx.screen.sprites);
         self.ow.rt.sprites_frozen = false;
         self.ow.reload_map_sprite_tile_patterns(self.ctx);
         self.restore_screen_tiles();
         self.ctx.screen.tiles.load_text_box_tiles();
+        self.ctx.screen.sgb.run(&crate::gfx::sgb::PaletteCommand::Default);
     }
 
     /// `CeladonMartRoofScript_GiveDrinkToGirl`'s menu: the drinks the bag holds, two rows apart in a
@@ -1586,10 +1588,10 @@ impl Script<'_, '_> {
         }
     }
 
-    /// `GetPartyMonName2` into `wStringBuffer`.
+    /// `GetPartyMonName2` into `wNameBuffer`.
     pub fn get_party_mon_name2(&mut self, slot: u8) {
         let nick = self.ctx.world.party[slot as usize].nick.clone();
-        self.ctx.world.text.strings.insert(TextBuffer::StringBuffer, nick);
+        self.ctx.world.text.strings.insert(TextBuffer::NameBuffer, nick);
     }
 
     /// `NameRatersHouseCheckMonOTScript`: whether the mon's OT name and OT id are both the player's,
@@ -1611,9 +1613,11 @@ impl Script<'_, '_> {
         Then::block(Block::Mode(Box::new(Mode::NamingScreen(screen))))
     }
 
-    /// `DisplayNameRaterScreen`'s carry: an empty name is a cancel and the mon keeps the one it has.
+    /// `DisplayNameRaterScreen`'s carry: the name typed into `wBuffer`, where an empty one is a
+    /// cancel and the mon keeps the one it has.
     pub fn rename_party_mon(&mut self, slot: u8) -> bool {
         let typed = self.ctx.world.text.string(TextBuffer::StringBuffer);
+        self.ctx.world.text.strings.insert(TextBuffer::Buffer, typed.clone());
         if typed.is_empty() {
             return false;
         }

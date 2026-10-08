@@ -404,3 +404,48 @@ fn the_old_rod_hooks_a_magikarp_as_the_cartridge_does() {
     ];
     lockstep(include_bytes!("../pokemon/data/postgame-fishing.bin"), old_rod_on_top, move |i, _| SCRIPT.get(i).copied());
 }
+
+/// `POTION` in the bag's first slot, the lead down 20 HP, and the start menu's cursor left on `ITEM`
+/// and the party's on the lead.
+fn potion_on_top(cartridge: &mut super::scripts::Cartridge) {
+    cartridge.write(sym::wBagItems.address, ItemId::Potion as u8);
+    cartridge.write(sym::wBagItems.address + 1, 1);
+    cartridge.write(sym::wBattleAndStartSavedMenuItem.address, ITEM_ROW);
+    cartridge.write(sym::wBagSavedMenuItem.address, 0);
+    cartridge.write(sym::wListScrollOffset.address, 0);
+    cartridge.write(sym::wPartyAndBillsPCSavedMenuItem.address, 0);
+    let hp = sym::wPartyMon1HP.address;
+    let left = u16::from_be_bytes([cartridge.read(hp), cartridge.read(hp + 1)]) - 20;
+    cartridge.write(hp, (left >> 8) as u8);
+    cartridge.write(hp + 1, left as u8);
+}
+
+/// A Potion from the bag on the hurt lead at Pallet Town's pond, through the party menu and back to
+/// the bag, the start menu and the map. The party menu is left alone until the start menu's sound has
+/// run out on both: the recreation, with no loading on the way, would otherwise reach
+/// `PlaySoundWaitForCurrent` with it still playing and wait for it where the cartridge does not.
+#[test]
+fn a_potion_from_the_bag_heals_the_lead_as_the_cartridge_does() {
+    a_potion_from_the_bag(false);
+}
+
+/// The same on a Super Game Boy, where the party menu sends its palettes and the bag's
+/// `RestoreScreenTilesAndReloadTilePatterns` the default.
+#[test]
+fn a_potion_from_the_bag_sends_the_cartridge_s_palettes_on_a_super_game_boy() {
+    a_potion_from_the_bag(true);
+}
+
+/// The frames `SFX_START_MENU` holds the noise channel.
+const START_MENU_SOUND_FRAMES: u32 = 12;
+
+fn a_potion_from_the_bag(on_sgb: bool) {
+    use super::scripts::{lockstep_or_on_sgb, Action, PROMPT};
+    const SCRIPT: &[(Action, &str)] = &[
+        (Action::Press(Joypad::START, 2), "START"), (PROMPT, "ITEM"), (PROMPT, "the Potion"), (PROMPT, "USE"),
+        (Action::Press(Joypad::empty(), START_MENU_SOUND_FRAMES), "the start menu's sound runs out"),
+        (PROMPT, "the lead"), (PROMPT, "recovered by 20!"), (Action::Press(Joypad::B, 1), "out of the bag"),
+        (Action::Press(Joypad::B, 1), "and the start menu"),
+    ];
+    lockstep_or_on_sgb(on_sgb, include_bytes!("../pokemon/data/postgame-fishing.bin"), potion_on_top, move |i, _| SCRIPT.get(i).copied());
+}

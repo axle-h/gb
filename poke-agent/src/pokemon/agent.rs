@@ -203,12 +203,16 @@ pub enum AgentEvent {
 }
 
 impl AgentEvent {
-    /// `action` chosen in `state`. An item is used on someone, who is the actor of the sentence.
+    /// `action` chosen in `state`. An item is used on someone, who is the actor of the sentence, and
+    /// an Ether on one of their moves, which is named with them.
     pub fn battle_action_started(state: &GameState, action: BattleAction) -> Self {
         let actor = match action {
-            BattleAction::UseItem { target: Some(target), .. } => state.pokemon
+            BattleAction::UseItem { target: Some(target), target_move, .. } => state.pokemon
                 .get(target as usize)
-                .map(|mon| mon.nickname.to_default_string())
+                .map(|mon| match target_move.and_then(|slot| mon.moves.get(slot as usize).copied().flatten()) {
+                    Some(known) => format!("{}'s {}", mon.nickname.to_default_string(), known.name),
+                    None => mon.nickname.to_default_string(),
+                })
                 .unwrap_or_else(|| active_pokemon_name(state)),
             _ => active_pokemon_name(state),
         };
@@ -406,8 +410,9 @@ pub(crate) enum BattleState {
     },
 
     /// Dedicated driver for using any bag item in battle.
-    /// `aim` is the party slot the item goes to, and `entry_hp` that member's HP when it was chosen.
-    UsingItem { item: crate::pokemon::item::ItemId, aim: u8, start_qty: u8, entry_hp: u16, press: bool, confirmed: bool, delay: DelayContext, ticks: u16, reader: PokemonTextReader },
+    /// `aim` is the party slot the item goes to, `aim_move` its move slot for an Ether, and
+    /// `entry_hp` that member's HP when it was chosen.
+    UsingItem { item: crate::pokemon::item::ItemId, aim: u8, aim_move: Option<u8>, start_qty: u8, entry_hp: u16, press: bool, confirmed: bool, delay: DelayContext, ticks: u16, reader: PokemonTextReader },
 }
 
 impl Default for BattleState {
@@ -770,6 +775,8 @@ pub struct PokemonAgent {
     forget_choice: Option<Option<usize>>,
     /// Ticks the B that declines the move list has been held, of `FORGET_B_PERIOD`.
     forget_b_ticks: u8,
+    /// `pick_move_to_mimic`'s row, held while Mimic's menu is up.
+    mimic_choice: Option<usize>,
 
     /// An item ball just pressed A on, waiting for the overworld to ask whether it is still there.
     pending_pickup: Option<(MetaTile, u16)>,
@@ -845,6 +852,7 @@ impl PokemonAgent {
             menu_handover_ticks: 0,
             forget_choice: None,
             forget_b_ticks: 0,
+            mimic_choice: None,
             pending_pickup: None,
             party_menu: None,
             blackout_ticks: 0,
@@ -1297,6 +1305,31 @@ impl PokemonAgent {
             },
             None => api.toggle_button(JoypadButton::A),
         }
+        Ok(())
+    }
+
+    /// Mimic's menu of the enemy's moves, its cursor counting from 1, answered by
+    /// `pick_move_to_mimic` once and held. It has no B, so a row it lacks is its first.
+    fn drive_mimic_menu(&mut self, api: &mut PokemonApi, cursor: u8) -> Result<(), String> {
+        let game_state = api.game_state()?;
+        self.poll_policy(&game_state, api);
+        let enemy: Vec<_> = game_state.battle.as_ref()
+            .map(|battle| battle.enemy.moves.iter().flatten().copied().collect()).unwrap_or_default();
+        let row = match self.mimic_choice {
+            Some(row) => row,
+            None => match self.policy.pick_move_to_mimic(&game_state, &enemy) {
+                Some(row) => *self.mimic_choice.insert(if row < enemy.len() { row } else { 0 }),
+                // Nothing is pressed while the policy decides, as on the forget menu.
+                None => {
+                    api.release_all_buttons();
+                    return Ok(());
+                }
+            },
+        };
+        let target = row as u8 + 1;
+        if cursor < target { api.toggle_button(JoypadButton::Down); }
+        else if cursor > target { api.toggle_button(JoypadButton::Up); }
+        else { api.toggle_button(JoypadButton::A); }
         Ok(())
     }
 
@@ -1782,6 +1815,16 @@ impl PokemonAgent {
                 return Ok(());
             }
             self.forget_choice = None;
+            // Read off the screen too: `wMoveMenuType` and the menu's geometry both outlive it.
+            let mimic_showing = matches!(game_mode, GameMode::WildBattle | GameMode::TrainerBattle)
+                && api.mmu().read_pointer(&pokered_symbols::wMoveMenuType) == 1
+                && api.on_screen_text(true).is_some_and(|text| text.contains("WHICH TECHNIQUE"));
+            if mimic_showing {
+                let cursor = api.menu_geometry().2;
+                self.drive_mimic_menu(api, cursor)?;
+                return Ok(());
+            }
+            self.mimic_choice = None;
         }
 
         self.assert_naming_screen(game_mode, api)?;
@@ -2631,13 +2674,13 @@ CascadeBadge; not cutting".to_string(),
                             if let Some(action) = self.policy.pick_battle_action(&game_state) {
                                 let active = game_state.battle.as_ref().map(|b| b.active_party_slot).unwrap_or(0);
                                 new_events.push(AgentEvent::battle_action_started(&game_state, action));
-                                if let BattleAction::UseItem { item, target, .. } = action {
+                                if let BattleAction::UseItem { item, target, target_move, .. } = action {
                                     let start_qty = game_state.bag.iter()
                                         .find(|b| b.id == item.id).map(|b| b.quantity).unwrap_or(0);
                                     let aim = target.unwrap_or(active);
                                     let entry_hp = game_state.pokemon.get(aim as usize).map(|p| p.current_hp).unwrap_or(0);
                                     self.set_battle_state(BattleState::UsingItem { ticks: 0,
-                                        item: item.id, aim, start_qty, entry_hp, press: true, confirmed: false,
+                                        item: item.id, aim, aim_move: target_move, start_qty, entry_hp, press: true, confirmed: false,
                                         delay: DelayContext::default(),
                                         reader: PokemonTextReader::message_box_only(),
                                     });
@@ -2761,7 +2804,7 @@ CascadeBadge; not cutting".to_string(),
                         }
                     }
 
-                    BattleState::UsingItem { item, aim, start_qty, entry_hp, press, confirmed, delay: _, ticks, reader } => {
+                    BattleState::UsingItem { item, aim, aim_move, start_qty, entry_hp, press, confirmed, delay: _, ticks, reader } => {
                         // Same bound as `Navigating`: six menus deep and nothing polled on the way.
                         const MAX_HEALING_TICKS: u16 = 250;
                         let ticks = *ticks;
@@ -2780,6 +2823,7 @@ CascadeBadge; not cutting".to_string(),
                         use crate::pokemon::item::ItemId;
                         let item = *item;
                         let aim = *aim;
+                        let aim_move = *aim_move;
                         let start_qty = *start_qty;
                         let entry_hp = *entry_hp;
                         let press = *press;
@@ -2803,13 +2847,13 @@ CascadeBadge; not cutting".to_string(),
                         if aimed_hp > entry_hp {
                             // The HP bar is filling: leave the still-open party menu alone.
                             api.release_all_buttons();
-                            self.set_battle_state(BattleState::UsingItem { item, aim, start_qty, entry_hp, press: !press, confirmed: true, delay: DelayContext::default(), ticks: ticks + 1, reader });
+                            self.set_battle_state(BattleState::UsingItem { item, aim, aim_move, start_qty, entry_hp, press: !press, confirmed: true, delay: DelayContext::default(), ticks: ticks + 1, reader });
                             return Ok(());
                         }
                         // Press and release on alternate ticks for clean rising edges.
                         if !press {
                             api.release_all_buttons();
-                            self.set_battle_state(BattleState::UsingItem { item, aim, start_qty, entry_hp, press: true, confirmed, delay: DelayContext::default(), ticks: ticks + 1, reader });
+                            self.set_battle_state(BattleState::UsingItem { item, aim, aim_move, start_qty, entry_hp, press: true, confirmed, delay: DelayContext::default(), ticks: ticks + 1, reader });
                             return Ok(());
                         }
 
@@ -2819,11 +2863,22 @@ CascadeBadge; not cutting".to_string(),
                             | ItemId::IceHeal | ItemId::Awakening | ItemId::ParlyzHeal
                             | ItemId::Revive | ItemId::MaxRevive
                             | ItemId::Ether | ItemId::MaxEther | ItemId::Elixer | ItemId::MaxElixer);
-                        let party_showing = opens_party_menu && (matches!(bms, Some(BattleMenuState::PokemonList { .. }))
+                        // "Restore PP of which technique?" over the party menu, whose HP slashes stay
+                        // on screen until the item is used. The cursor counts from 1, as the field's does.
+                        let over_party = raw.is_some_and(|m| (m.top_menu_item_x, m.top_menu_item_y) == (5, 7));
+                        let move_menu = over_party
+                            && api.on_screen_text(false).is_some_and(|t| t.to_ascii_uppercase().contains("TECHNIQUE"));
+                        let party_showing = opens_party_menu && !over_party && (matches!(bms, Some(BattleMenuState::PokemonList { .. }))
                             || (bms.is_none() && api.on_screen_text(false).map_or(false, |t| t.matches('/').count() >= 2)));
 
                         let next_confirmed = confirmed;
-                        let button: Option<JoypadButton> = if party_showing {
+                        let button: Option<JoypadButton> = if move_menu {
+                            // An Ether no policy aimed restores the first move, as the cursor starts there.
+                            let want = aim_move.unwrap_or(0) + 1;
+                            let cur = raw.map_or(0, |m| m.current_item);
+                            Some(if cur == want { JoypadButton::A }
+                                else if cur < want { JoypadButton::Down } else { JoypadButton::Up })
+                        } else if party_showing {
                             let cur = raw.map_or(0, |m| m.current_item);
                             if cur == aim { Some(JoypadButton::A) }
                             else if cur < aim { Some(JoypadButton::Down) }
@@ -2848,7 +2903,7 @@ CascadeBadge; not cutting".to_string(),
 
                         api.release_all_buttons();
                         if let Some(b) = button { api.press_button(b); }
-                        self.set_battle_state(BattleState::UsingItem { item, aim, start_qty, entry_hp, press: false, confirmed: next_confirmed, delay: DelayContext::default(), ticks: ticks + 1, reader });
+                        self.set_battle_state(BattleState::UsingItem { item, aim, aim_move, start_qty, entry_hp, press: false, confirmed: next_confirmed, delay: DelayContext::default(), ticks: ticks + 1, reader });
                     }
                 }
             }
@@ -4070,7 +4125,7 @@ mod tests {
             "the move's own Display already spaces and capitalises it",
         );
         assert_eq!(
-            say(BattleAction::UseItem { slot: 0, item: BagItem::new(ItemId::Potion, 1), target: Some(0) }),
+            say(BattleAction::UseItem { slot: 0, item: BagItem::new(ItemId::Potion, 1), target: Some(0), target_move: None }),
             "used Potion on BULBASAUR",
         );
         assert_eq!(
@@ -4079,6 +4134,16 @@ mod tests {
             "…tried: this is the action starting, not landing",
         );
         assert_eq!(say(BattleAction::SafariBall), "threw a Safari Ball at Pidgey");
+    }
+
+    /// An Ether is used on a move, which the sentence names with its mon.
+    #[test]
+    fn an_ether_names_the_move_it_is_used_on() {
+        let state = crate::llm::battle_script::scenarios::short_of_pp();
+        let ether = BattleAction::UseItem { slot: 0, item: BagItem::new(ItemId::Ether, 1), target: Some(1), target_move: Some(1) };
+        assert_eq!(format!("{}", AgentEvent::battle_action_started(&state, ether)), "used Ether on SHELLY's Water Gun");
+        let elixer = BattleAction::UseItem { slot: 2, item: BagItem::new(ItemId::Elixer, 1), target: Some(1), target_move: None };
+        assert_eq!(format!("{}", AgentEvent::battle_action_started(&state, elixer)), "used Elixer on SHELLY");
     }
 
     /// A win formats as a sentence.
@@ -4100,7 +4165,7 @@ mod tests {
         let say = |item| format!("{}", AgentEvent::BattleActionStarted {
             actor: "BULBASAUR".into(),
             opponent: "Pidgey".into(),
-            action: BattleAction::UseItem { slot: 0, item: BagItem::new(item, 1), target: None },
+            action: BattleAction::UseItem { slot: 0, item: BagItem::new(item, 1), target: None, target_move: None },
         });
 
         assert_eq!(say(ItemId::PokeBall), "threw a PokeBall at Pidgey");

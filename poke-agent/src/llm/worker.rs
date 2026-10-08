@@ -1150,6 +1150,7 @@ fn describe(decision: &Terminal) -> String {
             Some(slot) => format!("forget_move slot {slot}"),
             None => "forget_move (decline)".to_string(),
         },
+        Terminal::MimicMove { slot } => format!("mimic_move slot {slot}"),
         Terminal::Wait { ticks } => format!("wait {ticks} ticks"),
     }
 }

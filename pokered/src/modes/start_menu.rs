@@ -8,6 +8,7 @@ use poke_core::symbols::pokered_events::EVENT_GOT_POKEDEX;
 use serde::{Deserialize, Serialize};
 use crate::command::Decision;
 use crate::gfx::mon_icons::clear_sprites;
+use crate::gfx::sgb::PaletteCommand;
 use crate::gfx::ui::UiSurface;
 use crate::input::Joypad;
 use crate::mode::{Ctx, Mode, ModeUpdate, Outcome, Status, Transition};
@@ -188,10 +189,12 @@ impl ModeUpdate for StartMenu {
             return Transition::Pop(Outcome::Done);
         }
         // `RestoreScreenTilesAndReloadTilePatterns`, on the way out of the party's screens, takes the
-        // mon icons down and loads the map's sprites' patterns over the ones they replaced.
+        // mon icons down, loads the map's sprites' patterns over the ones they replaced and sends
+        // `SET_PAL_DEFAULT` over the party menu's palettes.
         if entry == Some(StartMenuEntry::Pokemon) {
             clear_sprites(&mut ctx.screen.sprites);
             ctx.reload_map_sprite_tile_patterns();
+            ctx.screen.sgb.run(&PaletteCommand::Default);
         }
         // An item or a field move that was used answers with what it was and closes the menu for the
         // overworld under it: `CloseStartMenu`, or `.goBackToMap`.

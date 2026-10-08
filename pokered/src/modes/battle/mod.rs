@@ -331,8 +331,8 @@ impl ModeUpdate for BattleMode {
     }
 }
 
-/// Carries out `Fight`, `Run` and `SwitchPokemon` through the battle's menus, and the party menu the
-/// battle opens.
+/// Carries out `Fight`, `Run`, `SwitchPokemon` and `UseItem` through the battle's menus, and the
+/// bag, party menu and move menu the battle opens.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BattleDriver {
     command: Command,
@@ -391,7 +391,7 @@ impl BattleDriver {
                     return Err(Refusal::Invalid("that mon is already out".into()));
                 }
             }
-            Command::UseItem { item, target } if at_menu => {
+            Command::UseItem { item, target, target_move } if at_menu => {
                 if !world.bag.items.iter().any(|slot| slot.id == *item) {
                     return Err(Refusal::Invalid(format!("the bag has no {item:?}")));
                 }
@@ -402,6 +402,14 @@ impl BattleDriver {
                     (false, Some(_)) => return Err(Refusal::Invalid("that item is not used on a party mon".into())),
                     (true, Some(slot)) if *slot as usize >= world.party.len() =>
                         return Err(Refusal::Invalid(format!("the party has no slot {}", slot + 1))),
+                    _ => {}
+                }
+                let moves = target.and_then(|slot| world.party.get(slot as usize)).map(|named| named.mon.mon.moves);
+                match (matches!(item, poke_core::item::ItemId::Ether | poke_core::item::ItemId::MaxEther), target_move) {
+                    (true, None) => return Err(Refusal::Invalid("an Ether is used on one move: say which".into())),
+                    (false, Some(_)) => return Err(Refusal::Invalid("that item is not used on one move".into())),
+                    (true, Some(slot)) if moves.and_then(|moves| moves.get(*slot as usize).copied().flatten()).is_none() =>
+                        return Err(Refusal::Invalid(format!("no move in slot {}", slot + 1))),
                     _ => {}
                 }
             }
@@ -427,7 +435,7 @@ impl BattleDriver {
             return Drive::Press(Joypad::empty());
         }
         let press = match (top, &self.command, decision) {
-            (Mode::ListMenu(list), Command::UseItem { item, target }, Decision::List) => {
+            (Mode::ListMenu(list), Command::UseItem { item, target, .. }, Decision::List) => {
                 let Some(index) = world.bag.items.iter().position(|slot| slot.id == *item) else { return Drive::Done };
                 let press = match index.cmp(&list.selected()) {
                     std::cmp::Ordering::Less => Joypad::UP,
@@ -437,7 +445,16 @@ impl BattleDriver {
                 self.answered = target.is_none() && press == Joypad::A;
                 press
             }
-            (Mode::PartyMenu(menu), Command::UseItem { target: Some(slot), .. }, Decision::PartyMenu) => {
+            (Mode::PartyMenu(menu), Command::UseItem { target: Some(slot), target_move, .. }, Decision::PartyMenu) => {
+                let press = match slot.cmp(&menu.selected()) {
+                    std::cmp::Ordering::Less => Joypad::UP,
+                    std::cmp::Ordering::Greater => Joypad::DOWN,
+                    std::cmp::Ordering::Equal => Joypad::A,
+                };
+                self.answered = press == Joypad::A && target_move.is_none();
+                press
+            }
+            (Mode::MoveSelectionMenu(menu), Command::UseItem { target_move: Some(slot), .. }, Decision::MoveMenu) => {
                 let press = match slot.cmp(&menu.selected()) {
                     std::cmp::Ordering::Less => Joypad::UP,
                     std::cmp::Ordering::Greater => Joypad::DOWN,
@@ -580,7 +597,7 @@ mod tests {
         assert_eq!(settle(&mut game), Some(Decision::Text));
         command(&mut game, Command::Advance);
         assert_eq!(settle(&mut game), Some(Decision::BattleMenu));
-        assert_eq!(command(&mut game, Command::UseItem { item: ItemId::MasterBall, target: None }), Reply::Accepted);
+        assert_eq!(command(&mut game, Command::UseItem { item: ItemId::MasterBall, target: None, target_move: None }), Reply::Accepted);
         let mut seen = Vec::new();
         for _ in 0..3000 {
             match game.status() {
@@ -614,7 +631,7 @@ mod tests {
         assert_eq!(settle(&mut game), Some(Decision::BattleMenu));
         let hud = |game: &Game| (0x6Du8..0x80).map(|id| *game.screen().tiles.bg(id)).collect::<Vec<_>>();
         let before = hud(&game);
-        assert_eq!(command(&mut game, Command::UseItem { item: ItemId::MasterBall, target: None }), Reply::Accepted);
+        assert_eq!(command(&mut game, Command::UseItem { item: ItemId::MasterBall, target: None, target_move: None }), Reply::Accepted);
         let mut named = false;
         for _ in 0..5000 {
             match game.status() {
@@ -711,9 +728,9 @@ mod tests {
         assert_eq!(settle(&mut game), Some(Decision::Text));
         command(&mut game, Command::Advance);
         assert_eq!(settle(&mut game), Some(Decision::BattleMenu));
-        assert!(matches!(command(&mut game, Command::UseItem { item: ItemId::Potion, target: None }), Reply::Refused(_)));
-        assert!(matches!(command(&mut game, Command::UseItem { item: ItemId::MasterBall, target: Some(0) }), Reply::Refused(_)));
-        assert_eq!(command(&mut game, Command::UseItem { item: ItemId::Potion, target: Some(0) }), Reply::Accepted);
+        assert!(matches!(command(&mut game, Command::UseItem { item: ItemId::Potion, target: None, target_move: None }), Reply::Refused(_)));
+        assert!(matches!(command(&mut game, Command::UseItem { item: ItemId::MasterBall, target: Some(0), target_move: None }), Reply::Refused(_)));
+        assert_eq!(command(&mut game, Command::UseItem { item: ItemId::Potion, target: Some(0), target_move: None }), Reply::Accepted);
         let mut used_ball = false;
         while let Some(decision) = settle(&mut game) {
             let next = match decision {
@@ -722,7 +739,7 @@ mod tests {
                     used_ball = true;
                     let Some(Mode::Battle(battle)) = game.modes().iter().find(|mode| matches!(mode, Mode::Battle(_))) else { unreachable!() };
                     assert_eq!(battle.battle().unwrap().player.mon.hp, 40, "the potion reached the battle mon");
-                    Command::UseItem { item: ItemId::MasterBall, target: None }
+                    Command::UseItem { item: ItemId::MasterBall, target: None, target_move: None }
                 }
                 Decision::TwoOption => Command::ChooseOption(1),
                 Decision::PokedexData => Command::CloseDex,
@@ -734,6 +751,39 @@ mod tests {
         assert_eq!(game.world().party.len(), 3, "MAGIKARP joined the party");
         assert_eq!(game.world().party[2].nick, PokemonSpecies::Magikarp.name());
         assert!(game.world().bag.items.iter().all(|slot| slot.id != ItemId::MasterBall));
+    }
+
+    /// An Ether names its mon and its move, and the move menu it opens is answered with that move.
+    #[test]
+    fn an_ether_restores_the_move_the_command_names() {
+        use poke_core::bag::BagItem;
+        use poke_core::item::ItemId;
+        let mut world = game(BattleMode::wild(PokemonSpecies::Magikarp, 5)).world().clone();
+        assert!(world.party[0].mon.mon.moves[1].is_some(), "BIRD needs a second move");
+        world.party[0].mon.mon.pp[0] = 0;
+        world.party[0].mon.mon.pp[1] = 0;
+        world.bag = crate::systems::inventory::Inventory::bag(vec![BagItem::new(ItemId::Ether, 1), BagItem::new(ItemId::Potion, 1)]);
+        world.party[1].mon.mon.moves[3] = None;
+        let mut game = Game::new(world, GameRng::seeded(7), Pacing::Faithful);
+        game.push(Mode::Battle(BattleMode::wild(PokemonSpecies::Magikarp, 5)));
+        assert_eq!(settle(&mut game), Some(Decision::Text));
+        command(&mut game, Command::Advance);
+        assert_eq!(settle(&mut game), Some(Decision::BattleMenu));
+        for refused in [
+            Command::UseItem { item: ItemId::Ether, target: Some(0), target_move: None },
+            Command::UseItem { item: ItemId::Ether, target: Some(1), target_move: Some(3) },
+            Command::UseItem { item: ItemId::Potion, target: Some(0), target_move: Some(0) },
+        ] {
+            assert!(matches!(command(&mut game, refused.clone()), Reply::Refused(_)), "{refused:?}");
+        }
+        assert_eq!(command(&mut game, Command::UseItem { item: ItemId::Ether, target: Some(0), target_move: Some(1) }), Reply::Accepted);
+        assert_eq!(&game.world().party[0].mon.mon.pp[..2], [0, 10], "the second move, and only it");
+        while settle(&mut game) == Some(Decision::Text) {
+            command(&mut game, Command::Advance);
+        }
+        assert!(game.world().bag.items.iter().all(|slot| slot.id != ItemId::Ether), "the Ether was used");
+        let Some(Mode::Battle(battle)) = game.modes().iter().find(|mode| matches!(mode, Mode::Battle(_))) else { unreachable!() };
+        assert_eq!(battle.battle().unwrap().player.mon.pp[1], 10, "the restored PP reached the battle mon");
     }
 
     #[test]
@@ -986,7 +1036,8 @@ mod tests {
         command(&mut game, Command::Advance);
         assert_eq!(settle(&mut game), Some(Decision::BattleMenu));
         let mut seen = vec![game.screen().sgb.palette_ids()];
-        command_recording(&mut game, Command::UseItem { item, target: Some(0) }, &mut seen);
+        let target_move = matches!(item, poke_core::item::ItemId::Ether | poke_core::item::ItemId::MaxEther).then_some(0);
+        command_recording(&mut game, Command::UseItem { item, target: Some(0), target_move }, &mut seen);
         let mut guard = 0;
         loop {
             match settle_recording(&mut game, &mut seen).expect("the battle goes on") {

@@ -15,7 +15,8 @@ arguments are in the module docs named below; this is the list of what not to br
 - `gb/src/sgb.rs` colours the PPU's finished DMG frame by reading its greys back as shades, so the
   DMG ramp in `DMGColor::to_lcd` is the SGB's input as well as the committed screenshots'.
 - Every fixture is a DMG capture: loaded on an SGB it keeps whatever the console held and reads
-  `wOnSGB` clear, so a lockstep boots to `LoadSGB` first (`poke-agent/src/lockstep/mod.rs` `on_sgb`).
+  `wOnSGB` and `wDefaultPaletteCommand` clear, so a lockstep boots to `LoadSGB` first and sets both
+  (`poke-agent/src/lockstep/mod.rs` `on_sgb`).
 
 ## Mappers
 

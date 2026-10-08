@@ -358,6 +358,8 @@ pub enum TurnContext<'a> {
         current: &'a [crate::pokemon::move_name::PokemonMove],
         new: crate::pokemon::move_name::PokemonMoveName,
     },
+    /// The enemy's moves Mimic's menu offers, in its order.
+    MimicMove { enemy: &'a [crate::pokemon::move_name::PokemonMove] },
     /// The watchdog's turn: what the agent believes it is doing, and for how long.
     Stuck { agent_state: &'a str, stuck_for: std::time::Duration },
     /// Whether a battle script is deciding battles, and whether the walkthrough chapter has moved.
@@ -389,6 +391,7 @@ pub fn situation(
         DecisionKind::Nickname => "## Decision: name this Pokémon\n\n",
         DecisionKind::MartPurchase => "## Decision: what to buy here, if anything\n\n",
         DecisionKind::ForgetMove => "## Decision: which move to forget, if any\n\n",
+        DecisionKind::MimicMove => "## Decision: which of the enemy's moves Mimic copies\n\n",
         DecisionKind::Stuck => "## Decision: the game is stuck — get it moving\n\n",
     });
 
@@ -448,6 +451,13 @@ pub fn situation(
                 );
             }
         }
+        TurnContext::MimicMove { enemy } => out.push_str(&format!(
+            "Your Pokémon used MIMIC, and the game is asking which of {}'s {} moves it copies. The \
+             copy takes MIMIC's place, with MIMIC's PP, until the battle ends or this Pokémon is \
+             switched out. The menu has no way back, so one of the rows below has to be chosen.\n\n",
+            state.battle.as_ref().map_or("the enemy".to_string(), |battle| battle.enemy.species.to_string()),
+            enemy.len(),
+        )),
         // At the top rather than under `### Battle`, where a nudge is read.
         TurnContext::Battle { script } => out.push_str(match script {
             ScriptState::Unedited => {
@@ -761,6 +771,7 @@ pub fn situation(
         DecisionKind::Nickname => "\n### Naming\n",
         DecisionKind::MartPurchase => "\n### For sale\n",
         DecisionKind::ForgetMove => "\n### The four moves it knows\n",
+        DecisionKind::MimicMove => "\n### The enemy's moves\n",
         DecisionKind::Stuck => "\n### What you can do\n",
     });
     if menu.is_empty() {
@@ -778,6 +789,9 @@ pub fn situation(
             }
             DecisionKind::ForgetMove => {
                 "(the move list could not be read. Call `forget_move` with no `slot` to decline.)\n"
+            }
+            DecisionKind::MimicMove => {
+                "(the enemy's moves could not be read. Call `mimic_move` with `slot` 0.)\n"
             }
             _ => {
                 "(nothing — the agent can reach no action from here. `wait` and look again; if it \
@@ -922,6 +936,7 @@ mod tests {
             slot: 0,
             item: crate::pokemon::bag::BagItem::new(ItemId::PokeBall, 4),
             target: None,
+            target_move: None,
         }, vec!["8/25 HP, worth a ball".to_string()]);
         report.said("Darn! The POKéMON broke free!");
 
@@ -985,7 +1000,7 @@ mod tests {
         for kind in tools::ALL_KINDS {
             let mut fixture = TestFixture::new(
                 match kind {
-                    DecisionKind::Battle => battle,
+                    DecisionKind::Battle | DecisionKind::MimicMove => battle,
                     _ => overworld,
                 },
                 Duration::from_secs(10),
@@ -1012,6 +1027,9 @@ mod tests {
                 .next()
                 .map(|mon| mon.moves.iter().flatten().cloned().collect())
                 .unwrap_or_default();
+            let enemy_moves: Vec<_> = state.battle.as_ref()
+                .map(|battle| battle.enemy.moves.iter().flatten().copied().collect())
+                .unwrap_or_default();
 
             // A standing the armed line can actually say something with.
             let standing = crate::llm::battle_script::ScriptStanding {
@@ -1028,6 +1046,7 @@ mod tests {
                 DecisionKind::ForgetMove => {
                     TurnContext::ForgetMove { slot: 0, current: &party_moves, new: PokemonMoveName::Surf }
                 }
+                DecisionKind::MimicMove => TurnContext::MimicMove { enemy: &enemy_moves },
                 DecisionKind::Stuck => TurnContext::Stuck {
                     agent_state: "text→ReadingTextBox",
                     stuck_for: Duration::from_secs(300),
@@ -1049,6 +1068,7 @@ mod tests {
                 DecisionKind::Battle => tools::battle_menu(&state),
                 DecisionKind::MartPurchase => tools::mart_menu(&snapshot, &state),
                 DecisionKind::ForgetMove => tools::forget_menu(&party_moves, state.ruleset),
+                DecisionKind::MimicMove => tools::mimic_menu(&state, &enemy_moves),
                 DecisionKind::Nickname | DecisionKind::Stuck => Vec::new(),
             };
 

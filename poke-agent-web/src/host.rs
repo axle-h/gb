@@ -161,8 +161,8 @@ pub struct EmulatorHost {
     /// [`AgentEvent::WatchdogFired`]s seen this run.
     watchdog_firings: u64,
     completed: Option<(AgentEvent, u64)>,
-    /// Whether the run was waiting on the model at the previous tick, to spot the transition.
-    awaiting_llm: bool,
+    /// [`Published::asks`] when the last save state was taken, to take one per request.
+    saved_for_ask: u64,
     /// The last `agent.update` failure that was published.
     last_agent_failure: Option<String>,
 }
@@ -209,7 +209,7 @@ impl EmulatorHost {
             // One interval out: the state just loaded was just checkpointed, and rewriting it at
             // startup would have a crash-looping process rewrite its save every few seconds.
             next_checkpoint: first_checkpoint,
-            awaiting_llm: false,
+            saved_for_ask: 0,
             last_status: None,
             last_status_at: now,
             booted: false,
@@ -220,6 +220,8 @@ impl EmulatorHost {
             last_agent_failure: None,
         };
         host.keep_served_options();
+        // Before the first tick can ask anything, so a report waits for the state its turn takes.
+        host.capture_save_state();
         if host.config.fresh_game {
             host.name_the_player();
         }
@@ -230,6 +232,16 @@ impl EmulatorHost {
     /// slice, because the credits' soft reset and Continue restore whatever the save was written with.
     fn keep_served_options(&mut self) {
         self.console.keep_served_options();
+    }
+
+    /// A save state for whatever the model is about to complain about.
+    fn capture_save_state(&mut self) {
+        self.saved_for_ask = self.published.asks();
+        match self.console.save_state() {
+            Ok(state) => self.published.publish_save_state(state),
+            // Nothing here may cost a tick.
+            Err(failure) => eprintln!("could not capture a turn's save state: {failure}"),
+        }
     }
 
     /// Put the policy's name on the trainer card, if it has one.
@@ -365,6 +377,7 @@ impl EmulatorHost {
                 archive: String::new(), // filled in by `archive`, which chooses the directory
                 run_id: meta.run_id.clone(),
                 teams: *teams,
+                game: run.kind(),
                 completed_at: poke_agent::run::iso8601(std::time::SystemTime::now()),
                 started_at: meta.started_at.clone(),
                 app_version: crate::cli::VERSION.to_string(),
@@ -460,7 +473,6 @@ impl EmulatorHost {
         self.watchdog_firings = 0;
         self.completed = None;
         self.last_agent_failure = None;
-        self.awaiting_llm = false;
         self.ahead_by_cycles = MachineCycles::ZERO;
         self.since_last_update = Duration::ZERO;
         self.dropped = Duration::ZERO;
@@ -564,16 +576,9 @@ impl EmulatorHost {
                     }
                 }
             }
-            // A save state for whatever the model is about to complain about.
-            let awaiting = matches!(self.published.run_status(), RunStatus::AwaitingLlm { .. });
-            if awaiting && !self.awaiting_llm {
-                match self.console.save_state() {
-                    Ok(state) => self.published.publish_save_state(state),
-                    // Nothing here may cost a tick.
-                    Err(failure) => eprintln!("could not capture a turn's save state: {failure}"),
-                }
+            if self.published.asks() != self.saved_for_ask {
+                self.capture_save_state();
             }
-            self.awaiting_llm = awaiting;
 
             let events = self.console.drain_events();
             for event in events {
@@ -712,6 +717,7 @@ impl EmulatorHost {
             model: (self.console.policy_name() == LLM_POLICY_NAME)
                 .then(|| self.config.run.as_ref().map(|run| run.model().to_string()))
                 .flatten(),
+            game_kind: self.console.kind(),
             agent_state: self.console.state_debug(),
             frame_seq: self.encoder.seq(),
             game,
@@ -823,6 +829,7 @@ mod tests {
         assert!(statuses.len() >= 40, "only {} status heartbeats arrived", statuses.len());
         assert!(statuses.iter().all(|s| s.game.is_some()), "a heartbeat could not read the game state");
         assert!(statuses.last().unwrap().emulated_ms > 0, "no emulated time was published");
+        assert!(statuses.iter().all(|s| s.game_kind == GameKind::Emulated), "the page would name the wrong game");
 
         // `RandomPolicy` walks Red around his bedroom, so something has to move.
         let positions: std::collections::HashSet<_> =
@@ -1455,6 +1462,7 @@ mod tests {
         let row = &rows[0];
         assert_eq!(row.run_id, finished_id);
         assert_eq!(row.teams, 1);
+        assert_eq!(row.game, GameKind::Emulated);
         assert_eq!(row.policy, "random", "the decider names itself");
         assert_eq!(row.model, None, "only an LLM run names a model");
         assert_eq!(row.app_version, crate::cli::VERSION);
@@ -1592,6 +1600,7 @@ mod tests {
         assert!(statuses.len() >= 40, "only {} status heartbeats arrived", statuses.len());
         assert!(statuses.iter().all(|s| s.game.is_some()), "a heartbeat could not read the game state");
         assert_eq!(statuses[0].policy, "random");
+        assert!(statuses.iter().all(|s| s.game_kind == GameKind::Native), "the page would name the wrong game");
         let positions: std::collections::HashSet<_> =
             statuses.iter().filter_map(|s| s.game.as_ref()).map(|g| (g.map.clone(), g.position.x, g.position.y)).collect();
         assert!(positions.len() > 1, "the player never moved: {positions:?}");
@@ -1864,6 +1873,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "one championship, one row");
         assert_eq!(rows[0].run_id, finished_id);
         assert_eq!(rows[0].teams, 1);
+        assert_eq!(rows[0].game, GameKind::Native, "the leaderboard says which game was won");
         assert_eq!(rows[0].badges, 8);
         let party = rows[0].party.iter().map(|mon| (mon.nickname.as_str(), mon.species.as_str(), mon.level)).collect::<Vec<_>>();
         assert_eq!(party, [("BLASTOISE", "Blastoise", 85), ("PIDGEY", "Pidgey", 9)]);
@@ -1875,5 +1885,226 @@ mod tests {
 
         published.publish_event(UiEventBody::Notice { level: "info", message: "done".into() });
         let _ = transcript.join();
+    }
+
+    /// A native run served as `web::run` serves one: a directory of its own, the policy built by
+    /// [`crate::web::policy_factory`] and the transcript written beside it.
+    struct ServedNative {
+        current: Arc<CurrentRun>,
+        published: Arc<Published>,
+        host: Option<EmulatorHost>,
+        stop: Arc<AtomicBool>,
+        transcript: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl ServedNative {
+        /// The newest native run under `root`, or a new game when there is none, with `brain`
+        /// answering in this process under `--policy llm`.
+        fn open(
+            root: &std::path::Path,
+            policy: crate::cli::ServePolicy,
+            brain: Option<Box<dyn poke_agent::tour::turn::Brain>>,
+        ) -> Self {
+            use poke_agent::llm::client::ChatEndpoint;
+            use poke_agent::run::{Origin, RunDir, transcript};
+
+            let validate = |bytes: &[u8]| pokered::Game::load(bytes, pokered::Pacing::Faithful).is_ok();
+            let (run, origin, resumed) =
+                RunDir::open_for(GameKind::Native, root, false, "mock", &validate).expect("a run directory");
+            let state = resumed.unwrap_or_else(|| crate::console::native_start_of_game().expect("a new native game"));
+            let published = Published::resuming(transcript::last_seq(&run.transcript_path()).map_or(0, |seq| seq + 1));
+            let current = Arc::new(CurrentRun::new(root.to_path_buf(), "mock".to_string(), run));
+            let stop = Arc::new(AtomicBool::new(false));
+            let transcript = transcript::spawn(Arc::clone(&current), Arc::clone(&published), Arc::clone(&stop))
+                .expect("a transcript writer");
+            let llm = brain.map(|brain| {
+                let endpoint: Box<dyn ChatEndpoint> = Box::new(poke_agent::tour::endpoint::BrainEndpoint::new(brain));
+                (mock_llm_config(), endpoint)
+            });
+            let policy = crate::web::policy_factory(policy, llm, &current, origin, &published).expect("a policy");
+            let config = HostConfig {
+                target_speed: 40.0,
+                video_interval: Duration::from_millis(5),
+                status_interval: Duration::from_millis(5),
+                run: Some(Arc::clone(&current)),
+                checkpoint_interval: Duration::from_secs(3_600),
+                fresh_game: origin == Origin::Fresh,
+                game: GameKind::Native,
+                ..HostConfig::default()
+            };
+            let host = EmulatorHost::new(&state, policy(), Arc::clone(&published), config).expect("the game loads");
+            Self { current, published, host: Some(host), stop, transcript: Some(transcript) }
+        }
+
+        fn host(&mut self) -> &mut EmulatorHost {
+            self.host.as_mut().expect("a live host")
+        }
+
+        /// Tick until `done` holds of what has been published, or the wall clock runs out.
+        fn tick_until(&mut self, within: Duration, mut done: impl FnMut(&mut Self) -> bool) -> bool {
+            let deadline = Instant::now() + within;
+            while Instant::now() < deadline {
+                if done(self) {
+                    return true;
+                }
+                if !self.host().tick() {
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            }
+            done(self)
+        }
+
+        /// Stop as the process does: a last checkpoint, the policy and its worker dropped, and the
+        /// transcript flushed. Answers the transcript's lines.
+        fn shut_down(&mut self) -> Vec<serde_json::Value> {
+            if let Some(mut host) = self.host.take() {
+                host.checkpoint();
+            }
+            self.stop.store(true, Ordering::Relaxed);
+            self.published.publish_event(UiEventBody::Notice { level: "info", message: "stopped".into() });
+            if let Some(transcript) = self.transcript.take() {
+                let _ = transcript.join();
+            }
+            std::fs::read_to_string(self.current.get().transcript_path())
+                .unwrap_or_default()
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("a transcript line is JSON"))
+                .collect()
+        }
+    }
+
+    impl Drop for ServedNative {
+        fn drop(&mut self) {
+            self.shut_down();
+        }
+    }
+
+    fn mock_llm_config() -> poke_agent::llm::LlmConfig {
+        use poke_agent::llm::config::*;
+        poke_agent::llm::LlmConfig {
+            base_url: "in-process".to_string(),
+            api_key: "mock".to_string(),
+            model: "mock".to_string(),
+            context_limit: DEFAULT_CONTEXT_LIMIT,
+            compact_above: DEFAULT_COMPACT_ABOVE,
+            temperature: DEFAULT_TEMPERATURE,
+            max_tool_steps: DEFAULT_MAX_TOOL_STEPS,
+            request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+            reasoning_effort: None,
+            stuck_timeout: Some(Duration::from_secs(DEFAULT_STUCK_TIMEOUT_SECS)),
+        }
+    }
+
+    /// `GB_GAME=native` under `--policy llm`: the model is asked from Red's room, files an issue
+    /// that carries the recreation's save, and leaves; a restart continues the same conversation.
+    #[test]
+    fn a_served_native_run_is_played_by_the_model_and_resumes_its_conversation() {
+        use poke_agent::run::files;
+        use poke_agent::tour::turn::{Call, Reply, TurnRequest};
+        use std::sync::Mutex;
+
+        let scratch = poke_agent::run::Scratch::new("host-native-llm");
+        let asked = Arc::new(Mutex::new(Vec::<TurnRequest>::new()));
+        let seen = Arc::clone(&asked);
+        let mut reported = false;
+        let brain = move |request: &TurnRequest| {
+            seen.lock().unwrap().push(request.clone());
+            if request.is_summary() {
+                return Reply::Content("I left my room.".to_string());
+            }
+            if request.has_tool("report_issue") && !std::mem::replace(&mut reported, true) {
+                return Reply::call("report_issue", serde_json::json!({ "message": "Checking that an issue is filed." }));
+            }
+            let downstairs = request.menu_rows().into_iter().find(|(_, row)| row.contains("RedsHouse1F"));
+            match (request.location().as_deref(), downstairs) {
+                (Some("RedsHouse2F"), Some((id, _))) =>
+                    Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "Going downstairs." })),
+                _ => Reply::Calls(vec![Call::wait(25)]),
+            }
+        };
+        let mut served = ServedNative::open(&scratch.0, crate::cli::ServePolicy::Llm, Some(Box::new(brain)));
+        let run = served.current.get();
+        let start = served.host().console.native().agent.game().world().location.map;
+        assert_eq!(start, poke_agent::pokemon::map::Map::RedsHouse2F);
+
+        let left = served.tick_until(Duration::from_secs(60), |served| {
+            served.host().console.native().agent.game().world().location.map != start
+        });
+        let first = asked.lock().unwrap().first().cloned();
+        assert!(left, "the player never left Red's room; the first turn: {:#?}", first.map(|turn| turn.situation().to_string()));
+        assert!(run.path().join(files::HISTORY).is_file(), "the conversation was not kept");
+
+        let issues: Vec<_> = std::fs::read_dir(run.path().join(files::ISSUES))
+            .expect("an issue was filed")
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        let saved = std::fs::read(issues[0].join(files::GAME)).expect("the issue carries the native game");
+        assert!(pokered::Game::load(&saved, pokered::Pacing::Faithful).is_ok(), "the issue's game does not load");
+        assert!(!issues[0].join(files::STATE).exists(), "a native issue filed an emulator state");
+
+        let transcript = served.shut_down();
+        drop(served);
+        let kinds: Vec<&str> = transcript.iter().filter_map(|line| line["type"].as_str()).collect();
+        for kind in ["turn_started", "tool_call", "decision", "agent"] {
+            assert!(kinds.contains(&kind), "no {kind} in the transcript: {kinds:?}");
+        }
+        assert!(run.path().join(files::GAME).is_file(), "the run was not checkpointed");
+        assert!(!run.path().join(files::STATE).exists(), "a native run wrote the emulator's files");
+
+        // The restart.
+        let resumed_asked = Arc::new(Mutex::new(Vec::<TurnRequest>::new()));
+        let seen = Arc::clone(&resumed_asked);
+        let brain = move |request: &TurnRequest| {
+            seen.lock().unwrap().push(request.clone());
+            Reply::Calls(vec![Call::wait(25)])
+        };
+        let mut resumed = ServedNative::open(&scratch.0, crate::cli::ServePolicy::Llm, Some(Box::new(brain)));
+        assert_eq!(resumed.current.get().run_id(), run.run_id(), "the restart forked the run");
+        assert_ne!(resumed.host().console.native().agent.game().world().location.map, start, "the restart lost the move");
+        let asked_again = resumed.tick_until(Duration::from_secs(30), |_| !resumed_asked.lock().unwrap().is_empty());
+        assert!(asked_again, "the resumed run never asked the model");
+        let transcript = resumed.shut_down();
+        let resumed_first = resumed_asked.lock().unwrap()[0].clone();
+        assert!(
+            resumed_first.messages.iter().any(|message| message.role == "user" && message.text.contains("RedsHouse2F")),
+            "the resumed conversation does not remember Red's room: {:#?}", resumed_first.messages,
+        );
+        assert!(
+            transcript.iter().any(|line| line["message"].as_str().is_some_and(|m| m.starts_with("resumed the conversation"))),
+            "the restart did not say it resumed the conversation",
+        );
+    }
+
+    /// `GB_GAME=native` under `--policy deterministic`: the scripted route is played from a new
+    /// game to the starter, and a restart takes it up at the step it had reached.
+    #[test]
+    fn a_served_native_run_plays_the_scripted_route_and_resumes_it() {
+        let scratch = poke_agent::run::Scratch::new("host-native-scripted");
+        let completed = |served: &ServedNative| -> usize {
+            let path = served.current.get().path().join("scripted-progress.json");
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .and_then(|progress| progress["completed"].as_u64())
+                .unwrap_or(0) as usize
+        };
+
+        let mut served = ServedNative::open(&scratch.0, crate::cli::ServePolicy::Deterministic, None);
+        let run_id = served.current.get().run_id();
+        // Down the stairs, out of the house, stopped by Oak, and the starter picked.
+        let chosen = served.tick_until(Duration::from_secs(120), |served| completed(served) >= 4);
+        let reached = completed(&served);
+        let game = served.host().console.native().agent.game();
+        assert!(chosen, "the route stalled at step {reached} on {:?}, {:?}", game.world().location, game.status());
+        assert!(!game.world().party.is_empty(), "four steps and no starter");
+        served.shut_down();
+        drop(served);
+
+        let mut resumed = ServedNative::open(&scratch.0, crate::cli::ServePolicy::Deterministic, None);
+        assert_eq!(resumed.current.get().run_id(), run_id, "the restart forked the run");
+        let onward = resumed.tick_until(Duration::from_secs(60), |served| completed(served) > reached);
+        assert!(onward, "the resumed route never got past step {reached}");
     }
 }

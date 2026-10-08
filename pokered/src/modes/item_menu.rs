@@ -35,6 +35,7 @@ use poke_core::text_script::{far_text, TextBuffer, TextMoney};
 use serde::{Deserialize, Serialize};
 use crate::audio::data::{sounds, AudioBank, Sound, SoundId};
 use crate::command::Decision;
+use crate::gfx::sgb::PaletteCommand;
 use crate::gfx::text_boxes::TextBoxId;
 use crate::gfx::ui::{UiSurface, SCREEN_TILES_X, SCREEN_TILES_Y};
 use crate::input::Joypad;
@@ -152,11 +153,12 @@ impl ItemMenu {
         Transition::Push(Mode::ListMenu(ListMenu::bag(ctx.menu.bag_saved, ctx.menu.list_scroll)))
     }
 
-    /// `ItemMenuLoop`: the start menu's screen back, then the bag again.
+    /// `ItemMenuLoop`: the start menu's screen and `SET_PAL_DEFAULT` back, then the bag again.
     fn menu_loop(&mut self, ctx: &mut Ctx) -> Transition {
         if let Some(saved) = &self.saved {
             ctx.screen.ui = saved.clone();
         }
+        ctx.screen.sgb.run(&PaletteCommand::Default);
         self.open_bag(ctx)
     }
 
@@ -441,6 +443,7 @@ impl ModeUpdate for ItemMenu {
                     ctx.screen.ui = saved.clone();
                 }
                 ctx.screen.tiles.load_text_box_tiles();
+                ctx.screen.sgb.run(&PaletteCommand::Default);
                 self.open_bag(ctx)
             }
             (After::Quantity, Outcome::Chosen(quantity)) => self.text("_IsItOKToTossItemText", After::AskToss(quantity)),

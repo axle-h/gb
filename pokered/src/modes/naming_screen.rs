@@ -298,8 +298,10 @@ impl NamingScreen {
     fn redraw(&mut self, ctx: &mut Ctx) -> Transition {
         if self.submit {
             ctx.world.text.strings.insert(TextBuffer::StringBuffer, self.name.clone());
-            // `.submitNickname`'s `ClearSprites`, and `wAnimCounter` back to zero for the next screen.
+            // `.submitNickname`'s `ClearSprites` and `RunDefaultPaletteCommand`, and `wAnimCounter`
+            // back to zero for the next screen.
             clear_sprites(&mut ctx.screen.sprites);
+            ctx.screen.sgb.run(&PaletteCommand::Default);
             self.anim_counter = 0;
             return Transition::Pop(Outcome::Done);
         }
@@ -312,7 +314,7 @@ impl NamingScreen {
 impl ModeUpdate for NamingScreen {
     fn enter(&mut self, ctx: &mut Ctx) {
         ctx.screen.ui.fill(0, 0, SCREEN_TILES_X, SCREEN_TILES_Y, UiSurface::BLANK);
-        // `SET_PAL_GENERIC`, which nothing puts back: the caller's `LoadGBPal` is the DMG's palette.
+        // `SET_PAL_GENERIC`, until `.submitNickname` sends the default.
         ctx.screen.sgb.run(&PaletteCommand::Generic);
         ctx.screen.tiles.load_hp_bar_and_status_tiles();
         ctx.screen.tiles.load_ed_tile();

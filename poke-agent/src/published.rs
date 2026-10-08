@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 
 use crate::pokemon::observe::StatusView;
+use crate::run::GameKind;
 use crate::frame::{Encoded, Frame, PIXELS};
 use gb::lcd_palette::LcdColor;
 
@@ -146,6 +147,8 @@ pub struct StatusSnapshot {
     pub policy: &'static str,
     /// `GB_MODEL`; `None` under any policy that is not an LLM.
     pub model: Option<String>,
+    /// The cartridge or the recreation, for the page's title.
+    pub game_kind: GameKind,
     /// [`crate::pokemon::agent::PokemonAgent::state_debug`]: which arm of the state machine drives.
     pub agent_state: String,
     pub frame_seq: u64,
@@ -167,6 +170,7 @@ impl StatusSnapshot {
             target_speed,
             policy,
             model,
+            game_kind,
             agent_state,
             game,
             run,
@@ -175,6 +179,7 @@ impl StatusSnapshot {
             && target_speed == &previous.target_speed
             && policy == &previous.policy
             && model == &previous.model
+            && game_kind == &previous.game_kind
             && agent_state == &previous.agent_state
             && game == &previous.game
             && run == &previous.run
@@ -196,7 +201,10 @@ pub struct Published {
     usage: RwLock<Option<UsageView>>,
     /// Decisions that landed, not `max(turn)`.
     turns: AtomicU64,
-    save_state: RwLock<Option<(Arc<Vec<u8>>, u64)>>,
+    /// Edges into [`RunStatus::AwaitingLlm`], each a request about to be sent to the model.
+    asks: AtomicU64,
+    /// The machine, when it was taken, and the [`Self::asks`] it was taken for.
+    save_state: RwLock<Option<(Arc<Vec<u8>>, u64, u64)>>,
     /// The most recent heartbeat, for a client that has just connected.
     latest_status: RwLock<Option<UiEvent>>,
     latest_plan: RwLock<Option<UiEvent>>,
@@ -228,6 +236,7 @@ impl Published {
             events: broadcast::channel(EVENT_CAPACITY).0,
             next_event_seq: AtomicU64::new(next_seq),
             status: RwLock::new(RunStatus::Booting),
+            asks: AtomicU64::new(0),
             save_state: RwLock::new(None),
             latest_status: RwLock::new(None),
             latest_plan: RwLock::new(None),
@@ -286,12 +295,29 @@ impl Published {
 
     /// Keep the machine as it is now, for a report filed during the turn that is starting.
     pub fn publish_save_state(&self, state: Vec<u8>) {
-        *self.save_state.write().expect("save state lock poisoned") =
-            Some((Arc::new(state), now_ms()));
+        let ask = self.asks();
+        *self.save_state.write().expect("save state lock poisoned") = Some((Arc::new(state), now_ms(), ask));
     }
 
-    pub fn latest_save_state(&self) -> Option<(Arc<Vec<u8>>, u64)> {
-        self.save_state.read().expect("save state lock poisoned").clone()
+    /// How many times the run has gone into [`RunStatus::AwaitingLlm`]; the host takes a save state
+    /// whenever this moves.
+    pub fn asks(&self) -> u64 {
+        self.asks.load(Ordering::SeqCst)
+    }
+
+    /// The save state taken for the latest ask, waiting up to `within` for the emulator thread to
+    /// take it, since an endpoint can answer before the thread's next tick. Then whatever is newest.
+    /// Nothing is waited for until a first state is published: that is how a host says it takes them.
+    pub fn save_state_for_this_ask(&self, within: std::time::Duration) -> Option<(Arc<Vec<u8>>, u64)> {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let saved = self.save_state.read().expect("save state lock poisoned").clone();
+            let current = saved.as_ref().is_none_or(|(_, _, ask)| *ask >= self.asks());
+            if current || std::time::Instant::now() >= deadline {
+                return saved.map(|(state, at, _)| (state, at));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     pub fn publish_event(&self, body: UiEventBody) -> u64 {
@@ -386,6 +412,9 @@ impl Published {
                 return;
             }
             *current = status.clone();
+            if matches!(status, RunStatus::AwaitingLlm { .. }) {
+                self.asks.fetch_add(1, Ordering::SeqCst);
+            }
         }
         self.publish_event(UiEventBody::Run { status });
     }
@@ -510,6 +539,15 @@ mod tests {
         assert!(!random.says_the_same_as(&snapshot("wait", 1)));
     }
 
+    /// So does which game it is playing, so the page can say "Pokémon Red" or "Rust Version".
+    #[test]
+    fn the_heartbeat_says_which_game_is_playing() {
+        assert_eq!(serde_json::to_value(snapshot("wait", 1)).expect("serialises")["game_kind"], "emulated");
+        let native = StatusSnapshot { game_kind: GameKind::Native, ..snapshot("wait", 1) };
+        assert_eq!(serde_json::to_value(&native).expect("serialises")["game_kind"], "native");
+        assert!(!native.says_the_same_as(&snapshot("wait", 1)));
+    }
+
     #[test]
     fn a_status_is_broadcast_on_transition_and_only_on_transition() {
         let published = Published::new();
@@ -544,6 +582,7 @@ mod tests {
             target_speed: 1.0,
             policy: "llm",
             model: Some("gpt-5".to_string()),
+            game_kind: GameKind::Emulated,
             agent_state: agent_state.to_string(),
             frame_seq: wall_ms / 33,
             game: None,

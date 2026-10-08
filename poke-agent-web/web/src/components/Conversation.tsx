@@ -280,6 +280,8 @@ function describeTool(entry: Extract<Entry, { type: 'tool' }>): string {
     }
     case 'forget_move':
       return args.slot === undefined ? 'Declined the new move' : `Forgot the move in slot ${args.slot}`;
+    case 'mimic_move':
+      return args.slot === undefined ? 'Copied an enemy move' : `Copied the enemy's move in row ${args.slot}`;
     case 'wait':
       return args.ticks === undefined ? 'Waited' : `Waited ${args.ticks} ticks`;
     default: {

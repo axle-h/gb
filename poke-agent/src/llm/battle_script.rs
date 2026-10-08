@@ -509,13 +509,15 @@ fn resolve(choice: Choice, state: &GameState, options: &[BattleAction]) -> Outco
                     "`battle.use_item` was given `{name}` for {}, and it would do nothing there: the \
                      cartridge would only say \"It won't have any effect.\" It can go to: {}.",
                     on.as_ref().map_or("the Pokémon that is out".to_string(), Ref::describe),
-                    list(options.iter().filter(named).filter_map(|action| match action {
-                        BattleAction::UseItem { target: Some(target), .. } => state
-                            .pokemon
-                            .get(*target as usize)
-                            .map(|mon| mon.nickname.to_default_string()),
-                        _ => None,
-                    })),
+                    list({
+                        // An Ether's rows are one per move, each mon's together.
+                        let mut targets: Vec<u8> = options.iter().filter(named).filter_map(|action| match action {
+                            BattleAction::UseItem { target, .. } => *target,
+                            _ => None,
+                        }).collect();
+                        targets.dedup();
+                        targets.into_iter().filter_map(|target| state.pokemon.get(target as usize).map(|mon| mon.nickname.to_default_string()))
+                    }),
                 )),
                 None => Outcome::Failed(format!(
                     "`battle.use_item` was given `{name}`, which is not in the bag. In it now: {}.",
@@ -1050,6 +1052,23 @@ pub(crate) mod scenarios {
         state
     }
 
+    /// SPARKY out with Ember at 3 PP, SHELLY's Water Gun spent and every other move full, and a PP
+    /// item of each kind in the bag.
+    #[cfg(test)]
+    pub fn short_of_pp() -> GameState {
+        let mut state = healthy_wild();
+        for (member, pp) in [(0, 3), (1, 0)] {
+            let mon = state.pokemon.get_mut(member).expect("a two-mon party");
+            mon.moves[1] = mon.moves[1].map(|known| PokemonMove { pp, ..known });
+        }
+        state.bag = Bag::new([ItemId::Ether, ItemId::MaxEther, ItemId::Elixer, ItemId::MaxElixer]
+            .into_iter().map(|item| BagItem::new(item, 1)).collect());
+        if let Some(battle) = state.battle.as_mut() {
+            battle.player = state.pokemon.get(0).expect("the lead").summary();
+        }
+        state
+    }
+
     pub fn catchable_wild() -> GameState {
         let mut foe = at(rattata(9), 0.15);
         foe.current_hp = foe.current_hp.max(1);
@@ -1091,6 +1110,19 @@ mod tests {
             matches!(decide(r#"battle.switch_to("SHELLY");"#, &wild()), Outcome::Action(BattleAction::SwitchPokemon { .. })),
             "by name too",
         );
+    }
+
+    /// `use_item` on an Ether restores the first move short of PP of the one out, or of the mon
+    /// named.
+    #[test]
+    fn an_ether_from_a_script_goes_to_a_move_short_of_pp() {
+        let state = scenarios::short_of_pp();
+        assert!(matches!(decide(r#"battle.use_item("Ether");"#, &state),
+                         Outcome::Action(BattleAction::UseItem { target: Some(0), target_move: Some(1), .. })));
+        assert!(matches!(decide(r#"battle.use_item("Ether", "SHELLY");"#, &state),
+                         Outcome::Action(BattleAction::UseItem { target: Some(1), target_move: Some(1), .. })));
+        assert!(matches!(decide(r#"battle.use_item("Elixer", 1);"#, &state),
+                         Outcome::Action(BattleAction::UseItem { target: Some(1), target_move: None, .. })));
     }
 
     #[test]

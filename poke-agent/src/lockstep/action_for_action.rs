@@ -45,6 +45,7 @@ pub(crate) enum Answer {
     Mart(Option<BagItem>),
     NextMart(BagItem),
     Forget(Option<usize>),
+    Mimic(usize),
 }
 
 /// Where the cartridge stood before an overworld action, and every answer from it to the next.
@@ -180,6 +181,12 @@ impl Policy for Recording {
         let forget = self.inner.pick_move_to_forget(party_slot, current_moves, new_move)?;
         self.note(Answer::Forget(forget));
         Some(forget)
+    }
+
+    fn pick_move_to_mimic(&mut self, state: &GameState, enemy_moves: &[PokemonMove]) -> Option<usize> {
+        let row = self.inner.pick_move_to_mimic(state, enemy_moves)?;
+        self.note(Answer::Mimic(row));
+        Some(row)
     }
 
     fn on_event(&mut self, event: &crate::pokemon::agent::AgentEvent) {
@@ -349,6 +356,11 @@ impl Policy for ReplayPolicy {
     /// The logged answer, or with none left the new move not learned.
     fn pick_move_to_forget(&mut self, _slot: usize, _moves: &[PokemonMove], _new: PokemonMoveName) -> Option<Option<usize>> {
         Some(self.take(|answer| match answer { Answer::Forget(forget) => Some(*forget), _ => None }).flatten())
+    }
+
+    /// The logged answer, or with none left the first row.
+    fn pick_move_to_mimic(&mut self, _state: &GameState, _enemy_moves: &[PokemonMove]) -> Option<usize> {
+        Some(self.take(|answer| match answer { Answer::Mimic(row) => Some(*row), _ => None }).unwrap_or(0))
     }
 }
 

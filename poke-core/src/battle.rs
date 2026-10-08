@@ -35,8 +35,15 @@ pub struct BattleState {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BattleAction {
     Fight { slot: u8, battle_move: PokemonMove },
-    /// `target` is the party slot for an item that asks which Pokémon, as the agent's `item_use::helps_in_battle` decides.
-    UseItem { slot: u8, item: BagItem, target: Option<u8> },
+    /// `target` is the party slot for an item that asks which Pokémon, as the agent's `item_use::helps_in_battle` decides,
+    /// and `target_move` that mon's move slot for an Ether, which asks which move as well.
+    UseItem {
+        slot: u8,
+        item: BagItem,
+        target: Option<u8>,
+        #[serde(default)]
+        target_move: Option<u8>,
+    },
     SwitchPokemon { slot: u8, pokemon: PokemonSummary },
     /// Wild battles only.
     Run,
@@ -51,8 +58,10 @@ impl Display for BattleAction {
         match self {
             BattleAction::Fight { battle_move, .. } => write!(f, "FIGHT  {}  PP {}", battle_move.name, battle_move.pp),
             BattleAction::UseItem { item, target: None, .. } => write!(f, "ITEM   {} ×{}", item.id, item.quantity),
-            BattleAction::UseItem { item, target: Some(target), .. } =>
+            BattleAction::UseItem { item, target: Some(target), target_move: None, .. } =>
                 write!(f, "ITEM   {} ×{} on party slot {target}", item.id, item.quantity),
+            BattleAction::UseItem { item, target: Some(target), target_move: Some(target_move), .. } =>
+                write!(f, "ITEM   {} ×{} on party slot {target}, move slot {target_move}", item.id, item.quantity),
             BattleAction::SwitchPokemon { pokemon, .. } => {
                 write!(f, "PKMN   {} Lv{} — {}/{} HP",
                        pokemon.species, pokemon.level, pokemon.current_hp, pokemon.stats.hp)?;

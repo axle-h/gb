@@ -129,6 +129,13 @@ impl Console {
         }
     }
 
+    pub fn kind(&self) -> GameKind {
+        match self {
+            Self::Emulated(_) => GameKind::Emulated,
+            Self::Native(_) => GameKind::Native,
+        }
+    }
+
     pub fn policy_name(&self) -> &'static str {
         match self {
             Self::Emulated(e) => e.agent.policy_name(),

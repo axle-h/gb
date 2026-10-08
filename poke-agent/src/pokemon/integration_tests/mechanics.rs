@@ -741,6 +741,9 @@ impl crate::pokemon::policy::Policy for RecordingPolicy {
     {
         self.inner.pick_move_to_forget(slot, moves, new_move)
     }
+    fn pick_move_to_mimic(&mut self, state: &GameState, enemy_moves: &[crate::pokemon::move_name::PokemonMove]) -> Option<usize> {
+        self.inner.pick_move_to_mimic(state, enemy_moves)
+    }
     fn pick_field_move(&mut self, state: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
         self.inner.pick_field_move(state)
     }
@@ -1943,6 +1946,9 @@ impl crate::pokemon::policy::Policy for CountingForget {
         *self.calls.borrow_mut() += 1;
         self.inner.pick_move_to_forget(slot, moves, new_move)
     }
+    fn pick_move_to_mimic(&mut self, state: &GameState, enemy_moves: &[crate::pokemon::move_name::PokemonMove]) -> Option<usize> {
+        self.inner.pick_move_to_mimic(state, enemy_moves)
+    }
     fn is_exhausted(&self) -> bool { self.inner.is_exhausted() }
     fn steps_remaining(&self) -> Option<usize> { self.inner.steps_remaining() }
     fn current_step_is_long_running(&self) -> bool { self.inner.current_step_is_long_running() }
@@ -2976,4 +2982,107 @@ fn a_mart_greeting_is_read_to_its_last_letter() {
         }
     }
     assert!(short.is_empty(), "read short, by quarter frames of phase: {short:?}");
+}
+
+/// Fights with MIMIC while it is in slot 0 and copies `row` of whatever Mimic offers.
+struct Mimics {
+    row: usize,
+    offered: std::rc::Rc<std::cell::RefCell<Vec<Vec<crate::pokemon::move_name::PokemonMoveName>>>>,
+}
+
+impl crate::pokemon::policy::Policy for Mimics {
+    fn name(&self) -> &'static str { "mimics" }
+    fn pick_overworld_action(&mut self, _: &GameState, _: &crate::pokemon::world_graph::WorldGraph)
+        -> Option<crate::pokemon::actions::OverworldAction> { None }
+    fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+        state.battle?.player.available_battle_moves().into_iter().next()
+    }
+    fn pick_move_to_mimic(&mut self, _: &GameState, enemy_moves: &[crate::pokemon::move_name::PokemonMove]) -> Option<usize> {
+        self.offered.borrow_mut().push(enemy_moves.iter().map(|known| known.name).collect());
+        Some(self.row)
+    }
+}
+
+/// The cartridge's Mimic menu is the policy's question, asked once with the enemy's moves, and the
+/// row it names is the move copied, as the recreation's is.
+#[test]
+fn the_cartridge_s_mimic_copies_the_enemy_move_the_policy_names() {
+    use crate::pokemon::move_name::PokemonMoveName;
+    use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointerRead};
+    let offered = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut fixture = TestFixture::with_policy(BATTLE_STATE, Duration::from_secs(60),
+                                               Box::new(Mimics { row: 1, offered: offered.clone() }));
+    let enemy: Vec<PokemonMoveName> = fixture.game_state().battle.expect("mid-battle").enemy.moves
+        .iter().flatten().map(|known| known.name).collect();
+    assert!(enemy.len() > 1, "the enemy needs a second move to copy: {enemy:?}");
+    {
+        let mmu = fixture.gb.core_mut().mmu_mut();
+        let slot = mmu.read_pointer(&sym::wPlayerMonNumber) as u16;
+        for (moves, pp) in [(sym::wBattleMonMoves.address, sym::wBattleMonPP.address),
+                            (sym::wPartyMon1Moves.address + slot * 0x2C, sym::wPartyMon1PP.address + slot * 0x2C)] {
+            mmu.write(moves, PokemonMoveName::Mimic as u8);
+            mmu.write(pp, 10);
+        }
+    }
+    let first = |fixture: &mut TestFixture| fixture.gb.core_mut().mmu_mut().read_pointer(&sym::wBattleMonMoves);
+    for _ in 0..5_000 {
+        fixture.step();
+        if first(&mut fixture) != PokemonMoveName::Mimic as u8 {
+            break;
+        }
+    }
+    assert_eq!(PokemonMoveName::from_repr(first(&mut fixture)), Some(enemy[1]), "offered {:?}", offered.borrow());
+    assert_eq!(*offered.borrow(), [enemy], "asked once, with the enemy's moves");
+}
+
+/// Uses the battle row for an Ether on `aim`'s move, once.
+struct EtherOn { aim: u8, used: bool }
+
+impl crate::pokemon::policy::Policy for EtherOn {
+    fn name(&self) -> &'static str { "ether" }
+    fn pick_overworld_action(&mut self, _: &GameState, _: &crate::pokemon::world_graph::WorldGraph)
+        -> Option<crate::pokemon::actions::OverworldAction> { None }
+    fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
+        if std::mem::replace(&mut self.used, true) {
+            return None;
+        }
+        let rows = crate::pokemon::policy::battle_options(state)?;
+        let row = rows.into_iter().find(|row| matches!(row,
+            BattleAction::UseItem { target_move: Some(aim), .. } if *aim == self.aim));
+        assert!(row.is_some(), "no Ether row for move {}", self.aim);
+        row
+    }
+}
+
+/// The cartridge's "Restore PP of which technique?" is answered with the move the row names, at
+/// once, and not by whichever move the cursor was left on after the party menu's presses.
+#[test]
+fn the_cartridge_s_ether_restores_the_move_its_row_names() {
+    use crate::pokemon::item::ItemId;
+    use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointerRead};
+    for aim in [0u8, 1] {
+        let mut fixture = TestFixture::with_policy(BATTLE_STATE, Duration::from_secs(60),
+                                                   Box::new(EtherOn { aim, used: false }));
+        fixture.api().debug_give_item(ItemId::Ether, 1).unwrap();
+        let slot = {
+            let mmu = fixture.gb.core_mut().mmu_mut();
+            let slot = mmu.read_pointer(&sym::wPlayerMonNumber) as u16;
+            for pp in [sym::wBattleMonPP.address, sym::wPartyMon1PP.address + slot * 0x2C] {
+                mmu.write(pp, 5);
+                mmu.write(pp + 1, 0);
+            }
+            slot as usize
+        };
+        assert!(fixture.game_state().pokemon[slot].moves[1].is_some(), "the lead needs a second move");
+        let mut ticks = 0;
+        while fixture.game_state().bag.iter().any(|b| b.id == ItemId::Ether) {
+            fixture.step();
+            ticks += 1;
+            assert!(ticks < 200, "the Ether on move {aim} was still in the bag after {ticks} ticks");
+        }
+        let pp: Vec<u8> = fixture.game_state().pokemon[slot].moves.iter().take(2)
+            .map(|mv| mv.expect("a move").pp).collect();
+        let want = if aim == 0 { [15, 0] } else { [5, 10] };
+        assert_eq!(pp, want, "the Ether on move {aim}");
+    }
 }

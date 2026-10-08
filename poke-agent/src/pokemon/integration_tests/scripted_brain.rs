@@ -167,6 +167,7 @@ fn default_for(request: &TurnRequest) -> Reply {
     for (name, arguments) in [
         ("set_nickname", serde_json::json!({})),
         ("forget_move", serde_json::json!({})),
+        ("mimic_move", serde_json::json!({ "slot": 0 })),
         ("buy_item", serde_json::json!({})),
     ] {
         if request.has_tool(name) {

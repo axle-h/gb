@@ -32,9 +32,9 @@ pub enum Command {
     CloseDex,
     /// Press B through an evolution's animation, which stops it unless an item forced it.
     CancelEvolution,
-    /// Back out with B from the party menu, the bag's USE/TOSS, a mon's moves, or the list of moves
-    /// to forget, which asks whether to abandon learning; or leave the League PC's Hall of Fame
-    /// before its last mon.
+    /// Back out with B from the party menu, a party mon's field moves, the bag's USE/TOSS, a mon's
+    /// moves, the save slots, or the list of moves to forget, which asks whether to abandon
+    /// learning; or leave the League PC's Hall of Fame before its last mon.
     CancelOption,
     /// Count up or down to a quantity and take it.
     ChooseQuantity(u8),
@@ -57,8 +57,14 @@ pub enum Command {
     Run,
     /// Send out the party mon in this slot: PKMN and SWITCH, or the choice after a faint.
     SwitchPokemon(u8),
-    /// Use a bag item in battle, on a party slot where it asks for one.
-    UseItem { item: ItemId, target: Option<u8> },
+    /// Use a bag item in battle, on a party slot where it asks for one, and on that mon's move slot
+    /// where it asks which move as well (an Ether).
+    UseItem {
+        item: ItemId,
+        target: Option<u8>,
+        #[serde(default)]
+        target_move: Option<u8>,
+    },
     /// The Safari Zone's BALL, BAIT and THROW ROCK, which stand where FIGHT, PKMN and ITEM do.
     SafariBall,
     SafariBait,
@@ -81,6 +87,7 @@ pub enum Decision {
     BuySellQuit,
     PartyMenu,
     NamingScreen,
+    /// A party mon's field moves above STATS, SWITCH and CANCEL; `CancelOption` backs out.
     FieldMoveMenu,
     /// The Pokédex's list of numbers.
     Pokedex,
@@ -130,7 +137,7 @@ pub enum Decision {
     /// is a `CursorMenu` (row 0 bets three coins, row 2 one), its texts and a win's `▼` are `Text`,
     /// and "One more go?" is a `TwoOption`.
     SlotWheels,
-    /// The save slots' list. Only buttons answer it: no agent saves.
+    /// The save slots' list. No agent saves, so a command only backs out of it, with `CancelOption`.
     SlotSelector,
 }
 
@@ -328,7 +335,8 @@ impl Executor {
             Command::CancelOption => match modes.last().map(|mode| mode.status()) {
                 Some(Status::Waiting(from @ (Decision::PartyMenu | Decision::UseToss | Decision::MoveMenu
                                               | Decision::BattleMoves | Decision::SwitchStatsCancel | Decision::CursorMenu
-                                              | Decision::TownMap | Decision::FlyDestination | Decision::ForgetMove))) =>
+                                              | Decision::TownMap | Decision::FlyDestination | Decision::ForgetMove
+                                              | Decision::FieldMoveMenu | Decision::SlotSelector))) =>
                     Driver::Cancel { from, pressed: false },
                 // The League PC's wait takes A or B, and a B held as it ends leaves the record.
                 Some(Status::Waiting(Decision::Text))
@@ -594,5 +602,43 @@ impl Executor {
             Driver::Overworld(driver) => driver.drive(modes, world),
             Driver::Battle(driver) => driver.drive(modes, world),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::modes::field_move_menu::FieldMoveMenu;
+    use crate::modes::slot_selector::SlotSelector;
+    use crate::rng::GameRng;
+    use crate::systems::field_moves::field_moves;
+    use crate::{Event, Game, Input, Pacing};
+    use super::*;
+
+    /// `mode` alone, backed out of with `CancelOption` once it waits on `decision`.
+    fn backed_out_of(mode: Mode, decision: Decision) -> Game {
+        let mut game = Game::new(World::default(), GameRng::seeded(0), Pacing::Faithful);
+        game.push(mode);
+        for _ in 0..100 {
+            if game.status() == Status::Waiting(decision.clone()) {
+                break;
+            }
+            game.frame(Input::None);
+        }
+        assert_eq!(game.status(), Status::Waiting(decision));
+        assert_eq!(game.frame(Input::Command(Command::CancelOption)).reply, Some(Reply::Accepted));
+        for _ in 0..100 {
+            if game.frame(Input::None).events.contains(&Event::CommandDone(Command::CancelOption)) {
+                return game;
+            }
+        }
+        panic!("CancelOption never finished");
+    }
+
+    #[test]
+    fn b_backs_out_of_a_party_mon_s_field_moves_and_the_save_slots() {
+        let game = backed_out_of(Mode::FieldMoveMenu(FieldMoveMenu::new(field_moves([0; 4]))), Decision::FieldMoveMenu);
+        assert!(game.modes().is_empty(), "{:?}", game.modes().last().map(Mode::status));
+        let game = backed_out_of(Mode::SlotSelector(SlotSelector::new(None)), Decision::SlotSelector);
+        assert!(game.modes().is_empty(), "{:?}", game.modes().last().map(Mode::status));
     }
 }

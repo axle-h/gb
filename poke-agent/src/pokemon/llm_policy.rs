@@ -35,7 +35,7 @@ pub struct LlmPolicy {
     snapshot: ApiSnapshot,
     /// The last `GameState` seen at a poll where a turn could start.
     state: Option<Box<GameState>>,
-    /// Which of the five poll sites was asked last.
+    /// Which of the poll sites was asked last.
     site: Option<DecisionKind>,
     /// The `choose_action` call being carried out, if one is — see [`ActionQueue`].
     queue: Option<ActionQueue>,
@@ -259,6 +259,10 @@ impl LlmPolicy {
                     DecisionKind::MartPurchase => tools::mart_menu(&self.snapshot, state),
                     DecisionKind::ForgetMove => match context {
                         TurnContext::ForgetMove { current, .. } => tools::forget_menu(current, state.ruleset),
+                        _ => Vec::new(),
+                    },
+                    DecisionKind::MimicMove => match context {
+                        TurnContext::MimicMove { enemy } => tools::mimic_menu(state, enemy),
                         _ => Vec::new(),
                     },
                     // The naming screen offers no choices; the tool's own arguments are the menu.
@@ -734,7 +738,30 @@ impl Policy for LlmPolicy {
         }
     }
 
-    /// The sixth kind, asked by the watchdog rather than by a poll site.
+    fn pick_move_to_mimic(&mut self, _state: &GameState, enemy_moves: &[PokemonMove]) -> Option<usize> {
+        match self.advance(DecisionKind::MimicMove, TurnContext::MimicMove { enemy: enemy_moves })? {
+            Terminal::MimicMove { slot } if (slot as usize) < enemy_moves.len() => Some(slot as usize),
+            // The menu cannot be left, so a row it lacks is asked about again.
+            Terminal::MimicMove { slot } => {
+                self.reject(format!(
+                    "Row {slot} is not one of the enemy's {} moves, so nothing was copied. Pick a row \
+                     from the list.",
+                    enemy_moves.len(),
+                ));
+                None
+            }
+            Terminal::Wait { ticks } => {
+                self.waiting = Some((DecisionKind::MimicMove, ticks));
+                None
+            }
+            other => {
+                self.reject(format!("`{other:?}` cannot answer Mimic's menu."));
+                None
+            }
+        }
+    }
+
+    /// The kind asked by the watchdog rather than by a poll site.
     fn pick_unstick(&mut self, _state: &GameState, jam: crate::pokemon::policy::Jam<'_>) {
         let context = TurnContext::Stuck { agent_state: jam.agent_state, stuck_for: jam.stuck_for };
         match self.advance(DecisionKind::Stuck, context) {
@@ -2504,6 +2531,76 @@ mod tests {
             .pump_prompt(&mut policy, |policy, _| policy.pick_move_to_forget(0, &moves, PokemonMoveName::Bite))
             .expect("it is answered rather than left hanging");
         assert_eq!(answer, None, "declining keeps all the moves it has");
+    }
+
+    /// The enemy's moves in the battle fixture, as Mimic's menu would list them.
+    fn enemy_moves(rig: &mut Rig) -> Vec<PokemonMove> {
+        rig.state().battle.expect("mid-battle").enemy.moves.iter().flatten().copied().collect()
+    }
+
+    /// Mimic's menu is a turn of its own, its rows the enemy's moves, and the row is the answer.
+    #[test]
+    fn a_mimic_turn_answers_with_the_enemy_move_to_copy() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        rig.enter_battle();
+        let enemy = enemy_moves(&mut rig);
+        let last = enemy.len() - 1;
+        rig.push(vec![calls(&[("mimic_move", &format!(r#"{{"slot":{last}}}"#))])]);
+
+        let answer = rig
+            .pump_prompt(&mut policy, |policy, state| policy.pick_move_to_mimic(state, &enemy))
+            .expect("Mimic's menu is answered");
+        assert_eq!(answer, last);
+
+        let requests = rig.requests();
+        let offered: Vec<&str> = requests[0].tools.iter().map(|t| t.function.name).collect();
+        assert!(offered.contains(&"mimic_move") && !offered.contains(&"choose_battle_action"), "{offered:?}");
+        let asked = last_user_message(&requests[0]);
+        assert!(asked.contains("used MIMIC"), "{asked}");
+        assert!(asked.contains(&format!("`{last}` — {}", enemy[last].name)), "the enemy's moves are the menu: {asked}");
+    }
+
+    /// The menu cannot be left, so a row it lacks is asked about again rather than taken.
+    #[test]
+    fn a_mimic_row_the_enemy_does_not_have_is_asked_again() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        rig.enter_battle();
+        let enemy = enemy_moves(&mut rig);
+        let missing = enemy.len();
+        rig.push(vec![
+            calls(&[("mimic_move", &format!(r#"{{"slot":{missing}}}"#))]),
+            calls(&[("mimic_move", r#"{"slot":0}"#)]),
+        ]);
+
+        let answer = rig
+            .pump_prompt(&mut policy, |policy, state| policy.pick_move_to_mimic(state, &enemy))
+            .expect("it is answered in the end");
+        assert_eq!(answer, 0);
+        let requests = rig.requests();
+        assert_eq!(requests.len(), 2);
+        let again = last_user_message(&requests[1]);
+        assert!(again.contains(&format!("Row {missing} is not one of the enemy's")), "{again}");
+    }
+
+    /// A Mimic the script chose goes to the model as one turn, and the script decides the battle's
+    /// next turn without another.
+    #[test]
+    fn a_mimic_the_script_chose_is_asked_once_and_the_script_carries_on() {
+        let (mut rig, mut policy) = armed_with(SCRIPT, 0);
+        rig.enter_battle();
+        rig.pump_battle(&mut policy, Duration::from_millis(200)).expect("the script decides");
+        let before = rig.requests().len();
+        let enemy = enemy_moves(&mut rig);
+        rig.push(vec![calls(&[("mimic_move", r#"{"slot":0}"#)])]);
+
+        let answer = rig
+            .pump_prompt(&mut policy, |policy, state| policy.pick_move_to_mimic(state, &enemy))
+            .expect("Mimic's menu is answered");
+        assert_eq!(answer, 0);
+        assert_eq!(rig.requests().len(), before + 1, "one request for the menu");
+
+        rig.pump_battle(&mut policy, Duration::from_millis(200)).expect("the script decides the next turn");
+        assert_eq!(rig.requests().len(), before + 1, "and none for the turn after it");
     }
 
     #[test]

@@ -76,6 +76,10 @@ pub struct RunMeta {
     /// `GB_MODEL`, or `"random"` under `--policy random`.
     pub model: String,
     pub started_at: String,
+    /// Which game the run is played on. A `meta.json` from before the field reads as emulated, and a
+    /// resume rewrites it from the file it found, so a native run's old meta corrects itself.
+    #[serde(default)]
+    pub game: GameKind,
     pub last_checkpoint_at: Option<String>,
     /// Emulated milliseconds across every process that has played the run.
     #[serde(default)]
@@ -105,11 +109,12 @@ pub struct RunMeta {
 
 impl RunMeta {
     /// A fresh run's meta, with every total at zero.
-    fn new(run_id: String, model: String) -> Self {
+    fn new(run_id: String, model: String, game: GameKind) -> Self {
         Self {
             run_id,
             model,
             started_at: iso8601(SystemTime::now()),
+            game,
             last_checkpoint_at: None,
             emulated_ms: 0,
             wall_ms: 0,
@@ -172,8 +177,9 @@ impl std::ops::Add for RunProgress {
     }
 }
 
-/// Which game a run is played on, and so which file holds it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Which game a run is played on, and so which file holds it. Written as `GB_GAME` spells it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum GameKind {
     /// The cartridge on the emulator: `state.gbst` and `sram.bin`.
     #[default]
@@ -247,8 +253,9 @@ impl RunDir {
                     Err(_) => continue,
                 };
                 let mut meta = read_meta(&candidate).unwrap_or_else(|| {
-                    RunMeta::new(directory_name(&candidate), model.to_string())
+                    RunMeta::new(directory_name(&candidate), model.to_string(), kind)
                 });
+                meta.game = kind;
                 // The model can change between processes; the current one is the one to record.
                 meta.model = model.to_string();
                 meta.resumed_from.push(iso8601(SystemTime::now()));
@@ -265,7 +272,7 @@ impl RunDir {
         std::fs::create_dir_all(&path)
             .map_err(|e| format!("could not create the run directory {}: {e}", path.display()))?;
         let run = Self {
-            meta: Mutex::new(RunMeta::new(run_id, model.to_string())),
+            meta: Mutex::new(RunMeta::new(run_id, model.to_string(), kind)),
             path,
             kind,
             baseline: RunProgress::default(),
@@ -633,10 +640,41 @@ pub(crate) mod tests {
         assert_eq!(meta.emulated_ms, 5_000, "what was there is kept as the baseline");
         assert_eq!(meta.wall_ms, 0, "what was not there defaults");
         assert!(meta.completed.is_empty());
+        assert_eq!(meta.game, GameKind::Emulated, "a run from before the field was the cartridge's");
 
         run.checkpoint(b"GBSTnew", b"", RunProgress { emulated_ms: 1_000, ..Default::default() })
             .expect("checkpoint");
         assert_eq!(run.meta().emulated_ms, 6_000, "and the old figure is continued, not replaced");
+    }
+
+    /// `meta.json` says which game the run is on: a fresh one from the start, and an old native one
+    /// once a native process has resumed it, since only the file it found knows.
+    #[test]
+    fn meta_json_records_the_game_a_run_is_played_on() {
+        let on_disk = |run: &RunDir| -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(run.path().join(files::META)).unwrap()).unwrap()
+        };
+        let scratch = Scratch::new("rungamekind");
+        let (fresh, _, _) = RunDir::open_for(GameKind::Native, &scratch.0, false, "m", &|_| true).expect("a run");
+        assert_eq!(on_disk(&fresh)["game"], "native");
+        let (emulated, _, _) = RunDir::open(&scratch.0, true, "m", &|_| true).expect("a run");
+        assert_eq!(on_disk(&emulated)["game"], "emulated");
+
+        let path = scratch.0.join("run-old-native");
+        std::fs::create_dir_all(&path).expect("a run directory");
+        std::fs::write(path.join(files::GAME), b"pkrd").expect("a game");
+        std::fs::write(
+            path.join(files::META),
+            br#"{"run_id":"run-old-native","model":"m","started_at":"2026-01-01T00:00:00Z","last_checkpoint_at":null}"#,
+        )
+        .expect("an old meta.json");
+        assert_eq!(read_meta(&path).expect("it parses").game, GameKind::Emulated, "the field defaults");
+
+        let (resumed, origin, _) = RunDir::open_for(GameKind::Native, &scratch.0, false, "m", &|_| true).expect("it opens");
+        assert_eq!(origin, Origin::Resumed);
+        assert_eq!(resumed.path(), path);
+        assert_eq!(resumed.meta().game, GameKind::Native);
+        assert_eq!(on_disk(&resumed)["game"], "native", "the resume corrects the default on disk");
     }
 
     /// A restart from a checkpoint just before `wNumHoFTeams` moved does not file the victory twice.

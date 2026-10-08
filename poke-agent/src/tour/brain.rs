@@ -1391,6 +1391,9 @@ impl Brain for CompletionBrain {
                 None => Reply::call("forget_move", serde_json::json!({ "summary": "keeping what it knows" })),
             };
         }
+        if request.has_tool("mimic_move") {
+            return Reply::call("mimic_move", serde_json::json!({ "slot": 0, "summary": "copying the first" }));
+        }
         if !request.has_tool("choose_action") {
             return Reply::Calls(vec![Call::wait(1)]);
         }

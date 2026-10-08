@@ -30,7 +30,9 @@ use crate::cli::ServePolicy;
 use gb::game_boy::GameBoy;
 use crate::host::{ControlRequest, ControlRequests, EmulatorHost, HostConfig};
 use gb::model::Model;
-use poke_agent::pokemon::policy::RandomPolicy;
+use poke_agent::llm::LlmConfig;
+use poke_agent::llm::client::ChatEndpoint;
+use poke_agent::pokemon::policy::{Policy, RandomPolicy};
 use poke_agent::run::{CurrentRun, GameKind, Origin, RunDir, transcript};
 use poke_agent::published::{self, Published};
 
@@ -124,57 +126,11 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
         },
     });
 
-    // A factory, run on the emulator thread: `Policy` is not `Send`.
-    let make_policy: Box<dyn FnOnce() -> Box<dyn poke_agent::pokemon::policy::Policy> + Send> = match policy
-    {
-        ServePolicy::Random => Box::new(|| Box::new(RandomPolicy::default())),
-        // The same policy, seed and queue `full_playthrough` runs.
-        ServePolicy::Deterministic => {
-            let run_dir = run.path().to_path_buf();
-            // Only this knows a cursorless run from a new one; `resuming_in` parks rather than guess.
-            let from_the_beginning = matches!(origin, Origin::Fresh);
-            Box::new(move || {
-                use poke_agent::pokemon::policy::{DeterministicPolicy, PolicyStep};
-                Box::new(DeterministicPolicy::new(SCRIPTED_SEED, PolicyStep::complete_game_steps())
-                    .resuming_in(&run_dir, from_the_beginning))
-            })
-        }
-        ServePolicy::Llm => {
-            use poke_agent::llm::{client::OpenAiClient, todo::TodoList, worker};
-            use poke_agent::pokemon::llm_policy::LlmPolicy;
-
-            let config = llm.expect("built above");
-            println!("poke-agent-web — {} via {}", config.model, config.base_url);
-            let endpoint = Box::new(OpenAiClient::new(&config));
-            let stuck_timeout = config.stuck_timeout;
-            // The plan, the battle script and the conversation live in the run directory, so they
-            // survive both a compaction and a restart.
-            let todo = TodoList::open(Some(run.path()));
-            let battle_script = poke_agent::llm::battle_script::BattleScript::open(Some(run.path()));
-            let history = poke_agent::llm::history::History::open(Some(run.path()));
-            if let Some(restored) = history.restored() {
-                published.publish_event(published::UiEventBody::Notice {
-                    level: "info",
-                    message: format!("resumed the conversation: {} messages", restored.messages),
-                });
-                if restored.system_prompt_changed {
-                    published.publish_event(published::UiEventBody::Notice {
-                        level: "warn",
-                        message: "the system prompt changed since this conversation was saved; \
-                                  the new one is now in force"
-                            .to_string(),
-                    });
-                }
-            }
-            // Incident records go to whichever run is current when the press happens, not to this
-            // one; see `llm::incident`.
-            let (worker, handles) = worker::channels(endpoint, config, Arc::clone(&published), todo, battle_script, history);
-            let worker = worker.with_run(Arc::clone(&current));
-            // It ends when the emulator thread drops the policy and its channels close.
-            worker.spawn()?;
-            Box::new(move || Box::new(LlmPolicy::new(handles, stuck_timeout)))
-        }
-    };
+    let llm = llm.map(|config| {
+        let endpoint: Box<dyn ChatEndpoint> = Box::new(poke_agent::llm::client::OpenAiClient::new(&config));
+        (config, endpoint)
+    });
+    let make_policy = policy_factory(policy, llm, &current, origin, &published)?;
 
     let control = Arc::new(ControlRequests::default());
     let admin_token = admin_token();
@@ -222,6 +178,68 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     });
     let _ = transcript.join();
     result
+}
+
+/// What plays the game, as a factory run on the emulator thread: `Policy` is not `Send`.
+pub(crate) type PolicyFactory = Box<dyn FnOnce() -> Box<dyn Policy> + Send>;
+
+/// The served `policy` on `current`, which `llm`'s endpoint answers under `--policy llm`.
+pub(crate) fn policy_factory(
+    policy: ServePolicy,
+    llm: Option<(LlmConfig, Box<dyn ChatEndpoint>)>,
+    current: &Arc<CurrentRun>,
+    origin: Origin,
+    published: &Arc<Published>,
+) -> Result<PolicyFactory, String> {
+    let run = current.get();
+    Ok(match policy {
+        ServePolicy::Random => Box::new(|| Box::new(RandomPolicy::default())),
+        // The same policy, seed and queue `full_playthrough` runs.
+        ServePolicy::Deterministic => {
+            let run_dir = run.path().to_path_buf();
+            // Only this knows a cursorless run from a new one; `resuming_in` parks rather than guess.
+            let from_the_beginning = matches!(origin, Origin::Fresh);
+            Box::new(move || {
+                use poke_agent::pokemon::policy::{DeterministicPolicy, PolicyStep};
+                Box::new(DeterministicPolicy::new(SCRIPTED_SEED, PolicyStep::complete_game_steps())
+                    .resuming_in(&run_dir, from_the_beginning))
+            })
+        }
+        ServePolicy::Llm => {
+            use poke_agent::llm::{todo::TodoList, worker};
+            use poke_agent::pokemon::llm_policy::LlmPolicy;
+
+            let (config, endpoint) = llm.ok_or("--policy llm needs an endpoint")?;
+            println!("poke-agent-web — {} via {}", config.model, config.base_url);
+            let stuck_timeout = config.stuck_timeout;
+            // The plan, the battle script and the conversation live in the run directory, so they
+            // survive both a compaction and a restart.
+            let todo = TodoList::open(Some(run.path()));
+            let battle_script = poke_agent::llm::battle_script::BattleScript::open(Some(run.path()));
+            let history = poke_agent::llm::history::History::open(Some(run.path()));
+            if let Some(restored) = history.restored() {
+                published.publish_event(published::UiEventBody::Notice {
+                    level: "info",
+                    message: format!("resumed the conversation: {} messages", restored.messages),
+                });
+                if restored.system_prompt_changed {
+                    published.publish_event(published::UiEventBody::Notice {
+                        level: "warn",
+                        message: "the system prompt changed since this conversation was saved; \
+                                  the new one is now in force"
+                            .to_string(),
+                    });
+                }
+            }
+            // Incident records go to whichever run is current when the press happens, not to this
+            // one; see `llm::incident`.
+            let (worker, handles) = worker::channels(endpoint, config, Arc::clone(published), todo, battle_script, history);
+            let worker = worker.with_run(Arc::clone(current));
+            // It ends when the emulator thread drops the policy and its channels close.
+            worker.spawn()?;
+            Box::new(move || Box::new(LlmPolicy::new(handles, stuck_timeout)))
+        }
+    })
 }
 
 /// How often the game state is sampled for the heartbeat, from `GB_STATUS_HZ`.

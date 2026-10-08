@@ -140,6 +140,9 @@ pub(super) struct Cartridge {
     /// The people's draws left off the tape: they draw by the frame, and on an SGB the frames its
     /// packets take move them.
     people_untaped: bool,
+    /// `_RunPaletteCommand` entered since the start: before it, an SGB shows what the console held
+    /// rather than anything the fixture's screen sent.
+    palette_sent: bool,
 }
 
 /// What the cartridge does between two points that the recreation leaves out, each entry to one of
@@ -172,11 +175,16 @@ enum Loading {
     HandleMenuInput,
     /// `RedrawPartyMenu_`'s `Delay3` once the list is drawn.
     PartyMenuDrawn,
-    /// `LoadTextBoxTilePatterns`, `LoadHpBarAndStatusTilePatterns` and `LoadFontTilePatterns` with the
-    /// LCD on, which jump to `CopyVideoData` or `CopyVideoDataDouble`: the tiles each copies.
+    /// `LoadTextBoxTilePatterns`, `LoadHpBarAndStatusTilePatterns`, `LoadFontTilePatterns` and
+    /// `LoadEDTile` with the LCD on, which jump to `CopyVideoData` or `CopyVideoDataDouble`: the
+    /// tiles each copies.
     TilePatterns(u16),
     /// `RestoreScreenTilesAndReloadTilePatterns`' closing `Delay3`.
     RestoreScreenTiles,
+    /// `PrintAlphabet`'s closing `Delay3`.
+    PrintAlphabet,
+    /// `UpdateHPBar2`'s closing `Delay3`, once the bar has walked.
+    UpdateHpBar,
     /// `UsedCut`'s two `Delay3` either side of reloading the map view.
     UsedCut,
     /// `LoadTownMap`'s `Delay3` after its palette.
@@ -228,6 +236,8 @@ const LOADING: &[(Loading, DmgPointer)] = &[
     (Loading::PlayerSpriteGraphics, sym::LoadPlayerSpriteGraphicsCommon),
     (Loading::TilePatterns(HP_BAR_AND_STATUS_TILES), local::LoadHpBarAndStatusTilePatterns::on),
     (Loading::TilePatterns(FONT_TILES), local::LoadFontTilePatterns::on),
+    (Loading::TilePatterns(ED_TILES), sym::LoadEDTile), (Loading::PrintAlphabet, sym::PrintAlphabet),
+    (Loading::UpdateHpBar, local::UpdateHPBar2::monFainted),
     (Loading::RestoreScreenTiles, sym::RestoreScreenTilesAndReloadTilePatterns),
     (Loading::UsedCut, local::UsedCut::canCut),
     (Loading::LoadTownMap, sym::LoadTownMap), (Loading::LoadTownMapFly, sym::LoadTownMap_Fly),
@@ -238,6 +248,8 @@ const LOADING: &[(Loading, DmgPointer)] = &[
 
 const TEXT_BOX_TILES: u16 = (sym::TextBoxGraphicsEnd.address - sym::TextBoxGraphics.address) / 16;
 const HP_BAR_AND_STATUS_TILES: u16 = (sym::HpBarAndStatusGraphicsEnd.address - sym::HpBarAndStatusGraphics.address) / 16;
+/// `ED_Tile`, which is 1bpp.
+const ED_TILES: u16 = (sym::ED_TileEnd.address - sym::ED_Tile.address) / 8;
 
 /// Arithmetic long enough to run over frames, which the recreation does at once: lag, priced by the
 /// VBlanks the cartridge takes between its entry and its return. `CalcStat`'s square root of stat
@@ -280,7 +292,8 @@ impl Loading {
     /// `None` where the stretch cannot be timed.
     fn frames(self, map: Map, x: u8, y: u8) -> Option<u32> {
         Some(match self {
-            Loading::DisplayTextIdInit | Loading::RestoreScreenTiles | Loading::LoadTownMap | Loading::FlyWarp => super::DELAY3,
+            Loading::DisplayTextIdInit | Loading::RestoreScreenTiles | Loading::LoadTownMap | Loading::FlyWarp
+                | Loading::PrintAlphabet | Loading::UpdateHpBar => super::DELAY3,
             Loading::RedrawMapView => 9,
             Loading::UsedCut => 2 * super::DELAY3,
             Loading::InGameTradeRestoreScreen => super::DELAY3 + 10,
@@ -332,7 +345,7 @@ impl Cartridge {
         gb.core_mut().mmu_mut().audio_mut().set_output_enabled(false);
         let map = gb.core().mmu().read(sym::wCurMap.address);
         Self { gb, tape: Vec::new(), map, entered: Vec::new(), text: 0, acting: 0, lagging: None, spanning: None, fought: false,
-            play_transition: false, transition_oam: None, people_untaped: false }
+            play_transition: false, transition_oam: None, people_untaped: false, palette_sent: false }
     }
 
     pub fn read(&self, at: u16) -> u8 {
@@ -353,8 +366,9 @@ impl Cartridge {
         let transition_tile = breakpoint(sym::LoadBattleTransitionTile);
         let copy_video = breakpoint(sym::CopyVideoData);
         let pause = breakpoint(sym::TextCommand_PAUSE);
+        let palette = breakpoint(sym::_RunPaletteCommand);
         let mut all = points.to_vec();
-        all.extend([copy_video, pause]);
+        all.extend([copy_video, pause, palette]);
         all.extend([random, encounter]);
         all.extend(&seams);
         all.extend(self.play_transition.then_some(transition_tile));
@@ -454,6 +468,7 @@ impl Cartridge {
                     registers.sp = sp + 2;
                     registers.pc = back;
                 }
+                Stop::Breakpoint(hit) if hit == palette && !points.contains(&hit) => self.palette_sent = true,
                 Stop::Breakpoint(hit) => return hit,
                 Stop::Budget => {}
                 stop => panic!("{stop:?}"),
@@ -596,7 +611,7 @@ impl Cartridge {
             held: self.held(),
             sprites: None,
             lcd: None,
-            sgb: mmu.sgb().map(|sgb| cells(|column, row| sgb.cell_palette(column, row))),
+            sgb: mmu.sgb().filter(|_| self.palette_sent).map(|sgb| cells(|column, row| sgb.cell_palette(column, row))),
             music: None,
             entered: std::mem::take(&mut self.entered),
         };
@@ -773,12 +788,23 @@ pub(super) fn lockstep(state: &[u8], prepare: impl FnOnce(&mut Cartridge), choos
 }
 
 /// `lockstep` with the cartridge on a Super Game Boy, comparing the palettes in force at every poll
-/// from the first map loaded on, which is the first palette the fixture's cartridge sends. Untimed:
-/// each palette sent is frames of the cartridge bit-banging packets, which the recreation leaves out.
+/// from the first palette the cartridge sends. Untimed: each palette sent is frames of the cartridge
+/// bit-banging packets, which the recreation leaves out.
 pub(super) fn lockstep_on_sgb(state: &[u8], prepare: impl FnOnce(&mut Cartridge),
     choose: impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>)
 {
     lockstep_from(Cartridge::on(super::on_sgb(state)), prepare, true, Joypad::empty(), choose);
+}
+
+/// `lockstep`, or on a Super Game Boy `lockstep_on_sgb`.
+pub(super) fn lockstep_or_on_sgb(on_sgb: bool, state: &[u8], prepare: impl FnOnce(&mut Cartridge),
+    choose: impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>)
+{
+    if on_sgb {
+        lockstep_on_sgb(state, prepare, choose);
+    } else {
+        lockstep(state, prepare, choose);
+    }
 }
 
 /// `lockstep`, with `held` down until the start's poll: Cycling Road's slope rolls a rider who holds
@@ -809,6 +835,7 @@ fn lockstep_from(mut cartridge: Cartridge, prepare: impl FnOnce(&mut Cartridge),
     let start = Start::take(&cartridge.gb);
     cartridge.tape.clear();
     cartridge.entered.clear();
+    cartridge.palette_sent = false;
     let mut polls = vec![cartridge.seen(Kind::Overworld, 0)];
     let mut script = Vec::new();
     while let Some((action, what)) = choose(script.len(), polls.last().unwrap()) {
@@ -844,12 +871,10 @@ fn lockstep_from(mut cartridge: Cartridge, prepare: impl FnOnce(&mut Cartridge),
     if from_poll {
         compare(&polls[0], &seen, screen, "the start");
     }
-    let mut map_loaded = false;
     for (i, &(action, what)) in script.iter().enumerate() {
         let (kind, frames) = recreation_act(&mut game, action);
         // The frame `wCurMap` changes is before the cartridge's `LoadMapData` sends the new map's.
-        let (seen, screen) = seen_at(&mut game, kind, frames, map_loaded && kind != Kind::MapChange);
-        map_loaded |= kind == Kind::MapChange;
+        let (seen, screen) = seen_at(&mut game, kind, frames, kind != Kind::MapChange);
         if std::env::var("LOG_LOCKSTEP").is_ok() {
             let next = &polls[i + 1];
             let text = |y: usize| next.screen.get(y).map(|row| super::battle::letters(row)).unwrap_or_default();
@@ -1313,6 +1338,17 @@ fn surfer_chosen(cartridge: &mut Cartridge) {
 /// SURF again, refused on land, back on, and off by swimming into the shore.
 #[test]
 fn surf_goes_onto_the_water_and_off_it_as_the_cartridge_does() {
+    surf(false);
+}
+
+/// The same on a Super Game Boy, where the party menu sends its palettes and both ways out of it,
+/// `.goBackToMap` and `.exitMenu`, send the default.
+#[test]
+fn surf_sends_the_cartridge_s_palettes_on_a_super_game_boy() {
+    surf(true);
+}
+
+fn surf(on_sgb: bool) {
     const SURF: [(Action, &str); 4] = [(START, "START"), (PROMPT, "POKéMON"), (PROMPT, "the surfer"), (PROMPT, "SURF")];
     const SCRIPT: &[(Action, &str)] = &[
         SURF[0], SURF[1], SURF[2], SURF[3], (PROMPT, "got on"),
@@ -1324,7 +1360,7 @@ fn surf_goes_onto_the_water_and_off_it_as_the_cartridge_does() {
         SURF[0], SURF[1], SURF[2], SURF[3], (PROMPT, "got on"),
         (Action::Walk(Joypad::UP), "up onto the shore, off the water"),
     ];
-    lockstep(include_bytes!("../pokemon/data/postgame-fishing.bin"), surfer_chosen, in_order(SCRIPT));
+    lockstep_or_on_sgb(on_sgb, include_bytes!("../pokemon/data/postgame-fishing.bin"), surfer_chosen, in_order(SCRIPT));
 }
 
 
@@ -1340,12 +1376,22 @@ fn cutter_chosen(cartridge: &mut Cartridge) {
 /// The stretch that cuts is untimed, since `ReloadMapSpriteTilePatterns` turns the LCD off.
 #[test]
 fn cut_takes_a_tree_down_as_the_cartridge_does() {
+    cut(false);
+}
+
+/// The same on a Super Game Boy, where `UsedCut` sends the default over the party menu's palettes.
+#[test]
+fn cut_sends_the_cartridge_s_palettes_on_a_super_game_boy() {
+    cut(true);
+}
+
+fn cut(on_sgb: bool) {
     const SCRIPT: &[(Action, &str)] = &[
         (START, "START"), (PROMPT, "POKéMON"), (PROMPT, "the cutter"), (PROMPT, "CUT"),
         (Action::Walk(Joypad::LEFT), "left, where the tree was"),
         (Action::Walk(Joypad::LEFT), "left again"),
     ];
-    lockstep(include_bytes!("../pokemon/data/route8-cut-trees.bin"), cutter_chosen, in_order(SCRIPT));
+    lockstep_or_on_sgb(on_sgb, include_bytes!("../pokemon/data/route8-cut-trees.bin"), cutter_chosen, in_order(SCRIPT));
 }
 
 /// Objects 36 to 39, the block `WriteCutOrBoulderDustAnimationOAMBlock` writes, as `[y, x, tile,
@@ -1516,6 +1562,59 @@ fn fly_lands_in_the_town_chosen_as_the_cartridge_does() {
     });
 }
 
+/// FLY to Lavender Town, then into the Name Rater's house to have the flier renamed: the party menu,
+/// a name typed with A until the cursor parks on `ED`, and the screen put back after each.
+#[test]
+fn the_name_rater_renames_the_flier_as_the_cartridge_does() {
+    the_name_rater(false);
+}
+
+/// The same on a Super Game Boy, where putting the screen back sends the default over the palettes
+/// the party menu and the naming screen sent.
+#[test]
+fn the_name_rater_sends_the_cartridge_s_palettes_on_a_super_game_boy() {
+    the_name_rater(true);
+}
+
+fn the_name_rater(on_sgb: bool) {
+    const UP: Action = Action::Press(Joypad::UP, 1);
+    const OPENING: [(Action, &str); 9] = [
+        (START, "START"), (PROMPT, "POKéMON"), (PROMPT, "the flier"), (PROMPT, "FLY"),
+        (UP, "VIRIDIAN CITY"), (UP, "PEWTER CITY"), (UP, "CERULEAN CITY"), (UP, "LAVENDER TOWN"), (PROMPT, "fly there"),
+    ];
+    const fn walk(button: Joypad, what: &'static str) -> (Action, &'static str) {
+        (Action::Walk(button), what)
+    }
+    const ROUTE: &[(Action, &str)] = &[
+        walk(Joypad::DOWN, "down from the Pokémon Center"), walk(Joypad::DOWN, "down"), walk(Joypad::DOWN, "down"),
+        walk(Joypad::DOWN, "down"), walk(Joypad::DOWN, "down to (3, 11), below the man at (9, 10)"),
+        walk(Joypad::RIGHT, "right, turning"), walk(Joypad::RIGHT, "right"), walk(Joypad::RIGHT, "right"),
+        walk(Joypad::RIGHT, "right"), walk(Joypad::RIGHT, "right"), walk(Joypad::RIGHT, "right"),
+        walk(Joypad::RIGHT, "right to (10, 11)"),
+        walk(Joypad::DOWN, "down, turning"), walk(Joypad::DOWN, "down"), walk(Joypad::DOWN, "down to (10, 14)"),
+        walk(Joypad::LEFT, "left, turning"), walk(Joypad::LEFT, "left"), walk(Joypad::LEFT, "left below the door"),
+        walk(Joypad::UP, "up into the Name Rater's house"),
+        walk(Joypad::UP, "up from the mat"), walk(Joypad::RIGHT, "right, turning"), walk(Joypad::RIGHT, "right"),
+        walk(Joypad::RIGHT, "right"), walk(Joypad::UP, "up, turning"), walk(Joypad::UP, "up below the Name Rater"),
+        (Action::Talk, "talk to him"),
+    ];
+    let mut renamed = false;
+    let mut route = walk_and_answer(ROUTE, |_| false);
+    lockstep_or_on_sgb(on_sgb, include_bytes!("../pokemon/data/postgame-fishing.bin"), flier_chosen, move |i, seen| {
+        renamed |= seen.kind == Kind::Prompt && seen.screen.get(14).is_some_and(|row| super::battle::letters(row).contains("This"));
+        if let Some(&step) = OPENING.get(i) {
+            return Some(step);
+        }
+        // The flight has no poll of its own, so it is walked through to the first one after it.
+        if !matches!(seen.location.0, Map::LavenderTown | Map::NameRatersHouse) {
+            return Some((WAIT, "the flight"));
+        }
+        let step = route(i, seen);
+        assert!(step.is_some() || renamed, "the flier was never renamed");
+        step
+    });
+}
+
 /// The Charmander ball taken from the table, which leaves the rival the Squirtle beside it: the
 /// Pokédex page the ball shows, the choice, and the nickname declined. B answers `AskName`, since the
 /// naming screen it opens is the naming lockstep's, and the polls of its question are the ones
@@ -1532,6 +1631,19 @@ fn the_charmander_ball_is_taken_as_the_cartridge_does() {
     });
 }
 
+
+/// The Charmander ball on a Super Game Boy with the nickname taken, typed with A until the cursor
+/// parks on `ED`: the naming screen sends its palette and `.submitNickname` the default.
+#[test]
+fn the_charmander_s_nickname_sends_the_cartridge_s_palettes_on_a_super_game_boy() {
+    lockstep_on_sgb(include_bytes!("../pokemon/data/branch-oaks-lab.bin"), |_| {}, |_, seen| match seen.kind {
+        Kind::Prompt => Some((PROMPT, "a prompt")),
+        Kind::MapChange | Kind::Bubble => Some((Action::Press(Joypad::empty(), 0), "the lab's script")),
+        Kind::Overworld if !seen.settled().party.is_empty() => None,
+        Kind::Overworld if seen.location.3 != SpriteFacing::Right => Some((Action::Press(Joypad::RIGHT, 2), "turn to the ball")),
+        Kind::Overworld => Some((Action::Talk, "the Charmander ball")),
+    });
+}
 
 /// Vermilion Gym, the fixture standing in front of LT.SURGE with his badge already won, which the
 /// cartridge is made to forget: he is talked to, fought with the first move, and hands over the

@@ -48,7 +48,7 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
         Label::PartyAsked => rt.display_party_menu().then(Label::MonChosen),
         Label::MonChosen => {
             let chosen = rt.chosen_party_mon();
-            rt.restore_screen_tiles();
+            rt.restore_screen_tiles_and_reload_sprites();
             let Some(slot) = chosen else {
                 return Flow::Jump(Label::DidNotRename.into());
             };

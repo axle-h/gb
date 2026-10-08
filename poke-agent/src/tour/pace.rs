@@ -104,6 +104,10 @@ impl<P: Progress> Policy for Paced<P> {
         self.inner.pick_move_to_forget(party_slot, current_moves, new_move)
     }
 
+    fn pick_move_to_mimic(&mut self, state: &GameState, enemy_moves: &[PokemonMove]) -> Option<usize> {
+        self.inner.pick_move_to_mimic(state, enemy_moves)
+    }
+
     fn on_event(&mut self, event: &AgentEvent) {
         self.inner.on_event(event)
     }

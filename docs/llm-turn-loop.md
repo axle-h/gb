@@ -30,8 +30,9 @@ argument lives in the code.
 - Every terminal tool's `summary` is enforced by `classify` rather than by the schema, because a
   field the schema requires and the parser allows is one a weak model omits.
 - `press_buttons` is offered on the watchdog turn only. `report_issue` does not end the turn and its
-  answer must not read like a fix. Both write a record whose `state.gbst` is taken on the edge into
-  `AwaitingLlm`, never the periodic checkpoint.
+  answer must not read like a fix. Both write a record whose save is taken for each edge into
+  `AwaitingLlm` (`Published::asks`), never the periodic checkpoint, and waited for, since an
+  endpoint can answer before the emulator thread's next tick.
 - Nothing a read answers may duplicate the situation. `read_route`'s `None` means "not walked there
   yet", never "unreachable" — it answers out of the map-header graph while the action menu answers
   out of walkable connectivity, so `route_answer` turns a route that cannot be *started* into a

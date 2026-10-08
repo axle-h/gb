@@ -98,6 +98,12 @@ pub trait Policy {
         Some(None) // default: never drop an existing move
     }
 
+    /// Called when the player's Mimic asks which of the enemy's moves to copy, once a menu and then
+    /// held. An index into `enemy_moves`; B does nothing on that menu, so there is no declining.
+    fn pick_move_to_mimic(&mut self, state: &GameState, enemy_moves: &[PokemonMove]) -> Option<usize> {
+        Some(move_to_mimic(state, enemy_moves))
+    }
+
     /// Called each idle overworld tick.
     fn pick_field_move(&mut self, _state: &GameState) -> Option<FieldMove> {
         None
@@ -268,6 +274,14 @@ impl Policy for RandomPolicy {
             None => options.into_iter().choose(&mut rand::rng()),
         }
     }
+
+    fn pick_move_to_mimic(&mut self, _state: &GameState, enemy_moves: &[PokemonMove]) -> Option<usize> {
+        let rows = 0..enemy_moves.len().max(1);
+        match &mut self.rng {
+            Some(rng) => rows.choose(rng),
+            None => rows.choose(&mut rand::rng()),
+        }
+    }
 }
 
 // ── Console (human-driven, non-blocking) ─────────────────────────────────────
@@ -277,6 +291,7 @@ pub struct ConsolePolicy {
     overworld_rx:   Option<Receiver<usize>>,
     battle_rx:      Option<Receiver<usize>>,
     nickname_rx:    Option<Receiver<Option<String>>>,
+    mimic_rx:       Option<Receiver<usize>>,
     ow_menu_shown:  bool,
     btl_menu_shown: bool,
     ow_shown_tiles: Vec<MetaTile>,
@@ -288,6 +303,7 @@ impl Default for ConsolePolicy {
             overworld_rx:   None,
             battle_rx:      None,
             nickname_rx:    None,
+            mimic_rx:       None,
             ow_menu_shown:  false,
             btl_menu_shown: false,
             ow_shown_tiles: vec![],
@@ -418,6 +434,49 @@ impl Policy for ConsolePolicy {
         }
         None
     }
+
+    fn pick_move_to_mimic(&mut self, _state: &GameState, enemy_moves: &[PokemonMove]) -> Option<usize> {
+        if self.mimic_rx.is_none() {
+            println!("\nMimic copies which of the enemy's moves?");
+            for (i, known) in enemy_moves.iter().enumerate() {
+                println!("  {}. {}", i + 1, known.name);
+            }
+            let max = enemy_moves.len().max(1);
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                loop {
+                    print!("Pick (1-{max}): ");
+                    io::stdout().flush().ok();
+                    let mut line = String::new();
+                    if io::stdin().read_line(&mut line).is_err() { break; }
+                    if let Ok(n) = line.trim().parse::<usize>() {
+                        if n >= 1 && n <= max { tx.send(n - 1).ok(); break; }
+                    }
+                    println!("Invalid.");
+                }
+            });
+            self.mimic_rx = Some(rx);
+        }
+
+        if let Ok(row) = self.mimic_rx.as_ref().unwrap().try_recv() {
+            self.mimic_rx = None;
+            return Some(row);
+        }
+        None
+    }
+}
+
+/// The enemy move that would hit the enemy hardest from the mon out, the first on a tie and when
+/// none deals damage.
+pub fn move_to_mimic(state: &GameState, enemy_moves: &[PokemonMove]) -> usize {
+    let Some(battle) = state.battle.as_ref() else { return 0 };
+    let damage = |known: &PokemonMove| expected_damage(&battle.player, known.name, &battle.enemy, battle.ruleset).unwrap_or(0);
+    enemy_moves.iter().enumerate()
+        .fold((0, 0), |best, (row, known)| match damage(known) {
+            more if more > best.1 => (row, more),
+            _ => best,
+        })
+        .0
 }
 
 /// Whether a step can be interrupted by a walk to a Pokémon Centre and still finish afterwards.
@@ -534,6 +593,7 @@ pub(crate) fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
 
     // One row per Pokémon an item would help, the one out first, and none for an item that would
     // help nobody: the cartridge answers that with "It won't have any effect." and the same menu.
+    // An Ether has one per move it would help, since it asks which move as well.
     let active = battle_state.active_party_slot;
     let party_order = std::iter::once(active as usize)
         .chain((0..state.pokemon.len()).filter(|&i| i != active as usize));
@@ -543,16 +603,26 @@ pub(crate) fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
         if no_room && crate::pokemon::item_use::is_ball(item.id) {
             continue;
         }
+        let pp_rows = |member: usize| state.pokemon.get(member)
+            .and_then(|mon| crate::pokemon::item_use::restores_pp(item.id, &mon.moves));
+        if pp_rows(active as usize).is_some() {
+            for &member in &party_order {
+                for target_move in pp_rows(member).unwrap_or_default() {
+                    opts.push(BattleAction::UseItem { slot, item: item.clone(), target: Some(member as u8), target_move });
+                }
+            }
+            continue;
+        }
         let helps = |member: usize| state.pokemon.get(member).and_then(|mon| {
             crate::pokemon::item_use::helps_in_battle(item.id, mon.current_hp, mon.stats.hp, mon.status)
         });
         if helps(active as usize).is_none() {
-            opts.push(BattleAction::UseItem { slot, item: item.clone(), target: None });
+            opts.push(BattleAction::UseItem { slot, item: item.clone(), target: None, target_move: None });
             continue;
         }
         for &member in &party_order {
             if helps(member) == Some(true) {
-                opts.push(BattleAction::UseItem { slot, item: item.clone(), target: Some(member as u8) });
+                opts.push(BattleAction::UseItem { slot, item: item.clone(), target: Some(member as u8), target_move: None });
             }
         }
     }
@@ -3347,6 +3417,12 @@ impl Policy for DeterministicPolicy {
         Some(Some(slot))
     }
 
+    fn pick_move_to_mimic(&mut self, state: &GameState, enemy_moves: &[PokemonMove]) -> Option<usize> {
+        let row = move_to_mimic(state, enemy_moves);
+        trace!(self.trace, "[policy] mimic copies row {row} ({:?})", enemy_moves.get(row).map(|m| m.name));
+        Some(row)
+    }
+
     fn pick_field_move(&mut self, state: &GameState) -> Option<FieldMove> {
         // Cut a tree the player is already facing (routed there by the CutTree overworld action).
         if let Some(&PolicyStep::CutTree { map }) = self.queue.front() {
@@ -3849,6 +3925,31 @@ mod move_learn_tests {
         let slot = p.pick_move_to_forget(0, &moves, Poisonpowder).flatten().unwrap();
         assert_ne!(moves[slot].name, Cut, "must never forget an HM move (Cut)");
     }
+
+    /// Mimic copies the enemy move that would hit the enemy hardest, and with none that deals
+    /// damage the first row.
+    #[test]
+    fn mimic_copies_the_move_that_would_hit_hardest() {
+        use crate::pokemon::pokemon::{PokemonStats, PokemonSummary, PokemonType};
+        let side = |species, types| PokemonSummary {
+            species, current_hp: 100, status: crate::pokemon::status::PokemonStatus::None, types, level: 25,
+            moves: [None; 4], disabled_move_slot: None,
+            stats: PokemonStats { hp: 100, attack: 50, defense: 50, speed: 50, special: 50 },
+        };
+        let state = GameState {
+            battle: Some(crate::pokemon::battle::BattleState {
+                battle_type: BattleType::Wild,
+                player: side(PokemonSpecies::Pidgey, [PokemonType::Normal, PokemonType::Flying]),
+                enemy: side(PokemonSpecies::Rattata, [PokemonType::Normal, PokemonType::Normal]),
+                active_party_slot: 0, enemy_trapping: false, enemy_catch_rate: 0,
+                ruleset: poke_core::ruleset::Ruleset::Gen1,
+            }),
+            ..GameState::default()
+        };
+        let mut p = DeterministicPolicy::new(0, Vec::<PolicyStep>::new());
+        assert_eq!(p.pick_move_to_mimic(&state, &[mv(TailWhip), mv(Tackle), mv(HyperFang), mv(QuickAttack)]), Some(2));
+        assert_eq!(p.pick_move_to_mimic(&state, &[mv(TailWhip), mv(Growl)]), Some(0));
+    }
 }
 
 #[cfg(test)]
@@ -3885,6 +3986,29 @@ mod policy_helper_tests {
         assert!(sprite_is_species("Zapdos", PokemonSpecies::Zapdos));
         assert!(!sprite_is_species("Electrode 1", PokemonSpecies::Voltorb));
         assert!(!sprite_is_species("Rare Candy", PokemonSpecies::Electrode));
+    }
+
+    /// A PP item in a battle has a row per mon and move it would restore something to: an Ether
+    /// one per move short of PP, an Elixer one per mon with any, and none for a mon or move that is full.
+    #[test]
+    fn a_pp_item_has_a_battle_row_per_mon_and_move_it_would_help() {
+        let mut state = crate::llm::battle_script::scenarios::short_of_pp();
+        let rows = |state: &GameState, item: ItemId| battle_options(state).expect("a battle").into_iter()
+            .filter_map(|row| match row {
+                BattleAction::UseItem { item: used, target, target_move, .. } if used.id == item => Some((target, target_move)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for ether in [ItemId::Ether, ItemId::MaxEther] {
+            assert_eq!(rows(&state, ether), [(Some(0), Some(1)), (Some(1), Some(1))], "{ether:?}");
+        }
+        for elixer in [ItemId::Elixer, ItemId::MaxElixer] {
+            assert_eq!(rows(&state, elixer), [(Some(0), None), (Some(1), None)], "{elixer:?}");
+        }
+        let shelly = state.pokemon.get_mut(1).expect("a bench");
+        shelly.moves[1] = shelly.moves[1].map(|known| PokemonMove::with_max_pp(known.name));
+        assert_eq!(rows(&state, ItemId::Ether), [(Some(0), Some(1))], "SHELLY is full again");
+        assert_eq!(rows(&state, ItemId::Elixer), [(Some(0), None)], "SHELLY is full again");
     }
 }
 

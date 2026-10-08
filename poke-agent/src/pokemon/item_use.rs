@@ -31,8 +31,8 @@ pub fn is_ball(item: ItemId) -> bool {
 }
 
 /// For a battle item that asks "Use item on which POKéMON?", whether it would do anything for a
-/// party member at `hp` of `max_hp` with `status`; `None` for an item that asks no such thing. Ethers
-/// ask a second question, which move, that nothing drives, so they stay on the Pokémon that is out.
+/// party member at `hp` of `max_hp` with `status`; `None` for an item that asks no such thing, or
+/// for a PP item, which [`restores_pp`] answers.
 pub fn helps_in_battle(item: ItemId, hp: u16, max_hp: u16, status: crate::pokemon::status::PokemonStatus) -> Option<bool> {
     use crate::pokemon::status::PokemonStatus as S;
     let alive = hp > 0;
@@ -48,6 +48,21 @@ pub fn helps_in_battle(item: ItemId, hp: u16, max_hp: u16, status: crate::pokemo
         ItemId::Awakening => alive && matches!(status, S::Asleep { .. }),
         _ => return None,
     })
+}
+
+/// For a PP item, which of `moves` it would restore something to: the one move an Ether is aimed
+/// at, so each move short of PP is a choice of its own, or every move an Elixer tops up at once,
+/// so a mon with any move short is one choice. `None` for any other item.
+pub fn restores_pp(item: ItemId, moves: &[Option<crate::pokemon::move_name::PokemonMove>; 4]) -> Option<Vec<Option<u8>>> {
+    use crate::pokemon::postgame::items::{max_pp, move_pp};
+    let short: Vec<u8> = moves.iter().enumerate()
+        .filter_map(|(slot, mv)| mv.filter(|mv| move_pp(mv) < max_pp(mv)).map(|_| slot as u8))
+        .collect();
+    match item {
+        ItemId::Ether | ItemId::MaxEther => Some(short.into_iter().map(Some).collect()),
+        ItemId::Elixer | ItemId::MaxElixer => Some(if short.is_empty() { vec![] } else { vec![None] }),
+        _ => None,
+    }
 }
 
 /// What to say when `use_item` is aimed at something the game will not use.

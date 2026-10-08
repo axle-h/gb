@@ -21,6 +21,9 @@ use crate::published::{Published, UiEvent, now_ms};
 
 const TURNS_KEPT: usize = 3;
 
+/// How long a record waits for the emulator thread to take the turn's save state.
+const SAVE_STATE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// What is being filed: the directory and two JSON fields differ, and the rest is the same.
 #[derive(Debug, Clone, Copy)]
 pub enum Report<'a> {
@@ -92,7 +95,7 @@ pub fn record(
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {dir:?}: {e}"))?;
 
     // Written first so its own timestamp can go in the JSON beside it.
-    let state_captured_at = match published.latest_save_state() {
+    let state_captured_at = match published.save_state_for_this_ask(SAVE_STATE_WAIT) {
         Some((state, at)) => run::write_atomically(&dir.join(run.kind().state_file()), &state).ok().map(|()| at),
         None => None,
     };

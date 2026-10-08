@@ -223,6 +223,7 @@ mod tests {
             target_speed: 1.0,
             policy: "random",
             model: None,
+            game_kind: crate::run::GameKind::Emulated,
             agent_state: "idle".into(),
             frame_seq: 0,
             game: None,

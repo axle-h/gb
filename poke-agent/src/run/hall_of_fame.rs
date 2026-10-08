@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use super::{ArchivedCompletion, RunMeta, files, unique_dir};
+use super::{ArchivedCompletion, GameKind, RunMeta, files, unique_dir};
 
 /// How long [`archive`] will wait for the transcript writer to catch up to the completion event.
 const TRANSCRIPT_FOLLOW: Duration = Duration::from_secs(5);
@@ -22,6 +22,9 @@ pub struct Completion {
     pub run_id: String,
     /// `wNumHoFTeams` after the increment: `2` is a second championship in the same save.
     pub teams: u8,
+    /// Which game was won. A ledger line from before the field was the cartridge's.
+    #[serde(default)]
+    pub game: GameKind,
     pub completed_at: String,
     pub started_at: String,
     /// `crate::cli::VERSION` at the time — which build played this.
@@ -274,6 +277,7 @@ mod tests {
             archive: String::new(),
             run_id: run_id.into(),
             teams: 1,
+            game: GameKind::Emulated,
             completed_at: completed_at.into(),
             started_at: "2026-08-10T09:30:11Z".into(),
             app_version: "1.0.0".into(),
@@ -415,6 +419,28 @@ mod tests {
         let rows = top(&scratch.0, 10);
         assert_eq!(rows.len(), 1, "the good row survives its neighbour");
         assert_eq!(rows[0].run_id, "run-good");
+    }
+
+    /// The leaderboard says which game each win was on, and a line written before it did reads as
+    /// the cartridge's.
+    #[test]
+    fn the_ledger_says_which_game_was_won_and_an_old_line_was_the_cartridge() {
+        let scratch = Scratch::new("hof-game");
+        std::fs::create_dir_all(scratch.0.join(files::HALL_OF_FAME)).expect("the hall of fame");
+        append(&ledger(&scratch.0), &Completion { game: GameKind::Native, ..row("run-native", 100, false, "2026-10-01T00:00:00Z") })
+            .expect("append");
+        let mut old = serde_json::to_value(row("run-old", 200, false, "2026-08-01T00:00:00Z")).expect("a row");
+        old.as_object_mut().expect("an object").remove("game");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(ledger(&scratch.0))
+            .and_then(|mut f| writeln!(f, "{old}"))
+            .expect("an old line");
+
+        let rows = top(&scratch.0, 10);
+        let games: Vec<(&str, GameKind)> = rows.iter().map(|row| (row.run_id.as_str(), row.game)).collect();
+        assert_eq!(games, [("run-native", GameKind::Native), ("run-old", GameKind::Emulated)]);
+        assert_eq!(serde_json::to_value(&rows[0]).expect("serialises")["game"], "native");
     }
 
     /// `"seq":4` is a substring of `"seq":41`, so the follow parses rather than matches.

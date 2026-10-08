@@ -34,6 +34,8 @@ pub enum DecisionKind {
     /// A mart's Buy/Sell/Quit menu just opened.
     MartPurchase,
     ForgetMove,
+    /// The player's Mimic is asking which of the enemy's moves to copy.
+    MimicMove,
     /// Not a poll site: no decision point for `GB_STUCK_TIMEOUT_SECS`, so the watchdog asks.
     Stuck,
 }
@@ -46,6 +48,7 @@ impl DecisionKind {
             Self::Nickname => "nickname",
             Self::MartPurchase => "mart",
             Self::ForgetMove => "forget-move",
+            Self::MimicMove => "mimic",
             Self::Stuck => "stuck",
         }
     }
@@ -53,7 +56,7 @@ impl DecisionKind {
     /// Whether only the last poll site, not the `GameState`, says this is the question; see
     /// `LlmPolicy::observed_kind`.
     pub fn is_inferred_from_the_site(self) -> bool {
-        matches!(self, Self::Nickname | Self::MartPurchase | Self::ForgetMove | Self::Stuck)
+        matches!(self, Self::Nickname | Self::MartPurchase | Self::ForgetMove | Self::MimicMove | Self::Stuck)
     }
 }
 
@@ -81,6 +84,8 @@ pub enum Terminal {
         then: Vec<BagItem>,
     },
     ForgetMove { slot: Option<u8> },
+    /// The row of the enemy's move Mimic copies.
+    MimicMove { slot: u8 },
     /// Do nothing for this many agent ticks (20 ms of emulated time each).
     Wait { ticks: u16 },
 }
@@ -494,6 +499,7 @@ pub const READ_TOOLS: &[ReadTool] = &[
             DecisionKind::Nickname,
             DecisionKind::MartPurchase,
             DecisionKind::ForgetMove,
+            DecisionKind::MimicMove,
         ],
         parameters: None,
     },
@@ -519,7 +525,7 @@ pub const READ_TOOLS: &[ReadTool] = &[
                       enemy's catch rate, and which of your moves Disable has locked out. The \
                       turn's battle menu already costs your moves against it; this is the detail.",
         // `ForgetMove` legitimately fires mid-fight, and which move to drop is a battle question.
-        kinds: &[DecisionKind::Battle, DecisionKind::ForgetMove],
+        kinds: &[DecisionKind::Battle, DecisionKind::ForgetMove, DecisionKind::MimicMove],
         parameters: None,
     },
     ReadTool {
@@ -580,12 +586,13 @@ fn read_route_arguments() -> Value {
 }
 
 /// Every [`DecisionKind`], so a loop over all of them keeps meaning it when one is added.
-pub const ALL_KINDS: [DecisionKind; 6] = [
+pub const ALL_KINDS: [DecisionKind; 7] = [
     DecisionKind::Overworld,
     DecisionKind::Battle,
     DecisionKind::Nickname,
     DecisionKind::MartPurchase,
     DecisionKind::ForgetMove,
+    DecisionKind::MimicMove,
     DecisionKind::Stuck,
 ];
 
@@ -875,6 +882,20 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
                 "additionalProperties": false,
             }),
         )),
+        DecisionKind::MimicMove => tools.push(ToolSpec::new(
+            "mimic_move",
+            "ENDS THE TURN. Answer Mimic's menu of the enemy's moves. `slot` is the row of the move to \
+             copy, from the list in the turn. The game offers no way back out of this menu, so a \
+             row has to be chosen.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "slot": { "type": "integer", "minimum": 0, "maximum": 3, "description": "The row of the enemy's move to copy." },
+                },
+                "required": ["slot"],
+                "additionalProperties": false,
+            }),
+        )),
     }
 
     if offers_issue_report(kind) {
@@ -1150,6 +1171,7 @@ pub fn terminal_names(kind: DecisionKind) -> &'static [&'static str] {
         DecisionKind::Nickname => &["set_nickname", "wait"],
         DecisionKind::MartPurchase => &["buy_item", "wait"],
         DecisionKind::ForgetMove => &["forget_move", "wait"],
+        DecisionKind::MimicMove => &["mimic_move", "wait"],
         DecisionKind::Stuck => &["press_buttons", "wait"],
     }
 }
@@ -1197,12 +1219,16 @@ fn battle_rule_behind(id: &str, menu: &[String]) -> &'static str {
             return " That item asks which Pokémon it is for, so its rows carry the party slot after an \
                     `@`, as `item:Potion@1` does. Use one of those.";
         }
+        if menu.iter().any(|offered| offered.starts_with(&format!("item:{item}:"))) {
+            return " That item asks which move as well, so its rows carry the move slot after a second \
+                    `:`, as `item:Ether@0:1` does. Use one of those.";
+        }
         if item.contains('@') {
             return " Either the bag has none left, or it would do nothing for that Pokémon and the \
                     cartridge would only say \"It won't have any effect.\" An item that asks which \
                     Pokémon has a row for each one it would help: a Revive for one that has fainted, a \
-                    potion for one that is hurt, a cure for one with that status. `read_bag` says what \
-                    is left.";
+                    potion for one that is hurt, a cure for one with that status, an Ether for each \
+                    move short of PP. `read_bag` says what is left.";
         }
         return " That item is not in the bag. A bag row goes the moment the last one is used, so an \
                 id you read on an earlier turn stops resolving; `read_bag` says what is left.";
@@ -1381,6 +1407,17 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
                 )),
             }
         }
+        "mimic_move" if kind == DecisionKind::MimicMove => match arguments.get("slot").and_then(Value::as_u64) {
+            Some(slot) if slot < 4 => CallKind::Terminal(Terminal::MimicMove { slot: slot as u8 }),
+            Some(slot) => CallKind::Rejected(format!(
+                "There is no row {slot}; the enemy's moves are numbered from 0, as the list in the turn \
+                 shows them."
+            )),
+            None => CallKind::Rejected(
+                "`mimic_move` needs the `slot` of the enemy's move to copy, from the list in the turn."
+                    .to_string(),
+            ),
+        },
         "wait" => match arguments.get("ticks").and_then(Value::as_u64) {
             Some(ticks) => CallKind::Terminal(Terminal::Wait {
                 ticks: ticks.clamp(1, u64::from(MAX_WAIT_TICKS)) as u16,
@@ -1396,7 +1433,7 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
         )),
         // A terminal tool from another decision kind.
         "choose_action" | "choose_battle_action" | "use_field_move"
-        | "set_nickname" | "buy_item" | "forget_move" => CallKind::Rejected(format!(
+        | "set_nickname" | "buy_item" | "forget_move" | "mimic_move" => CallKind::Rejected(format!(
             "`{name}` is not available in a {} turn. End this turn with one of: {}.",
             kind.label(),
             terminal_names(kind).join(", "),
@@ -1944,7 +1981,9 @@ pub fn battle_id(action: &BattleAction) -> String {
     match action {
         BattleAction::Fight { battle_move, .. } => format!("fight:{}", battle_move.name),
         BattleAction::UseItem { item, target: None, .. } => format!("item:{:?}", item.id),
-        BattleAction::UseItem { item, target: Some(target), .. } => format!("item:{:?}@{target}", item.id),
+        BattleAction::UseItem { item, target: Some(target), target_move: None, .. } => format!("item:{:?}@{target}", item.id),
+        BattleAction::UseItem { item, target: Some(target), target_move: Some(target_move), .. } =>
+            format!("item:{:?}@{target}:{target_move}", item.id),
         BattleAction::SwitchPokemon { slot, .. } => format!("switch:{slot}"),
         BattleAction::Run => "run".to_string(),
         BattleAction::SafariBall => "ball".to_string(),
@@ -1965,16 +2004,24 @@ pub fn battle_menu(state: &GameState) -> Vec<MenuItem> {
             if let (BattleAction::Fight { battle_move, .. }, Some((me, foe, ruleset))) = (action, sides) {
                 description.push_str(&fight_row_notes(battle_move.name, me, foe, ruleset));
             }
-            if let BattleAction::UseItem { item, target: Some(target), .. } = action
+            if let BattleAction::UseItem { item, target: Some(target), target_move, .. } = action
                 && let Some(mon) = state.pokemon.get(*target as usize)
             {
+                use crate::pokemon::postgame::items::{max_pp, move_pp};
+                let pp = |mv: &PokemonMove| format!("{}/{} PP", move_pp(mv), max_pp(mv));
                 let condition = match (mon.current_hp, mon.status) {
                     (0, _) => "fainted".to_string(),
                     (hp, crate::pokemon::status::PokemonStatus::None) => format!("{hp}/{} HP", mon.stats.hp),
                     (hp, status) => format!("{hp}/{} HP, {status}", mon.stats.hp),
                 };
-                description = format!("ITEM   {} ×{} on {} the {}, {condition}",
-                    item.id, item.quantity, mon.nickname.to_default_string(), mon.species);
+                let who = format!("{} the {}", mon.nickname.to_default_string(), mon.species);
+                description = match target_move.and_then(|slot| mon.moves.get(slot as usize).copied().flatten()) {
+                    Some(mv) => format!("ITEM   {} ×{} on {who}'s {}, {}", item.id, item.quantity, mv.name, pp(&mv)),
+                    None if crate::pokemon::item_use::restores_pp(item.id, &mon.moves).is_some() =>
+                        format!("ITEM   {} ×{} on {who}, every move: {}", item.id, item.quantity,
+                                mon.moves.iter().flatten().map(|mv| format!("{} {}", mv.name, pp(mv))).collect::<Vec<_>>().join(", ")),
+                    None => format!("ITEM   {} ×{} on {who}, {condition}", item.id, item.quantity),
+                };
             }
             MenuItem { id: battle_id(action), description }
         })
@@ -2087,6 +2134,35 @@ pub fn forget_menu(current: &[PokemonMove], ruleset: poke_core::ruleset::Ruleset
                     match hm_move(known.name) {
                         Some(_) => " — ⚠️ an HM move, and it cannot be re-learnt",
                         None => "",
+                    },
+                ),
+            }
+        })
+        .collect()
+}
+
+/// The enemy's moves Mimic's menu chooses between, keyed on row as `mimic_move` takes, each costed
+/// against the enemy from the mon out and saying what it does.
+pub fn mimic_menu(state: &GameState, enemy_moves: &[PokemonMove]) -> Vec<MenuItem> {
+    let sides = state.battle.as_ref().map(|battle| (&battle.player, &battle.enemy, battle.ruleset));
+    enemy_moves
+        .iter()
+        .enumerate()
+        .map(|(row, known)| {
+            let metadata = known.name.metadata();
+            let notes = match sides {
+                Some((me, foe, ruleset)) => fight_row_notes(known.name, me, foe, ruleset),
+                None => move_effect(known.name, state.ruleset).map_or(String::new(), |effect| format!(" — {effect}")),
+            };
+            MenuItem {
+                id: row.to_string(),
+                description: format!(
+                    "{} — {}, {}{notes}",
+                    known.name,
+                    metadata.move_type,
+                    match metadata.power {
+                        Some(power) => format!("{power} power"),
+                        None => "no damage".to_string(),
                     },
                 ),
             }
@@ -2294,7 +2370,7 @@ mod tests {
     fn read_pc_is_offered_on_the_only_turn_that_can_use_it() {
         assert!(names(DecisionKind::Overworld).contains(&"read_pc"));
         for elsewhere in [DecisionKind::Battle, DecisionKind::Nickname, DecisionKind::MartPurchase,
-                          DecisionKind::ForgetMove, DecisionKind::Stuck] {
+                          DecisionKind::ForgetMove, DecisionKind::MimicMove, DecisionKind::Stuck] {
             assert!(!names(elsewhere).contains(&"read_pc"), "{elsewhere:?} must not offer read_pc");
         }
     }
@@ -2351,7 +2427,7 @@ mod tests {
         }
     }
 
-    const KINDS: [DecisionKind; 6] = ALL_KINDS;
+    const KINDS: [DecisionKind; 7] = ALL_KINDS;
 
     /// A menu row carries what its id cannot, and nothing else.
     #[test]
@@ -2480,6 +2556,11 @@ mod tests {
         assert!(battle_rule_behind("item:Revive@0", &hurt).contains("It won't have any effect."));
         assert_eq!(battle_rule_behind("fight:Tackle", &safari), "");
 
+        // An Ether asks which move as well.
+        let spent: Vec<String> = ["fight:Peck", "item:Ether@0:1"].iter().map(|id| id.to_string()).collect();
+        assert!(battle_rule_behind("item:Ether@0", &spent).contains("`item:Ether@0:1`"), "the move was not asked for");
+        assert!(battle_rule_behind("item:Ether@0:0", &spent).contains("It won't have any effect."));
+
         let here: Vec<String> = vec!["ViridianCity:18,6:Sprite".to_string()];
         let stale = not_on_the_menu("ViridianForest:17,47:Warp", &here)
             .expect("an id from another map is not on this menu");
@@ -2499,6 +2580,7 @@ mod tests {
             (DecisionKind::Nickname, 4_075),
             (DecisionKind::MartPurchase, 4_825),
             (DecisionKind::ForgetMove, 4_275),
+            (DecisionKind::MimicMove, 4_275),
             (DecisionKind::Stuck, 6_025),
         ] {
             let bytes = serde_json::to_string(&for_kind(kind)).expect("the specs serialise").len();
@@ -2529,6 +2611,7 @@ mod tests {
             DecisionKind::Nickname,
             DecisionKind::MartPurchase,
             DecisionKind::ForgetMove,
+            DecisionKind::MimicMove,
             DecisionKind::Stuck,
         ] {
             walk(&serde_json::to_value(for_kind(kind)).expect("the specs serialise"), "tools", kind);
@@ -2734,6 +2817,21 @@ mod tests {
         assert!(modern[3].description.ends_with("Doubles the user's critical-hit rate."), "{}", modern[3].description);
     }
 
+    /// A PP item's row names the mon and, for an Ether, the move it restores, with the PP it has.
+    #[test]
+    fn a_pp_item_row_says_whose_move_it_restores() {
+        let state = crate::llm::battle_script::scenarios::short_of_pp();
+        let menu = battle_menu(&state);
+        let row = |id: &str| menu.iter().find(|row| row.id == id).map(|row| row.description.as_str())
+            .unwrap_or_else(|| panic!("no `{id}` among {:?}", menu.iter().map(|row| &row.id).collect::<Vec<_>>()));
+        assert_eq!(row("item:Ether@0:1"), "ITEM   Ether ×1 on SPARKY the Charmander's Ember, 3/25 PP");
+        assert_eq!(row("item:MaxEther@1:1"), "ITEM   MaxEther ×1 on SHELLY the Squirtle's Water Gun, 0/25 PP");
+        assert_eq!(row("item:Elixer@0"),
+                   "ITEM   Elixer ×1 on SPARKY the Charmander, every move: Scratch 35/35 PP, Ember 3/25 PP, Growl 40/40 PP, Leer 30/30 PP");
+        assert!(resolve_battle(&state, "item:Ether@1:1").is_some_and(|action|
+            matches!(action, BattleAction::UseItem { target: Some(1), target_move: Some(1), .. })));
+    }
+
     #[test]
     fn a_battle_menu_row_is_a_sentence_and_not_a_debug_dump() {
         let switch = BattleAction::SwitchPokemon {
@@ -2852,6 +2950,7 @@ mod tests {
             (DecisionKind::Nickname, "set_nickname", r#"{"name":"Bubbles"}"#),
             (DecisionKind::MartPurchase, "buy_item", "{}"),
             (DecisionKind::ForgetMove, "forget_move", r#"{"slot":1}"#),
+            (DecisionKind::MimicMove, "mimic_move", r#"{"slot":1}"#),
             (DecisionKind::Overworld, "wait", r#"{"ticks":5}"#),
         ] {
             let CallKind::Rejected(complaint) = classify(kind, &bare(name, arguments), &[]) else {
@@ -2912,7 +3011,7 @@ mod tests {
         }
 
         // Single-question prompts do not carry it, and a call there is explained.
-        for kind in [DecisionKind::Nickname, DecisionKind::MartPurchase, DecisionKind::ForgetMove] {
+        for kind in [DecisionKind::Nickname, DecisionKind::MartPurchase, DecisionKind::ForgetMove, DecisionKind::MimicMove] {
             assert!(!offers_issue_report(kind));
             assert!(!names(kind).contains(&REPORT_ISSUE), "{kind:?} does not offer it");
             let call = bare(REPORT_ISSUE, r#"{"message":"x"}"#);
@@ -2934,7 +3033,7 @@ mod tests {
         assert!(!battle.contains(&"choose_action"));
 
         // The three menu prompts are single-question turns: their one terminal tool, and `wait`.
-        for kind in [DecisionKind::Nickname, DecisionKind::MartPurchase, DecisionKind::ForgetMove] {
+        for kind in [DecisionKind::Nickname, DecisionKind::MartPurchase, DecisionKind::ForgetMove, DecisionKind::MimicMove] {
             let offered = names(kind);
             for elsewhere in
                 ["choose_action", "choose_battle_action", "use_field_move", "press_buttons", REPORT_ISSUE]
@@ -2945,6 +3044,7 @@ mod tests {
         assert!(names(DecisionKind::Nickname).contains(&"set_nickname"));
         assert!(names(DecisionKind::MartPurchase).contains(&"buy_item"));
         assert!(names(DecisionKind::ForgetMove).contains(&"forget_move"));
+        assert!(names(DecisionKind::MimicMove).contains(&"mimic_move"));
         for kind in [DecisionKind::Overworld, DecisionKind::Battle] {
             assert!(!names(kind).contains(&"press_buttons"), "{kind:?} must not offer the hatch");
             assert!(names(kind).contains(&REPORT_ISSUE), "{kind:?} offers the replacement");
@@ -2957,7 +3057,7 @@ mod tests {
         );
         assert!(stuck.contains(&"press_buttons") && stuck.contains(&"wait"));
         for elsewhere in ["choose_action", "choose_battle_action", "use_field_move", "set_nickname",
-                          "buy_item", "forget_move"] {
+                          "buy_item", "forget_move", "mimic_move"] {
             assert!(!stuck.contains(&elsewhere), "a stuck turn must not offer {elsewhere}");
         }
         // The reads are all there, to work out why it is stuck before pressing anything.
@@ -2968,7 +3068,7 @@ mod tests {
         for name in BATTLE_SCRIPT_TOOL_NAMES {
             assert!(names(DecisionKind::Overworld).contains(name), "the overworld turn writes the script");
             for elsewhere in [DecisionKind::Battle, DecisionKind::Nickname, DecisionKind::MartPurchase,
-                              DecisionKind::ForgetMove, DecisionKind::Stuck] {
+                              DecisionKind::ForgetMove, DecisionKind::MimicMove, DecisionKind::Stuck] {
                 assert!(!names(elsewhere).contains(name), "{elsewhere:?} must not offer {name}");
             }
         }
@@ -3364,6 +3464,13 @@ mod tests {
             matches!(parse(DecisionKind::ForgetMove, "forget_move", r#"{"slot":7}"#), CallKind::Rejected(_)),
             "a Pokémon has four move slots, and a cursor sent to a fifth never arrives",
         );
+        assert!(matches!(
+            parse(DecisionKind::MimicMove, "mimic_move", r#"{"slot":1}"#),
+            CallKind::Terminal(Terminal::MimicMove { slot: 1 }),
+        ));
+        assert!(matches!(parse(DecisionKind::MimicMove, "mimic_move", "{}"), CallKind::Rejected(_)),
+                "Mimic's menu has no B, so there is nothing to decline");
+        assert!(matches!(parse(DecisionKind::MimicMove, "mimic_move", r#"{"slot":4}"#), CallKind::Rejected(_)));
     }
 
     /// Resolution against a real game, where the party and bag checks live.

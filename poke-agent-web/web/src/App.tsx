@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { RunStatus, UsageView } from './api';
+import { gameName, type RunStatus, type UsageView } from './api';
 import { BattleScriptPanel } from './components/BattleScriptPanel';
 import { Conversation } from './components/Conversation';
 import { Leaderboard } from './components/Leaderboard';
@@ -32,18 +32,19 @@ export function App() {
 
   // `null` under every policy that is not an LLM.
   const player = status?.model ?? null;
+  const game = `Pokémon ${gameName(status?.game_kind)}`;
 
   // A background tab's title is its whole UI, so it names who is playing.
   useEffect(() => {
-    document.title = describeTitle(player, status?.policy ?? null);
-  }, [player, status?.policy]);
+    document.title = describeTitle(player, status?.policy ?? null, game);
+  }, [player, status?.policy, game]);
 
   return (
     <div className="app">
       <header>
         {/* Identity and run figures are two groups so the narrow layout can fold the figures away. */}
         <span className="who">
-          <span className="title">Pokémon Red</span>
+          <span className="title">{game}</span>
           <span className="dim">played by</span>
           <span className="policy" title={player ? `GB_MODEL=${player}` : `--policy ${status?.policy ?? ''}`}>
             {player ?? status?.policy ?? '…'}
@@ -159,18 +160,18 @@ function describeUsage(usage: UsageView): string {
 }
 
 /** The tab title: the full `GB_MODEL`, or how the game is played under a policy with no model. */
-function describeTitle(player: string | null, policy: string | null): string {
-  if (player) return `${player} plays Pokémon Red`;
+function describeTitle(player: string | null, policy: string | null, game: string): string {
+  if (player) return `${player} plays ${game}`;
   switch (policy) {
     case 'random':
-      return 'Randomly playing Pokémon Red';
+      return `Randomly playing ${game}`;
     case 'console':
-      return 'Playing Pokémon Red by hand';
+      return `Playing ${game} by hand`;
     case 'scripted':
-      return 'Scripted playthrough of Pokémon Red';
+      return `Scripted playthrough of ${game}`;
     // An unknown policy is a build newer than this page.
     default:
-      return 'Pokémon Red';
+      return game;
   }
 }
 

@@ -9,7 +9,7 @@ use poke_core::species::PokemonSpecies;
 use poke_core::sprite::SpriteFacing;
 use pokered::input::Joypad;
 use crate::pokemon::symbols::{pokered_symbols as sym, DmgPointerRead};
-use super::scripts::{lockstep, Action, Cartridge, Kind, Seen, PROMPT};
+use super::scripts::{lockstep, lockstep_or_on_sgb, Action, Cartridge, Kind, Seen, PROMPT};
 
 const PARTY_STRUCT: u16 = 0x2C;
 
@@ -28,17 +28,6 @@ fn route(route: &'static [(Action, &'static str)], done: impl Fn(&Seen) -> bool 
             walked += 1;
             Some(step)
         }
-    }
-}
-
-/// `lockstep`, or on a Super Game Boy `lockstep_on_sgb`.
-fn lockstep_or_on_sgb(on_sgb: bool, state: &[u8], prepare: impl FnOnce(&mut Cartridge),
-    choose: impl FnMut(usize, &Seen) -> Option<(Action, &'static str)>)
-{
-    if on_sgb {
-        super::scripts::lockstep_on_sgb(state, prepare, choose);
-    } else {
-        lockstep(state, prepare, choose);
     }
 }
 

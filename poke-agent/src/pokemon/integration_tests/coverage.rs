@@ -734,6 +734,9 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
                     return Reply::call(name, serde_json::json!({}));
                 }
             }
+            if request.has_tool("mimic_move") {
+                return Reply::call("mimic_move", serde_json::json!({ "slot": 0 }));
+            }
             return Reply::Calls(vec![Call::wait(1)]);
         }
 

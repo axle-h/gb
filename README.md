@@ -151,7 +151,7 @@ Everything a run needs is one directory, `$GB_RUN_DIR/<run-id>/`:
 
 | | |
 |---|---|
-| `meta.json` | run id, model, when it started |
+| `meta.json` | run id, which game, model, when it started |
 | `state.gbst` | the save state — the emulator, exactly as it was |
 | `sram.bin` | the cartridge's battery-backed save |
 | `transcript.jsonl` | every event, appended; what `/api/history` replays into a page that just loaded |
