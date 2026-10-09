@@ -1987,7 +1987,7 @@ mod tests {
             model: "mock".to_string(),
             context_limit: DEFAULT_CONTEXT_LIMIT,
             compact_above: DEFAULT_COMPACT_ABOVE,
-            temperature: DEFAULT_TEMPERATURE,
+            temperature: None,
             max_tool_steps: DEFAULT_MAX_TOOL_STEPS,
             request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
             max_tokens: Some(DEFAULT_MAX_TOKENS),

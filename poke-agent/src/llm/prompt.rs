@@ -1134,7 +1134,7 @@ mod tests {
     #[cfg(feature = "slow-tests")]
     struct LlmConfigForProbe {
         model: String,
-        temperature: f32,
+        temperature: Option<f32>,
         max_tokens: Option<u32>,
     }
 
@@ -1143,7 +1143,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 model: "gpt-5".to_string(),
-                temperature: 1.0,
+                temperature: None,
                 max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
             }
         }

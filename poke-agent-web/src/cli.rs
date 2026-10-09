@@ -28,7 +28,8 @@ ENVIRONMENT (--policy llm):
     GB_CONTEXT_LIMIT            The model's context window, in tokens [default: 128000]
     GB_COMPACT_ABOVE            How full the context gets before the history is compacted
                                 [default: 0.85]
-    GB_TEMPERATURE, GB_MAX_TOOL_STEPS
+    GB_TEMPERATURE              Sent when set; unset leaves it to the model's default
+    GB_MAX_TOOL_STEPS           The most completions one turn may take [default: 12]
     GB_REQUEST_TIMEOUT_SECS     How long the endpoint may take to answer [default: 180]
     GB_MAX_TOKENS               Ceiling on one completion [default: 8192; 0 removes it]
     GB_REASONING_EFFORT         Sent as reasoning_effort when set; none turns thinking off

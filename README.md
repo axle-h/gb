@@ -228,7 +228,8 @@ All environment variables, never flags — the API key has to be one, so the res
 | `OPENAI_BASE_URL` | any OpenAI-compatible endpoint |
 | `GB_CONTEXT_LIMIT` | the context window, in tokens — set it to the model's, not the default 128 k |
 | `GB_COMPACT_ABOVE` | how full it gets before the turn loop compacts (`0.85`) |
-| `GB_TEMPERATURE`, `GB_MAX_TOOL_STEPS` | the turn loop's shape |
+| `GB_TEMPERATURE` | sent when set; unset leaves it to the model |
+| `GB_MAX_TOOL_STEPS` | the most completions one turn may take (`12`) |
 | `GB_REQUEST_TIMEOUT_SECS` | how long an endpoint may take to answer (`180`) |
 | `GB_MAX_TOKENS` | ceiling on one completion (`8192`); `0` removes it |
 | `GB_REASONING_EFFORT` | sent as `reasoning_effort` when set — `none` turns thinking off entirely |

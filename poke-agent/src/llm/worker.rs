@@ -1190,7 +1190,7 @@ mod tests {
             model: "m".into(),
             context_limit,
             compact_above,
-            temperature: 1.0,
+            temperature: None,
             max_tool_steps: 4,
             request_timeout: Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
             max_tokens: None,

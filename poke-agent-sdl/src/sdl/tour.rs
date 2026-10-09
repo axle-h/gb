@@ -273,7 +273,7 @@ fn llm_policy(brain: Box<dyn poke_agent::tour::turn::Brain>) -> Result<Box<dyn P
         model: "mock".to_string(),
         context_limit: 128_000,
         compact_above: DEFAULT_COMPACT_ABOVE,
-        temperature: 1.0,
+        temperature: None,
         max_tool_steps: 6,
         request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
         max_tokens: Some(DEFAULT_MAX_TOKENS),

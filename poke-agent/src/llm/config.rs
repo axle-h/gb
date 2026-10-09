@@ -13,8 +13,8 @@ pub struct LlmConfig {
     /// `GB_COMPACT_ABOVE`: the fraction of [`Self::context_limit`] at which the history is
     /// compacted, by eviction first and summarisation only if that leaves it still over.
     pub compact_above: f64,
-    /// `GB_TEMPERATURE`.
-    pub temperature: f32,
+    /// `GB_TEMPERATURE`, or `None` for the model's own default.
+    pub temperature: Option<f32>,
     /// `GB_MAX_TOOL_STEPS`: the most completions one turn may take.
     pub max_tool_steps: usize,
     /// `GB_REQUEST_TIMEOUT_SECS`: how long the endpoint may take to start, and to keep, answering
@@ -35,7 +35,6 @@ pub const DEFAULT_COMPACT_ABOVE: f64 = 0.85;
 /// Above this ceiling the remaining window cannot hold the compaction summary, and the run
 /// silently degrades to the last-resort trim.
 pub const COMPACT_ABOVE_RANGE: std::ops::RangeInclusive<f64> = 0.2..=0.95;
-pub const DEFAULT_TEMPERATURE: f32 = 1.0;
 pub const DEFAULT_MAX_TOOL_STEPS: usize = 12;
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 180;
 pub const DEFAULT_MAX_TOKENS: u32 = 8192;
@@ -77,7 +76,7 @@ impl LlmConfig {
                     ));
                 }
             },
-            temperature: number(env, "GB_TEMPERATURE", DEFAULT_TEMPERATURE)?,
+            temperature: optional_number(env, "GB_TEMPERATURE")?,
             max_tool_steps: number(env, "GB_MAX_TOOL_STEPS", DEFAULT_MAX_TOOL_STEPS)?,
             max_tokens: match number(env, "GB_MAX_TOKENS", DEFAULT_MAX_TOKENS)? {
                 0 => None,
@@ -108,10 +107,17 @@ fn number<T>(env: &dyn Fn(&str) -> Option<String>, name: &str, default: T) -> Re
 where
     T: std::str::FromStr,
 {
-    match env(name).map(|value| value.trim().to_string()).filter(|value| !value.is_empty()) {
-        Some(value) => value.parse().map_err(|_| format!("`{name}={value}` is not a number")),
-        None => Ok(default),
-    }
+    Ok(optional_number(env, name)?.unwrap_or(default))
+}
+
+/// `None` when unset, for a setting left to the endpoint.
+fn optional_number<T>(env: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<Option<T>, String>
+where
+    T: std::str::FromStr,
+{
+    env(name).map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+        .map(|value| value.parse().map_err(|_| format!("`{name}={value}` is not a number")))
+        .transpose()
 }
 
 /// `GB_RESTORE_HISTORY`: whether a resumed run keeps its conversation; on unless `0`, `false`,
@@ -254,7 +260,8 @@ mod tests {
         ]);
         let config = LlmConfig::from_lookup(&lookup(&pairs)).expect("valid");
         assert_eq!(config.context_limit, 32_000);
-        assert_eq!(config.temperature, 0.2);
+        assert_eq!(config.temperature, Some(0.2));
+        assert_eq!(LlmConfig::from_lookup(&lookup(MINIMAL)).expect("valid").temperature, None, "unset is the model's default");
         assert_eq!(config.max_tool_steps, 4);
 
         for (name, bad) in [("GB_CONTEXT_LIMIT", "lots"), ("GB_MAX_TOOL_STEPS", "a few")] {

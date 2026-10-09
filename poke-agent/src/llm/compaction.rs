@@ -328,7 +328,7 @@ mod tests {
             model: "m".into(),
             context_limit: 1000,
             compact_above: crate::llm::config::DEFAULT_COMPACT_ABOVE,
-            temperature: 0.4,
+            temperature: Some(0.4),
             max_tool_steps: 4,
             request_timeout: std::time::Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
             max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
@@ -340,7 +340,7 @@ mod tests {
 
         assert_eq!(request.messages.len(), messages.len() + 1);
         assert_eq!(request.messages.last().unwrap().text(), Some(SUMMARY_INSTRUCTION));
-        assert_eq!(request.temperature, 0.4);
+        assert_eq!(request.temperature, Some(0.4));
         assert!(request.tools.is_empty());
 
         let json = serde_json::to_value(&request).expect("serialises");

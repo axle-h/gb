@@ -211,7 +211,7 @@ mod tests {
             parallel_tool_calls: Some(true),
             max_tokens: None,
             reasoning_effort: None,
-            temperature: 1.0,
+            temperature: None,
             stream: true,
             stream_options: StreamOptions { include_usage: true },
         }

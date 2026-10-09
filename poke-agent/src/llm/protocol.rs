@@ -277,7 +277,9 @@ pub struct ChatRequest {
     /// How hard the model should think, for endpoints that expose it. `None` omits the key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    pub temperature: f32,
+    /// `None` omits the key, so the model samples at its own default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
     pub stream: bool,
     /// Several endpoints stream no `usage` unless asked; [`Usage::estimate`] covers the rest.
     pub stream_options: StreamOptions,
@@ -979,7 +981,7 @@ mod tests {
             parallel_tool_calls: Some(true),
             max_tokens: None,
             reasoning_effort: None,
-            temperature: 1.0,
+            temperature: None,
             stream: true,
             stream_options: StreamOptions { include_usage: true },
         };
@@ -987,15 +989,18 @@ mod tests {
         // Absent rather than null: `max_tokens: null` is a 400 on several endpoints.
         assert!(json.get("max_tokens").is_none(), "{json}");
         assert!(json.get("reasoning_effort").is_none(), "{json}");
+        assert!(json.get("temperature").is_none(), "{json}");
 
         let capped = ChatRequest {
             max_tokens: Some(8192),
             reasoning_effort: Some("none".to_string()),
+            temperature: Some(0.5),
             ..request.clone()
         };
         let json_capped = serde_json::to_value(&capped).expect("serialises");
         assert_eq!(json_capped["max_tokens"], 8192);
         assert_eq!(json_capped["reasoning_effort"], "none");
+        assert_eq!(json_capped["temperature"], 0.5);
 
         assert_eq!(json["stream_options"]["include_usage"], true);
         assert_eq!(json["parallel_tool_calls"], true);

@@ -338,7 +338,7 @@ impl LlmRunBuilder {
             model: "mock".to_string(),
             context_limit: self.context_limit,
             compact_above: self.compact_above,
-            temperature: 1.0,
+            temperature: None,
             max_tool_steps: self.max_tool_steps,
             request_timeout: self.request_timeout,
             max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
