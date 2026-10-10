@@ -1085,6 +1085,7 @@ mod tests {
                 request_timeout: std::time::Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
                 max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
                 reasoning_effort: None,
+                reasoning_budget: None,
                 stuck_timeout: Some(Duration::from_secs(300)),
             };
             tweak(&mut config);

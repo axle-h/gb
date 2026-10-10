@@ -343,6 +343,7 @@ impl LlmRunBuilder {
             request_timeout: self.request_timeout,
             max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
             reasoning_effort: None,
+            reasoning_budget: None,
             stuck_timeout: self.stuck_timeout,
         }
     }

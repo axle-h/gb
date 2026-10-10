@@ -277,12 +277,28 @@ pub struct ChatRequest {
     /// How hard the model should think, for endpoints that expose it. `None` omits the key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// OpenRouter's reasoning budget. `None` omits the key, which other endpoints reject.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningBudget>,
     /// `None` omits the key, so the model samples at its own default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     pub stream: bool,
     /// Several endpoints stream no `usage` unless asked; [`Usage::estimate`] covers the rest.
     pub stream_options: StreamOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ReasoningBudget {
+    pub max_tokens: u32,
+}
+
+impl ReasoningBudget {
+    /// Where [`read_stream`] stops reading, for a model that ignores the budget. Twice over, so the
+    /// character-count estimate never cuts off one that keeps it.
+    pub fn cutoff(self) -> u64 {
+        2 * u64::from(self.max_tokens)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -339,11 +355,14 @@ pub enum Fragment<'a> {
     Reasoning(&'a str),
 }
 
-/// Consume an SSE body to the end of the completion.
+/// Consume an SSE body to the end of the completion, or until its reasoning runs past
+/// `reasoning_cutoff` tokens before any reply has begun: that completion finishes as one cut off at
+/// the length limit, with no tool call.
 pub fn read_stream(
     reader: impl BufRead,
     on_delta: &mut dyn FnMut(Fragment<'_>),
     cancelled: &dyn Fn() -> bool,
+    reasoning_cutoff: Option<u64>,
 ) -> Result<Completion, LlmError> {
     let mut accumulator = StreamAccumulator::default();
     for line in reader.lines() {
@@ -358,6 +377,10 @@ pub fn read_stream(
             }
         })?;
         if accumulator.push_line(&line, on_delta)? {
+            break;
+        }
+        if reasoning_cutoff.is_some_and(|cutoff| accumulator.reasoning_ran_past(cutoff)) {
+            accumulator.finish_reason = Some("length".to_string());
             break;
         }
     }
@@ -463,6 +486,13 @@ impl StreamAccumulator {
                 call.arguments.push_str(&arguments);
             }
         }
+    }
+
+    /// A partial tool call is never cut: its arguments would be half a JSON object.
+    fn reasoning_ran_past(&self, tokens: u64) -> bool {
+        self.calls.is_empty()
+            && self.content.is_empty()
+            && (self.reasoning.len() as f64 / CHARS_PER_TOKEN) as u64 > tokens
     }
 
     pub fn finish(self) -> Completion {
@@ -958,9 +988,35 @@ mod tests {
                 seen.set(seen.get() + 1);
                 seen.get() > 1
             },
+            None,
         )
         .expect_err("cancellation is not a completion");
         assert!(matches!(failure, LlmError::Cancelled), "{failure}");
+    }
+
+    #[test]
+    fn reasoning_past_the_cutoff_ends_the_completion_as_cut_off() {
+        let thought = r#"data: {"choices":[{"delta":{"reasoning":"We need to be more specific. "}}]}"#;
+        let body = format!("{}\ndata: [DONE]\n", vec![thought; 100].join("\n"));
+        let read = |cutoff| read_stream(body.as_bytes(), &mut |_| {}, &|| false, cutoff).expect("completes");
+
+        let cut = read(Some(50));
+        assert_eq!(cut.finish_reason.as_deref(), Some("length"));
+        assert!(cut.reasoning.len() < 400, "stopped soon after the cutoff, not at the end");
+        assert_eq!(read(None).reasoning.len(), 2900, "no budget, no cut");
+    }
+
+    #[test]
+    fn a_reply_already_under_way_is_never_cut() {
+        let body = concat!(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"wait","arguments":"{"}}]}}]}"#, "\n",
+            r#"data: {"choices":[{"delta":{"reasoning":"a long afterthought, far past any cutoff"}}]}"#, "\n",
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]}"#, "\n",
+            "data: [DONE]\n",
+        );
+        let completion = read_stream(body.as_bytes(), &mut |_| {}, &|| false, Some(1)).expect("completes");
+        assert_eq!(completion.tool_calls[0].function.arguments, "{}");
+        assert_eq!(completion.finish_reason, None);
     }
 
     /// No nulls where a key should be absent, and `stream_options` so `usage` comes back.
@@ -981,6 +1037,7 @@ mod tests {
             parallel_tool_calls: Some(true),
             max_tokens: None,
             reasoning_effort: None,
+            reasoning: None,
             temperature: None,
             stream: true,
             stream_options: StreamOptions { include_usage: true },
@@ -989,17 +1046,20 @@ mod tests {
         // Absent rather than null: `max_tokens: null` is a 400 on several endpoints.
         assert!(json.get("max_tokens").is_none(), "{json}");
         assert!(json.get("reasoning_effort").is_none(), "{json}");
+        assert!(json.get("reasoning").is_none(), "{json}");
         assert!(json.get("temperature").is_none(), "{json}");
 
         let capped = ChatRequest {
             max_tokens: Some(8192),
             reasoning_effort: Some("none".to_string()),
+            reasoning: Some(ReasoningBudget { max_tokens: 1024 }),
             temperature: Some(0.5),
             ..request.clone()
         };
         let json_capped = serde_json::to_value(&capped).expect("serialises");
         assert_eq!(json_capped["max_tokens"], 8192);
         assert_eq!(json_capped["reasoning_effort"], "none");
+        assert_eq!(json_capped["reasoning"], serde_json::json!({ "max_tokens": 1024 }));
         assert_eq!(json_capped["temperature"], 0.5);
 
         assert_eq!(json["stream_options"]["include_usage"], true);

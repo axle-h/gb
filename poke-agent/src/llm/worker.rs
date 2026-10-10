@@ -620,6 +620,7 @@ impl Worker {
                     parallel_tool_calls: Some(true),
                     max_tokens: self.config.max_tokens,
                     reasoning_effort: self.config.reasoning_effort.clone(),
+                    reasoning: self.config.reasoning_budget,
                     temperature: self.config.temperature,
                     stream: true,
                     stream_options: StreamOptions { include_usage: true },
@@ -1195,6 +1196,7 @@ mod tests {
             request_timeout: Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
             max_tokens: None,
             reasoning_effort: None,
+            reasoning_budget: None,
             stuck_timeout: None,
         };
         let (worker, _) = channels(

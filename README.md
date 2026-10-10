@@ -233,6 +233,7 @@ All environment variables, never flags — the API key has to be one, so the res
 | `GB_REQUEST_TIMEOUT_SECS` | how long an endpoint may take to answer (`180`) |
 | `GB_MAX_TOKENS` | ceiling on one completion (`8192`); `0` removes it |
 | `GB_REASONING_EFFORT` | sent as `reasoning_effort` when set — `none` turns thinking off entirely |
+| `GB_REASONING_MAX_TOKENS` | sent as OpenRouter's `reasoning.max_tokens` instead; a model still thinking at twice it is cut off |
 | `GB_STUCK_TIMEOUT_SECS` | the watchdog (`300`); `0` turns it off |
 | `GB_POLICY` | what plays the game: `llm` (default), `random` or `deterministic`; `--policy` wins |
 | `GB_RUN_DIR` | where runs live (default `./runs`) |

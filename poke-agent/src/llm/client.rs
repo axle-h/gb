@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::llm::LlmError;
 use crate::llm::config::LlmConfig;
 use crate::llm::protocol::{
-    ChatRequest, Completion, Fragment, describe_error_body, read_stream, reset_at_ms,
+    ChatRequest, Completion, Fragment, ReasoningBudget, describe_error_body, read_stream, reset_at_ms,
 };
 use crate::published::now_ms;
 
@@ -95,7 +95,12 @@ impl ChatEndpoint for OpenAiClient {
             return Err(LlmError::Http { status, message });
         }
 
-        read_stream(BufReader::new(response.into_body().into_reader()), on_delta, cancelled)
+        read_stream(
+            BufReader::new(response.into_body().into_reader()),
+            on_delta,
+            cancelled,
+            request.reasoning.map(ReasoningBudget::cutoff),
+        )
     }
 }
 
@@ -211,6 +216,7 @@ mod tests {
             parallel_tool_calls: Some(true),
             max_tokens: None,
             reasoning_effort: None,
+            reasoning: None,
             temperature: None,
             stream: true,
             stream_options: StreamOptions { include_usage: true },

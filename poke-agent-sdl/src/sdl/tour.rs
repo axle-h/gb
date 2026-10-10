@@ -278,6 +278,7 @@ fn llm_policy(brain: Box<dyn poke_agent::tour::turn::Brain>) -> Result<Box<dyn P
         request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
         max_tokens: Some(DEFAULT_MAX_TOKENS),
         reasoning_effort: None,
+        reasoning_budget: None,
         stuck_timeout: None,
     };
     let (worker, handles) = worker::channels(

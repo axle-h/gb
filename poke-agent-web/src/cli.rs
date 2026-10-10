@@ -33,6 +33,8 @@ ENVIRONMENT (--policy llm):
     GB_REQUEST_TIMEOUT_SECS     How long the endpoint may take to answer [default: 180]
     GB_MAX_TOKENS               Ceiling on one completion [default: 8192; 0 removes it]
     GB_REASONING_EFFORT         Sent as reasoning_effort when set; none turns thinking off
+    GB_REASONING_MAX_TOKENS     Sent as OpenRouter's reasoning.max_tokens when set; a reply
+                                still thinking at twice it is cut off [not with the above]
     GB_STUCK_TIMEOUT_SECS       Emulated seconds with the agent asking nothing at all before
                                 the watchdog asks on its behalf [default: 300; 0 turns it off]
     GB_RESTORE_HISTORY          Resume a run's conversation as well as its save [default: 1;

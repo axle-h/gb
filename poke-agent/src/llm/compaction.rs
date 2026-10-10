@@ -71,6 +71,7 @@ pub fn summary_request(config: &LlmConfig, messages: &[Message]) -> ChatRequest 
         // Capped too: a runaway summary is the outage this request exists to prevent.
         max_tokens: config.max_tokens,
         reasoning_effort: config.reasoning_effort.clone(),
+        reasoning: config.reasoning_budget,
         temperature: config.temperature,
         stream: true,
         stream_options: StreamOptions { include_usage: true },
@@ -333,6 +334,7 @@ mod tests {
             request_timeout: std::time::Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
             max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
             reasoning_effort: None,
+            reasoning_budget: None,
             stuck_timeout: None,
         };
         let messages = history(2, false);

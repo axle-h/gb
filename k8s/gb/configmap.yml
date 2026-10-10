@@ -35,8 +35,9 @@ data:
   # Ceiling on one completion, so a repetition loop cannot run until the context window fills.
   GB_MAX_TOKENS: "8192"
 
-  # Passed through unvalidated as `reasoning_effort`; a model without reasoning ignores it.
-  GB_REASONING_EFFORT: "low"
+  # OpenRouter's `reasoning.max_tokens`: honoured by Anthropic and Gemini, mapped to an effort elsewhere,
+  # and a model that ignores it is cut off at twice it.
+  GB_REASONING_MAX_TOKENS: "1024"
 
   # Emulated seconds with no decision point before the model is asked for a nudge; `0` turns it off.
   GB_STUCK_TIMEOUT_SECS: "300"

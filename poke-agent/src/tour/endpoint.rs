@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::llm::LlmError;
 use crate::llm::client::ChatEndpoint;
-use crate::llm::protocol::{ChatRequest, Completion, Fragment, describe_error_body, read_stream, reset_at_ms};
+use crate::llm::protocol::{ChatRequest, Completion, Fragment, ReasoningBudget, describe_error_body, read_stream, reset_at_ms};
 use crate::published::now_ms;
 use crate::tour::turn::{Brain, Call, Fault, Reply, TurnRequest};
 
@@ -40,7 +40,7 @@ impl ChatEndpoint for BrainEndpoint {
         let turn = TurnRequest::from_wire(&wire, self.seen.fetch_add(1, Ordering::SeqCst));
         let reply = self.brain.lock().expect("not poisoned").respond(&turn);
         if let Some(body) = sse_body(&reply) {
-            return read_stream(body.as_bytes(), on_delta, cancelled);
+            return read_stream(body.as_bytes(), on_delta, cancelled, request.reasoning.map(ReasoningBudget::cutoff));
         }
         let Reply::Fault(fault) = reply else { unreachable!("every other reply is a stream") };
         let body = |message: String| describe_error_body(&error_body(&message));
@@ -202,6 +202,7 @@ mod tests {
             parallel_tool_calls: None,
             max_tokens: None,
             reasoning_effort: None,
+            reasoning: None,
             temperature: None,
             stream: true,
             stream_options: StreamOptions { include_usage: true },

@@ -1,5 +1,7 @@
 //! The LLM configuration, read once at startup and entirely from the environment.
 
+use crate::llm::protocol::ReasoningBudget;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmConfig {
     /// `OPENAI_BASE_URL`: any OpenAI-compatible endpoint, the public one by default.
@@ -24,6 +26,9 @@ pub struct LlmConfig {
     pub max_tokens: Option<u32>,
     /// `GB_REASONING_EFFORT`, sent as `reasoning_effort` when set, in the endpoint's vocabulary.
     pub reasoning_effort: Option<String>,
+    /// `GB_REASONING_MAX_TOKENS`, sent as OpenRouter's `reasoning.max_tokens`, and twice it is
+    /// where the client stops reading a model that ignores it.
+    pub reasoning_budget: Option<ReasoningBudget>,
     /// `GB_STUCK_TIMEOUT_SECS`: emulated time without any decision point before the watchdog asks
     /// for a nudge; `None` when set to `0`, which turns it off.
     pub stuck_timeout: Option<std::time::Duration>,
@@ -55,6 +60,15 @@ impl LlmConfig {
             }
         };
 
+        let reasoning_effort =
+            env("GB_REASONING_EFFORT").map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+        let reasoning_budget =
+            optional_number(env, "GB_REASONING_MAX_TOKENS")?.map(|max_tokens| ReasoningBudget { max_tokens });
+        // OpenRouter takes an effort or a budget, never both.
+        if reasoning_effort.is_some() && reasoning_budget.is_some() {
+            return Err("set GB_REASONING_EFFORT or GB_REASONING_MAX_TOKENS, not both".to_string());
+        }
+
         Ok(Self {
             // A trailing slash here and the request path would double it.
             base_url: env("OPENAI_BASE_URL")
@@ -83,9 +97,8 @@ impl LlmConfig {
                 cap => Some(cap),
             },
             // Not validated: the endpoint owns the values and rejects a bad one in a 400 we keep.
-            reasoning_effort: env("GB_REASONING_EFFORT")
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
+            reasoning_effort,
+            reasoning_budget,
             request_timeout: std::time::Duration::from_secs(number(
                 env,
                 "GB_REQUEST_TIMEOUT_SECS",
@@ -227,6 +240,20 @@ mod tests {
         let mut pairs = MINIMAL.to_vec();
         pairs.push(("GB_MAX_TOKENS", "2048"));
         assert_eq!(LlmConfig::from_lookup(&lookup(&pairs)).expect("valid").max_tokens, Some(2048));
+    }
+
+    #[test]
+    fn a_reasoning_budget_is_sent_only_when_asked_for_and_never_beside_an_effort() {
+        assert_eq!(LlmConfig::from_lookup(&lookup(MINIMAL)).expect("valid").reasoning_budget, None);
+
+        let mut pairs = MINIMAL.to_vec();
+        pairs.push(("GB_REASONING_MAX_TOKENS", "1024"));
+        let config = LlmConfig::from_lookup(&lookup(&pairs)).expect("valid");
+        assert_eq!(config.reasoning_budget, Some(ReasoningBudget { max_tokens: 1024 }));
+
+        pairs.push(("GB_REASONING_EFFORT", "low"));
+        let refusal = LlmConfig::from_lookup(&lookup(&pairs)).expect_err("both is a contradiction");
+        assert!(refusal.contains("not both"), "{refusal}");
     }
 
     #[test]

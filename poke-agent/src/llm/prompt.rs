@@ -1086,6 +1086,7 @@ mod tests {
                 parallel_tool_calls: Some(true),
                 max_tokens: config.max_tokens,
                 reasoning_effort: None,
+                reasoning: None,
                 temperature: config.temperature,
                 stream: true,
                 stream_options: StreamOptions { include_usage: true },

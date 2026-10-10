@@ -1992,6 +1992,7 @@ mod tests {
             request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
             max_tokens: Some(DEFAULT_MAX_TOKENS),
             reasoning_effort: None,
+            reasoning_budget: None,
             stuck_timeout: Some(Duration::from_secs(DEFAULT_STUCK_TIMEOUT_SECS)),
         }
     }
