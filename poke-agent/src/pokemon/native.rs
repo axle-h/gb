@@ -129,17 +129,25 @@ impl NativeGame {
         let gates = NativeGates(self.world());
         let wild = poke_core::wild::encounters(map);
 
-        let metadata = if live_blocks(map) {
-            Arc::new(self.runtime_metadata(map, overworld)?)
-        } else if crate::pokemon::tile_map::elevator_for(map).is_some() {
-            let exits = overworld.warps().iter().map(|warp| (warp.destination_warp, warp.destination_map));
-            Arc::new(crate::pokemon::map_metadata::with_live_exits(&self.rom, &*self.maps.read_map(&self.rom, map)?, exits))
+        let rom = self.maps.read_map(&self.rom, map)?;
+        // A warp writes `location.map` before its fade and the view is the last map's until the load,
+        // as `wCurMap` is written first on the cartridge, so nothing live is read until they agree.
+        let view = overworld.view();
+        let header = &rom.map_header;
+        let header_loaded = (view.width, view.height, view.tileset) == (header.width, header.height, header.tileset);
+
+        let metadata = if !header_loaded {
+            rom
         } else {
-            self.maps.read_map(&self.rom, map)?
-        };
-        let metadata = match overworld.view().width == metadata.map_header.width {
-            true => crate::pokemon::map_metadata::with_trees_cut(metadata, live_block(overworld)),
-            false => metadata,
+            let metadata = if live_blocks(map) {
+                Arc::new(self.runtime_metadata(map, overworld)?)
+            } else if crate::pokemon::tile_map::elevator_for(map).is_some() {
+                let exits = overworld.warps().iter().map(|warp| (warp.destination_warp, warp.destination_map));
+                Arc::new(crate::pokemon::map_metadata::with_live_exits(&self.rom, &rom, exits))
+            } else {
+                rom
+            };
+            crate::pokemon::map_metadata::with_trees_cut(metadata, live_block(overworld))
         };
 
         Ok(CurrentMap {
@@ -155,10 +163,7 @@ impl NativeGame {
             water_encounter_rate: wild.as_ref().map_or(0, |w| w.water_rate),
             card_key_locked: crate::pokemon::map_metadata::map_has_card_key_doors(map)
                 && !self.world().bag.items.iter().any(|slot| slot.id == ItemId::CardKey),
-            // The recreation loads a map's header in the same pass that changes `location.map`, so
-            // there is no frame where the two disagree; the emulated side needs the check because
-            // `wCurMap` is written before the load.
-            header_loaded: true,
+            header_loaded,
             surfing: location.walk_bike_surf == SURFING,
             sprites_loaded: true,
             standing_on_warp: overworld.standing_on_warp(),

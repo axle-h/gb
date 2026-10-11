@@ -2683,13 +2683,18 @@ mod tests {
     /// The player standing at `(x, y)` on `map`, past Oak's stopping them at the grass, with a
     /// Mewtwo and whatever `edit` adds.
     fn game_at(map: Map, x: u8, y: u8, edit: impl FnOnce(&mut World)) -> Game {
+        paced_game_at(map, x, y, Pacing::Instant, edit)
+    }
+
+    /// [`game_at`], at `pacing`.
+    fn paced_game_at(map: Map, x: u8, y: u8, pacing: Pacing, edit: impl FnOnce(&mut World)) -> Game {
         let mut world = World::default();
         world.player_name = encode("RED").unwrap();
         world.party = vec![named(PokemonSpecies::Mewtwo, [None; 4])];
         world.location = Location { map, x, y, last_map: map, ..Location::default() };
         world.events.set(poke_core::symbols::pokered_events::EVENT_FOLLOWED_OAK_INTO_LAB);
         edit(&mut world);
-        let mut game = Game::new(world, GameRng::seeded(11), Pacing::Instant);
+        let mut game = Game::new(world, GameRng::seeded(11), pacing);
         game.push(Mode::Overworld(Overworld::new()));
         game
     }
@@ -2707,6 +2712,26 @@ mod tests {
                 world.bag.add(ItemId::CoinCase, 1);
             }
         })
+    }
+
+    /// A warp names the map it leads to before its fade, and the view is still the last map's until
+    /// the load: down the Game Corner's stairs, that read a 10-block-wide view as the hideout's 15.
+    #[test]
+    fn a_warp_is_unsettled_until_the_map_it_leads_to_is_loaded() {
+        let game = paced_game_at(Map::GameCorner, 17, 5, Pacing::Faithful, |world| {
+            world.events.set(poke_core::symbols::pokered_events::EVENT_FOUND_ROCKET_HIDEOUT);
+        });
+        let (mut agent, log) = agent(game, vec![Goal::Enter(Map::RocketHideoutB1F)]);
+        let mid_fade = RefCell::new(0);
+        run(&mut agent, &log, |agent, log| {
+            let map = agent.native().current_map().expect("the map reads at every frame");
+            if map.metadata.map == Map::RocketHideoutB1F && !map.header_loaded {
+                *mid_fade.borrow_mut() += 1;
+            }
+            settled(agent, log)
+        });
+        assert!(*mid_fade.borrow() > 0, "the fade was never seen, so this proves nothing");
+        assert_eq!(agent.game().world().location.map, Map::RocketHideoutB1F);
     }
 
     fn at_a_machine(agent: &NativeAgent) -> bool {
