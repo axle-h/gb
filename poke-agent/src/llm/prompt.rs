@@ -651,9 +651,10 @@ pub fn situation(
             ));
         }
 
+        // A map edge is a way off too, so a route whose doors all lead into one building is not this.
         let doors: std::collections::HashSet<crate::pokemon::map::Map> =
             state.map.warp_targets.iter().map(|(to_map, _)| *to_map).collect();
-        if state.map.warp_targets.len() > 1 && doors.len() == 1 {
+        if state.map.warp_targets.len() > 1 && doors.len() == 1 && state.map.connection_targets.is_empty() {
             let to_map = doors.into_iter().next().expect("one");
             out.push_str(&format!(
                 "Every way off this map leads back to {to_map}, at {} different places on it, so \
@@ -1328,8 +1329,9 @@ mod tests {
         use crate::pokemon::map::Map;
         let base = state_from(include_bytes!("../pokemon/data/at-vermilion.bin"));
 
-        // A gate: several landings, all on one map.
+        // A gate: several landings, all on one map, and no map edge.
         let mut gate = base.clone();
+        gate.map.connection_targets.clear();
         gate.map.warp_targets = [
             (Map::Route7, poke_core::geometry::Point8 { x: 11, y: 10 }),
             (Map::Route7, poke_core::geometry::Point8 { x: 18, y: 9 }),
@@ -1339,6 +1341,11 @@ mod tests {
         assert!(turn.contains("2 different places"), "{turn}");
         // The fact no row can carry: there is nothing else here to look for.
         assert!(turn.contains("Nothing beyond Route7 can be reached through a door from here"), "{turn}");
+
+        // A route whose doors all lead into one building has its edges as well: Route 20 and Seafoam.
+        let mut route = gate.clone();
+        route.map.connection_targets = [Map::Route19].into_iter().collect();
+        assert!(!overworld_turn(&route, &[]).contains("Every way off this map"));
 
         // A double-wide front door is two warp tiles onto one square, and is not this.
         let mut house = base.clone();
