@@ -610,7 +610,7 @@ fn a_tree_grows_back_after_a_battle_that_ends_in_a_catch() {
             cut = true;
             row("cut down the tree at (30, 12)")
         } else if !caught {
-            row("walk into tall grass")
+            row("pace back and forth in the nearest tall grass")
         } else {
             // Out west: through the gate if the way is open, or the tree again.
             row("take the warp to Route8Gate").or_else(|| row("cut down the tree at (30, 12)"))

@@ -213,10 +213,8 @@ fn the_action_menu_offers_a_cast_when_a_rod_is_in_the_bag() {
     let mut outcomes = 0;
     for event in fixture.agent.drain_events() {
         match event {
+            // A miss and a bite both land the cast.
             AgentEvent::OverworldActionCompleted { destination: MetaTile::Fish { .. } } => outcomes += 1,
-            AgentEvent::OverworldActionAborted {
-                destination: MetaTile::Fish { .. },
-                reason: crate::pokemon::agent::OverworldActionAbortedReason::Battle, .. } => outcomes += 1,
             _ => {}
         }
     }

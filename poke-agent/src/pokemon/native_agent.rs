@@ -757,6 +757,10 @@ impl NativeAgent {
             }
             // A battle out of a step behind a boulder, or the step onto the water. A boulder goal
             // outlives it, as the emulated agent's does, and is taken up again on the same floor.
+            // A bite lands a fishing row's cast.
+            if matches!(self.task, Some(Task::Bag(BagUse { how: BagHow::Cast { row: true, .. }, .. }))) {
+                self.complete();
+            }
             self.task = None;
         }
         // An arrow tile carries the walk on rather than taking the screen from it, as the emulated
@@ -1297,6 +1301,9 @@ impl NativeAgent {
         if walk.pressed_a && mode == GameMode::TextBox {
             self.walk = None;
             self.interacted(walk);
+        } else if mode == GameMode::WildBattle && walk.destination.is_paced_for_encounters() {
+            // What a hunt was for.
+            self.complete();
         } else {
             let at = self.player_at();
             if let (Some(at), Some(came_from)) = (at, walk.came_from) && at != came_from {
@@ -3860,8 +3867,8 @@ mod tests {
         run(&mut agent, &log, |agent, _| matches!(agent.task, Some(Task::Pace(_))));
         run(&mut agent, &log, |_, log| log.battles > 0);
         let log = log.borrow();
-        assert!(log.events.iter().any(|event| event.starts_with("OverworldActionAborted { destination: Grass, reason: Battle")),
-                "a battle is what ends a pace: {:#?}", log.events);
+        assert!(log.events.iter().any(|event| event == "OverworldActionCompleted { destination: Grass }"),
+                "a wild battle is what lands a pace: {:#?}", log.events);
     }
 
     fn messages(events: &[String]) -> Vec<&str> {

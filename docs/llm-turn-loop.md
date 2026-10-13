@@ -73,13 +73,13 @@ argument lives in the code.
   walk the gym in two requests, and a test asserts the turn is byte-identical whatever the puzzle
   state says.
 - A chain is checked against the same menu and each hop is re-resolved against a fresh `actions()`.
-  Only a landed action advances it. `resume_after_battle` is opt-in, battles only, and capped.
+  Only a landed action advances it. `resume_after_battle` is on unless the model turns it off,
+  battles only, and capped.
   A walk stopped by a message that left the player on the same square, with no battle after it, is
   taken up again without asking (`MAX_NOTICE_RESUMES`); a walk-back or a trainer still hands it back.
-- `resume_after_battle` was dead on tall grass, because a pace that ended in an encounter emitted no
-  abort at all. No test in this file could see it: they pin what happens *given* silence, and cannot
-  say which endings are silent. A driver that reports nothing still exists, so the hole can be dug
-  again.
+- A chain stalls on a pace that ended in an encounter and reported nothing. No test in this file
+  could see it: they pin what happens *given* silence, and cannot say which endings are silent. A
+  driver that reports nothing still exists, so the hole can be dug again.
 
 ## The battle script
 

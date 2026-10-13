@@ -769,7 +769,8 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
                      the one before, as in heal then leave. It stops at the first that will not \
                      resolve or is stopped, and says where it got to. `resume_after_battle` is \
                      true unless you say otherwise: a battle interrupting the action does not end \
-                     it, and it is taken up again after, up to {} times.",
+                     it, and it is taken up again after, up to {} times. A row that hunts wild \
+                     Pokémon lands when one appears, so chain it to hunt again.",
                     MAX_CHAINED_ACTIONS - 1,
                     crate::pokemon::llm_policy::MAX_BATTLE_RESUMES,
                 ),
@@ -1830,12 +1831,16 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
                     to_position.x + dx, to_position.y + dy)
         }
         MetaTile::ConnectionWater(to_map) => format!("surf into {to_map}"),
-        MetaTile::Grass => "walk into tall grass to find wild Pokémon".to_string(),
+        // The hunts say they go nowhere, or a model reads "surf" as a way across the sea.
+        MetaTile::Grass =>
+            "pace back and forth in the nearest tall grass until a wild Pokémon appears; this goes nowhere".to_string(),
         // Where there is no grass, as a cave's floor and the sea's surface roll the same.
         MetaTile::Pace { water: false } =>
-            "walk up and down this floor to find wild Pokémon: here any floor rolls them".to_string(),
+            "pace back and forth on the nearest floor until a wild Pokémon appears, as any floor here rolls them; \
+             this goes nowhere".to_string(),
         MetaTile::Pace { water: true } =>
-            "surf up and down on this water to find wild water Pokémon".to_string(),
+            "surf back and forth on the nearest water until a wild water Pokémon appears; this goes nowhere, \
+             so to cross the water take a row that names where it leads".to_string(),
         MetaTile::Pc => "use the PC".to_string(),
         // One press of A each; what it does is the cartridge's business.
         MetaTile::Switch { object, ordinal } => {
@@ -2575,7 +2580,7 @@ mod tests {
     fn the_tool_array_stays_within_its_budget() {
         // Overworld is the big one: it carries `use_field_move`.
         for (kind, ceiling) in [
-            (DecisionKind::Overworld, 13_175),
+            (DecisionKind::Overworld, 13_250),
             (DecisionKind::Battle, 5_575),
             (DecisionKind::Nickname, 4_075),
             (DecisionKind::MartPurchase, 4_825),

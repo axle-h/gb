@@ -52,6 +52,12 @@ impl MetaTile {
         }
     }
 
+    /// A row walked back and forth until a wild Pokémon appears, so a wild battle on the way there
+    /// or in the pacing is what it was for.
+    pub fn is_paced_for_encounters(&self) -> bool {
+        matches!(self, Self::Grass | Self::Pace { .. })
+    }
+
     /// The last field of an action id: [`Self::kind`], except for a person or object, named.
     pub fn id_kind(&self) -> std::borrow::Cow<'static, str> {
         match self {

@@ -244,6 +244,15 @@ impl Display for AgentEvent {
             // A cut is not an arrival.
             AgentEvent::OverworldActionCompleted { destination: MetaTile::Cut { at } } =>
                 write!(f, "✓ cut down the tree at ({}, {})", at.x, at.y),
+            // Nor is a hunt, which lands on the wild Pokémon it was for, or a cast, bite or not.
+            AgentEvent::OverworldActionCompleted { destination: MetaTile::Grass } =>
+                write!(f, "✓ found a wild Pokémon in the tall grass"),
+            AgentEvent::OverworldActionCompleted { destination: MetaTile::Pace { water: false } } =>
+                write!(f, "✓ found a wild Pokémon walking the floor"),
+            AgentEvent::OverworldActionCompleted { destination: MetaTile::Pace { water: true } } =>
+                write!(f, "✓ found a wild Pokémon on the water"),
+            AgentEvent::OverworldActionCompleted { destination: MetaTile::Fish { rod } } =>
+                write!(f, "✓ cast the {}", rod.name()),
             AgentEvent::OverworldActionCompleted { destination } =>
                 write!(f, "✓ reached {destination}"),
             // The page drops this kind: the dialogue that follows says the same.
@@ -1446,18 +1455,19 @@ impl PokemonAgent {
                     self.event(AgentEvent::BattleStarted);
                     self.set_battle_state(BattleState::default());
                 }
-                // Every state that carries a walk.
+                // Every state that carries a walk. A wild battle is what a hunt was for, so it lands.
                 _ if self.state.open_overworld_action().is_some() => {
                     let d = self.state.open_overworld_action().expect("just checked");
-                    self.abort_overworld(d, OverworldActionAbortedReason::Battle, None);
+                    match game_mode == GameMode::WildBattle && d.is_paced_for_encounters() {
+                        true => self.event(AgentEvent::OverworldActionCompleted { destination: d }),
+                        false => self.abort_overworld(d, OverworldActionAbortedReason::Battle, None),
+                    }
                     self.event(AgentEvent::BattleStarted);
                     self.set_battle_state(BattleState::default());
                 }
-                // A bite ends a cast the same way.
+                // A bite lands a cast.
                 AgentState::Fishing(state) => {
-                    self.abort_overworld(
-                        MetaTile::Fish { rod: state.rod },
-                        OverworldActionAbortedReason::Battle, None);
+                    self.event(AgentEvent::OverworldActionCompleted { destination: MetaTile::Fish { rod: state.rod } });
                     self.event(AgentEvent::BattleStarted);
                     self.set_battle_state(BattleState::default());
                 }
@@ -4233,12 +4243,12 @@ mod tests {
         );
         assert!(format!("{nothing}").contains(&format!("{PACING_BUDGET_SECS} seconds")));
 
-        let met_something = AgentEvent::OverworldActionAborted {
-            destination: MetaTile::Grass,
-            reason: OverworldActionAbortedReason::Battle,
-            at: None,
-        };
-        assert_eq!(format!("{met_something}"), "✗ gave up on tall grass: a battle started");
+        // A wild battle is what the row was for, so it is the row landing.
+        let found = |destination| format!("{}", AgentEvent::OverworldActionCompleted { destination });
+        assert_eq!(found(MetaTile::Grass), "✓ found a wild Pokémon in the tall grass");
+        assert_eq!(found(MetaTile::Pace { water: false }), "✓ found a wild Pokémon walking the floor");
+        assert_eq!(found(MetaTile::Pace { water: true }), "✓ found a wild Pokémon on the water");
+        assert_eq!(found(MetaTile::Fish { rod: crate::pokemon::postgame::fishing::Rod::Good }), "✓ cast the Good Rod");
     }
 
     /// A cast that never happened says so, in the sentence that closes the row.
