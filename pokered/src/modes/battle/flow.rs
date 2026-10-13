@@ -1087,6 +1087,7 @@ impl BattleMode {
     /// `.quitPartyMenu`: the battle's screen and, by `RunDefaultPaletteCommand`, its palettes back.
     fn quit_party_menu(&mut self) {
         self.push(Present::ClearSprites);
+        self.push(Present::LoadHudTiles);
         self.push(Present::LoadScreen2);
         self.push_set_pal_battle();
         self.goto(Step::DisplayBattleMenu);
@@ -1114,6 +1115,7 @@ impl BattleMode {
         }
         self.action_taken = true;
         self.push(Present::ClearSprites);
+        self.push(Present::LoadHudTiles);
         self.push(Present::LoadScreen1);
         // `RunDefaultPaletteCommand`, which in a battle is `SET_PAL_BATTLE`, for the mon still out.
         self.push_set_pal_battle();

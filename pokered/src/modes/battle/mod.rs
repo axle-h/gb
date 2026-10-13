@@ -617,6 +617,10 @@ mod tests {
         assert_eq!(seen, [Decision::PokedexData, Decision::TwoOption]);
     }
 
+    fn hud_tiles(game: &Game) -> Vec<[u8; poke_core::rom_gfx::TILE_BYTES]> {
+        (0x6Du8..0x80).map(|id| *game.screen().tiles.bg(id)).collect()
+    }
+
     /// A nickname typed in a battle comes back to the HUD's own corner and line tiles, which the
     /// naming screen's text box tiles had replaced.
     #[test]
@@ -629,8 +633,7 @@ mod tests {
         assert_eq!(settle(&mut game), Some(Decision::Text));
         command(&mut game, Command::Advance);
         assert_eq!(settle(&mut game), Some(Decision::BattleMenu));
-        let hud = |game: &Game| (0x6Du8..0x80).map(|id| *game.screen().tiles.bg(id)).collect::<Vec<_>>();
-        let before = hud(&game);
+        let before = hud_tiles(&game);
         assert_eq!(command(&mut game, Command::UseItem { item: ItemId::MasterBall, target: None, target_move: None }), Reply::Accepted);
         let mut named = false;
         for _ in 0..5000 {
@@ -646,7 +649,41 @@ mod tests {
             }
         }
         assert!(named, "the naming screen came up");
-        assert!(hud(&game) == before, "the HUD's tiles");
+        assert!(hud_tiles(&game) == before, "the HUD's tiles");
+    }
+
+    /// A switch comes back to the HUD's own tiles, which the party menu's HP bar and status tiles
+    /// had replaced.
+    #[test]
+    fn switching_puts_back_the_hud_s_tiles() {
+        let mut game = game(BattleMode::wild(PokemonSpecies::Magikarp, 5));
+        assert_eq!(settle(&mut game), Some(Decision::Text));
+        command(&mut game, Command::Advance);
+        assert_eq!(settle(&mut game), Some(Decision::BattleMenu));
+        let before = hud_tiles(&game);
+        assert_eq!(command(&mut game, Command::SwitchPokemon(1)), Reply::Accepted);
+        assert!(hud_tiles(&game) == before, "the HUD's tiles");
+    }
+
+    /// So does leaving the party menu without choosing.
+    #[test]
+    fn quitting_the_party_menu_puts_back_the_hud_s_tiles() {
+        let mut game = game(BattleMode::wild(PokemonSpecies::Magikarp, 5));
+        assert_eq!(settle(&mut game), Some(Decision::Text));
+        command(&mut game, Command::Advance);
+        assert_eq!(settle(&mut game), Some(Decision::BattleMenu));
+        let before = hud_tiles(&game);
+        let press = |game: &mut Game, button: Joypad| {
+            game.frame(Input::Buttons(button));
+            for _ in 0..3 {
+                game.frame(Input::None);
+            }
+            settle(game)
+        };
+        press(&mut game, Joypad::RIGHT);
+        assert_eq!(press(&mut game, Joypad::A), Some(Decision::PartyMenu));
+        assert_eq!(press(&mut game, Joypad::B), Some(Decision::BattleMenu));
+        assert!(hud_tiles(&game) == before, "the HUD's tiles");
     }
 
     /// A Marowak met in the grass is a Marowak: only one `wCurOpponent` names, the tower's restless
