@@ -216,6 +216,8 @@ impl Executor {
                     Driver::Advance { answered: screen.answered(), held: 0 },
                 Some(Mode::UseItem(flow)) if flow.status() == Status::Waiting(Decision::Text) =>
                     Driver::Advance { answered: flow.answered(), held: 0 },
+                Some(Mode::ItemMenu(menu)) if menu.status() == Status::Waiting(Decision::Text) =>
+                    Driver::Advance { answered: menu.answered(), held: 0 },
                 Some(Mode::Overworld(overworld)) if overworld.status() == Status::Waiting(Decision::Text) =>
                     Driver::Advance { answered: overworld.answered(), held: 0 },
                 Some(Mode::TrainerCard(card)) if card.status() == Status::Waiting(Decision::TrainerCard) =>
@@ -394,6 +396,7 @@ impl Executor {
                     Some(Mode::TextBox(text)) => (text.answered(), text.status(), Decision::Text),
                     Some(Mode::StatusScreen(screen)) => (screen.answered(), screen.status(), Decision::StatusScreen),
                     Some(Mode::UseItem(flow)) => (flow.answered(), flow.status(), Decision::Text),
+                    Some(Mode::ItemMenu(menu)) => (menu.answered(), menu.status(), Decision::Text),
                     Some(Mode::Overworld(overworld)) => (overworld.answered(), overworld.status(), Decision::Text),
                     Some(Mode::TrainerCard(card)) => (card.answered(), card.status(), Decision::TrainerCard),
                     Some(Mode::Battle(battle)) => (battle.answered(), battle.status(), Decision::Text),
@@ -464,7 +467,11 @@ impl Executor {
                     Some(Mode::PartyMenu(menu)) => (Decision::PartyMenu, menu.status(), menu.selected()),
                     Some(Mode::FieldMoveMenu(menu)) => (Decision::FieldMoveMenu, menu.status(), menu.selected()),
                     Some(Mode::LearnMove(learn)) => (Decision::ForgetMove, learn.status(), learn.selected()),
-                    Some(Mode::ItemMenu(menu)) => (Decision::UseToss, menu.status(), menu.selected()),
+                    // The bag stays up after USE, and a Repel's box can be up within the frame.
+                    Some(Mode::ItemMenu(menu)) => match menu.status() {
+                        Status::Waiting(decision) => (decision, menu.status(), menu.selected()),
+                        status => (Decision::UseToss, status, menu.selected()),
+                    },
                     Some(Mode::MoveSelectionMenu(menu)) => (Decision::MoveMenu, menu.status(), menu.selected()),
                     Some(Mode::CursorMenu(menu)) => (Decision::CursorMenu, menu.status(), menu.selected()),
                     Some(Mode::TownMap(map)) => (Decision::FlyDestination, map.status(), map.selected()),

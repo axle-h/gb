@@ -67,6 +67,9 @@ pub struct ItemMenu {
     /// `wWhichPokemon`: the chosen item's slot in the bag.
     slot: u8,
     phase: Phase,
+    /// Presses answered at `WaitButton`, so a driver can see its press land.
+    #[serde(default)]
+    answered: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,7 +142,13 @@ impl ItemMenu {
             item: ItemId::Potion,
             slot: 0,
             phase: Phase::Child(After::Bag),
+            answered: 0,
         }
+    }
+
+    /// Presses answered at `PrintItemUseTextAndRemoveItem`'s `WaitForTextScrollButtonPress`.
+    pub fn answered(&self) -> u32 {
+        self.answered
     }
 
     /// The USE/TOSS row under the cursor.
@@ -392,6 +401,7 @@ impl ModeUpdate for ItemMenu {
                 if !ctx.pad.low_sensitivity(ctx.frame_counter).intersects(Joypad::A | Joypad::B) {
                     return Transition::Stay;
                 }
+                self.answered += 1;
                 remove_from_bag(ctx, self.slot as usize, 1);
                 self.menu_loop(ctx)
             }
@@ -903,7 +913,7 @@ mod tests {
             assert_eq!(text_row(&game, 14), encode("RED used").unwrap());
             assert_eq!(game.world().location.repel_steps, steps);
             assert_eq!(game.world().bag.quantity_of(item), 2, "not spent until the press");
-            game.frame(Input::Buttons(Joypad::A));
+            answer(&mut game, Decision::Text, Command::Advance);
             assert_eq!(settle(&mut game), Decision::List, "the bag again");
             assert_eq!(game.world().bag.quantity_of(item), 1);
         }

@@ -3408,6 +3408,14 @@ mod tests {
         assert_eq!(agent.game().world().location.walk_bike_surf, 1, "{events:#?}");
     }
 
+    #[test]
+    fn a_repel_is_used_and_its_box_closed() {
+        let game = with_bag(&[(ItemId::SuperRepel, 2)], |_| {});
+        let (agent, events) = ask(game, FieldMove::UseBagItem { item: ItemId::SuperRepel, target: UseTarget::Nothing }, None);
+        assert_eq!(agent.game().world().location.repel_steps, 200, "{events:#?}");
+        assert_eq!(quantity(&agent, ItemId::SuperRepel), 1);
+    }
+
     fn four_moves() -> Named<pokered::party::PartyMon> {
         use PokemonMoveName::*;
         let mut mewtwo = level(PokemonSpecies::Mewtwo, 70);
