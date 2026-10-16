@@ -160,6 +160,8 @@ Everything a run needs is one directory, `$GB_RUN_DIR/<run-id>/`:
 | `scripted-progress.json` | how far along the scripted route this run is — `--policy deterministic` only |
 | `history.json` | the live conversation, rewritten each turn — what a restart resumes on |
 | `conversation.jsonl` | every message ever sent, appended; what a compaction replaced |
+| `moments.jsonl` | the run's turning points — badges, bosses, new species, evolutions, black-outs, the Hall of Fame — each naming its save state |
+| `moments/` | those save states, each carrying the screen it was taken on |
 | `issues/` | one directory per `report_issue`: the message, the screen, a save state, the conversation |
 | `press-buttons/` | the same, for the watchdog turn's escape hatch |
 

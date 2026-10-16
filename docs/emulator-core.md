@@ -31,6 +31,9 @@ arguments are in the module docs named below; this is the list of what not to br
   means appending it inside its section and bumping that section's version. Never reorder or
   retype a shipped value: bincode is positional. Before writing a legacy struct, check whether the
   boundary can be re-cut instead; that is how CGB support cost zero fixture regeneration.
+- A state carries its screen as a PNG for tools that never run it: the `screen` section of a `.gbst`
+  (`savestate::screenshot`), a `screen` stream of a `.pkrd` (`pokered::saved_screenshot`). No load
+  reads either, so the LCD stays blank until the next frame is drawn.
 - `every_committed_fixture_decodes` loads every `.bin` in `poke-agent/src/pokemon/data/`, so a
   `.bin` there must be a save state. Other binary fixtures go elsewhere (`poke-core/src/data/gfx/`), and
   `poke-agent-sdl/pokemon-red.sav` is raw SRAM rather than a state.

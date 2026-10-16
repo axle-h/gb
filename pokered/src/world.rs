@@ -52,6 +52,10 @@ pub struct World {
     /// `wNumHoFTeams`, which stops at 255 rather than wrapping.
     #[serde(default)]
     pub hall_of_fame_teams: u8,
+    /// Times the player has blacked out, counted where the game decides to. The cartridge keeps no
+    /// such count; a host reads its blackouts from this one.
+    #[serde(default)]
+    pub blackouts: u32,
     /// `sHallOfFame`: the teams recorded, oldest first, at most `HOF_TEAM_CAPACITY`.
     #[serde(default)]
     pub hall_of_fame: Vec<Vec<HallOfFameMon>>,

@@ -30,6 +30,8 @@ pub struct BattleState {
     pub enemy_catch_rate: u8,
     /// The rules the battle plays by, which the damage estimate follows.
     pub ruleset: Ruleset,
+    /// `wTrainerClass`, from 1, in a trainer battle; 0 in any other.
+    pub trainer_class: u8,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

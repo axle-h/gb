@@ -137,6 +137,10 @@ export type UiEvent = At &
   | { seq: number; type: 'turn_cancelled'; turn: number; reason: string }
   | { seq: number; type: 'run_status'; status: RunStatus }
   | { seq: number; type: 'plan'; items: TodoView[] }
+  /** For whatever tells the run's story afterwards; the page draws none of it. */
+  | { seq: number; type: 'timeline' }
+  /** A turning point, with a save state in the run directory. */
+  | { seq: number; type: 'moment'; kind: string; title: string }
   | ({ seq: number; type: 'battle_script' } & BattleScriptView)
   | {
       seq: number;

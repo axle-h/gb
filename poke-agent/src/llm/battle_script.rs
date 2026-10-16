@@ -983,6 +983,7 @@ pub(crate) mod scenarios {
             enemy_trapping: false,
             enemy_catch_rate: 255,
             ruleset: poke_core::ruleset::Ruleset::Gen1,
+            trainer_class: 0,
         });
         state
     }

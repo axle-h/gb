@@ -6,6 +6,7 @@ use gb::cycles::MachineCycles;
 use gb::model::Model;
 use poke_agent::pokemon::agent::AgentEvent;
 use poke_agent::pokemon::policy::{LLM_POLICY_NAME, Policy};
+use poke_agent::run::moments::{self, Found, Landmarks, Moment, MomentTracker};
 use poke_agent::run::{CurrentRun, GameKind, RunProgress};
 use poke_agent::published::{
     FrameSnapshot, Published, RunStatus, StatusSnapshot, UiEventBody, now_ms,
@@ -165,6 +166,9 @@ pub struct EmulatorHost {
     saved_for_ask: u64,
     /// The last `agent.update` failure that was published.
     last_agent_failure: Option<String>,
+    moments: MomentTracker,
+    /// [`Console::blackouts`] as last read; a first read is a baseline, so a resume is not a blackout.
+    blackouts: Option<u32>,
 }
 
 impl EmulatorHost {
@@ -187,6 +191,7 @@ impl EmulatorHost {
         // Read rather than assumed zero, so a shared `Published` cannot credit this run with
         // another's turns.
         let turns_at_run_start = published.turns();
+        let last_moment = config.run.as_ref().and_then(|current| moments::last(current.get().path()));
         let mut host = Self {
             console,
             published,
@@ -218,6 +223,8 @@ impl EmulatorHost {
             watchdog_firings: 0,
             completed: None,
             last_agent_failure: None,
+            moments: MomentTracker::resuming(last_moment.map(|moment| moment.playtime_seconds)),
+            blackouts: None,
         };
         host.keep_served_options();
         // Before the first tick can ask anything, so a report waits for the state its turn takes.
@@ -473,6 +480,8 @@ impl EmulatorHost {
         self.watchdog_firings = 0;
         self.completed = None;
         self.last_agent_failure = None;
+        self.moments = MomentTracker::default();
+        self.blackouts = None;
         self.ahead_by_cycles = MachineCycles::ZERO;
         self.since_last_update = Duration::ZERO;
         self.dropped = Duration::ZERO;
@@ -579,6 +588,12 @@ impl EmulatorHost {
             if self.published.asks() != self.saved_for_ask {
                 self.capture_save_state();
             }
+            if let Some(count) = self.console.blackouts() {
+                if self.blackouts.is_some_and(|seen| count > seen) {
+                    self.take_moment(&Found { kind: "blackout", title: "blacked out".to_string() });
+                }
+                self.blackouts = Some(count);
+            }
 
             let events = self.console.drain_events();
             for event in events {
@@ -588,8 +603,14 @@ impl EmulatorHost {
                 });
                 match event {
                     AgentEvent::WatchdogFired { .. } => self.watchdog_firings += 1,
+                    AgentEvent::TextBox { message }
+                        if self.console.kind() == GameKind::Emulated && message.contains("blacked out") =>
+                    {
+                        self.take_moment(&Found { kind: "blackout", title: "blacked out".to_string() });
+                    }
                     // Filed at the top of the next tick, where swapping the run directory is safe.
                     event @ AgentEvent::HallOfFame { .. } => {
+                        self.take_moment(&Found { kind: "hall_of_fame", title: "entered the Hall of Fame".to_string() });
                         self.completed.get_or_insert((event, seq));
                     }
                     _ => {}
@@ -698,7 +719,10 @@ impl EmulatorHost {
     /// Sample the game state and publish it if it says something new or the keepalive is due.
     fn publish_status(&mut self, now: Instant) {
         // `game_state` reads a lot of RAM and can legitimately fail mid-transition.
-        let game = self.console.status();
+        let (game, landmarks) = self.console.status().unzip();
+        if let Some(landmarks) = landmarks {
+            self.follow(landmarks);
+        }
         let snapshot = StatusSnapshot {
             // `run_started`, not the process's own clock.
             wall_ms: now
@@ -731,6 +755,38 @@ impl EmulatorHost {
         self.last_status = Some(snapshot.clone());
         self.last_status_at = now;
         self.published.publish_status(snapshot);
+    }
+}
+
+impl EmulatorHost {
+    /// The timeline into the transcript, and whatever moments the tracker finds into the run.
+    fn follow(&mut self, landmarks: Landmarks) {
+        let observed = self.moments.observe(landmarks);
+        if let Some(timeline) = observed.timeline {
+            self.published.publish_event(UiEventBody::Timeline(timeline));
+        }
+        for found in &observed.moments {
+            self.take_moment(found);
+        }
+    }
+
+    /// A save state of this instant into `moments/`, a line for it in `moments.jsonl` and an event
+    /// in the transcript. Nothing is taken before the tracker has believed a sample, nor without a
+    /// run directory to keep it in.
+    fn take_moment(&mut self, found: &Found) {
+        let Some(run) = self.config.run.as_ref().map(|current| current.get()) else { return };
+        let Some(landmarks) = self.moments.latest().cloned() else { return };
+        let n = moments::last(run.path()).map_or(1, |last| last.n + 1);
+        let moment = Moment::new(n, found, &landmarks, self.console.state_extension());
+        let state = match self.console.save_state() {
+            Ok(state) => state,
+            Err(failure) => return self.complain(format!("could not save the state for {}: {failure}", moment.state)),
+        };
+        self.moments.taken_at(landmarks.playtime_seconds);
+        let seq = self.published.publish_event(UiEventBody::Moment(moment.clone()));
+        if let Err(failure) = moments::record(run.path(), &moment, seq, &state) {
+            self.complain(failure);
+        }
     }
 }
 
@@ -1882,9 +1938,69 @@ mod tests {
         assert!(!archive.join(files::STATE).exists(), "a native win filed an emulator state");
         assert!(finished.path().join(files::GAME).is_file(), "the outgoing run was checkpointed");
         assert!(finished.already_archived(1));
+        let moment = poke_agent::run::moments::last(finished.path()).expect("the championship is a moment");
+        assert_eq!(moment.kind, "hall_of_fame");
+        assert!(archive.join(files::MOMENTS_LOG).is_file() && archive.join(&moment.state).is_file(),
+                "the moments travel with the run");
 
         published.publish_event(UiEventBody::Notice { level: "info", message: "done".into() });
         let _ = transcript.join();
+    }
+
+    /// A badge is a moment: a save state in `moments/` carrying its own screen, a line in
+    /// `moments.jsonl` naming it, and the event that announced it, both with the same `seq`. So is a
+    /// blackout the recreation counts.
+    #[test]
+    fn a_badge_and_a_blackout_are_moments_whose_save_states_carry_their_screens() {
+        use poke_agent::run::{RunDir, files, moments};
+
+        let scratch = poke_agent::run::Scratch::new("host-native-moment");
+        let (run, _, _) =
+            RunDir::open_for(GameKind::Native, &scratch.0, false, "random", &|_| true).expect("a fresh run");
+        let current = Arc::new(CurrentRun::new(scratch.0.clone(), "random".to_string(), run));
+        let run_dir = current.get().path().to_path_buf();
+        let published = Published::new();
+        let mut events = published.subscribe_events();
+        let mut host = native_host(Arc::clone(&published), |config| {
+            config.run = Some(Arc::clone(&current));
+            config.checkpoint_interval = Duration::from_secs(3_600);
+        });
+
+        let (mut earned, mut timeline, mut announced) = (false, false, None);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while announced.is_none() && Instant::now() < deadline {
+            host.tick();
+            if !earned && host.moments.latest().is_some() {
+                host.console.native().agent.game_mut().world_mut().badges |= 1;
+                earned = true;
+            }
+            while let Ok(UiEvent { seq, body, .. }) = events.try_recv() {
+                match body {
+                    UiEventBody::Timeline(_) => timeline = true,
+                    UiEventBody::Moment(moment) => announced = Some((seq, moment.n)),
+                    _ => {}
+                }
+            }
+        }
+        assert!(timeline, "the first settled sample starts the timeline");
+        let (seq, n) = announced.expect("the badge was never announced");
+
+        let moment = moments::last(&run_dir).expect("the badge has a line");
+        assert_eq!((moment.n, moment.kind.as_str(), moment.title.as_str()), (n, "badge", "earned the BOULDERBADGE"));
+        let line = std::fs::read_to_string(run_dir.join(files::MOMENTS_LOG)).unwrap();
+        assert!(line.contains(&format!("\"seq\":{seq}")), "{line}");
+        let state = std::fs::read(run_dir.join(&moment.state)).expect("the moment's save state");
+        pokered::Game::load(&state, pokered::Pacing::Faithful).expect("a moment loads");
+        let png = pokered::saved_screenshot(&state).unwrap().expect("a screen beside the game");
+        assert!(png.starts_with(b"\x89PNG"), "a PNG");
+
+        host.console.native().agent.game_mut().world_mut().blackouts += 1;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while moments::last(&run_dir).is_some_and(|last| last.n == moment.n) && Instant::now() < deadline {
+            host.tick();
+        }
+        let blackout = moments::last(&run_dir).expect("still a log");
+        assert_eq!((blackout.n, blackout.kind.as_str()), (moment.n + 1, "blackout"));
     }
 
     /// A native run served as `web::run` serves one: a directory of its own, the policy built by

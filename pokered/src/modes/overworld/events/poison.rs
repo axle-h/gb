@@ -64,6 +64,7 @@ fn blackout_check(s: &mut Script) -> Flow {
 pub(super) fn blacked_out(s: &mut Script) -> Flow {
     s.ow.rt.battle_over_or_blackout = true;
     s.ow.rt.out_of_battle_blackout = true;
+    s.ctx.world.blackouts = s.ctx.world.blackouts.saturating_add(1);
     Flow::Return
 }
 

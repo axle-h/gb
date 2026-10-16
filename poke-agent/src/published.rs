@@ -82,6 +82,10 @@ pub enum UiEventBody {
     Plan { items: Vec<TodoView> },
     /// The model's battle script, whenever it changes.
     BattleScript { source: Option<String>, armed: bool, is_default: bool, last_failure: Option<String> },
+    /// Where the player is and what they have, whenever that changes. See [`crate::run::moments`].
+    Timeline(crate::run::moments::Landmarks),
+    /// A turning point, with a save state in the run's `moments/`.
+    Moment(crate::run::moments::Moment),
     Compacted {
         before: u64,
         after: u64,

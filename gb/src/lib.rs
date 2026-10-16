@@ -25,6 +25,7 @@ pub mod registers;
 pub mod roms;
 pub mod rtc;
 pub mod savestate;
+pub mod screenshot;
 pub mod schedule;
 pub mod serial;
 pub mod sgb;

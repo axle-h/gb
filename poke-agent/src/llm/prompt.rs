@@ -1294,7 +1294,7 @@ mod tests {
         foe.species = PokemonSpecies::Mewtwo;
         state.battle = Some(BattleState {
             battle_type: BattleType::Wild, player: mine, enemy: foe, active_party_slot: 0,
-            enemy_trapping: false, enemy_catch_rate: 3, ruleset: poke_core::ruleset::Ruleset::Gen1,
+            enemy_trapping: false, enemy_catch_rate: 3, ruleset: poke_core::ruleset::Ruleset::Gen1, trainer_class: 0,
         });
         assert!(!battle_turn(&state).contains("standing on the floor"), "an ordinary wild battle");
 

@@ -2184,6 +2184,7 @@ impl BattleMode {
         self.push(Present::SetPalBattleBlack);
         self.far_text("_PlayerBlackedOutText2", Side::Player);
         ctx.world.location.always_on_bike = false;
+        ctx.world.blackouts = ctx.world.blackouts.saturating_add(1);
         self.push(Present::Clear { x: 0, y: 0, width: SCREEN_TILES_X, height: SCREEN_TILES_Y });
         self.goto(Step::BattleOver);
     }

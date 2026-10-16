@@ -6,6 +6,7 @@ use gb::cycles::MachineCycles;
 use gb::game_boy::GameBoy;
 use gb::lcd_palette::LcdColor;
 use gb::model::Model;
+use gb::ppu::{LCD_HEIGHT, LCD_WIDTH};
 use poke_agent::pokemon::agent::{AgentEvent, PokemonAgent};
 use poke_agent::pokemon::map_metadata::MapMetadataCache;
 use poke_agent::pokemon::native_agent::NativeAgent;
@@ -14,6 +15,7 @@ use poke_agent::pokemon::options::{SERVED_OPTIONS, keep_game_options};
 use poke_agent::pokemon::policy::Policy;
 use poke_agent::pokemon::{PokemonApi, PokemonApiTrait};
 use poke_agent::run::hall_of_fame::PartyMember;
+use poke_agent::run::moments::Landmarks;
 use poke_agent::run::{GameKind, RunDir, RunProgress, files};
 use pokered::audio::Voices;
 use pokered::audio::synth::{HEADROOM, Synth};
@@ -176,7 +178,24 @@ impl Console {
     pub fn save_state(&self) -> Result<Vec<u8>, String> {
         match self {
             Self::Emulated(e) => e.gb.save_state(),
-            Self::Native(n) => Ok(n.agent.game().save()),
+            Self::Native(n) => Ok(n.agent.game().save_with_screenshot(&gb::screenshot::png(&*self.screen(), LCD_WIDTH as u32, LCD_HEIGHT as u32))),
+        }
+    }
+
+    /// The blackouts the recreation has counted; `None` for the cartridge, which counts none, so the
+    /// host reads its blackouts from the text.
+    pub fn blackouts(&self) -> Option<u32> {
+        match self {
+            Self::Emulated(_) => None,
+            Self::Native(n) => Some(n.agent.game().world().blackouts),
+        }
+    }
+
+    /// What [`Self::save_state`]'s bytes are, as a file extension.
+    pub fn state_extension(&self) -> &'static str {
+        match self {
+            Self::Emulated(_) => "gbst",
+            Self::Native(_) => "pkrd",
         }
     }
 
@@ -227,14 +246,17 @@ impl Console {
         (badges.bits().count_ones(), owned, seen, money, party, maxed)
     }
 
-    /// The heartbeat's view of the game; `None` mid-transition, when it cannot be read.
-    pub fn status(&mut self) -> Option<StatusView> {
+    /// The heartbeat's view of the game and the moments' from one read; `None` mid-transition,
+    /// when it cannot be read.
+    pub fn status(&mut self) -> Option<(StatusView, Landmarks)> {
         match self {
             Self::Emulated(e) => {
                 let api = PokemonApi::with_cache(&mut e.gb, &mut e.map_cache);
-                api.game_state().ok().map(|state| observe::status(&state, &api))
+                api.game_state().ok().map(|state| (observe::status(&state, &api), Landmarks::of(&state, &api)))
             }
-            Self::Native(n) => n.agent.game_state().ok().map(|state| observe::status(&state, n.agent.native())),
+            Self::Native(n) => n.agent.game_state().ok().map(|state| {
+                (observe::status(&state, n.agent.native()), Landmarks::of(&state, n.agent.native()))
+            }),
         }
     }
 

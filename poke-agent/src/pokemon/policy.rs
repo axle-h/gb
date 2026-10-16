@@ -3943,6 +3943,7 @@ mod move_learn_tests {
                 enemy: side(PokemonSpecies::Rattata, [PokemonType::Normal, PokemonType::Normal]),
                 active_party_slot: 0, enemy_trapping: false, enemy_catch_rate: 0,
                 ruleset: poke_core::ruleset::Ruleset::Gen1,
+                trainer_class: 0,
             }),
             ..GameState::default()
         };

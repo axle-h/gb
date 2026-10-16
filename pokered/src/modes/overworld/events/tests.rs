@@ -146,6 +146,7 @@ fn poison_takes_a_point_every_fourth_step_and_a_party_that_faints_blacks_out() {
     let world = game.world();
     assert_eq!(world.money, [0x00, 0x05, 0x00], "halved");
     assert_eq!(world.party[0].mon.mon.hp, world.party[0].mon.stats[0], "healed");
+    assert_eq!(world.blackouts, 1);
 }
 
 #[test]

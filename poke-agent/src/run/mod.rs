@@ -1,6 +1,7 @@
 //! The run directory: where a playthrough lives between processes. `files` names what is in it.
 
 pub mod hall_of_fame;
+pub mod moments;
 pub mod transcript;
 
 use std::path::{Path, PathBuf};
@@ -35,6 +36,9 @@ pub mod files {
     /// One subdirectory per `press_buttons` escape hatch; nothing reads it back. See [`crate::llm::incident`].
     pub const PRESS_BUTTONS: &str = "press-buttons";
 
+    /// The run's moments, one JSON line each, naming its save state in `MOMENTS`. See [`super::moments`].
+    pub const MOMENTS_LOG: &str = "moments.jsonl";
+    pub const MOMENTS: &str = "moments";
     /// One directory per `report_issue` call, with the screen and a save state. See [`crate::llm::incident`].
     pub const ISSUES: &str = "issues";
     /// Where finished runs are filed, one level below the root, where `resumable` does not look.

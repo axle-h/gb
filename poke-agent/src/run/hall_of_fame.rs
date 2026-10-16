@@ -126,6 +126,12 @@ pub fn archive(job: &ArchiveJob) -> Result<String, String> {
     }
 
     copy_tree(&job.run_dir.join(files::MEMORIES), &into.join(files::MEMORIES))?;
+    copy_tree(&job.run_dir.join(files::MOMENTS), &into.join(files::MOMENTS))?;
+    let moments = job.run_dir.join(files::MOMENTS_LOG);
+    if moments.exists() {
+        std::fs::copy(&moments, into.join(files::MOMENTS_LOG))
+            .map_err(|e| format!("could not copy {}: {e}", moments.display()))?;
+    }
     let todo = job.run_dir.join(files::TODO);
     if todo.exists() {
         std::fs::copy(&todo, into.join(files::TODO))
@@ -325,6 +331,9 @@ mod tests {
         std::fs::write(run.path().join(files::MEMORIES).join("plan.md"), "beat brock").expect("a memory");
         std::fs::write(run.path().join(files::TODO), "[]").expect("a todo list");
         std::fs::write(run.path().join(files::BATTLE_SCRIPT), "{}").expect("a battle script");
+        std::fs::create_dir_all(run.path().join(files::MOMENTS)).expect("moments");
+        std::fs::write(run.path().join(files::MOMENTS).join("0001-badge.gbst"), "GBSTbadge").expect("a moment");
+        std::fs::write(run.path().join(files::MOMENTS_LOG), "{\"n\":1}\n").expect("a moments log");
         std::fs::write(run.path().join(files::HISTORY), r#"{"version":1,"messages":[]}"#)
             .expect("a saved conversation");
         std::fs::write(
@@ -350,6 +359,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(into.join(files::MEMORIES).join("plan.md")).unwrap(), "beat brock");
         assert!(into.join(files::TODO).is_file(), "the model's plan travels with the run");
         assert!(into.join(files::BATTLE_SCRIPT).is_file(), "the battle script travels with the run");
+        assert!(into.join(files::MOMENTS_LOG).is_file(), "the moments travel with the run");
+        assert_eq!(std::fs::read(into.join(files::MOMENTS).join("0001-badge.gbst")).unwrap(), b"GBSTbadge");
         assert!(into.join(files::META).is_file(), "the archive is self-describing without the ledger");
         assert!(into.join(files::HISTORY).is_file(), "the conversation travels with the run");
 

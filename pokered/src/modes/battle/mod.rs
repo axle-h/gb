@@ -916,6 +916,7 @@ mod tests {
         let (game, seen) = lose_on(poke_core::map::Map::OaksLab, BattleMode::trainer(0x19, 1, 0, 0), &["Yeah! Am", "is out of"]);
         assert_eq!(seen, [true, false]);
         assert!(game.world().location.always_on_bike, "only a blackout gets off the bike");
+        assert_eq!(game.world().blackouts, 0);
     }
 
     /// `hTileAnimations` is zeroed once the transition has cleared the screen, because the water and
@@ -953,6 +954,7 @@ mod tests {
         let (game, seen) = lose_on(poke_core::map::Map::Route22, BattleMode::trainer(0x19, 1, 0, 0), &["Yeah! Am", "is out of"]);
         assert_eq!(seen, [true, true]);
         assert!(!game.world().location.always_on_bike, "a blackout gets off the bike");
+        assert_eq!(game.world().blackouts, 1);
     }
 
     #[test]

@@ -84,10 +84,21 @@ pub struct Game {
     slots: Vec<Option<Slot>>,
 }
 
+/// ```text
+/// "PKRD" | u16 version (LE) | stream*
+/// stream := label bytes | 0x00 | u32 len (LE) | bytes[len]
+/// ```
+/// `game` is the lz4-compressed MessagePack game and the only stream a load needs. `screen` is a PNG
+/// the host drew, held for whatever reads a save without loading it; this crate never decodes it.
+/// An unknown stream is skipped.
 const SAVE_MAGIC: &[u8; 4] = b"PKRD";
-const SAVE_VERSION: u16 = 2;
+const SAVE_VERSION: u16 = 3;
+/// The `game` stream alone, unlabelled; still read, since saves of it exist.
+const GAME_ONLY_SAVE_VERSION: u16 = 2;
 /// The same MessagePack body without the lz4 block around it; still read, since saves of it exist.
 const UNCOMPRESSED_SAVE_VERSION: u16 = 1;
+const GAME_STREAM: &str = "game";
+const SCREEN_STREAM: &str = "screen";
 
 impl Game {
     pub fn new(world: World, rng: GameRng, pacing: Pacing) -> Self {
@@ -294,19 +305,33 @@ impl Game {
     }
 
     pub fn save(&self) -> Vec<u8> {
+        self.save_streams(None)
+    }
+
+    /// [`Self::save`] with `png` beside the game, for [`saved_screenshot`] to hand back.
+    pub fn save_with_screenshot(&self, png: &[u8]) -> Vec<u8> {
+        self.save_streams(Some(png))
+    }
+
+    fn save_streams(&self, screen: Option<&[u8]>) -> Vec<u8> {
         let mut bytes = SAVE_MAGIC.to_vec();
         bytes.extend(SAVE_VERSION.to_le_bytes());
         let body = rmp_serde::to_vec_named(self).expect("a game always serialises");
-        bytes.extend(lz4_flex::compress_prepend_size(&body));
+        push_stream(&mut bytes, GAME_STREAM, &lz4_flex::compress_prepend_size(&body));
+        if let Some(png) = screen {
+            push_stream(&mut bytes, SCREEN_STREAM, png);
+        }
         bytes
     }
 
     pub fn load(bytes: &[u8], pacing: Pacing) -> Result<Self, String> {
-        let body = bytes.strip_prefix(SAVE_MAGIC).ok_or("not a pokered save")?;
-        let (version, body) = body.split_at_checked(2).ok_or("a truncated save")?;
-        let version = u16::from_le_bytes([version[0], version[1]]);
+        let (version, body) = save_body(bytes)?;
         let body = match version {
-            SAVE_VERSION => std::borrow::Cow::Owned(lz4_flex::decompress_size_prepended(body).map_err(|e| e.to_string())?),
+            SAVE_VERSION => {
+                let game = stream(body, GAME_STREAM)?.ok_or("a save with no game in it")?;
+                std::borrow::Cow::Owned(lz4_flex::decompress_size_prepended(game).map_err(|e| e.to_string())?)
+            }
+            GAME_ONLY_SAVE_VERSION => std::borrow::Cow::Owned(lz4_flex::decompress_size_prepended(body).map_err(|e| e.to_string())?),
             UNCOMPRESSED_SAVE_VERSION => std::borrow::Cow::Borrowed(body),
             _ => return Err(format!("save version {version}, expected {SAVE_VERSION}")),
         };
@@ -320,6 +345,42 @@ impl Game {
         game.audio.restart_saved_music();
         Ok(game)
     }
+}
+
+/// The PNG a save was written with by [`Game::save_with_screenshot`], without loading the game.
+pub fn saved_screenshot(bytes: &[u8]) -> Result<Option<&[u8]>, String> {
+    match save_body(bytes)? {
+        (SAVE_VERSION, body) => stream(body, SCREEN_STREAM),
+        _ => Ok(None),
+    }
+}
+
+fn save_body(bytes: &[u8]) -> Result<(u16, &[u8]), String> {
+    let body = bytes.strip_prefix(SAVE_MAGIC).ok_or("not a pokered save")?;
+    let (version, body) = body.split_at_checked(2).ok_or("a truncated save")?;
+    Ok((u16::from_le_bytes([version[0], version[1]]), body))
+}
+
+fn push_stream(bytes: &mut Vec<u8>, label: &str, payload: &[u8]) {
+    bytes.extend(label.as_bytes());
+    bytes.push(0);
+    bytes.extend(u32::try_from(payload.len()).expect("a stream under 4 GiB").to_le_bytes());
+    bytes.extend(payload);
+}
+
+fn stream<'a>(mut body: &'a [u8], wanted: &str) -> Result<Option<&'a [u8]>, String> {
+    while !body.is_empty() {
+        let end = body.iter().position(|&b| b == 0).ok_or("a truncated save: an unterminated stream label")?;
+        let (label, rest) = (&body[..end], &body[end + 1..]);
+        let (len, rest) = rest.split_at_checked(4).ok_or("a truncated save: a stream with no length")?;
+        let len = u32::from_le_bytes(len.try_into().expect("four bytes")) as usize;
+        let (payload, rest) = rest.split_at_checked(len).ok_or("a truncated save: a stream cut short")?;
+        if label == wanted.as_bytes() {
+            return Ok(Some(payload));
+        }
+        body = rest;
+    }
+    Ok(None)
 }
 
 fn apply(modes: &mut Vec<Mode>, transition: Transition, ctx: &mut Ctx) {
@@ -381,6 +442,26 @@ mod tests {
     }
 
     #[test]
+    fn a_version_two_save_still_loads() {
+        let game = battle_game(BattleMode::wild(PokemonSpecies::Onix, 20));
+        let mut version_two = SAVE_MAGIC.to_vec();
+        version_two.extend(GAME_ONLY_SAVE_VERSION.to_le_bytes());
+        version_two.extend(lz4_flex::compress_prepend_size(&rmp_serde::to_vec_named(&game).unwrap()));
+        assert_eq!(Game::load(&version_two, Pacing::Faithful).unwrap().save(), game.save());
+        assert_eq!(saved_screenshot(&version_two), Ok(None));
+    }
+
+    #[test]
+    fn a_screenshot_rides_beside_the_game_and_is_not_part_of_it() {
+        let game = Game::new(World::default(), GameRng::seeded(1), Pacing::Faithful);
+        let png = b"\x89PNG not really".as_slice();
+        let saved = game.save_with_screenshot(png);
+        assert_eq!(saved_screenshot(&saved), Ok(Some(png)));
+        assert_eq!(saved_screenshot(&game.save()), Ok(None));
+        assert_eq!(Game::load(&saved, Pacing::Faithful).unwrap().save(), game.save());
+    }
+
+    #[test]
     fn a_gen_1_save_loads_as_gen_1() {
         let world = World { ruleset: Ruleset::Gen1, ..World::default() };
         let game = Game::new(world, GameRng::seeded(1), Pacing::Faithful);
@@ -412,7 +493,7 @@ mod tests {
         assert!(Game::load(b"GBST\x01\x00", Pacing::Faithful).is_err());
         let mut save = Game::new(World::default(), GameRng::seeded(1), Pacing::Faithful).save();
         save[4] = 99;
-        assert_eq!(Game::load(&save, Pacing::Faithful).unwrap_err(), "save version 99, expected 2");
+        assert_eq!(Game::load(&save, Pacing::Faithful).unwrap_err(), "save version 99, expected 3");
     }
 
     use std::hash::{Hash, Hasher};

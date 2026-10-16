@@ -41,6 +41,8 @@ pub mod labels {
     pub const JOYP: &str = "joyp";
     /// The Super Game Boy's packets, palettes and attributes.
     pub const SGB: &str = "sgb";
+    /// The LCD as a PNG, for whatever reads a state without running it; a load never reads it.
+    pub const SCREEN: &str = "screen";
 
     // --- Reserved.
     pub const CGB: &str = "cgb";
@@ -121,6 +123,12 @@ impl FieldWriter<'_> {
         self.body.extend_from_slice(&encoded);
         Ok(())
     }
+}
+
+/// The PNG of the screen `data` was saved on, without loading it; `None` from a state older than
+/// the section.
+pub fn screenshot(data: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    Ok(SectionReader::parse(data)?.read::<Vec<u8>>(labels::SCREEN)?.map(|(_, png)| png))
 }
 
 /// A parsed container. Sections are held as raw payloads and decoded on demand, so an unknown

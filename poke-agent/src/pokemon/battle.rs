@@ -96,6 +96,10 @@ impl BattleStateReader for MMU {
             enemy_trapping: self.read_pointer(&pokered_symbols::wEnemyBattleStatus1) & (1 << 5) != 0,
             enemy_catch_rate: self.read_pointer(&pokered_symbols::wEnemyMonActualCatchRate),
             ruleset: poke_core::ruleset::Ruleset::Gen1,
+            trainer_class: match battle_type {
+                BattleType::Trainer => self.read_pointer(&pokered_symbols::wTrainerClass),
+                _ => 0,
+            },
         })
     }
 }

@@ -2,7 +2,8 @@ use crate::core::Core;
 use crate::header::LoadError;
 use crate::cycles::MachineCycles;
 use crate::model::Model;
-use crate::savestate::{SectionReader, SectionWriter};
+use crate::ppu::{LCD_HEIGHT, LCD_WIDTH};
+use crate::savestate::{SectionReader, SectionWriter, labels};
 
 mod harness;
 pub use harness::{Breakpoint, Stop};
@@ -103,6 +104,8 @@ impl GameBoy {
     pub fn save_state(&self) -> Result<Vec<u8>, String> {
         let mut writer = SectionWriter::new();
         self.write_sections(&mut writer)?;
+        let lcd = self.core.mmu().ppu().lcd();
+        writer.write(labels::SCREEN, 1, &crate::screenshot::png(lcd, LCD_WIDTH as u32, LCD_HEIGHT as u32))?;
         Ok(writer.finish())
     }
 
@@ -510,6 +513,22 @@ mod tests {
 
         // Verify the loaded state matches the original
         assert_eq!(original_gb, loaded_gb);
+    }
+
+    #[test]
+    fn a_save_state_carries_the_screen_it_was_taken_on() {
+        let mut gb = GameBoy::dmg_hello_world();
+        gb.run(MachineCycles::from_m(200_000));
+        let png = crate::savestate::screenshot(&gb.save_state().unwrap()).unwrap().expect("a screen section");
+
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(png));
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let mut reader = decoder.read_info().unwrap();
+        let mut rgb = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut rgb).unwrap();
+        let lcd: Vec<u8> = gb.core().mmu().ppu().lcd().iter().flat_map(|c| c.to_rgb().0).collect();
+        assert_eq!(rgb, lcd);
+        assert!(lcd.chunks(3).any(|pixel| pixel != [0xFF; 3]), "hello world has drawn something");
     }
 
     mod blargg_cpu {

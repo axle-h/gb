@@ -473,6 +473,10 @@ pub(crate) fn battle_state(game: &Game) -> Option<BattleState> {
         enemy_trapping: battle.enemy.status1.contains(Status1::USING_TRAPPING_MOVE),
         enemy_catch_rate: battle.enemy_exp.catch_rate,
         ruleset: battle.ruleset,
+        trainer_class: match battle_type {
+            BattleType::Trainer => battle.trainer_class,
+            _ => 0,
+        },
     })
 }
 
