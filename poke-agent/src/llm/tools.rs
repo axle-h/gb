@@ -197,14 +197,30 @@ fn hm_available(state: &GameState, name: PokemonMoveName) -> Result<(), String> 
     }
 }
 
+/// The PC a model can use on `map`, and whether it stores Pokémon as well as items. Bill's is his
+/// cell separator (`BillsHousePC`), and the bedroom's is the player's own, items only (`OpenRedsPC`).
+pub fn usable_pc(map: crate::pokemon::map::Map) -> Option<(Point8, bool)> {
+    use crate::pokemon::map::Map;
+    match map {
+        Map::BillsHouse => None,
+        _ => crate::pokemon::tile_map::pc_locations_for(map).first().map(|&at| (at, map != Map::RedsHouse2F)),
+    }
+}
+
 /// The PC on this map, or why there is none.
-fn the_pc_here(state: &GameState) -> Result<Point8, String> {
-    crate::pokemon::tile_map::pc_locations_for(state.map.map).first().copied().ok_or_else(|| {
-        format!(
-            "There is no PC on {}. Every Pokémon Centre has one, and so does the player's bedroom.",
+fn the_pc_here(state: &GameState, for_pokemon: bool) -> Result<Point8, String> {
+    match usable_pc(state.map.map) {
+        Some((_, false)) if for_pokemon => Err(format!(
+            "The PC on {} stores items only. Pokémon are stored at a Pokémon Centre's PC.",
             state.map.map,
-        )
-    })
+        )),
+        Some((at, _)) => Ok(at),
+        None => Err(format!(
+            "There is no PC on {}. Every Pokémon Centre has one, and so does the player's bedroom, \
+             for items only.",
+            state.map.map,
+        )),
+    }
 }
 
 /// Turn a request into the [`FieldMove`] the agent executes, or the sentence the model is told.
@@ -344,7 +360,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
         FieldMoveRequest::TossItem { item } => FieldMove::TossItem { item: held(*item)? },
         FieldMoveRequest::ReorderParty { slot } => FieldMove::ReorderParty { slot: party_slot(*slot)? },
         FieldMoveRequest::UsePcBox { op } => {
-            let pc = the_pc_here(state)?;
+            let pc = the_pc_here(state, true)?;
             // `blocked_by` is the game's own refusals, asked before a button is pressed.
             if let Some(refusal) = op.blocked_by(
                 state.pokemon.len() as u8,
@@ -357,7 +373,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
         }
         FieldMoveRequest::UseItemPc { op, item, qty } => {
             use crate::pokemon::postgame::item_storage::PcItemOp;
-            let pc = the_pc_here(state)?;
+            let pc = the_pc_here(state, false)?;
             if *qty == 0 {
                 return Err("A quantity of 0 moves nothing.".to_string());
             }
@@ -1012,10 +1028,10 @@ fn use_field_move_spec() -> ToolSpec {
              neither, for the Bicycle, a Repel or the Itemfinder.\n\
              - `toss_item` — throw `item` away to free a bag slot. The bag holds only 20 kinds.\n\
              - `reorder_party` — make the Pokémon in `slot` the party leader.\n\
-             - `pc_pokemon` — at a PC: `op` is `deposit` (party `slot` → box), `withdraw` or \
+             - `pc_pokemon` — on a map with a PC; walks there: `op` is `deposit` (party `slot` → box), `withdraw` or \
              `release` (a `box_slot`), or `change_box` (`box`, 1-12). \
              Only the open box can be read; `read_pc` shows it.\n\
-             - `pc_items` — at a PC: `op` `deposit` or `withdraw` moves `quantity` of `item` \
+             - `pc_items` — the same PC: `op` `deposit` or `withdraw` moves `quantity` of `item` \
              between the bag and PC storage. The bag holds only 20 kinds.\n\
              - `elevator` — inside a lift, ride it to `map`. The three lifts are in the Rocket \
              Hideout, Celadon Mart and Silph Co.\n\
@@ -2378,6 +2394,13 @@ mod tests {
                           DecisionKind::ForgetMove, DecisionKind::MimicMove, DecisionKind::Stuck] {
             assert!(!names(elsewhere).contains(&"read_pc"), "{elsewhere:?} must not offer read_pc");
         }
+    }
+
+    #[test]
+    fn only_a_storage_pc_is_offered_and_the_bedroom_s_holds_items() {
+        assert_eq!(usable_pc(Map::FuchsiaPokecenter), Some((Point8 { x: 13, y: 3 }, true)));
+        assert_eq!(usable_pc(Map::RedsHouse2F), Some((Point8 { x: 0, y: 1 }, false)));
+        assert_eq!(usable_pc(Map::BillsHouse), None, "Bill's PC is his cell separator");
     }
 
     #[test]

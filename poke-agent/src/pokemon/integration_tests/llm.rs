@@ -646,6 +646,70 @@ fn native_bike_shop() -> pokered::Game {
     game
 }
 
+/// The player in the Fuchsia Pokémon Centre on the recreation with a full party, and an Articuno in
+/// box 1.
+fn native_full_party_at_a_pc() -> pokered::Game {
+    use poke_core::species::PokemonSpecies;
+    use pokered::rng::GameRng;
+    use pokered::systems::add_mon::{deposit, new_party_mon, Origin};
+    let mut world = pokered::world::World::default();
+    world.player_name = poke_core::charmap::encode("RED").unwrap();
+    let named = |species: PokemonSpecies| {
+        let mon = new_party_mon(species, 30, 1, &Origin::Trainer, &mut GameRng::tape(vec![]));
+        pokered::party::Named { mon, ot: poke_core::charmap::encode("RED").unwrap(), nick: species.name().to_vec() }
+    };
+    world.party = [PokemonSpecies::Blastoise, PokemonSpecies::Gloom, PokemonSpecies::Mankey,
+                   PokemonSpecies::Exeggcute, PokemonSpecies::Nidorino, PokemonSpecies::Shellder]
+        .into_iter().map(named).collect();
+    let articuno = named(PokemonSpecies::Articuno);
+    world.boxes = vec![vec![pokered::party::Named { mon: deposit(articuno.mon), ot: articuno.ot, nick: articuno.nick }]];
+    world.location = pokered::systems::overworld::location::Location {
+        map: Map::FuchsiaPokecenter, x: 3, y: 6, last_map: Map::FuchsiaCity, facing: poke_core::sprite::SpriteFacing::Up,
+        ..Default::default()
+    };
+    let mut game = pokered::Game::new(world, GameRng::seeded(11), pokered::Pacing::Instant);
+    game.push(pokered::mode::Mode::Overworld(pokered::modes::overworld::Overworld::new()));
+    game
+}
+
+/// A Pokémon Centre's PC has no menu row, so the turn says where it is, and the two field moves
+/// that use it walk there from the door: a deposit makes room and a withdrawal fills it.
+#[test]
+fn a_model_swaps_a_boxed_mon_into_a_full_party_at_the_pc() {
+    use poke_core::species::PokemonSpecies;
+    let situations = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&situations);
+    let mut asked = 0;
+    let brain = move |request: &TurnRequest| {
+        if request.is_summary() {
+            return Reply::Content("I am at the PC.".to_string());
+        }
+        if !request.has_tool("choose_action") {
+            return Reply::Calls(vec![Call::wait(1)]);
+        }
+        seen.lock().unwrap().push(request.situation().to_string());
+        asked += 1;
+        match asked {
+            1 => Reply::call("use_field_move", serde_json::json!({
+                "move": "pc_pokemon", "op": "deposit", "slot": 2, "summary": "Making room." })),
+            2 => Reply::call("use_field_move", serde_json::json!({
+                "move": "pc_pokemon", "op": "withdraw", "box_slot": 0, "summary": "Taking Articuno." })),
+            _ => Reply::Calls(vec![Call::wait(1)]),
+        }
+    };
+    let mut run = LlmRun::builder(FIXTURE).named("native-pc-swap").start_native(native_full_party_at_a_pc(), Box::new(brain));
+    let swapped = run.tick_until(PATIENCE, |run| {
+        run.agent().game().world().party.iter().any(|named| named.mon.mon.species == PokemonSpecies::Articuno)
+    }).unwrap();
+    let situations = situations.lock().unwrap().clone();
+    assert!(situations[0].contains("A PC is at (13, 3)"), "{}", situations[0]);
+    assert!(swapped, "Articuno never left the box: {situations:#?}");
+    let world = run.agent().game().world();
+    assert_eq!(world.party.len(), 6);
+    assert!(world.party.iter().all(|named| named.mon.mon.species != PokemonSpecies::Mankey), "the deposit never landed");
+    assert_eq!(world.boxes[0].iter().map(|named| named.mon.species).collect::<Vec<_>>(), [PokemonSpecies::Mankey]);
+}
+
 /// On the recreation the Bike Shop's menu is a mart turn whose one row is the Bicycle at the price
 /// the clerk's menu draws, and buying it is answered with the clerk's refusal.
 #[test]

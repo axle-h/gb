@@ -69,6 +69,8 @@ argument lives in the code.
   unconditionally, and says either that each reachable target is a row below or which half of
   Strength or Cut is missing. The "no boulder rows" branch counts rows off `actions()`, never off
   `boulder_pushes()`: a floor can have legal shoves left and still offer no goal.
+- The PC has no menu row, so the overworld turn names it, out of `usable_pc` rather than
+  `pc_locations_for`: Bill's is his cell separator and the bedroom's stores items only.
 - The bin line reads `hidden_objects_for(map)` and nothing else — handing over `trash_cans` would
   walk the gym in two requests, and a test asserts the turn is byte-identical whatever the puzzle
   state says.

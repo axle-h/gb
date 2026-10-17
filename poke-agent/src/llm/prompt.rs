@@ -561,6 +561,19 @@ pub fn situation(
             ));
         }
 
+        // The menu withholds the PC's row, so this line is the only sign there is one.
+        if let Some((at, pokemon)) = crate::llm::tools::usable_pc(state.map.map) {
+            out.push_str(&match pokemon {
+                true => format!(
+                    "A PC is at ({}, {}). It has no row in the menu: `use_field_move` with \
+                     `pc_pokemon` or `pc_items` walks to it and does the deposit or withdrawal, and \
+                     `read_pc` shows what is stored.\n", at.x, at.y),
+                false => format!(
+                    "Your own PC is at ({}, {}), and it stores items only. It has no row in the \
+                     menu: `use_field_move` with `pc_items` walks to it and does the deposit or \
+                     withdrawal.\n", at.x, at.y),
+            });
+        }
         // Boulders, said every turn there are any, whether or not they can be moved.
         let boulders = state.map.boulders();
         if !boulders.is_empty() {

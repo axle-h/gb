@@ -3,13 +3,20 @@
 Goal: beat Blaine in `CinnabarGym`. The gym is locked, and the key is at the bottom of
 the Pokémon Mansion across the island.
 
-Route: `FuchsiaCity` > `Route19` > `Route20` > `CinnabarIsland` > `PokemonMansion1F`
-down to `PokemonMansionB1F` > `CinnabarGym`. The short way there is to Fly to `PalletTown` and surf
-south down `Route21` instead.
+Route: `PalletTown`, by Fly or on foot > `Route21` > `CinnabarIsland` > `PokemonMansion1F` down to
+`PokemonMansionB1F` > `CinnabarGym`.
 
-1. Surf south out of `FuchsiaCity`. `Route19` and `Route20` are open water with a long
-   line of Swimmers on them, and they lead west to `CinnabarIsland`.
-2. Optional, and the only chance at it: `SeafoamIslands1F`, halfway along `Route20`.
+1. Get to `PalletTown`, then surf south down `Route21`, which leads straight to
+   `CinnabarIsland`. Fly there if something in the party knows Fly. If nothing does, walk:
+   from the east of Kanto the way on foot is `VermilionCity` > `Route11` >
+   `DiglettsCaveRoute11` > `DiglettsCave` > `DiglettsCaveRoute2` > `Route2` >
+   `ViridianCity` > `Route1` > `PalletTown`, and reading the route to `PalletTown`
+   gives the walk from wherever you are.
+   ⚠️ **Not the way from `FuchsiaCity`.** `Route19` and `Route20` lead west only as far as
+   the Seafoam Islands: the island's ledges cut `Route20` in two, and the water on the
+   Fuchsia side reaches nothing but the cave entrance at (49, 5). The only way through
+   from that side is the caves themselves, which needs Strength (step 2).
+2. Optional, and the only chance at it: `SeafoamIslands1F`, in the middle of `Route20`.
    Articuno is on B4F. The current on B3F sweeps you along and cannot be surfed
    against; **the way to stop it is Strength**, pushing four boulders down the holes
    above it. Without Strength there is no point going in. Once something in the party
