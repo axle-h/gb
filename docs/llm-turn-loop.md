@@ -27,10 +27,11 @@ argument lives in the code.
 
 ## The tools
 
-- Every terminal tool's `summary` is enforced by `classify` rather than by the schema, because a
-  field the schema requires and the parser allows is one a weak model omits.
-- `press_buttons` is offered on the watchdog turn only. `report_issue` does not end the turn and its
-  answer must not read like a fix. Both write a record whose save is taken for each edge into
+- Every turn ends with `choose_action`, whose spec is the same on every kind: what varies is the
+  menu in the turn. Its `summary`, once per reply, is enforced by `classify_reply` rather than by the
+  schema, because a field the schema requires and the parser allows is one a weak model omits.
+- `press:` is a row on the watchdog turn only, and refused on every other. `report_issue` does not
+  end the turn and its answer must not read like a fix. Both write a record whose save is taken for each edge into
   `AwaitingLlm` (`Published::asks`), never the periodic checkpoint, and waited for, since an
   endpoint can answer before the emulator thread's next tick.
 - Nothing a read answers may duplicate the situation. `read_route`'s `None` means "not walked there
@@ -74,9 +75,10 @@ argument lives in the code.
 - The bin line reads `hidden_objects_for(map)` and nothing else — handing over `trash_cans` would
   walk the gym in two requests, and a test asserts the turn is byte-identical whatever the puzzle
   state says.
-- A chain is checked against the same menu and each hop is re-resolved against a fresh `actions()`.
-  Only a landed action advances it. `resume_after_battle` is on unless the model turns it off,
-  battles only, and capped.
+- A reply's `choose_action` calls fold into one `Terminal` in `classify_reply`, all or none, each
+  checked against the same menu, and each hop is re-resolved against a fresh `actions()`. Only a
+  landed action advances it. A walk a battle stopped is taken up again, capped, unless a party
+  member fainted in that battle (`LlmPolicy::battle_faints`).
   A walk stopped by a message that left the player on the same square, with no battle after it, is
   taken up again without asking (`MAX_NOTICE_RESUMES`); a walk-back or a trainer still hands it back.
 - A chain stalls on a pace that ended in an encounter and reported nothing. No test in this file
@@ -110,7 +112,8 @@ argument lives in the code.
   script's last turn: a model's turn opens no report turn, and a walk resumed after the battle asks
   nothing in between, so the faint, the level and the evolution had nowhere else to go.
 - `take_over` stops the script deciding the rest of *this* battle and nothing more. It cannot be
-  scoped to the run: a disarm reached for mid-battle is one nothing brings back.
+  scoped to the run: a disarm reached for mid-battle is one nothing brings back. It is a row only on
+  the turn the script handed back (`offer_take_over`), sent beside that turn's action.
 
 ## The plan and the prompt
 

@@ -80,7 +80,7 @@ impl Brain for Refuser {
             }
             if request.is_battle() {
                 seen.battle_turns.push(request.situation().to_string());
-            } else if request.has_tool("choose_action") {
+            } else if request.is_overworld() {
                 seen.overworld_turns.push(request.situation().to_string());
             }
             if request.is_stuck() {
@@ -93,13 +93,10 @@ impl Brain for Refuser {
             return Reply::Content("I am testing what happens when the game says no.".to_string());
         }
         if request.is_stuck() {
-            return Reply::call(
-                "press_buttons",
-                serde_json::json!({ "buttons": ["b"], "why": "the agent is wedged" }),
-            );
+            return Reply::call("choose_action", serde_json::json!({ "id": "press:b", "summary": "the agent is wedged" }));
         }
-        if request.has_tool("set_nickname") {
-            return Reply::call("set_nickname", serde_json::json!({ "summary": "keeping the species name" }));
+        if request.is_nickname() {
+            return Reply::choose("NONE");
         }
         if request.is_battle() {
             if let Some(mut call) = self.plan.pop_front() {
@@ -119,7 +116,7 @@ impl Brain for Refuser {
 /// A terminal battle call, with the `summary` every one of them requires.
 fn choose(id: &str) -> Call {
     Call::new(
-        "choose_battle_action",
+        "choose_action",
         serde_json::json!({ "id": id, "summary": format!("taking `{id}` to see what the game says") }),
     )
 }
@@ -611,7 +608,7 @@ fn the_old_mans_tutorial_is_a_battle_the_agent_cannot_walk_into() {
             let mut seen = log.lock().expect("not poisoned");
             if request.is_battle() {
                 seen.battle_turns.push(request.situation().to_string());
-            } else if request.has_tool("choose_action") {
+            } else if request.is_overworld() {
                 seen.overworld_turns.push(request.situation().to_string());
             }
             if request.is_stuck() {
@@ -622,10 +619,7 @@ fn the_old_mans_tutorial_is_a_battle_the_agent_cannot_walk_into() {
             return Reply::Content("I am talking to an old man in Viridian City.".to_string());
         }
         if request.is_stuck() {
-            return Reply::call(
-                "press_buttons",
-                serde_json::json!({ "buttons": ["b"], "why": "the agent is wedged" }),
-            );
+            return Reply::call("choose_action", serde_json::json!({ "id": "press:b", "summary": "the agent is wedged" }));
         }
         // The id, not the prose.
         match request.menu_ids().into_iter().find(|id| id == "ViridianCity:OldMan") {

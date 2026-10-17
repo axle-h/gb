@@ -245,7 +245,7 @@ pub struct Worker {
     accounting: Accounting,
     /// `POST /api/new-run` and `POST /api/clear` — taken at the top of every turn.
     reset: Resets,
-    /// Where the `press_buttons` records go — see [`crate::llm::incident`].
+    /// Where the raw-press and issue records go — see [`crate::llm::incident`].
     run: Option<Arc<CurrentRun>>,
 }
 
@@ -341,7 +341,7 @@ impl Worker {
         let Some(run) = &self.run else { return };
         let what = match report {
             incident::Report::Issue { .. } => "report_issue",
-            incident::Report::Press { .. } => "press_buttons",
+            incident::Report::Press { .. } => "press",
         };
         match incident::record(run, &self.published, turn, kind, report, summary, &self.history) {
             Ok(path) => println!("{what} on turn {turn} ({}): recorded in {path:?}", kind.label()),
@@ -728,8 +728,7 @@ impl Worker {
                 continue;
             }
 
-            let classified: Vec<CallKind> =
-                completion.tool_calls.iter().map(|call| tools::classify(kind, call, menu)).collect();
+            let classified = tools::classify_reply(kind, &completion.tool_calls, menu);
 
             // Published after classification, so a rejected call arrives labelled as one.
             for (call, classification) in completion.tool_calls.iter().zip(&classified) {
@@ -746,15 +745,22 @@ impl Worker {
             if let Some(position) = classified.iter().position(|c| matches!(c, CallKind::Terminal(_))) {
                 let CallKind::Terminal(decision) = &classified[position] else { unreachable!() };
                 let decision = decision.clone();
-                // Read off the call: the emulator has no use for the summary.
-                let summary = tools::call_summary(&completion.tool_calls[position]);
                 let ended_with = completion.tool_calls[position].function.name.clone();
+                let chained = ended_with == tools::CHOOSE_ACTION;
+                // Read off the calls: the emulator has no use for the summary.
+                let summary = match chained {
+                    true => tools::reply_summary(&completion.tool_calls, &classified),
+                    false => tools::call_summary(&completion.tool_calls[position]),
+                };
                 for (index, call) in completion.tool_calls.iter().enumerate() {
                     let content = match &classified[index] {
                         _ if index == position => {
                             "Accepted. The agent is carrying it out now; the next turn will tell you \
                              what happened."
                                 .to_string()
+                        }
+                        CallKind::Chained if chained => {
+                            "Accepted, to be taken after the one before it if that one lands.".to_string()
                         }
                         CallKind::Todo(call) => self.apply_todo(call.clone()),
                         // Filed, not dropped, like a TODO call.
@@ -771,8 +777,8 @@ impl Worker {
                 }
                 // After the tool results are appended, not before.
                 if let Terminal::PressButtons { buttons } = &decision {
-                    // `tools::classify` enforces `why`, so the default is unreachable.
-                    let why = tools::call_reason(&completion.tool_calls[position]).unwrap_or_default();
+                    // `tools::classify_reply` enforces a summary, so the default is unreachable.
+                    let why = summary.clone().unwrap_or_default();
                     let report = incident::Report::Press { buttons, why: &why };
                     self.record_report(id, kind, report, summary.as_deref());
                 }
@@ -856,7 +862,7 @@ impl Worker {
                     CallKind::Issue(message) => self.file_issue(id, kind, message, None),
                     CallKind::BattleScript(call) => self.apply_battle_script(call.clone()),
                     CallKind::Rejected(complaint) => complaint.clone(),
-                    CallKind::Terminal(_) => unreachable!("handled above"),
+                    CallKind::Terminal(_) | CallKind::Chained => unreachable!("handled above"),
                 };
                 self.publish_tool_result(id, call, classification, &content, png);
                 self.history.push(Message::tool_result(&call.id, content));
@@ -1113,46 +1119,43 @@ fn names(calls: &[ToolCall]) -> String {
 fn describe(decision: &Terminal) -> String {
     match decision {
         // The chain is on the line the page shows, or three actions read as one.
-        Terminal::ChooseAction { id, then, resume_after_battle } => {
+        Terminal::ChooseAction { id, then } => {
             let mut line = format!("choose_action {id}");
             if !then.is_empty() {
                 line.push_str(&format!(", then {}", then.join(", ")));
-            }
-            if *resume_after_battle {
-                line.push_str(" (resuming after a battle)");
             }
             line
         }
         // So is a take-over, since a scripted battle is otherwise invisible from outside.
         Terminal::ChooseBattleAction { id, take_over } => match take_over {
-            true => format!("choose_battle_action {id} (taking over this battle)"),
-            false => format!("choose_battle_action {id}"),
+            true => format!("choose_action {id} (taking over this battle)"),
+            false => format!("choose_action {id}"),
         },
         Terminal::UseFieldMove(request) => format!("use_field_move {request:?}"),
         Terminal::PressButtons { buttons } => format!(
-            "press_buttons {}",
-            buttons.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(" "),
+            "choose_action press:{}",
+            buttons.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(","),
         ),
         Terminal::SetNickname { name } => match name {
-            Some(name) => format!("set_nickname {name}"),
-            None => "set_nickname (keep the default)".to_string(),
+            Some(name) => format!("choose_action {name} (the nickname)"),
+            None => "choose_action NONE (keep the species name)".to_string(),
         },
         Terminal::BuyItem { item, then } => match item {
             Some(item) => match then.is_empty() {
-                true => format!("buy_item {item}"),
+                true => format!("choose_action buy {item}"),
                 false => format!(
-                    "buy_item {item}, then {}",
+                    "choose_action buy {item}, then {}",
                     then.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "),
                 ),
             },
-            None => "buy_item (nothing)".to_string(),
+            None => "choose_action leave".to_string(),
         },
         Terminal::ForgetMove { slot } => match slot {
-            Some(slot) => format!("forget_move slot {slot}"),
-            None => "forget_move (decline)".to_string(),
+            Some(slot) => format!("choose_action forget:{slot}"),
+            None => "choose_action keep".to_string(),
         },
-        Terminal::MimicMove { slot } => format!("mimic_move slot {slot}"),
-        Terminal::Wait { ticks } => format!("wait {ticks} ticks"),
+        Terminal::MimicMove { slot } => format!("choose_action mimic:{slot}"),
+        Terminal::Wait { ticks } => format!("choose_action wait*{ticks}"),
     }
 }
 

@@ -33,7 +33,7 @@ pub mod files {
     /// Every message ever appended, plus a marker line per compaction. Append-only, and read by
     /// nothing in this program.
     pub const CONVERSATION: &str = "conversation.jsonl";
-    /// One subdirectory per `press_buttons` escape hatch; nothing reads it back. See [`crate::llm::incident`].
+    /// One subdirectory per `press:` escape hatch; nothing reads it back. See [`crate::llm::incident`].
     pub const PRESS_BUTTONS: &str = "press-buttons";
 
     /// The run's moments, one JSON line each, naming its save state in `MOMENTS`. See [`super::moments`].

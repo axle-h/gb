@@ -78,14 +78,54 @@ impl TurnRequest {
         self.tools.iter().any(|tool| tool.name == name)
     }
 
+    /// What the turn asks, off its `## Decision:` heading: every kind is sent the same action tool.
+    /// The newest turn message, which a read step's results and pictures come after.
+    pub fn decision(&self) -> &str {
+        self.messages
+            .iter()
+            .rev()
+            .filter(|message| message.role == "user")
+            .find_map(|message| message.text.lines().find_map(|line| line.strip_prefix("## Decision: ")))
+            .unwrap_or("")
+    }
+
+    pub fn is_overworld(&self) -> bool {
+        self.decision().contains("in the overworld")
+    }
+
     pub fn is_battle(&self) -> bool {
-        self.has_tool("choose_battle_action")
+        self.decision().contains("this battle turn")
     }
 
     pub fn is_stuck(&self) -> bool {
-        self.has_tool("press_buttons")
-            && !self.has_tool("choose_action")
-            && !self.has_tool("choose_battle_action")
+        self.decision().contains("the game is stuck")
+    }
+
+    pub fn is_nickname(&self) -> bool {
+        self.decision().starts_with("name this")
+    }
+
+    pub fn is_mart(&self) -> bool {
+        self.decision().starts_with("what to buy")
+    }
+
+    pub fn is_forget_move(&self) -> bool {
+        self.decision().starts_with("which move to forget")
+    }
+
+    pub fn is_mimic(&self) -> bool {
+        self.decision().contains("Mimic copies")
+    }
+
+    /// The id that answers a menu prompt with the game's own default, if this turn is one.
+    pub fn default_answer(&self) -> Option<&'static str> {
+        match () {
+            _ if self.is_nickname() => Some("NONE"),
+            _ if self.is_forget_move() => Some("keep"),
+            _ if self.is_mart() => Some("leave"),
+            _ if self.is_mimic() => Some("mimic:0"),
+            _ => None,
+        }
     }
 
     /// Compaction's own request: no tools, and the last user message is the instruction.
@@ -117,9 +157,14 @@ impl Call {
         Self { name: name.to_string(), arguments }
     }
 
-    /// The terminal `wait`, every brain's "I have nothing" answer.
+    /// One `choose_action`.
+    pub fn choose(id: &str) -> Self {
+        Self::new(crate::llm::tools::CHOOSE_ACTION, serde_json::json!({ "id": id }))
+    }
+
+    /// `wait*N`, every brain's "I have nothing" answer.
     pub fn wait(ticks: u64) -> Self {
-        Self::new("wait", serde_json::json!({ "ticks": ticks }))
+        Self::choose(&format!("wait*{ticks}"))
     }
 }
 
@@ -136,6 +181,11 @@ pub enum Reply {
 impl Reply {
     pub fn call(name: &str, arguments: serde_json::Value) -> Self {
         Self::Calls(vec![Call::new(name, arguments)])
+    }
+
+    /// One `choose_action`.
+    pub fn choose(id: &str) -> Self {
+        Self::Calls(vec![Call::choose(id)])
     }
 }
 

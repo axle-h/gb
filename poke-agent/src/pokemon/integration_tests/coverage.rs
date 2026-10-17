@@ -719,25 +719,17 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
                 .into_iter()
                 .find(|id| id.starts_with("fight:"))
                 .unwrap_or_else(|| "run".to_string());
-            return Reply::call("choose_battle_action", serde_json::json!({ "id": id }));
+            return Reply::call("choose_action", serde_json::json!({ "id": id }));
         }
         if request.is_stuck() {
-            return Reply::call(
-                "press_buttons",
-                serde_json::json!({ "buttons": ["a"], "why": "the agent reached no decision point" }),
-            );
+            return Reply::call("choose_action", serde_json::json!({ "id": "press:a", "summary": "the agent reached no decision point" }));
         }
-        if !request.has_tool("choose_action") {
+        if !request.is_overworld() {
             // A nickname, a mart, a move to forget: answer with the game's default.
-            for name in ["set_nickname", "forget_move", "buy_item"] {
-                if request.has_tool(name) {
-                    return Reply::call(name, serde_json::json!({}));
-                }
-            }
-            if request.has_tool("mimic_move") {
-                return Reply::call("mimic_move", serde_json::json!({ "slot": 0 }));
-            }
-            return Reply::Calls(vec![Call::wait(1)]);
+            return match request.default_answer() {
+                Some(id) => Reply::choose(id),
+                None => Reply::Calls(vec![Call::wait(1)]),
+            };
         }
 
         self.turns += 1;
@@ -871,13 +863,7 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
                 {
                     *self.exits.entry(crossing).or_insert(0) += 1;
                 }
-                // `resume_after_battle` everywhere except the rows that exist to start a
-                // battle.
-                let resume = !matches!(id.rsplit(':').next(), Some("Grass" | "Empty")) && pacing(&id).is_none();
-                Reply::call(
-                    "choose_action",
-                    serde_json::json!({ "id": id, "resume_after_battle": resume }),
-                )
+                Reply::choose(&id)
             }
             None => {
                 self.stalled_turns += 1;

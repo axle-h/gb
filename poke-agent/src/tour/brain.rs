@@ -444,7 +444,7 @@ impl CompletionBrain {
         let situation = request.situation();
         let foe = situation.lines().find_map(|line| line.strip_prefix("Enemy: "))
             .and_then(|rest| rest.split_whitespace().next()).unwrap_or("").to_string();
-        let choose = |id: &str| Reply::call("choose_battle_action", serde_json::json!({ "id": id, "summary": "as planned" }));
+        let choose = |id: &str| Reply::call(crate::llm::tools::CHOOSE_ACTION, serde_json::json!({ "id": id, "summary": "as planned" }));
         // The game draws this message over itself, so only the part that always survives is matched.
         if situation.contains("BOX is full") {
             self.box_full = true;
@@ -496,7 +496,7 @@ impl CompletionBrain {
             return choose(id);
         }
         let refused = self.box_full;
-        let spare = |id: &String| !id.starts_with("read_") && id.as_str() != "wait";
+        let spare = |id: &String| !id.starts_with("read_") && !id.starts_with("wait") && id.as_str() != crate::llm::tools::TAKE_OVER;
         match ids.iter().find(|id| id.as_str() == "run")
             .or_else(|| ids.iter().find(|id| spare(id) && id.as_str() != "ball"))
             .or_else(|| ids.iter().find(|id| spare(id) && !(refused && id.as_str() == "ball")))
@@ -534,10 +534,10 @@ impl CompletionBrain {
             self.saw(Way::NicknameGiven);
             // The naming screen has letters and a little punctuation, and no digits.
             let name = ["ALPHA", "BRAVO", "DELTA", "ECHO", "GOLF", "HOTEL", "KILO", "LIMA", "OSCAR"][self.named / 2 % 9];
-            Reply::call("set_nickname", serde_json::json!({ "name": name, "summary": "named" }))
+            Reply::choose(name)
         } else {
             self.saw(Way::NicknameDeclined);
-            Reply::call("set_nickname", serde_json::json!({ "summary": "the species name will do" }))
+            Reply::choose("NONE")
         }
     }
 
@@ -546,18 +546,13 @@ impl CompletionBrain {
             self.orders = orders.iter().copied().collect();
             self.at += 1;
         }
-        match self.orders.pop_front() {
-            Some((item, quantity)) => {
-                // `buy_item` refuses more than three chained kinds, and the mart closes after one call.
-                if self.orders.len() > 3 {
-                    self.stuck(format!("step {}: more kinds than one buy_item takes: {:?}", self.at, self.orders));
-                }
-                let then: Vec<serde_json::Value> = self.orders.drain(..)
-                    .map(|(item, quantity)| serde_json::json!({ "item": item, "quantity": quantity }))
-                    .collect();
-                Reply::call("buy_item", serde_json::json!({ "item": item, "quantity": quantity, "then": then, "summary": "stocking up" }))
-            }
-            None => Reply::call("buy_item", serde_json::json!({ "summary": "nothing needed here" })),
+        // One reply takes four orders at most, and the mart closes after it.
+        if self.orders.len() > crate::llm::tools::MAX_CHAINED_ACTIONS {
+            self.stuck(format!("step {}: more orders than one reply takes: {:?}", self.at, self.orders));
+        }
+        match self.orders.is_empty() {
+            false => Reply::Calls(self.orders.drain(..).map(|(item, quantity)| Call::choose(&format!("buy:{item}*{quantity}"))).collect()),
+            true => Reply::choose("leave"),
         }
     }
 
@@ -746,7 +741,7 @@ impl CompletionBrain {
             self.repeated = (format!("{map}|{id}"), 1);
         }
         self.chosen.entry(map).or_default().insert(id.clone());
-        Reply::call("choose_action", serde_json::json!({ "id": id, "resume_after_battle": true, "summary": "as planned" }))
+        Reply::call(crate::llm::tools::CHOOSE_ACTION, serde_json::json!({ "id": id, "summary": "as planned" }))
     }
 
     /// One turn of a tidy: read the bag, then toss what it holds that nothing needs.
@@ -1320,7 +1315,7 @@ impl Brain for CompletionBrain {
             return Reply::Content("Playing the whole game, a step list at a time.".into());
         }
         if request.is_stuck() {
-            return Reply::call("press_buttons", serde_json::json!({ "buttons": ["a"], "why": "no decision point" }));
+            return Reply::call(crate::llm::tools::CHOOSE_ACTION, serde_json::json!({ "id": "press:a", "summary": "no decision point" }));
         }
         // A quiz machine answered wrong is a battle at once, so a quiz row followed by anything
         // else is the answer its gate wanted. Nothing left in RAM tells the two apart: the gate
@@ -1374,27 +1369,28 @@ impl Brain for CompletionBrain {
         if request.is_battle() {
             return self.battle(request);
         }
-        if request.has_tool("set_nickname") {
+        if request.is_nickname() {
             return self.nickname();
         }
-        if request.has_tool("buy_item") {
+        if request.is_mart() {
             return self.mart();
         }
-        if request.has_tool("forget_move") {
+        if request.is_forget_move() {
             // A machine taught on purpose replaces the first move that is not an HM's.
             let hm = ["cut", "fly", "surf", "strength", "flash"];
             let slot = self.teaching.then(|| request.menu_rows().into_iter()
-                .find(|(_, what)| !hm.contains(&what.split_whitespace().next().unwrap_or("").to_ascii_lowercase().as_str()))
+                .find(|(id, what)| id.starts_with("forget:")
+                    && !hm.contains(&what.split_whitespace().next().unwrap_or("").to_ascii_lowercase().as_str()))
                 .map(|(id, _)| id)).flatten();
             return match slot {
-                Some(slot) => Reply::call("forget_move", serde_json::json!({ "slot": slot.parse::<u8>().unwrap_or(0), "summary": "making room" })),
-                None => Reply::call("forget_move", serde_json::json!({ "summary": "keeping what it knows" })),
+                Some(slot) => Reply::choose(&slot),
+                None => Reply::choose("keep"),
             };
         }
-        if request.has_tool("mimic_move") {
-            return Reply::call("mimic_move", serde_json::json!({ "slot": 0, "summary": "copying the first" }));
+        if request.is_mimic() {
+            return Reply::choose("mimic:0");
         }
-        if !request.has_tool("choose_action") {
+        if !request.is_overworld() {
             return Reply::Calls(vec![Call::wait(1)]);
         }
         let mut reply = self.overworld(request);
@@ -1516,7 +1512,7 @@ impl Brain for FinishFlag {
                 // The reply that takes the last step is carried out after this turn, so the run is
                 // over at the next free turn: stopping here drops that step, a talk to an aide
                 // included.
-                None if was_finished && request.has_tool("choose_action") && !request.is_battle() =>
+                None if was_finished && request.is_overworld() =>
                     *self.progress.finished.lock().expect("not poisoned") = true,
                 None => {}
             }

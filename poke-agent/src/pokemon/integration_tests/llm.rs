@@ -22,19 +22,16 @@ fn plays_the_menu(request: &TurnRequest) -> Reply {
         return Reply::Content("I am in Pallet Town and I am trying to leave it.".to_string());
     }
     if request.is_stuck() {
-        // `why` is required and read back out of its record by
+        // The summary is the press record's `why`, read back out of it by
         // `the_watchdog_asks_the_model_for_a_nudge_and_delivers_it`.
-        return Reply::call(
-            "press_buttons",
-            serde_json::json!({ "buttons": ["a"], "why": "the agent is wedged" }),
-        );
+        return Reply::call("choose_action", serde_json::json!({ "id": "press:a", "summary": "the agent is wedged" }));
     }
     let ids = request.menu_ids();
     if request.is_battle() {
         // A wild encounter is never impossible, and a brain that only ran would hang in a trainer
         // fight.
         let id = ids.iter().find(|id| id.starts_with("fight:")).cloned().unwrap_or_else(|| "run".into());
-        return Reply::call("choose_battle_action", serde_json::json!({ "id": id }));
+        return Reply::call("choose_action", serde_json::json!({ "id": id }));
     }
     if request.seen == 0 {
         // Both in one message: the read goes to the emulator thread and the screenshot to the
@@ -169,14 +166,7 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
             if request.is_stuck() {
                 let mut seen = self.0.lock().expect("not poisoned");
                 if seen.is_none() {
-                    let mut terminals: Vec<String> = request
-                        .tool_names()
-                        .into_iter()
-                        .filter(|name| name.starts_with("press") || *name == "wait")
-                        .map(str::to_string)
-                        .collect();
-                    terminals.sort();
-                    *seen = Some((request.situation().to_string(), terminals));
+                    *seen = Some((request.situation().to_string(), request.menu_ids()));
                 }
             }
             plays_the_menu(request)
@@ -203,9 +193,9 @@ fn the_watchdog_asks_the_model_for_a_nudge_and_delivers_it() {
     });
 
     let stuck = seen.lock().expect("not poisoned").clone();
-    let (situation, terminals) = stuck.expect("no stuck turn ever reached the endpoint");
+    let (situation, rows) = stuck.expect("no stuck turn ever reached the endpoint");
 
-    assert_eq!(terminals, vec!["press_buttons".to_string(), "wait".to_string()]);
+    assert_eq!(rows, ["press:<buttons>", "wait*N"], "the one turn a raw press is offered on");
 
     // The turn names the agent's own state and says the fault is the agent's, not a puzzle.
     assert!(situation.contains("## Decision: the game is stuck"), "{situation:.300}");
@@ -455,7 +445,7 @@ fn a_completion_with_nothing_in_it_is_nudged_then_forced() {
         run.notices(),
     );
     assert!(
-        run.decisions().iter().any(|decision| decision.starts_with("wait")),
+        run.decisions().iter().any(|decision| decision.contains("wait*")),
         "the forced fallback is a wait: {:?}",
         run.decisions(),
     );
@@ -604,7 +594,7 @@ fn each_opening_into_a_neighbour_is_a_row_the_turn_can_take() {
             match rows.iter().find(|(_, what)| what.contains(&format!("({}, {})", SOUTHERN_LANDING.0, SOUTHERN_LANDING.1))) {
                 Some((id, _)) => Reply::call("choose_action", serde_json::json!({
                     "id": id, "summary": "out by the southern opening, the one that lands where I want" })),
-                None => Reply::call("wait", serde_json::json!({ "ticks": 1, "summary": "waiting" })),
+                None => Reply::Calls(vec![Call::wait(1)]),
             }
         }
     }
@@ -684,7 +674,7 @@ fn a_model_swaps_a_boxed_mon_into_a_full_party_at_the_pc() {
         if request.is_summary() {
             return Reply::Content("I am at the PC.".to_string());
         }
-        if !request.has_tool("choose_action") {
+        if !request.is_overworld() {
             return Reply::Calls(vec![Call::wait(1)]);
         }
         seen.lock().unwrap().push(request.situation().to_string());
@@ -721,10 +711,10 @@ fn the_native_bike_shop_is_asked_as_a_mart_selling_the_bicycle() {
         if request.is_summary() {
             return Reply::Content("I am in the Bike Shop.".to_string());
         }
-        let mart = request.has_tool("buy_item");
+        let mart = request.is_mart();
         seen.lock().unwrap().push((mart, request.situation().to_string()));
         if mart {
-            return Reply::call("buy_item", serde_json::json!({ "item": "Bicycle", "summary": "The bike, please." }));
+            return Reply::call("choose_action", serde_json::json!({ "id": "buy:Bicycle", "summary": "The bike, please." }));
         }
         match request.menu_ids().into_iter().find(|id| id.contains("Clerk")).filter(|_| !std::mem::replace(&mut talked, true)) {
             Some(id) => Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "Asking about a bike." })),
@@ -739,7 +729,7 @@ fn the_native_bike_shop_is_asked_as_a_mart_selling_the_bicycle() {
     let marts: Vec<_> = situations.iter().filter(|(mart, _)| *mart).map(|(_, situation)| situation).collect();
     assert_eq!(marts.len(), 1, "{situations:#?}");
     let for_sale = marts[0].split("### For sale").nth(1).expect("a For sale section");
-    assert!(for_sale.contains("`Bicycle`") && for_sale.contains("¥1000000"), "{}", marts[0]);
+    assert!(for_sale.contains("`buy:Bicycle`") && for_sale.contains("¥1000000"), "{}", marts[0]);
     assert!(refused, "the clerk's refusal never reached a turn: {situations:#?}");
     assert_eq!(run.agent().game().world().bag.quantity_of(poke_core::item::ItemId::Bicycle), 0);
 }

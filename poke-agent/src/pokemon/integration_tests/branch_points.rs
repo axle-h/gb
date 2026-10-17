@@ -63,7 +63,7 @@ fn first_menu(run: &LlmRun) -> Vec<String> {
     run.endpoint
         .requests()
         .into_iter()
-        .find(|request| request.has_tool("choose_action"))
+        .find(|request| request.is_overworld())
         .map(|request| request.menu_ids())
         .unwrap_or_default()
 }
@@ -73,7 +73,7 @@ fn last_menu(run: &LlmRun) -> Vec<String> {
     run.endpoint
         .requests()
         .into_iter()
-        .filter(|request| request.has_tool("choose_action"))
+        .filter(|request| request.is_overworld())
         .next_back()
         .map(|request| request.menu_ids())
         .unwrap_or_default()
@@ -301,8 +301,8 @@ fn the_bike_branch_can_be_taken_without_the_voucher() {
         "¥{money} bought a ¥1,000,000 bicycle");
     assert_eq!(state.money, money, "nothing should have been spent");
     assert!(!was_stuck(&run), "the watchdog fired: the no-voucher shop wedged the agent");
-    assert!(!run.endpoint.requests().iter().any(|request| request.has_tool("buy_item")),
-        "this arm is a text box rather than a mart; a `buy_item` turn here means the agent's mart \
+    assert!(!run.endpoint.requests().iter().any(|request| request.is_mart()),
+        "this arm is a text box rather than a mart; a mart turn here means the agent's mart \
          driver has started claiming it, and the assertions above are then about the wrong thing");
     println!("[branch-bike-shop] the shop refused ¥{money} for a ¥1,000,000 bicycle, in one text box");
 }

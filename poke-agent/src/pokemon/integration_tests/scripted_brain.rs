@@ -62,16 +62,13 @@ impl Brain for ScriptedBrain {
                 .into_iter()
                 .find(|id| id.starts_with("fight:"))
                 .unwrap_or_else(|| "run".to_string());
-            return Reply::call("choose_battle_action", serde_json::json!({ "id": id }));
+            return Reply::call("choose_action", serde_json::json!({ "id": id }));
         }
         if request.is_stuck() {
-            return Reply::call(
-                "press_buttons",
-                serde_json::json!({ "buttons": ["a"], "why": "the agent reached no decision point" }),
-            );
+            return Reply::call("choose_action", serde_json::json!({ "id": "press:a", "summary": "the agent reached no decision point" }));
         }
         // Every other kind is answered with the game's own default.
-        if !request.has_tool("choose_action") {
+        if !request.is_overworld() {
             return default_for(request);
         }
 
@@ -104,11 +101,7 @@ impl Brain for ScriptedBrain {
         match intent.resolve(request) {
             Some(id) => {
                 self.unresolved = 0;
-                // `resume_after_battle`, because a wild encounter says nothing about the walk.
-                calls.push(Call::new(
-                    "choose_action",
-                    serde_json::json!({ "id": id, "resume_after_battle": true }),
-                ));
+                calls.push(Call::choose(&id));
                 // A `Row` or `Says` is done once chosen; `Enter` and `Repeat` are checked by the
                 // loop above next turn.
                 if !matches!(intent, Intent::Enter(_) | Intent::Repeat(_)) {
@@ -164,17 +157,10 @@ impl Brain for ScriptedBrain {
 
 /// The answer that keeps the game moving on a kind this brain has no opinion about.
 fn default_for(request: &TurnRequest) -> Reply {
-    for (name, arguments) in [
-        ("set_nickname", serde_json::json!({})),
-        ("forget_move", serde_json::json!({})),
-        ("mimic_move", serde_json::json!({ "slot": 0 })),
-        ("buy_item", serde_json::json!({})),
-    ] {
-        if request.has_tool(name) {
-            return Reply::call(name, arguments);
-        }
+    match request.default_answer() {
+        Some(id) => Reply::choose(id),
+        None => Reply::Calls(vec![Call::wait(1)]),
     }
-    Reply::Calls(vec![Call::wait(1)])
 }
 
 #[cfg(test)]

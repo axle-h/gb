@@ -53,14 +53,19 @@ pub struct LlmPolicy {
     battle_report: Option<BattleReport>,
     /// Finished reports, waiting for the next turn of any kind to carry them.
     reports: Vec<String>,
-    /// Kinds `buy_item`'s `then` queued for this visit; see [`Policy::next_mart_purchase`].
+    /// The orders after the first of a mart reply, queued for this visit; see [`Policy::next_mart_purchase`].
     mart_queue: std::collections::VecDeque<BagItem>,
     /// The [`crate::llm::guide::chapter_index`] the last `read_guide` answered from, to spot a badge moving it.
     guide_chapter_read: Option<usize>,
     /// A report whose battle has ended, waiting for one more observation to close against.
     finishing: Option<BattleReport>,
-    /// The model took this battle from its script with `choose_battle_action`'s `take_over`.
+    /// The model took this battle from its script with the `take_over` row.
     taken_over: bool,
+    /// The next battle turn offers the `take_over` row: the armed script handed it back.
+    offer_take_over: bool,
+    /// How many of the party had fainted when this battle was first observed, and whether more
+    /// have since: a walk is not taken up again after a battle that cost a party member.
+    battle_faints: Option<(usize, bool)>,
     /// The latest state with a battle in it, for closing a report's last turn.
     last_battle_state: Option<Box<GameState>>,
 }
@@ -108,7 +113,7 @@ enum ActionOutcome {
     Stopped(OverworldActionAbortedReason, Option<Point8>),
 }
 
-/// One `choose_action` call, while the agent is working through it.
+/// One reply's `choose_action` calls, while the agent is working through them.
 struct ActionQueue {
     /// The id the agent is carrying out now.
     current: String,
@@ -116,8 +121,6 @@ struct ActionQueue {
     rest: VecDeque<String>,
     /// What has already landed.
     done: Vec<String>,
-    /// From the tool call: a battle does not end `current`.
-    resume_after_battle: bool,
     /// Battles `current` has already been resumed through.
     resumes: u8,
     /// Passing messages `current` has already been taken up again after.
@@ -134,6 +137,8 @@ enum Dropped {
     Unreported,
     /// [`MAX_BATTLE_RESUMES`], spent.
     Resumes,
+    /// The battle that stopped it cost a party member, or the whole party.
+    Fainted,
 }
 
 /// The two different mistakes an id that will not resolve can be, in the words that say which.
@@ -175,6 +180,8 @@ impl LlmPolicy {
             mart_queue: std::collections::VecDeque::new(),
             guide_chapter_read: None,
             taken_over: false,
+            offer_take_over: false,
+            battle_faints: None,
             last_battle_state: None,
         }
     }
@@ -255,7 +262,13 @@ impl LlmPolicy {
             self.state.as_deref().map(|state| {
                 let menu = match kind {
                     DecisionKind::Overworld => tools::overworld_menu(state, self.snapshot.arrival),
-                    DecisionKind::Battle => tools::battle_menu(state),
+                    DecisionKind::Battle => {
+                        let mut menu = tools::battle_menu(state);
+                        if self.offer_take_over {
+                            menu.push(tools::take_over_row());
+                        }
+                        menu
+                    }
                     DecisionKind::MartPurchase => tools::mart_menu(&self.snapshot, state),
                     DecisionKind::ForgetMove => match context {
                         TurnContext::ForgetMove { current, .. } => tools::forget_menu(current, state.ruleset),
@@ -265,7 +278,7 @@ impl LlmPolicy {
                         TurnContext::MimicMove { enemy } => tools::mimic_menu(state, enemy),
                         _ => Vec::new(),
                     },
-                    // The naming screen offers no choices; the tool's own arguments are the menu.
+                    // The naming screen's id is the name, and the stuck turn's is the presses.
                     DecisionKind::Nickname | DecisionKind::Stuck => Vec::new(),
                 };
                 let situation =
@@ -287,6 +300,10 @@ impl LlmPolicy {
         };
 
         let id = self.handles.next_generation();
+        // Offered on the one turn the script handed back, as its note is.
+        if kind == DecisionKind::Battle {
+            self.offer_take_over = false;
+        }
         if let Some(note) = self.note.take() {
             situation = format!("{note}\n\n{situation}");
         }
@@ -357,10 +374,12 @@ impl LlmPolicy {
                     note.push_str(&format!(
                         "\n\n{account}\nIt is still armed, so it decides the turns after this one \
                          too, including any it does not hand back. If the rest of this battle should \
-                         be yours, pass `take_over` to `choose_battle_action`; it goes back to \
-                         deciding at the next battle.",
+                         be yours, send the `{}` row as well as this turn's action; the script goes \
+                         back to deciding at the next battle.",
+                        tools::TAKE_OVER,
                     ));
                 }
+                self.offer_take_over = true;
                 self.note = Some(note);
                 None
             }
@@ -416,9 +435,11 @@ impl LlmPolicy {
             let queue = self.queue.as_ref()?;
             match self.outcome {
                 Some(ActionOutcome::Landed) => Step::Next,
+                // Spent here: the next battle counts its own faints.
                 Some(ActionOutcome::Stopped(OverworldActionAbortedReason::Battle, _))
-                    if queue.resume_after_battle =>
-                {
+                    if self.battle_faints.take().is_some_and(|(_, fainted)| fainted) =>
+                    Step::Drop(Dropped::Fainted),
+                Some(ActionOutcome::Stopped(OverworldActionAbortedReason::Battle, _)) => {
                     match queue.resumes < MAX_BATTLE_RESUMES {
                         true => Step::Resume,
                         false => Step::Drop(Dropped::Resumes),
@@ -500,6 +521,11 @@ impl LlmPolicy {
                  not taken up again. Decide for yourself whether it is still the right thing to do.",
                 queue.current,
             ),
+            Dropped::Fainted => format!(
+                "`{}` was interrupted by a battle in which a party member fainted, so it was not \
+                 taken up again. Decide for yourself whether it is still the right thing to do.",
+                queue.current,
+            ),
         };
 
         let mut note = String::new();
@@ -544,6 +570,13 @@ impl Policy for LlmPolicy {
                 self.last_battle_state = Some(previous);
             }
         }
+        if state.battle.is_some() {
+            let fainted = state.pokemon.iter().filter(|mon| mon.current_hp == 0).count();
+            match self.battle_faints.as_mut() {
+                None => self.battle_faints = Some((fainted, false)),
+                Some((before, more)) => *more |= fainted > *before,
+            }
+        }
         // This is the observation the report was waiting for.
         if self.finishing.is_some() && state.battle.is_none() {
             self.close_battle_report(Some(state));
@@ -583,14 +616,13 @@ impl Policy for LlmPolicy {
             guide: crate::llm::guide::status(state.badges, self.guide_chapter_read),
         };
         match self.advance(DecisionKind::Overworld, context)? {
-            Terminal::ChooseAction { id, then, resume_after_battle } => {
+            Terminal::ChooseAction { id, then } => {
                 // Even a lone action gets a queue, so [`Self::take_current`] is the one place an
                 // id is resolved, against a fresh list.
                 self.queue = Some(ActionQueue {
                     current: id,
                     rest: then.into(),
                     done: Vec::new(),
-                    resume_after_battle,
                     resumes: 0,
                     notices: 0,
                 });
@@ -667,7 +699,10 @@ impl Policy for LlmPolicy {
 
     fn pick_nickname(&mut self, species: PokemonSpecies) -> Option<Option<String>> {
         match self.advance(DecisionKind::Nickname, TurnContext::Nickname(species))? {
-            Terminal::SetNickname { name } => Some(name),
+            // The species name typed back is the default, which the screen keeps for nothing.
+            Terminal::SetNickname { name } => {
+                Some(name.filter(|name| !name.eq_ignore_ascii_case(&species.to_string())))
+            }
             Terminal::Wait { ticks } => {
                 self.waiting = Some((DecisionKind::Nickname, ticks));
                 None
@@ -700,7 +735,7 @@ impl Policy for LlmPolicy {
         }
     }
 
-    /// The next kind queued by this visit's `buy_item`.
+    /// The next order queued by this visit's mart reply.
     fn next_mart_purchase(&mut self) -> Option<BagItem> {
         self.mart_queue.pop_front()
     }
@@ -768,8 +803,7 @@ impl Policy for LlmPolicy {
             Some(Terminal::PressButtons { buttons }) => self.manual.extend(buttons),
             Some(Terminal::Wait { ticks }) => self.waiting = Some((DecisionKind::Stuck, ticks)),
             Some(other) => self.reject(format!(
-                "`{other:?}` cannot be used while the agent is stuck — only `press_buttons` and \
-                 `wait` can."
+                "`{other:?}` cannot be used while the agent is stuck; only `press:` and `wait*N` can."
             )),
             None => {}
         }
@@ -804,6 +838,8 @@ impl Policy for LlmPolicy {
         self.battle_report = None;
         self.finishing = None;
         self.taken_over = false;
+        self.offer_take_over = false;
+        self.battle_faints = None;
         self.reports.clear();
         // A queued order belongs to a mart in the old game.
         self.mart_queue.clear();
@@ -858,6 +894,7 @@ impl Policy for LlmPolicy {
                 if let Some(ActionOutcome::Stopped(_, at)) = self.outcome.as_mut() {
                     *at = None;
                 }
+                self.battle_faints = None;
             }
             // The cartridge's own words are the only account of a battle turn there is.
             AgentEvent::TextBox { message } => {
@@ -881,6 +918,7 @@ impl Policy for LlmPolicy {
                     report.events_end = Some(self.events.len() + 1);
                 }
                 self.taken_over = false;
+                self.offer_take_over = false;
             }
             _ => {}
         }
@@ -1124,6 +1162,12 @@ mod tests {
         }
 
         /// One agent tick: the tool poll, then the decision poll, in `agent.rs`'s order.
+        /// The tool poll alone, on `state` rather than the emulator's.
+        fn observe(&mut self, policy: &mut LlmPolicy, state: &GameState) {
+            let api = PokemonApi::new(&mut self.gb);
+            policy.service_tools(state, &api, &self.graph);
+        }
+
         fn tick_overworld(&mut self, policy: &mut LlmPolicy) -> Option<OverworldAction> {
             let state = self.state();
             let api = PokemonApi::new(&mut self.gb);
@@ -1344,7 +1388,7 @@ mod tests {
         assert_eq!(requests.len(), 1, "the `pending` guard let {} turns out", requests.len());
         // …and the turn it did send was the overworld one, with the overworld tools.
         let offered: Vec<&str> = requests[0].tools.iter().map(|t| t.function.name).collect();
-        assert!(offered.contains(&"choose_action") && !offered.contains(&"choose_battle_action"));
+        assert!(offered.contains(&"choose_action") && offered.contains(&"use_field_move"));
         assert!(last_user_message(&requests[0]).contains(&id), "the menu must carry the id it expects back");
     }
 
@@ -1502,7 +1546,7 @@ mod tests {
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
             replies.push_back(held(calls(&[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]), &release));
-            replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+            replies.push_back(calls(&[("choose_action", r#"{"id":"run"}"#)]));
         }
 
         rig.tick_overworld(&mut policy);
@@ -1521,7 +1565,7 @@ mod tests {
         let requests = rig.requests();
         assert_eq!(requests.len(), 2);
         let offered: Vec<&str> = requests[1].tools.iter().map(|t| t.function.name).collect();
-        assert!(offered.contains(&"choose_battle_action") && !offered.contains(&"choose_action"),
+        assert!(offered.contains(&"choose_action") && !offered.contains(&"use_field_move"),
                 "the replacement turn is a battle turn");
         // …built from the state the battle is in, not from the overworld state it replaced.
         let asked = last_user_message(&requests[1]);
@@ -1539,7 +1583,7 @@ mod tests {
         let release = Arc::new(AtomicBool::new(false));
         let (mut rig, mut policy) = Rig::new(vec![]);
         rig.endpoint.replies.lock().unwrap()
-            .push_back(held(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]), &release));
+            .push_back(held(calls(&[("choose_action", r#"{"id":"run"}"#)]), &release));
 
         rig.enter_battle();
         assert!(rig.tick_battle(&mut policy).is_none(), "the battle turn has only just been asked");
@@ -1567,7 +1611,7 @@ mod tests {
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
             replies.push_back(held(calls(&[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]), &release));
-            replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+            replies.push_back(calls(&[("choose_action", r#"{"id":"run"}"#)]));
         }
         policy.on_event(&AgentEvent::TextBox { message: "the walk was given up".into() });
         rig.tick_overworld(&mut policy);
@@ -1761,7 +1805,7 @@ mod tests {
             ("choose_action", &choose),
         ])];
         // Well past the window, all of it in battle.
-        replies.extend((0..REFRESH + 4).map(|_| calls(&[("choose_battle_action", r#"{"id":"run"}"#)])));
+        replies.extend((0..REFRESH + 4).map(|_| calls(&[("choose_action", r#"{"id":"run"}"#)])));
         rig.push(replies);
         assert!(rig.pump_overworld(&mut policy).is_some(), "the plan is planted by an overworld turn");
         rig.enter_battle();
@@ -1855,7 +1899,7 @@ mod tests {
     fn a_stuck_turn_may_read_first_and_its_press_reaches_the_agent() {
         let (mut rig, mut policy) = Rig::new(vec![
             calls(&[("read_map", "{}")]),
-            calls(&[("press_buttons", r#"{"buttons":["a"],"why":"a text box that will not close"}"#)]),
+            calls(&[("choose_action", r#"{"id":"press:a","summary":"a text box that will not close"}"#)]),
         ]);
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1878,9 +1922,9 @@ mod tests {
 
         let offered: Vec<&str> =
             requests[0].tools.iter().map(|tool| tool.function.name).collect();
-        assert!(offered.contains(&"press_buttons") && offered.contains(&"wait"));
-        assert!(!offered.contains(&"choose_action"), "a wedged agent cannot walk anywhere: {offered:?}");
+        assert!(!offered.contains(&"use_field_move"), "a wedged agent cannot walk anywhere: {offered:?}");
         let situation = requests[0].messages.last().and_then(Message::text).unwrap_or_default();
+        assert!(situation.contains("- `press:<buttons>`") && situation.contains("- `wait*N`"), "{situation}");
         assert!(situation.contains("`script`"), "the situation must name the state it is stuck in");
         assert!(situation.contains("300 seconds"), "…and how long it has been stuck: {situation:.400}");
     }
@@ -1889,8 +1933,8 @@ mod tests {
     fn a_stuck_turn_is_cancelled_the_moment_the_agent_asks_a_real_question() {
         let release = Arc::new(AtomicBool::new(false));
         let (mut rig, mut policy) = Rig::new(vec![
-            held(calls(&[("press_buttons", r#"{"buttons":["a"]}"#)]), &release),
-            calls(&[("wait", r#"{"ticks":1}"#)]),
+            held(calls(&[("choose_action", r#"{"id":"press:a"}"#)]), &release),
+            calls(&[("choose_action", r#"{"id":"wait*1"}"#)]),
         ]);
 
         rig.tick_stuck(&mut policy, "script");
@@ -2008,7 +2052,7 @@ mod tests {
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
             replies.push_back(calls(&[("read_map", "{}")]));
-            replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+            replies.push_back(calls(&[("choose_action", r#"{"id":"run"}"#)]));
         }
 
         // Start the overworld turn and let the model ask for a read…
@@ -2095,8 +2139,8 @@ mod tests {
     #[test]
     fn a_wait_from_one_kind_does_not_delay_the_other() {
         let (mut rig, mut policy) = Rig::new(vec![
-            calls(&[("wait", r#"{"ticks":150}"#)]),
-            calls(&[("choose_battle_action", r#"{"id":"run"}"#)]),
+            calls(&[("choose_action", r#"{"id":"wait*150"}"#)]),
+            calls(&[("choose_action", r#"{"id":"run"}"#)]),
         ]);
 
         // Pump until the wait has been decided and is being counted down.
@@ -2117,7 +2161,7 @@ mod tests {
     fn an_id_the_turn_never_offered_is_refused_without_ending_the_turn() {
         let (mut rig, mut policy) = Rig::new(vec![
             calls(&[("choose_action", r#"{"id":"PalletTown:99,99:Warp","summary":"out of the lab"}"#)]),
-            calls(&[("wait", r#"{"ticks":1,"summary":"waiting"}"#)]),
+            calls(&[("choose_action", r#"{"id":"wait*1","summary":"waiting"}"#)]),
         ]);
 
         rig.pump_overworld_for(&mut policy, Duration::from_secs(2));
@@ -2147,10 +2191,10 @@ mod tests {
     fn a_chained_action_is_taken_without_asking_the_model_again() {
         let (mut rig, mut policy) = Rig::new(vec![]);
         let ids = rig.action_ids(2);
-        rig.endpoint.replies.lock().unwrap().push_back(calls(&[(
-            "choose_action",
-            &format!(r#"{{"id":"{}","then":["{}"],"summary":"heal, then leave"}}"#, ids[0], ids[1]),
-        )]));
+        rig.endpoint.replies.lock().unwrap().push_back(calls(&[
+            ("choose_action", &format!(r#"{{"id":"{}","summary":"heal, then leave"}}"#, ids[0])),
+            ("choose_action", &format!(r#"{{"id":"{}"}}"#, ids[1])),
+        ]));
 
         let first = rig.pump_overworld(&mut policy).expect("the first action lands");
         assert_eq!(tools::overworld_id(&rig.state(), &first), ids[0]);
@@ -2174,14 +2218,12 @@ mod tests {
     fn a_chain_stops_where_the_agent_was_stopped_and_says_where_it_got_to() {
         let (mut rig, mut policy) = Rig::new(vec![]);
         let ids = rig.action_ids(3);
-        rig.endpoint.replies.lock().unwrap().push_back(calls(&[(
-            "choose_action",
-            &format!(
-                r#"{{"id":"{}","then":["{}","{}"],"summary":"three in a row"}}"#,
-                ids[0], ids[1], ids[2],
-            ),
-        )]));
-        rig.endpoint.replies.lock().unwrap().push_back(calls(&[("wait", r#"{"ticks":1,"summary":"think"}"#)]));
+        rig.endpoint.replies.lock().unwrap().push_back(calls(&[
+            ("choose_action", &format!(r#"{{"id":"{}","summary":"three in a row"}}"#, ids[0])),
+            ("choose_action", &format!(r#"{{"id":"{}"}}"#, ids[1])),
+            ("choose_action", &format!(r#"{{"id":"{}"}}"#, ids[2])),
+        ]));
+        rig.endpoint.replies.lock().unwrap().push_back(calls(&[("choose_action", r#"{"id":"wait*1","summary":"think"}"#)]));
 
         let first = rig.pump_overworld(&mut policy).expect("the first action lands");
         policy.on_event(&AgentEvent::OverworldActionAborted {
@@ -2200,31 +2242,40 @@ mod tests {
         assert!(situation.contains(&ids[0]), "and which action was stopped: {situation}");
     }
 
-    /// The other half of the same call.
+    /// A battle does not end a walk, unless it cost a party member.
     #[test]
-    fn a_battle_takes_the_action_up_again_only_when_it_was_asked_to() {
-        for (resume, expected_requests) in [(true, 1), (false, 2)] {
+    fn a_battle_takes_the_action_up_again_unless_a_party_member_fainted_in_it() {
+        for (fainted, expected_requests) in [(false, 1), (true, 2)] {
             let (mut rig, mut policy) = Rig::new(vec![]);
+            rig.enter_battle();
+            let mut battle = rig.state();
+            rig.gb.load_state(FIXTURE).expect("the committed fixture loads");
             let id = rig.first_action_id();
             rig.endpoint.replies.lock().unwrap().push_back(calls(&[(
                 "choose_action",
-                &format!(r#"{{"id":"{id}","resume_after_battle":{resume},"summary":"to the centre"}}"#),
+                &format!(r#"{{"id":"{id}","summary":"to the centre"}}"#),
             )]));
-            rig.endpoint.replies.lock().unwrap().push_back(calls(&[("wait", r#"{"ticks":1,"summary":"think"}"#)]));
+            rig.endpoint.replies.lock().unwrap().push_back(calls(&[("choose_action", r#"{"id":"wait*1","summary":"think"}"#)]));
 
             let action = rig.pump_overworld(&mut policy).expect("the action lands");
+            policy.on_event(&AgentEvent::BattleStarted);
+            rig.observe(&mut policy, &battle);
+            if fainted {
+                battle.pokemon.get_mut(0).expect("a party").current_hp = 0;
+                rig.observe(&mut policy, &battle);
+            }
             policy.on_event(&AgentEvent::OverworldActionAborted {
                 destination: action.tile,
                 reason: OverworldActionAbortedReason::Battle,
                 at: None,
             });
 
-            match resume {
-                true => {
+            match fainted {
+                false => {
                     let again = rig.tick_overworld(&mut policy).expect("the same action is taken up again");
                     assert_eq!(tools::overworld_id(&rig.state(), &again), id);
                 }
-                false => {
+                true => {
                     assert!(rig.tick_overworld(&mut policy).is_none(), "the decision comes back");
                     rig.wait_for_requests(2, Duration::from_secs(2));
                 }
@@ -2232,8 +2283,12 @@ mod tests {
             assert_eq!(
                 rig.requests().len(),
                 expected_requests,
-                "resume_after_battle={resume} should cost {expected_requests} request(s)",
+                "a battle with fainted={fainted} should cost {expected_requests} request(s)",
             );
+            if fainted {
+                let situation = last_user_message(&rig.requests()[1]).to_string();
+                assert!(situation.contains("a party member fainted"), "and says why: {situation}");
+            }
         }
     }
 
@@ -2255,7 +2310,7 @@ mod tests {
                 "choose_action",
                 &format!(r#"{{"id":"{id}","summary":"across the floor"}}"#),
             )]));
-            rig.endpoint.replies.lock().unwrap().push_back(calls(&[("wait", r#"{"ticks":1,"summary":"think"}"#)]));
+            rig.endpoint.replies.lock().unwrap().push_back(calls(&[("choose_action", r#"{"id":"wait*1","summary":"think"}"#)]));
 
             let mut action = rig.pump_overworld(&mut policy).expect("the action lands");
             let here = rig.state().map.player_position;
@@ -2292,11 +2347,11 @@ mod tests {
     fn a_chain_does_not_advance_on_an_ending_the_agent_never_reported() {
         let (mut rig, mut policy) = Rig::new(vec![]);
         let ids = rig.action_ids(2);
-        rig.endpoint.replies.lock().unwrap().push_back(calls(&[(
-            "choose_action",
-            &format!(r#"{{"id":"{}","then":["{}"],"summary":"grass, then out"}}"#, ids[0], ids[1]),
-        )]));
-        rig.endpoint.replies.lock().unwrap().push_back(calls(&[("wait", r#"{"ticks":1,"summary":"think"}"#)]));
+        rig.endpoint.replies.lock().unwrap().push_back(calls(&[
+            ("choose_action", &format!(r#"{{"id":"{}","summary":"grass, then out"}}"#, ids[0])),
+            ("choose_action", &format!(r#"{{"id":"{}"}}"#, ids[1])),
+        ]));
+        rig.endpoint.replies.lock().unwrap().push_back(calls(&[("choose_action", r#"{"id":"wait*1","summary":"think"}"#)]));
 
         assert!(rig.pump_overworld(&mut policy).is_some(), "the first action lands");
         // No event of any kind, which is exactly what a pace or a surf mount produces.
@@ -2326,7 +2381,7 @@ mod tests {
         let (mut rig, mut policy) = Rig::new(vec![
             // Nobody in Oak's lab is facing a tree, and the starter does not know Cut.
             calls(&[("use_field_move", r#"{"move":"cut"}"#)]),
-            calls(&[("wait", r#"{"ticks":1}"#)]),
+            calls(&[("choose_action", r#"{"id":"wait*1"}"#)]),
         ]);
 
         rig.pump_overworld_for(&mut policy, Duration::from_secs(2));
@@ -2341,8 +2396,8 @@ mod tests {
     #[test]
     fn a_press_on_a_turn_with_a_menu_is_refused_and_the_turn_carries_on() {
         let (mut rig, mut policy) = Rig::new(vec![
-            calls(&[("press_buttons", r#"{"buttons":["b","start","a"]}"#)]),
-            calls(&[("wait", r#"{"ticks":1}"#)]),
+            calls(&[("choose_action", r#"{"id":"press:b,start,a"}"#)]),
+            calls(&[("choose_action", r#"{"id":"wait*1"}"#)]),
         ]);
 
         rig.pump_overworld_for(&mut policy, Duration::from_secs(2));
@@ -2350,8 +2405,8 @@ mod tests {
 
         let requests = rig.requests();
         assert!(requests.len() >= 2, "the refusal is a tool result, so the turn recovers");
+        assert!(!last_user_message(&requests[0]).contains("press:"), "not even offered");
         let offered: Vec<&str> = requests[0].tools.iter().map(|tool| tool.function.name).collect();
-        assert!(!offered.contains(&"press_buttons"), "not even offered: {offered:?}");
         assert!(offered.contains(&"report_issue"), "what replaced it: {offered:?}");
 
         // The refusal names the menu, and `report_issue` for a menu that is wrong.
@@ -2363,7 +2418,7 @@ mod tests {
             .next_back()
             .expect("the refusal is answered as a tool result")
             .to_string();
-        assert!(refusal.contains("choose_action"), "{refusal}");
+        assert!(refusal.contains("the agent presses the buttons"), "{refusal}");
         assert!(refusal.contains("report_issue"), "{refusal}");
     }
 
@@ -2372,7 +2427,7 @@ mod tests {
     fn the_menu_prompts_are_their_own_turns_and_can_use_read_tools() {
         let (mut rig, mut policy) = Rig::new(vec![
             calls(&[("read_party", "{}")]),
-            calls(&[("set_nickname", r#"{"name":"Bubbles"}"#)]),
+            calls(&[("choose_action", r#"{"id":"Bubbles"}"#)]),
         ]);
 
         let answer = rig
@@ -2383,8 +2438,7 @@ mod tests {
         let requests = rig.requests();
         assert_eq!(requests.len(), 2, "one read step, then the decision — not a restart loop");
         history_is_well_formed(&requests[1]);
-        let offered: Vec<&str> = requests[0].tools.iter().map(|t| t.function.name).collect();
-        assert!(offered.contains(&"set_nickname") && !offered.contains(&"choose_action"));
+        assert!(last_user_message(&requests[0]).contains("## Decision: name this"));
         assert!(last_user_message(&requests[0]).contains("Squirtle"), "the species is in the situation");
         // The read really was serviced, from the live fixture.
         let results: Vec<&str> =
@@ -2430,28 +2484,24 @@ mod tests {
     /// The mart's stock comes from the ROM through `ApiSnapshot`; `GameState` lacks it.
     #[test]
     fn a_mart_turn_answers_with_a_purchase() {
-        let (mut rig, mut policy) = Rig::new(vec![calls(&[(
-            "buy_item",
-            r#"{"item":"Potion","quantity":3}"#,
-        )])]);
+        let (mut rig, mut policy) = Rig::new(vec![calls(&[("choose_action", r#"{"id":"buy:Potion*3"}"#)])]);
 
         let answer = rig
             .pump_prompt(&mut policy, |policy, state| policy.pick_mart_purchase(state))
             .expect("the mart menu is answered");
         assert_eq!(answer, Some(BagItem::new(crate::pokemon::item::ItemId::Potion, 3)));
-
-        let offered: Vec<&str> = rig.requests()[0].tools.iter().map(|t| t.function.name).collect();
-        assert!(offered.contains(&"buy_item") && !offered.contains(&"choose_action"));
+        assert!(last_user_message(&rig.requests()[0]).contains("## Decision: what to buy"));
     }
 
     /// One mart visit, several kinds, and the queue must not outlive the visit.
     #[test]
     fn a_mart_turn_can_buy_several_kinds_in_one_visit() {
         use crate::pokemon::item::ItemId;
-        let (mut rig, mut policy) = Rig::new(vec![calls(&[(
-            "buy_item",
-            r#"{"item":"Potion","quantity":3,"then":[{"item":"PokeBall","quantity":10},{"item":"Antidote"}]}"#,
-        )])]);
+        let (mut rig, mut policy) = Rig::new(vec![calls(&[
+            ("choose_action", r#"{"id":"buy:Potion*3"}"#),
+            ("choose_action", r#"{"id":"buy:PokeBall*10"}"#),
+            ("choose_action", r#"{"id":"buy:Antidote"}"#),
+        ])]);
 
         let head = rig
             .pump_prompt(&mut policy, |policy, state| policy.pick_mart_purchase(state))
@@ -2468,8 +2518,8 @@ mod tests {
     fn an_abandoned_chain_is_not_spent_at_the_next_mart() {
         use crate::pokemon::item::ItemId;
         let (mut rig, mut policy) = Rig::new(vec![
-            calls(&[("buy_item", r#"{"item":"Potion","then":[{"item":"PokeBall","quantity":10}]}"#)]),
-            calls(&[("buy_item", r#"{"item":"Antidote"}"#)]),
+            calls(&[("choose_action", r#"{"id":"buy:Potion"}"#), ("choose_action", r#"{"id":"buy:PokeBall*10"}"#)]),
+            calls(&[("choose_action", r#"{"id":"buy:Antidote"}"#)]),
         ]);
 
         rig.pump_prompt(&mut policy, |policy, state| policy.pick_mart_purchase(state))
@@ -2490,8 +2540,8 @@ mod tests {
         rig.enter_battle();
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
-            replies.push_back(held(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]), &release));
-            replies.push_back(calls(&[("forget_move", r#"{"slot":2}"#)]));
+            replies.push_back(held(calls(&[("choose_action", r#"{"id":"run"}"#)]), &release));
+            replies.push_back(calls(&[("choose_action", r#"{"id":"forget:2"}"#)]));
         }
 
         rig.tick_battle(&mut policy);
@@ -2519,13 +2569,16 @@ mod tests {
         assert_eq!(requests.len(), 2);
         let asked = last_user_message(&requests[1]);
         assert!(asked.contains("Bite"), "the incoming move is in the situation: {asked}");
-        assert!(asked.contains("`2` — Bubble"), "the four known moves are the menu: {asked}");
+        assert!(asked.contains("`forget:2` — Bubble"), "the four known moves are the menu: {asked}");
     }
 
-    /// A slot the Pokémon lacks is declined, with the reason, rather than wedging the prompt.
+    /// A slot the Pokémon lacks is refused inside the turn rather than wedging the prompt.
     #[test]
-    fn a_forget_slot_the_pokemon_does_not_have_declines_instead_of_hanging() {
-        let (mut rig, mut policy) = Rig::new(vec![calls(&[("forget_move", r#"{"slot":3}"#)])]);
+    fn a_forget_slot_the_pokemon_does_not_have_is_refused_instead_of_hanging() {
+        let (mut rig, mut policy) = Rig::new(vec![
+            calls(&[("choose_action", r#"{"id":"forget:3"}"#)]),
+            calls(&[("choose_action", r#"{"id":"keep"}"#)]),
+        ]);
         let moves: Vec<PokemonMove> =
             [PokemonMoveName::Tackle, PokemonMoveName::Growl].into_iter().map(PokemonMove::with_max_pp).collect();
 
@@ -2533,6 +2586,11 @@ mod tests {
             .pump_prompt(&mut policy, |policy, _| policy.pick_move_to_forget(0, &moves, PokemonMoveName::Bite))
             .expect("it is answered rather than left hanging");
         assert_eq!(answer, None, "declining keeps all the moves it has");
+        let requests = rig.requests();
+        assert_eq!(requests.len(), 2, "one turn: the refusal is a tool result");
+        let refusal = requests[1].messages.iter().filter(|m| m.role == Role::Tool).filter_map(Message::text)
+            .next_back().expect("the refusal is answered").to_string();
+        assert!(refusal.contains("`forget:3` is not one of this turn's actions"), "{refusal}");
     }
 
     /// The enemy's moves in the battle fixture, as Mimic's menu would list them.
@@ -2547,7 +2605,7 @@ mod tests {
         rig.enter_battle();
         let enemy = enemy_moves(&mut rig);
         let last = enemy.len() - 1;
-        rig.push(vec![calls(&[("mimic_move", &format!(r#"{{"slot":{last}}}"#))])]);
+        rig.push(vec![calls(&[("choose_action", &format!(r#"{{"id":"mimic:{last}"}}"#))])]);
 
         let answer = rig
             .pump_prompt(&mut policy, |policy, state| policy.pick_move_to_mimic(state, &enemy))
@@ -2555,11 +2613,9 @@ mod tests {
         assert_eq!(answer, last);
 
         let requests = rig.requests();
-        let offered: Vec<&str> = requests[0].tools.iter().map(|t| t.function.name).collect();
-        assert!(offered.contains(&"mimic_move") && !offered.contains(&"choose_battle_action"), "{offered:?}");
         let asked = last_user_message(&requests[0]);
         assert!(asked.contains("used MIMIC"), "{asked}");
-        assert!(asked.contains(&format!("`{last}` — {}", enemy[last].name)), "the enemy's moves are the menu: {asked}");
+        assert!(asked.contains(&format!("`mimic:{last}` — {}", enemy[last].name)), "the enemy's moves are the menu: {asked}");
     }
 
     /// The menu cannot be left, so a row it lacks is asked about again rather than taken.
@@ -2570,8 +2626,8 @@ mod tests {
         let enemy = enemy_moves(&mut rig);
         let missing = enemy.len();
         rig.push(vec![
-            calls(&[("mimic_move", &format!(r#"{{"slot":{missing}}}"#))]),
-            calls(&[("mimic_move", r#"{"slot":0}"#)]),
+            calls(&[("choose_action", &format!(r#"{{"id":"mimic:{missing}"}}"#))]),
+            calls(&[("choose_action", r#"{"id":"mimic:0"}"#)]),
         ]);
 
         let answer = rig
@@ -2580,8 +2636,9 @@ mod tests {
         assert_eq!(answer, 0);
         let requests = rig.requests();
         assert_eq!(requests.len(), 2);
-        let again = last_user_message(&requests[1]);
-        assert!(again.contains(&format!("Row {missing} is not one of the enemy's")), "{again}");
+        let refusal = requests[1].messages.iter().filter(|m| m.role == Role::Tool).filter_map(Message::text)
+            .next_back().expect("the refusal is answered").to_string();
+        assert!(refusal.contains(&format!("`mimic:{missing}` is not one of this turn's actions")), "{refusal}");
     }
 
     /// A Mimic the script chose goes to the model as one turn, and the script decides the battle's
@@ -2593,7 +2650,7 @@ mod tests {
         rig.pump_battle(&mut policy, Duration::from_millis(200)).expect("the script decides");
         let before = rig.requests().len();
         let enemy = enemy_moves(&mut rig);
-        rig.push(vec![calls(&[("mimic_move", r#"{"slot":0}"#)])]);
+        rig.push(vec![calls(&[("choose_action", r#"{"id":"mimic:0"}"#)])]);
 
         let answer = rig
             .pump_prompt(&mut policy, |policy, state| policy.pick_move_to_mimic(state, &enemy))
@@ -2675,7 +2732,7 @@ mod tests {
             last.messages[1].text(),
         );
         assert!(
-            last.messages[1].text().unwrap_or_default().contains("exactly one terminal tool call"),
+            last.messages[1].text().unwrap_or_default().contains("`choose_action` and an id from the menu"),
             "the one-terminal-call contract has to survive the compaction",
         );
         // The tail is kept, so the turn that filled the window is still there.
@@ -3067,7 +3124,7 @@ mod tests {
                       battle.ask();";
         let (mut rig, mut policy) = armed_with(broken, 0);
         rig.endpoint.replies.lock().unwrap()
-            .push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+            .push_back(calls(&[("choose_action", r#"{"id":"run"}"#)]));
         let before = rig.requests().len();
 
         rig.enter_battle();
@@ -3097,8 +3154,8 @@ mod tests {
         let (mut rig, mut policy) = armed_with(asks_first, 0);
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
-            replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run","take_over":true}"#)]));
-            replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+            replies.push_back(calls(&[("choose_action", r#"{"id":"take_over"}"#), ("choose_action", r#"{"id":"run"}"#)]));
+            replies.push_back(calls(&[("choose_action", r#"{"id":"run"}"#)]));
         }
         let before = rig.requests().len();
 
@@ -3114,6 +3171,9 @@ mod tests {
             .expect("a situation").text().unwrap_or_default().to_string();
         assert!(situation.contains("You took this battle over"), "{situation}");
         assert!(situation.contains("as soon as this battle ends"), "and that it expires: {situation}");
+        let handed_back = last_user_message(&rig.requests()[before]).to_string();
+        assert!(handed_back.contains("- `take_over`"), "the hand-back offers the row: {handed_back}");
+        assert!(!situation.contains("- `take_over`"), "and no other turn does: {situation}");
 
         // Still armed, which is what makes this not a disarm under another name.
         assert!(policy.handles.live_script.source().is_some(), "the script survives the takeover");
@@ -3122,7 +3182,7 @@ mod tests {
         // The takeover ends with the battle, and the next one is scripted again.
         policy.on_event(&AgentEvent::BattleEnded);
         rig.endpoint.replies.lock().unwrap()
-            .push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+            .push_back(calls(&[("choose_action", r#"{"id":"run"}"#)]));
         rig.enter_battle();
         rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("turn 1 of the next battle asks");
         rig.wait_for_requests(before + 3, Duration::from_secs(5));
@@ -3140,7 +3200,7 @@ mod tests {
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
             for _ in 0..2 {
-                replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+                replies.push_back(calls(&[("choose_action", r#"{"id":"run"}"#)]));
             }
         }
         let before = rig.requests().len();
@@ -3177,7 +3237,7 @@ mod tests {
 
         // Which means the very next battle turn is the model's, not a script's.
         rig.endpoint.replies.lock().unwrap()
-            .push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+            .push_back(calls(&[("choose_action", r#"{"id":"run"}"#)]));
         rig.enter_battle();
         rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("the model answers it");
     }
@@ -3188,7 +3248,7 @@ mod tests {
         let walk = format!(r#"{{"id":"{}"}}"#, rig.first_action_id());
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
-            replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+            replies.push_back(calls(&[("choose_action", r#"{"id":"run"}"#)]));
             replies.push_back(calls(&[("choose_action", &walk)]));
         }
 
@@ -3227,7 +3287,7 @@ mod tests {
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
             for _ in 0..2 {
-                replies.push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+                replies.push_back(calls(&[("choose_action", r#"{"id":"run"}"#)]));
             }
             replies.push_back(calls(&[("choose_action", &walk)]));
         }
@@ -3279,7 +3339,7 @@ mod tests {
         let asking = "if battle.me.level > 3 { battle.ask(); }\nbattle.ask();";
         let (mut rig, mut policy) = armed_with(asking, 0);
         rig.endpoint.replies.lock().unwrap()
-            .push_back(calls(&[("choose_battle_action", r#"{"id":"run"}"#)]));
+            .push_back(calls(&[("choose_action", r#"{"id":"run"}"#)]));
 
         rig.enter_battle();
         rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("the model answers the asked turn");

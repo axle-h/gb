@@ -16,7 +16,7 @@ pub const EVICTED: &str = "[image removed to save context]";
 /// [`prompt::contract`](crate::llm::prompt::contract) lists them at the bottom of every turn.
 pub const CONTRACT_REMINDER: &str = "\
 Whatever else has changed, the rule for every turn is the same as it was: end each turn with \
-exactly one terminal tool call, chosen from the list at the bottom of the turn request. Read tools \
+`choose_action` and an id from the menu at the bottom of the turn request. Read tools \
 do not end the turn, and a reply with no tool call at all does nothing in the game.";
 
 /// What stage 2 asks the model to write about its own history.
@@ -306,11 +306,11 @@ mod tests {
         let text = message.text().expect("the summary is prose");
 
         assert!(text.ends_with(CONTRACT_REMINDER), "the reminder is the last thing the model reads");
-        assert!(CONTRACT_REMINDER.contains("exactly one terminal tool call"));
+        assert!(CONTRACT_REMINDER.contains("`choose_action` and an id from the menu"));
         assert!(CONTRACT_REMINDER.contains("do not end the turn"));
         // The wording has to stay recognisably the same rule as the one every turn ends with.
         let real = crate::llm::prompt::contract(crate::llm::tools::DecisionKind::Overworld);
-        for phrase in ["exactly one", "do not end the turn"] {
+        for phrase in ["`choose_action`", "do not end the turn"] {
             assert!(real.contains(phrase) && CONTRACT_REMINDER.contains(phrase), "`{phrase}` has drifted");
         }
 

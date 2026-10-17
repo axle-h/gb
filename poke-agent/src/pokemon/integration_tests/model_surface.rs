@@ -27,16 +27,16 @@ fn choosing(suffix: &'static str, seen: Arc<Mutex<Seen>>) -> impl FnMut(&TurnReq
         }
         if request.is_stuck() {
             log.was_stuck = true;
-            return Reply::call("press_buttons", serde_json::json!({ "buttons": ["b"], "why": "wedged" }));
+            return Reply::call("choose_action", serde_json::json!({ "id": "press:b", "summary": "wedged" }));
         }
         if request.is_battle() {
             log.battle_turns += 1;
-            return Reply::call("choose_battle_action", serde_json::json!({ "id": "run", "summary": "not now" }));
+            return Reply::call("choose_action", serde_json::json!({ "id": "run", "summary": "not now" }));
         }
-        if request.has_tool("set_nickname") {
-            return Reply::call("set_nickname", serde_json::json!({ "summary": "keeping the species name" }));
+        if request.is_nickname() {
+            return Reply::choose("NONE");
         }
-        if !request.has_tool("choose_action") {
+        if !request.is_overworld() {
             return Reply::Calls(vec![Call::wait(10)]);
         }
         log.overworld_turns.push(request.situation().to_string());
@@ -138,16 +138,16 @@ fn walk_in_then(
         }
         if request.is_stuck() {
             log.was_stuck = true;
-            return Reply::call("press_buttons", serde_json::json!({ "buttons": ["b"], "why": "wedged" }));
+            return Reply::call("choose_action", serde_json::json!({ "id": "press:b", "summary": "wedged" }));
         }
         if request.is_battle() {
             log.battle_turns += 1;
-            return Reply::call("choose_battle_action", serde_json::json!({ "id": "run", "summary": "not now" }));
+            return Reply::call("choose_action", serde_json::json!({ "id": "run", "summary": "not now" }));
         }
-        if request.has_tool("set_nickname") {
-            return Reply::call("set_nickname", serde_json::json!({ "summary": "keeping the species name" }));
+        if request.is_nickname() {
+            return Reply::choose("NONE");
         }
-        if !request.has_tool("choose_action") {
+        if !request.is_overworld() {
             return Reply::Calls(vec![Call::wait(10)]);
         }
         log.overworld_turns.push(request.situation().to_string());
@@ -480,9 +480,9 @@ fn a_seafoam_hole_says_where_the_current_below_leaves_the_player() {
     let log = Arc::clone(&turns);
     let brain = move |request: &TurnRequest| {
         if request.is_battle() {
-            return Reply::call("choose_battle_action", serde_json::json!({ "id": "run", "summary": "not now" }));
+            return Reply::call("choose_action", serde_json::json!({ "id": "run", "summary": "not now" }));
         }
-        if !request.has_tool("choose_action") {
+        if !request.is_overworld() {
             return Reply::Calls(vec![Call::wait(10)]);
         }
         let rows = request.menu_rows();
@@ -540,11 +540,8 @@ fn teaches_strength(forget: Option<u8>, name: &'static str) -> (LlmRun, Arc<Mute
     let mut walk = walk_in_then(&["CeruleanCity"], vec![
         field_move(serde_json::json!({ "move": "teach", "item": "Hm04Strength", "slot": 0 })),
     ], Arc::clone(&seen));
-    let brain = move |request: &TurnRequest| match request.has_tool("forget_move") {
-        true => Reply::call("forget_move", match forget {
-            Some(slot) => serde_json::json!({ "slot": slot }),
-            None => serde_json::json!({}),
-        }),
+    let brain = move |request: &TurnRequest| match request.is_forget_move() {
+        true => Reply::choose(&forget.map_or("keep".to_string(), |slot| format!("forget:{slot}"))),
         false => walk(request),
     };
     let mut run = LlmRun::builder(include_bytes!("../data/completion-bill.bin"))
@@ -594,13 +591,13 @@ fn a_tree_grows_back_after_a_battle_that_ends_in_a_catch() {
             return Reply::Content("Cutting and catching.".to_string());
         }
         if request.is_battle() {
-            return Reply::call("choose_battle_action", serde_json::json!({ "id": "item:MasterBall", "summary": "catch" }));
+            return Reply::call("choose_action", serde_json::json!({ "id": "item:MasterBall", "summary": "catch" }));
         }
-        if request.has_tool("set_nickname") {
+        if request.is_nickname() {
             caught = true;
-            return Reply::call("set_nickname", serde_json::json!({ "summary": "keeping the species name" }));
+            return Reply::choose("NONE");
         }
-        if !request.has_tool("choose_action") {
+        if !request.is_overworld() {
             return Reply::Calls(vec![Call::wait(10)]);
         }
         log.lock().expect("not poisoned").overworld_turns.push(request.situation().to_string());
@@ -646,7 +643,7 @@ fn a_vending_row_buys_the_drink_it_names() {
                                   "CeladonMart5F", "CeladonMartRoof"], vec![], Arc::clone(&seen));
     let mut bought = false;
     let brain = move |request: &TurnRequest| {
-        if !bought && request.location().as_deref() == Some("CeladonMartRoof") && request.has_tool("choose_action")
+        if !bought && request.location().as_deref() == Some("CeladonMartRoof") && request.is_overworld()
             && let Some((id, _)) = request.menu_rows().into_iter().find(|(_, what)| what.starts_with("buy a SODA POP"))
         {
             bought = true;
@@ -679,7 +676,7 @@ fn probe_policy_menu() {
         if request.is_summary() {
             return Reply::Content("Looking around.".to_string());
         }
-        if request.has_tool("choose_action") {
+        if request.is_overworld() {
             log.lock().expect("not poisoned").overworld_turns.push(request.situation().to_string());
         }
         Reply::Calls(vec![Call::wait(20)])
@@ -705,9 +702,9 @@ fn a_one_shove_row_says_it_landed_after_a_long_shove() {
     let log = Arc::clone(&told);
     let brain = move |request: &TurnRequest| {
         if request.is_battle() {
-            return Reply::call("choose_battle_action", serde_json::json!({ "id": "run", "summary": "not now" }));
+            return Reply::call("choose_action", serde_json::json!({ "id": "run", "summary": "not now" }));
         }
-        if !request.has_tool("choose_action") {
+        if !request.is_overworld() {
             return Reply::Calls(vec![Call::wait(10)]);
         }
         let outcome = request.situation().lines()
@@ -743,9 +740,9 @@ fn a_second_vending_machine_sells_its_own_drink() {
     let mut picks = vec!["CeladonMartRoof:11,1:VendingMachine2", "CeladonMartRoof:10,1:VendingMachine1"];
     let brain = move |request: &TurnRequest| {
         if request.is_battle() {
-            return Reply::call("choose_battle_action", serde_json::json!({ "id": "run", "summary": "not now" }));
+            return Reply::call("choose_action", serde_json::json!({ "id": "run", "summary": "not now" }));
         }
-        if !request.has_tool("choose_action") {
+        if !request.is_overworld() {
             return Reply::Calls(vec![Call::wait(10)]);
         }
         if request.situation().contains("SODA POP popped out") {
@@ -780,9 +777,9 @@ fn a_slots_row_is_chosen_by_its_id_and_the_next_turn_says_what_it_won() {
     let mut chosen = false;
     let brain = move |request: &TurnRequest| {
         if request.is_battle() {
-            return Reply::call("choose_battle_action", serde_json::json!({ "id": "run", "summary": "not now" }));
+            return Reply::call("choose_action", serde_json::json!({ "id": "run", "summary": "not now" }));
         }
-        if !request.has_tool("choose_action") {
+        if !request.is_overworld() {
             return Reply::Calls(vec![Call::wait(10)]);
         }
         if let Some(line) = request.situation().lines().find(|line| line.contains("spins at the slot machine")) {

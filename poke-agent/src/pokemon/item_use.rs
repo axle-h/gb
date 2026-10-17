@@ -77,7 +77,7 @@ pub fn field_use_refusal(item: ItemId) -> Option<String> {
     if is_ball(item) {
         return Some(format!(
             "{item} is a Poké Ball and the game refuses one outside a battle. Throw it on a battle \
-             turn with `choose_battle_action` instead."
+             turn with its `item:` row instead."
         ));
     }
     if never_usable(item) {
@@ -149,7 +149,7 @@ mod tests {
         assert!(fossil.contains("carry"), "it has to say what to do instead: {fossil}");
 
         let ball = field_use_refusal(ItemId::PokeBall).expect("refused");
-        assert!(ball.contains("choose_battle_action"), "{ball}");
+        assert!(ball.contains("`item:` row"), "{ball}");
 
         let machine = field_use_refusal(ItemId::Hm01Cut).expect("refused");
         assert!(machine.contains("teach"), "{machine}");

@@ -93,17 +93,18 @@ decision is on the table, and asks a `Policy`. The trait is non-blocking — eve
 `Option` — so the emulator keeps running while the model thinks, which is the property everything
 else is built around.
 
-`LlmPolicy` turns each decision into a conversation turn with a tool catalogue scoped to that kind of
-decision and one terminal tool that commits. The turn is built to make reading unnecessary: location,
+`LlmPolicy` turns each decision into a conversation turn ended by one action tool, `choose_action`,
+whose id comes from the menu that kind of decision carries. The turn is built to make reading unnecessary: location,
 party, money, badges, what is on screen and the menu of what can be done are all in the request. An
 action the game would refuse is not in that menu, because the cartridge refuses a missing badge by
 dropping back to the menu it came from and the agent has no exit condition for that — but the turn
 says once that the trees and boulders are there and what would move them, since a model shown no way
 forward invents reasons why.
 
-Three things cut what a run spends. `choose_action` takes a `then`: up to three more ids from the
+Three things cut what a run spends. One reply may carry up to four `choose_action` calls from the
 same menu, each re-resolved against the live game when its turn comes, so anything that stops one
-stops the rest. `resume_after_battle` takes a walk up again once an interrupting battle is over.
+stops the rest. A walk an interrupting battle stopped is taken up again once it is over, unless a
+party member fainted in it.
 And `set_battle_script` lets the model write the mechanical part of a battle down once, as a short
 [Rhai](https://rhai.rs) program evaluated on the emulator thread inside `pick_battle_action` — no
 request, no round trip, no latency — which can hand any one turn back with `battle.ask()`. The

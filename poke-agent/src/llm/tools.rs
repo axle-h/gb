@@ -5,8 +5,6 @@ use gb::joypad::JoypadButton;
 use crate::llm::prompt::ApiSnapshot;
 use crate::llm::battle_script::MAX_SOURCE as MAX_BATTLE_SCRIPT;
 
-/// How many extra kinds one `buy_item` may order in a single mart visit.
-const MAX_CHAINED_PURCHASES: usize = 3;
 use crate::llm::todo::{MAX_ITEMS as MAX_TODO_ITEMS, MAX_TEXT as MAX_TODO_TEXT, TodoCall};
 use crate::llm::protocol::{ToolCall, ToolSpec};
 use crate::llm::worker::ToolAnswer;
@@ -69,8 +67,6 @@ pub enum Terminal {
         id: String,
         /// Further ids from the same turn's menu, in the order they are to be taken.
         then: Vec<String>,
-        /// Opt-in: once an interrupting battle is over the action is taken again, not handed back.
-        resume_after_battle: bool,
     },
     /// One battle action, and whether the rest of this battle belongs to the model.
     ChooseBattleAction { id: String, take_over: bool },
@@ -90,11 +86,20 @@ pub enum Terminal {
     Wait { ticks: u16 },
 }
 
-/// How many overworld actions one `choose_action` may carry, `id` included.
+/// How many `choose_action` calls one overworld or mart reply may carry.
 pub const MAX_CHAINED_ACTIONS: usize = 4;
 
 /// A longer `wait` is a model stalling its own run.
 pub const MAX_WAIT_TICKS: u16 = 150;
+
+/// What a bare `wait` waits.
+pub const DEFAULT_WAIT_TICKS: u16 = 50;
+
+/// The most of one item a mart order may ask for.
+pub const MAX_ORDER: u32 = 99;
+
+/// The action tool, the one tool that ends a turn on every kind but the overworld's field moves.
+pub const CHOOSE_ACTION: &str = "choose_action";
 
 /// The longest nickname the naming screen's buffer holds.
 pub const MAX_NICKNAME: usize = 10;
@@ -113,6 +118,8 @@ pub enum CallKind {
     BattleScript(BattleScriptCall),
     /// The turn is over.
     Terminal(Terminal),
+    /// A `choose_action` folded into the [`CallKind::Terminal`] earlier in the same reply.
+    Chained,
     /// An unknown name, a terminal tool of another decision kind, or unparseable arguments.
     Rejected(String),
 }
@@ -126,7 +133,7 @@ impl CallKind {
             Self::Issue(_) => "issue",
             // Not a fifth word: `api.ts` matches on these.
             Self::BattleScript(_) => "todo",
-            Self::Terminal(_) => "terminal",
+            Self::Terminal(_) | Self::Chained => "terminal",
             Self::Rejected(_) => "rejected",
         }
     }
@@ -772,188 +779,54 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
     if offers_battle_script(kind) {
         tools.extend(battle_script_tools());
     }
-
-    match kind {
-        DecisionKind::Overworld => {
-            tools.push(ToolSpec::new(
-                "choose_action",
-                format!(
-                    "ENDS THE TURN. Walk to and take one of the actions listed in the turn's action \
-                     menu. `id` is the id from that menu, copied exactly — never a position in the \
-                     list. `then` chains up to {} more ids from this same menu, taken in order \
-                     without asking you again; that is worth doing where each is still true after \
-                     the one before, as in heal then leave. It stops at the first that will not \
-                     resolve or is stopped, and says where it got to. `resume_after_battle` is \
-                     true unless you say otherwise: a battle interrupting the action does not end \
-                     it, and it is taken up again after, up to {} times. A row that hunts wild \
-                     Pokémon lands when one appears, so chain it to hunt again.",
-                    MAX_CHAINED_ACTIONS - 1,
-                    crate::pokemon::llm_policy::MAX_BATTLE_RESUMES,
-                ),
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string", "description": "An id from the action menu." },
-                        "then": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "maxItems": MAX_CHAINED_ACTIONS - 1,
-                            "description": "More ids from this menu, in order.",
-                        },
-                        "resume_after_battle": {
-                            "type": "boolean",
-                            "description": "Default true. False to be asked again instead.",
-                        },
-                    },
-                    "required": ["id"],
-                    "additionalProperties": false,
-                }),
-            ));
-            tools.push(use_field_move_spec());
-        }
-        DecisionKind::Battle => {
-            tools.push(ToolSpec::new(
-                "choose_battle_action",
-                "ENDS THE TURN. Take one of the actions listed in the turn's battle menu. `id` is the \
-                 id from that menu, copied exactly. `take_over` takes the rest of *this* battle away \
-                 from your battle script, so a switch or a plan of your own is not replaced on the \
-                 next turn; the script decides battles again as soon as this one ends.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string", "description": "An id from the battle menu." },
-                        "take_over": { "type": "boolean",
-                                       "description": "Decide the rest of this battle yourself." },
-                    },
-                    "required": ["id"],
-                    "additionalProperties": false,
-                }),
-            ));
-        }
-        DecisionKind::Nickname => tools.push(ToolSpec::new(
-            "set_nickname",
-            format!(
-                "ENDS THE TURN. **Give this Pokémon a nickname**: one that says what you make of \
-                 it — how you came by it, what you mean to use it for, what it reminds you of. It \
-                 is what every message about it will call it from now on. Omit `name` only if \
-                 nothing comes to mind. At most {MAX_NICKNAME} characters; letters, digits, spaces \
-                 and `.,:;'-?!()[]/` only."
-            ),
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "maxLength": MAX_NICKNAME,
-                        "description": "The nickname you have chosen. Omit to keep the species name.",
-                    }
-                },
-                "additionalProperties": false,
-            }),
-        )),
-        DecisionKind::MartPurchase => tools.push(ToolSpec::new(
-            "buy_item",
-            "ENDS THE TURN. Buy from the mart, then leave. `item` is a name from the stock list, \
-             copied exactly, and `quantity` how many. `then` buys more kinds in the same visit \
-             without asking you again — Poké Balls and Potions in one stop rather than two. Omit \
-             `item` to walk away without buying anything. Each order is trimmed to what the money \
-             covers, in order, because Gen 1 sells you nothing at all for an order you cannot \
-             afford; the row for each item says how many you already have.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "item": { "type": "string", "description": "A name from the stock list." },
-                    "quantity": {
-                        "type": "integer", "minimum": 1, "maximum": 99, "default": 1,
-                        "description": "How many of `item` to buy.",
-                    },
-                    "then": {
-                        "type": "array",
-                        "description": "More kinds to buy in this same visit, in order.",
-                        "maxItems": MAX_CHAINED_PURCHASES,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "item": { "type": "string" },
-                                "quantity": { "type": "integer", "minimum": 1, "maximum": 99, "default": 1 },
-                            },
-                            "required": ["item"],
-                            "additionalProperties": false,
-                        },
-                    },
-                },
-                "additionalProperties": false,
-            }),
-        )),
-        DecisionKind::Stuck => tools.push(press_buttons_spec()),
-        DecisionKind::ForgetMove => tools.push(ToolSpec::new(
-            "forget_move",
-            "ENDS THE TURN. Answer the 'which move should be forgotten?' prompt. `slot` is the move \
-             slot to replace, from the list in the turn. Omit `slot` to decline the new move and \
-             keep all four.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "slot": { "type": "integer", "minimum": 0, "maximum": 3, "description": "The move slot to forget." },
-                },
-                "additionalProperties": false,
-            }),
-        )),
-        DecisionKind::MimicMove => tools.push(ToolSpec::new(
-            "mimic_move",
-            "ENDS THE TURN. Answer Mimic's menu of the enemy's moves. `slot` is the row of the move to \
-             copy, from the list in the turn. The game offers no way back out of this menu, so a \
-             row has to be chosen.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "slot": { "type": "integer", "minimum": 0, "maximum": 3, "description": "The row of the enemy's move to copy." },
-                },
-                "required": ["slot"],
-                "additionalProperties": false,
-            }),
-        )),
+    tools.push(choose_action_spec());
+    if kind == DecisionKind::Overworld {
+        let mut field_move = use_field_move_spec();
+        add_summary_argument(&mut field_move);
+        tools.push(field_move);
     }
-
     if offers_issue_report(kind) {
         tools.push(report_issue_spec());
-    }
-
-    tools.push(ToolSpec::new(
-        "wait",
-        format!(
-            "ENDS THE TURN. Do nothing for `ticks` agent ticks (20 ms of game time each, so 50 is \
-             one second) and then decide again. Use it when the game is mid-animation or mid-text \
-             and the right move is to let it finish. Maximum {MAX_WAIT_TICKS}."
-        ),
-        json!({
-            "type": "object",
-            "properties": {
-                "ticks": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": MAX_WAIT_TICKS,
-                    "description": "How many 20 ms ticks to wait.",
-                }
-            },
-            "required": ["ticks"],
-            "additionalProperties": false,
-        }),
-    ));
-
-    for tool in &mut tools {
-        if terminal_names(kind).contains(&tool.function.name) {
-            add_summary_argument(tool);
-        }
     }
     tools
 }
 
+/// The one action tool, the same on every turn: what varies is the menu the turn carries.
+fn choose_action_spec() -> ToolSpec {
+    let mut spec = ToolSpec::new(
+        CHOOSE_ACTION,
+        format!(
+            "ENDS THE TURN. Take one of the actions in this turn's menu. `id` is an id from that \
+             menu, copied exactly — never a position in the list. Where a row says so, `*N` on the \
+             end asks for N of it: `buy:PokeBall*10`, `wait*50`. Every turn also takes `wait*N`, \
+             which lets the game run N ticks of 20 ms (default {DEFAULT_WAIT_TICKS}, at most \
+             {MAX_WAIT_TICKS}) and then asks again. On an overworld or mart turn up to \
+             {MAX_CHAINED_ACTIONS} calls in one reply are taken in order without asking you again, \
+             each checked against the game as its turn comes; the first that will not go or is \
+             stopped drops the rest, and the next turn says where it got to. Every other turn takes \
+             one call. The turn's own last line says which applies."
+        ),
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "An id from this turn's menu." },
+            },
+            "required": ["id"],
+            "additionalProperties": false,
+        }),
+    );
+    add_summary_argument(&mut spec);
+    // Required on the first call of a reply only, which a schema cannot say: `classify_reply`.
+    spec.function.parameters["required"] = json!(["id"]);
+    if let Some(summary) = spec.function.parameters["properties"]["summary"]["description"].as_str() {
+        let summary = format!("{summary} Required on the first `{CHOOSE_ACTION}` of a reply; the rest may leave it out.");
+        spec.function.parameters["properties"]["summary"]["description"] = json!(summary);
+    }
+    spec
+}
+
 /// Long enough for the intent and the reason, short enough to carry one per turn for a whole run.
 pub const MAX_SUMMARY: usize = 300;
-
-/// `press_buttons`' `why` answers one narrow question, so it is shorter than a summary.
-pub const MAX_REASON: usize = 200;
 
 /// Bolt a required `summary` onto a terminal tool's schema.
 fn add_summary_argument(tool: &mut ToolSpec) {
@@ -984,11 +857,6 @@ fn add_summary_argument(tool: &mut ToolSpec) {
 /// The model's own account of a terminal call, if it gave one.
 pub fn call_summary(call: &ToolCall) -> Option<String> {
     call_string(call, "summary", MAX_SUMMARY)
-}
-
-/// `press_buttons`' `why`: what the model thinks is on the screen and what it is pressing at.
-pub fn call_reason(call: &ToolCall) -> Option<String> {
-    call_string(call, "why", MAX_REASON)
 }
 
 /// One free-text argument, trimmed and capped: a schema's `maxLength` is only a request.
@@ -1132,41 +1000,6 @@ pub fn issue_message(call: &ToolCall) -> Option<String> {
     call_string(call, "message", MAX_ISSUE)
 }
 
-/// The last resort, on the watchdog's turn only: raw presses pre-empt the state machine.
-fn press_buttons_spec() -> ToolSpec {
-    ToolSpec::new(
-        "press_buttons",
-        format!(
-            "ENDS THE TURN. Press these buttons in order, one at a time, then hand control back \
-             to the agent. You are being offered this because the agent has stopped reaching \
-             decision points on its own: there is no menu to choose from and a raw press is the way \
-             out. Work out from the screen what is in front of you. B backs out of most menus and \
-             closes most boxes; A advances text. Up to {MANUAL_INPUT_CAPACITY} presses; anything \
-             past that is dropped."
-        ),
-        json!({
-            "type": "object",
-            "properties": {
-                "buttons": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": MANUAL_INPUT_CAPACITY,
-                    "items": { "type": "string", "enum": ["up", "down", "left", "right", "a", "b", "start", "select"] },
-                },
-                "why": {
-                    "type": "string",
-                    "maxLength": MAX_REASON,
-                    "description": "What you think is on the screen, and what these presses are \
-                                    meant to do about it. Required: every press is recorded and \
-                                    read afterwards by a person.",
-                },
-            },
-            "required": ["buttons", "why"],
-            "additionalProperties": false,
-        }),
-    )
-}
-
 pub fn non_terminal_names(kind: DecisionKind) -> Vec<&'static str> {
     reads_for(kind)
         .map(|tool| tool.name)
@@ -1183,13 +1016,8 @@ pub fn offers_issue_report(kind: DecisionKind) -> bool {
 
 pub fn terminal_names(kind: DecisionKind) -> &'static [&'static str] {
     match kind {
-        DecisionKind::Overworld => &["choose_action", "use_field_move", "wait"],
-        DecisionKind::Battle => &["choose_battle_action", "wait"],
-        DecisionKind::Nickname => &["set_nickname", "wait"],
-        DecisionKind::MartPurchase => &["buy_item", "wait"],
-        DecisionKind::ForgetMove => &["forget_move", "wait"],
-        DecisionKind::MimicMove => &["mimic_move", "wait"],
-        DecisionKind::Stuck => &["press_buttons", "wait"],
+        DecisionKind::Overworld => &[CHOOSE_ACTION, "use_field_move"],
+        _ => &[CHOOSE_ACTION],
     }
 }
 
@@ -1253,20 +1081,328 @@ fn battle_rule_behind(id: &str, menu: &[String]) -> &'static str {
     ""
 }
 
-/// Decide what a call is, without touching the game.
+/// Decide what one call is on its own, without touching the game; see [`classify_reply`].
 pub fn classify(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKind {
-    match classify_call(kind, call, menu) {
-        CallKind::Terminal(_) if call_summary(call).is_none() => CallKind::Rejected(format!(
-            "`{}` needs a `summary`: one or two sentences saying what you are doing and why. Your \
-             thinking is not kept, so it is the only note you will have of this turn. Call it again \
-             with one.",
-            call.function.name,
+    classify_reply(kind, std::slice::from_ref(call), menu)
+        .pop()
+        .unwrap_or_else(|| CallKind::Rejected("There was no call to classify.".to_string()))
+}
+
+/// Decide what every call in one reply is, without touching the game. The reply's `choose_action`
+/// calls fold into one [`Terminal`], carried by the first of them, and the rest are
+/// [`CallKind::Chained`]. They are taken all or none, so one refused refuses every one.
+pub fn classify_reply(kind: DecisionKind, calls: &[ToolCall], menu: &[String]) -> Vec<CallKind> {
+    let mut classified = Vec::with_capacity(calls.len());
+    let mut picks: Vec<(usize, Result<Pick, String>)> = Vec::new();
+    for (index, call) in calls.iter().enumerate() {
+        match call.function.name == CHOOSE_ACTION {
+            true => {
+                picks.push((index, pick(kind, call, menu)));
+                classified.push(CallKind::Chained);
+            }
+            false => classified.push(match classify_call(kind, call) {
+                CallKind::Terminal(_) if call_summary(call).is_none() => CallKind::Rejected(summary_missing(&call.function.name)),
+                other => other,
+            }),
+        }
+    }
+    if picks.is_empty() {
+        return classified;
+    }
+
+    let folded = match picks.iter().any(|(_, pick)| pick.is_err()) {
+        true => Err(format!(
+            "Not taken: another `{CHOOSE_ACTION}` in this reply was refused, and the actions in one \
+             reply are taken all or none. Send them again with that one put right."
         )),
-        classified => classified,
+        false => fold(kind, picks.iter().filter_map(|(_, pick)| pick.clone().ok()).collect()).and_then(|terminal| {
+            match picks.iter().any(|(index, _)| call_summary(&calls[*index]).is_some()) {
+                true => Ok(terminal),
+                false => Err(summary_missing(CHOOSE_ACTION)),
+            }
+        }),
+    };
+    match folded {
+        Ok(terminal) => {
+            let mut terminal = Some(terminal);
+            for (index, _) in &picks {
+                classified[*index] = match terminal.take() {
+                    Some(terminal) => CallKind::Terminal(terminal),
+                    None => CallKind::Chained,
+                };
+            }
+        }
+        Err(complaint) => {
+            for (index, pick) in picks {
+                classified[index] = CallKind::Rejected(pick.err().unwrap_or_else(|| complaint.clone()));
+            }
+        }
+    }
+    classified
+}
+
+/// The summary of a reply's decision: the first its action calls carry.
+pub fn reply_summary(calls: &[ToolCall], classified: &[CallKind]) -> Option<String> {
+    calls
+        .iter()
+        .zip(classified)
+        .filter(|(_, kind)| matches!(kind, CallKind::Terminal(_) | CallKind::Chained))
+        .find_map(|(call, _)| call_summary(call))
+}
+
+fn summary_missing(name: &str) -> String {
+    format!(
+        "`{name}` needs a `summary`: one or two sentences saying what you are doing and why. Your \
+         thinking is not kept, so it is the only note you will have of this turn. Call it again \
+         with one."
+    )
+}
+
+/// One `choose_action` id, parsed for the kind of turn it was sent on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pick {
+    Overworld(String),
+    Battle(String),
+    TakeOver,
+    Buy(BagItem),
+    Leave,
+    Nickname(Option<String>),
+    Forget(Option<u8>),
+    Mimic(u8),
+    Press(Vec<JoypadButton>),
+    Wait(u16),
+}
+
+/// What a battle turn's menu calls the row that takes the rest of the battle from the script.
+pub const TAKE_OVER: &str = "take_over";
+
+/// The prefix of the stuck turn's raw presses.
+const PRESS: &str = "press:";
+
+/// The several picks of one reply as the one [`Terminal`] the agent carries out.
+fn fold(kind: DecisionKind, picks: Vec<Pick>) -> Result<Terminal, String> {
+    if let [Pick::Wait(ticks)] = picks.as_slice() {
+        return Ok(Terminal::Wait { ticks: *ticks });
+    }
+    if picks.iter().any(|pick| matches!(pick, Pick::Wait(_))) {
+        return Err("`wait` is a whole answer on its own: send it alone, or send the actions without it."
+            .to_string());
+    }
+    let sent = picks.len();
+    let one_only = move || {
+        format!(
+            "This turn takes one `{CHOOSE_ACTION}` and that reply sent {sent}. The next question is a \
+             turn of its own with its own menu, so send just the one for this one."
+        )
+    };
+    if chains(kind) && picks.len() > MAX_CHAINED_ACTIONS {
+        return Err(format!(
+            "That reply sent {} actions and one reply may carry at most {MAX_CHAINED_ACTIONS}. Nothing \
+             was done: send the first {MAX_CHAINED_ACTIONS} and the rest once they are done; you will \
+             be shown a fresh menu then anyway.",
+            picks.len(),
+        ));
+    }
+    match kind {
+        DecisionKind::Overworld => {
+            let mut ids = picks.into_iter().filter_map(|pick| match pick {
+                Pick::Overworld(id) => Some(id),
+                _ => None,
+            });
+            let id = ids.next().ok_or_else(one_only)?;
+            Ok(Terminal::ChooseAction { id, then: ids.collect() })
+        }
+        DecisionKind::MartPurchase => {
+            let leaves = picks.iter().position(|pick| *pick == Pick::Leave);
+            if leaves.is_some_and(|at| at + 1 != picks.len()) {
+                return Err("`leave` ends the visit, so it can only come last. Nothing was bought; send \
+                            the orders first."
+                    .to_string());
+            }
+            let mut orders = picks.into_iter().filter_map(|pick| match pick {
+                Pick::Buy(item) => Some(item),
+                _ => None,
+            });
+            Ok(Terminal::BuyItem { item: orders.next(), then: orders.collect() })
+        }
+        DecisionKind::Battle => {
+            let take_over = picks.contains(&Pick::TakeOver);
+            let actions: Vec<String> = picks
+                .iter()
+                .filter_map(|pick| match pick {
+                    Pick::Battle(id) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
+            match (actions.as_slice(), picks.len() - actions.len()) {
+                ([id], 0 | 1) => Ok(Terminal::ChooseBattleAction { id: id.clone(), take_over }),
+                ([], _) => Err(format!(
+                    "`{TAKE_OVER}` hands you the rest of this battle, and this turn still needs its \
+                     action: send it together with one of the other rows."
+                )),
+                _ => Err(format!(
+                    "A battle turn takes one action, plus `{TAKE_OVER}` when it is offered. Send the \
+                     one you want for this turn."
+                )),
+            }
+        }
+        _ => match <[Pick; 1]>::try_from(picks) {
+            Ok([Pick::Nickname(name)]) => Ok(Terminal::SetNickname { name }),
+            Ok([Pick::Forget(slot)]) => Ok(Terminal::ForgetMove { slot }),
+            Ok([Pick::Mimic(slot)]) => Ok(Terminal::MimicMove { slot }),
+            Ok([Pick::Press(buttons)]) => Ok(Terminal::PressButtons { buttons }),
+            Ok([other]) => Err(format!("`{other:?}` cannot answer a {} turn.", kind.label())),
+            Err(_) => Err(one_only()),
+        },
     }
 }
 
-fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKind {
+/// Whether one reply may carry several `choose_action` calls on this kind.
+pub fn chains(kind: DecisionKind) -> bool {
+    matches!(kind, DecisionKind::Overworld | DecisionKind::MartPurchase)
+}
+
+/// One `choose_action` call, read against the turn it was sent on.
+fn pick(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> Result<Pick, String> {
+    let arguments = call
+        .arguments()
+        .map_err(|failure| format!("{failure}. Send the arguments as a JSON object and try again."))?;
+    let id = string_argument(&arguments, "id")?;
+    let id = id.trim();
+
+    if id == "wait" {
+        return Ok(Pick::Wait(DEFAULT_WAIT_TICKS));
+    }
+    if let Some(count) = id.strip_prefix("wait*") {
+        return match count.parse::<u64>() {
+            Ok(ticks) => Ok(Pick::Wait(ticks.clamp(1, u64::from(MAX_WAIT_TICKS)) as u16)),
+            Err(_) => Err(format!("`{id}`: `wait*N` takes a whole number of ticks, as `wait*50` does.")),
+        };
+    }
+    if kind == DecisionKind::Nickname {
+        return nickname(id).map(Pick::Nickname);
+    }
+    if kind == DecisionKind::Stuck {
+        return match id.strip_prefix(PRESS) {
+            Some(buttons) => press(buttons).map(Pick::Press),
+            None => Err(format!(
+                "`{id}` is not something this turn can do. With no menu, the ids are `{PRESS}` and the \
+                 buttons in order, as `{PRESS}b,a`, or `wait*N`."
+            )),
+        };
+    }
+    if id.starts_with(PRESS) {
+        return Err(format!(
+            "`{PRESS}` is offered only on a turn where the agent has stopped asking anything, and this \
+             turn has a menu: the agent presses the buttons. Take one of the ids in the list. If what \
+             you want genuinely is not in it, call `{REPORT_ISSUE}` to say so and then take the \
+             closest action there is."
+        ));
+    }
+
+    let (base, count) = match id.rsplit_once('*') {
+        None => (id, None),
+        Some((base, count)) => match count.parse::<u32>() {
+            Ok(count) if count >= 1 => (base, Some(count)),
+            _ => return Err(format!("`{id}`: `*` takes a whole number after it, as `buy:PokeBall*10` does.")),
+        },
+    };
+    let buying = kind == DecisionKind::MartPurchase && base.starts_with("buy:");
+    if count.is_some() && !buying {
+        return Err(format!(
+            "`{id}`: only a mart's `buy:` rows and `wait` take a `*N`. Send `{base}` on its own."
+        ));
+    }
+
+    if kind == DecisionKind::Battle && base == TAKE_OVER {
+        return match menu.iter().any(|offered| offered == TAKE_OVER) {
+            true => Ok(Pick::TakeOver),
+            false => Err(format!(
+                "`{TAKE_OVER}` is offered only on a battle turn your armed battle script handed back \
+                 to you, and this is not one."
+            )),
+        };
+    }
+    if let Some(complaint) = not_on_the_menu(base, menu) {
+        return Err(match kind {
+            DecisionKind::Battle => format!("{complaint}{}", battle_rule_behind(base, menu)),
+            _ => complaint,
+        });
+    }
+
+    match kind {
+        DecisionKind::Overworld => Ok(Pick::Overworld(base.to_string())),
+        DecisionKind::Battle => Ok(Pick::Battle(base.to_string())),
+        DecisionKind::MartPurchase => match base.strip_prefix("buy:") {
+            None if base == "leave" => Ok(Pick::Leave),
+            None => Err(format!("`{base}` is not a row of this shop. Buy with a `buy:` row, or `leave`.")),
+            Some(name) => match item_by_name(name) {
+                Some(item) => Ok(Pick::Buy(BagItem::new(item, count.unwrap_or(1).min(MAX_ORDER) as u8))),
+                None => Err(format!("`{name}` is not an item this game has. Copy a `buy:` id from the list exactly.")),
+            },
+        },
+        DecisionKind::ForgetMove => match base {
+            "keep" => Ok(Pick::Forget(None)),
+            _ => match base.strip_prefix("forget:").and_then(|slot| slot.parse::<u8>().ok()) {
+                Some(slot) if slot < 4 => Ok(Pick::Forget(Some(slot))),
+                _ => Err(format!(
+                    "`{base}` is not one of the rows: a Pokémon has four move slots, `forget:0` to \
+                     `forget:3`, and `keep` declines the new move."
+                )),
+            },
+        },
+        DecisionKind::MimicMove => match base.strip_prefix("mimic:").and_then(|row| row.parse::<u8>().ok()) {
+            Some(row) if row < 4 => Ok(Pick::Mimic(row)),
+            _ => Err(format!(
+                "`{base}` is not one of the rows: the enemy's moves are `mimic:0` onwards, as the list \
+                 in the turn shows them."
+            )),
+        },
+        DecisionKind::Nickname | DecisionKind::Stuck => unreachable!("answered above"),
+    }
+}
+
+/// The naming turn's id is the name itself, and `NONE` keeps the species name.
+fn nickname(id: &str) -> Result<Option<String>, String> {
+    if id.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    let length = id.chars().count();
+    if length > MAX_NICKNAME {
+        return Err(format!(
+            "`{id}` is {length} characters and the game holds at most {MAX_NICKNAME}. Pick a shorter \
+             name."
+        ));
+    }
+    // Written straight into the naming screen's buffer, so nothing else checks it.
+    match unencodable(id) {
+        Some(bad) => Err(format!(
+            "`{bad}` is not a character this game can write. A nickname may use letters, digits, \
+             spaces and `.,:;'-?!()[]/`, and nothing else; pick a name out of those and send it again."
+        )),
+        None => Ok(Some(id.to_string())),
+    }
+}
+
+/// `press:`'s buttons, comma-separated, in order.
+fn press(list: &str) -> Result<Vec<JoypadButton>, String> {
+    let names: Vec<&str> = list.split([',', ' ']).map(str::trim).filter(|name| !name.is_empty()).collect();
+    if names.is_empty() {
+        return Err(format!("`{PRESS}` needs at least one button after it, as `{PRESS}b,a` does."));
+    }
+    names
+        .iter()
+        .map(|name| {
+            button_by_name(name).ok_or_else(|| {
+                format!("`{name}` is not a button: up, down, left, right, a, b, start or select.")
+            })
+        })
+        .take(MANUAL_INPUT_CAPACITY)
+        .collect()
+}
+
+/// Every call but `choose_action`.
+fn classify_call(kind: DecisionKind, call: &ToolCall) -> CallKind {
     let name = call.function.name.as_str();
     // A read not offered in this kind is answered like a terminal tool from the wrong kind.
     if let Some(tool) = read_tool(name) {
@@ -1328,132 +1464,19 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
     }
 
     match name {
-        "choose_action" if kind == DecisionKind::Overworld => match chosen_actions(&arguments, menu) {
-            Ok(terminal) => CallKind::Terminal(terminal),
-            Err(complaint) => CallKind::Rejected(complaint),
-        },
-        "choose_battle_action" if kind == DecisionKind::Battle => match string_argument(&arguments, "id") {
-            Ok(id) => match not_on_the_menu(&id, menu) {
-                // An absent `take_over` is `false`, and so is one sent as anything but a boolean.
-                None => CallKind::Terminal(Terminal::ChooseBattleAction {
-                    id,
-                    take_over: arguments.get("take_over").and_then(Value::as_bool).unwrap_or(false),
-                }),
-                Some(complaint) => {
-                    CallKind::Rejected(format!("{complaint}{}", battle_rule_behind(&id, menu)))
-                }
-            },
-            Err(complaint) => CallKind::Rejected(complaint),
-        },
         "use_field_move" if kind == DecisionKind::Overworld => match field_move_arguments(&arguments) {
             Ok(request) => CallKind::Terminal(Terminal::UseFieldMove(request)),
             Err(complaint) => CallKind::Rejected(complaint),
         },
-        // `Stuck` only.
-        "press_buttons" if kind == DecisionKind::Stuck => match button_arguments(&arguments) {
-            Ok(buttons) => match call_reason(call) {
-                Some(_) => CallKind::Terminal(Terminal::PressButtons { buttons }),
-                // Enforced here, as the `why` is the headline of the press record.
-                None => CallKind::Rejected(
-                    "`press_buttons` needs a `why`: what you think is on the screen, and what \
-                     these presses are meant to do about it. Every press is filed and read."
-                        .to_string(),
-                ),
-            },
-            Err(complaint) => CallKind::Rejected(complaint),
-        },
-        "set_nickname" if kind == DecisionKind::Nickname => {
-            // Absent or empty is "keep the default", as the naming screen reads an empty buffer.
-            let name = arguments
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(|name| name.chars().take(MAX_NICKNAME).collect::<String>());
-            // Written straight into the naming screen's buffer, so nothing else checks it.
-            match name.as_deref().and_then(unencodable) {
-                Some(bad) => CallKind::Rejected(format!(
-                    "`{bad}` is not a character this game can write. A nickname may use letters, \
-                     digits, spaces and `.,:;'-?!()[]/`, and nothing else — pick a name out of those \
-                     and call `set_nickname` again."
-                )),
-                None => CallKind::Terminal(Terminal::SetNickname { name }),
-            }
-        }
-        "buy_item" if kind == DecisionKind::MartPurchase => {
-            let Some(name) = arguments.get("item").and_then(Value::as_str).filter(|n| !n.is_empty())
-            else {
-                return CallKind::Terminal(Terminal::BuyItem { item: None, then: Vec::new() });
-            };
-            let head = match purchase(name, arguments.get("quantity")) {
-                Ok(item) => item,
-                Err(failure) => return CallKind::Rejected(failure),
-            };
-            // Every chained order is parsed before any is placed, as `chosen_actions` does.
-            let mut then = Vec::new();
-            if let Some(more) = arguments.get("then") {
-                let Some(list) = more.as_array() else {
-                    return CallKind::Rejected(
-                        "`then` has to be a list of `{item, quantity}` objects.".to_string());
-                };
-                if list.len() > MAX_CHAINED_PURCHASES {
-                    return CallKind::Rejected(format!(
-                        "`then` takes at most {MAX_CHAINED_PURCHASES} more kinds and you gave {}. \
-                         Nothing was bought — ask again with a shorter list.", list.len()));
-                }
-                for entry in list {
-                    let Some(name) = entry.get("item").and_then(Value::as_str) else {
-                        return CallKind::Rejected(
-                            "Every entry in `then` needs an `item` name from the stock list.".to_string());
-                    };
-                    match purchase(name, entry.get("quantity")) {
-                        Ok(item) => then.push(item),
-                        Err(failure) => return CallKind::Rejected(failure),
-                    }
-                }
-            }
-            CallKind::Terminal(Terminal::BuyItem { item: Some(head), then })
-        }
-        "forget_move" if kind == DecisionKind::ForgetMove => {
-            match arguments.get("slot").and_then(Value::as_u64) {
-                None => CallKind::Terminal(Terminal::ForgetMove { slot: None }),
-                Some(slot) if slot < 4 => CallKind::Terminal(Terminal::ForgetMove { slot: Some(slot as u8) }),
-                Some(slot) => CallKind::Rejected(format!(
-                    "There is no move slot {slot}; a Pokémon has four, numbered 0 to 3. Omit `slot` \
-                     to decline the new move instead."
-                )),
-            }
-        }
-        "mimic_move" if kind == DecisionKind::MimicMove => match arguments.get("slot").and_then(Value::as_u64) {
-            Some(slot) if slot < 4 => CallKind::Terminal(Terminal::MimicMove { slot: slot as u8 }),
-            Some(slot) => CallKind::Rejected(format!(
-                "There is no row {slot}; the enemy's moves are numbered from 0, as the list in the turn \
-                 shows them."
-            )),
-            None => CallKind::Rejected(
-                "`mimic_move` needs the `slot` of the enemy's move to copy, from the list in the turn."
-                    .to_string(),
-            ),
-        },
-        "wait" => match arguments.get("ticks").and_then(Value::as_u64) {
-            Some(ticks) => CallKind::Terminal(Terminal::Wait {
-                ticks: ticks.clamp(1, u64::from(MAX_WAIT_TICKS)) as u16,
-            }),
-            None => CallKind::Rejected("`wait` needs a whole number of `ticks`.".to_string()),
-        },
-        // Not the generic sentence below.
-        "press_buttons" => CallKind::Rejected(format!(
-            "`press_buttons` is not available on a turn that has a menu; the agent presses the \
-             buttons. Take one of: {}. If what you want genuinely is not in the menu, call \
-             `{REPORT_ISSUE}` to say so and then take the closest action there is.",
-            terminal_names(kind).join(", "),
-        )),
-        // A terminal tool from another decision kind.
-        "choose_action" | "choose_battle_action" | "use_field_move"
-        | "set_nickname" | "buy_item" | "forget_move" | "mimic_move" => CallKind::Rejected(format!(
-            "`{name}` is not available in a {} turn. End this turn with one of: {}.",
+        "use_field_move" => CallKind::Rejected(format!(
+            "`use_field_move` is not available in a {} turn. End this turn with `{CHOOSE_ACTION}`.",
             kind.label(),
-            terminal_names(kind).join(", "),
+        )),
+        // An older conversation's tools, which a resumed history still shows the model calling.
+        "choose_battle_action" | "set_nickname" | "buy_item" | "forget_move" | "mimic_move"
+        | "press_buttons" | "wait" => CallKind::Rejected(format!(
+            "There is no `{name}` any more: every turn ends with `{CHOOSE_ACTION}`, and the id says \
+             what. Take an id from this turn's menu."
         )),
         other => CallKind::Rejected(format!(
             "There is no tool called `{other}`. The tools that do not end the turn are {}; end the \
@@ -1464,69 +1487,14 @@ fn classify_call(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> CallKi
     }
 }
 
-/// One `{item, quantity}` order, resolved against the game's item list.
-fn purchase(name: &str, quantity: Option<&Value>) -> Result<BagItem, String> {
-    let Some(item) = item_by_name(name) else {
-        return Err(format!(
-            "`{name}` is not an item this game has. Copy a name from the stock list exactly."));
-    };
-    let quantity = quantity.and_then(Value::as_u64).unwrap_or(1).clamp(1, 99) as u8;
-    Ok(BagItem::new(item, quantity))
-}
-
 fn string_argument(arguments: &Value, key: &str) -> Result<String, String> {
     match arguments.get(key).and_then(Value::as_str) {
-        Some(value) if !value.is_empty() => Ok(value.to_string()),
+        Some(value) if !value.trim().is_empty() => Ok(value.to_string()),
         _ => Err(format!("`{key}` is required and must be a non-empty string.")),
     }
 }
 
 // ── Parsing the awkward arguments ────────────────────────────────────────────────────────────────
-
-/// A `choose_action` call: the id, whatever is chained behind it, and whether a battle ends it.
-fn chosen_actions(arguments: &Value, menu: &[String]) -> Result<Terminal, String> {
-    let id = string_argument(arguments, "id")?;
-    if let Some(complaint) = not_on_the_menu(&id, menu) {
-        return Err(complaint);
-    }
-
-    let malformed = || {
-        "`then` is a list of further ids from this turn's action menu, as strings; omit it to take \
-         one action."
-            .to_string()
-    };
-    let then: Vec<String> = match arguments.get("then") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .map(|item| match item.as_str().map(str::trim).filter(|next| !next.is_empty()) {
-                Some(next) => match not_on_the_menu(next, menu) {
-                    None => Ok(next.to_string()),
-                    Some(complaint) => Err(complaint),
-                },
-                None => Err(malformed()),
-            })
-            .collect::<Result<_, _>>()?,
-        Some(_) => return Err(malformed()),
-    };
-    if then.len() + 1 > MAX_CHAINED_ACTIONS {
-        return Err(format!(
-            "That chains {} actions and one call may carry at most {MAX_CHAINED_ACTIONS}. Keep the \
-             first {MAX_CHAINED_ACTIONS} and ask again once they are done; you will be shown a \
-             fresh menu then anyway.",
-            then.len() + 1,
-        ));
-    }
-
-    Ok(Terminal::ChooseAction {
-        id,
-        then,
-        resume_after_battle: arguments
-            .get("resume_after_battle")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-    })
-}
 
 fn field_move_arguments(arguments: &Value) -> Result<FieldMoveRequest, String> {
     let which = string_argument(arguments, "move")?;
@@ -1661,26 +1629,6 @@ fn field_move_arguments(arguments: &Value) -> Result<FieldMoveRequest, String> {
             field_move_names().join(", "),
         )),
     }
-}
-
-fn button_arguments(arguments: &Value) -> Result<Vec<JoypadButton>, String> {
-    let list = arguments
-        .get("buttons")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "`press_buttons` needs a `buttons` array.".to_string())?;
-    if list.is_empty() {
-        return Err("`buttons` was empty, so nothing would have been pressed.".to_string());
-    }
-    list.iter()
-        .map(|button| {
-            let name = button.as_str().unwrap_or_default();
-            button_by_name(name).ok_or_else(|| {
-                format!("`{name}` is not a button: up, down, left, right, a, b, start or select.")
-            })
-        })
-        // Silently dropping the tail would be a lie about what was pressed, so say so instead.
-        .take(MANUAL_INPUT_CAPACITY)
-        .collect()
 }
 
 /// Compare names ignoring case and punctuation: `"HM01 Cut"`, `"hm01_cut"` and `"Hm01Cut"` match.
@@ -2109,15 +2057,27 @@ pub fn resolve_battle(state: &GameState, id: &str) -> Option<BattleAction> {
     battle_options(state)?.into_iter().find(|action| battle_id(action) == id)
 }
 
-/// What the mart sells (see [`ApiSnapshot`]); the id is the item's name, as `buy_item` takes.
+/// The battle row an armed script's hand-back offers.
+pub fn take_over_row() -> MenuItem {
+    MenuItem {
+        id: TAKE_OVER.to_string(),
+        description: "decide the rest of this battle yourself: your battle script decides none of \
+                      its turns, and goes back to deciding at the next battle. Send it as well as \
+                      this turn's action"
+            .to_string(),
+    }
+}
+
+/// What the mart sells (see [`ApiSnapshot`]), each as `buy:` and the item as the battle menu spells
+/// it, and the way out.
 pub fn mart_menu(snapshot: &ApiSnapshot, state: &GameState) -> Vec<MenuItem> {
-    snapshot
+    let mut menu: Vec<MenuItem> = snapshot
         .mart_stock
         .iter()
         .map(|(item, price)| {
             let held = state.bag.iter().find(|entry| entry.id == *item).map_or(0, |e| e.quantity);
             MenuItem {
-                id: item.to_string(),
+                id: format!("buy:{item:?}"),
                 description: format!(
                     "{} — you have {held}",
                     match price {
@@ -2128,19 +2088,28 @@ pub fn mart_menu(snapshot: &ApiSnapshot, state: &GameState) -> Vec<MenuItem> {
                 ),
             }
         })
-        .collect()
+        .collect();
+    // An unread stock is an empty menu, which `not_on_the_menu` holds nothing to.
+    if menu.is_empty() {
+        return menu;
+    }
+    menu.push(MenuItem {
+        id: "leave".to_string(),
+        description: "walk away without buying anything; after the last order you leave anyway".to_string(),
+    });
+    menu
 }
 
-/// The four moves the forget prompt chooses between, keyed on slot as `forget_move` takes, each
-/// saying what it does by the run's rules.
+/// The four moves the forget prompt chooses between, keyed on slot, each saying what it does by
+/// the run's rules, and the row that declines.
 pub fn forget_menu(current: &[PokemonMove], ruleset: poke_core::ruleset::Ruleset) -> Vec<MenuItem> {
-    current
+    let mut menu: Vec<MenuItem> = current
         .iter()
         .enumerate()
         .map(|(slot, known)| {
             let metadata = known.name.metadata();
             MenuItem {
-                id: slot.to_string(),
+                id: format!("forget:{slot}"),
                 description: format!(
                     "{} — {}, {}, {}/{} pp{}{}",
                     known.name,
@@ -2159,10 +2128,15 @@ pub fn forget_menu(current: &[PokemonMove], ruleset: poke_core::ruleset::Ruleset
                 ),
             }
         })
-        .collect()
+        .collect();
+    menu.push(MenuItem {
+        id: "keep".to_string(),
+        description: "decline the new move and keep all four".to_string(),
+    });
+    menu
 }
 
-/// The enemy's moves Mimic's menu chooses between, keyed on row as `mimic_move` takes, each costed
+/// The enemy's moves Mimic's menu chooses between, keyed on row, each costed
 /// against the enemy from the mon out and saying what it does.
 pub fn mimic_menu(state: &GameState, enemy_moves: &[PokemonMove]) -> Vec<MenuItem> {
     let sides = state.battle.as_ref().map(|battle| (&battle.player, &battle.enemy, battle.ruleset));
@@ -2176,7 +2150,7 @@ pub fn mimic_menu(state: &GameState, enemy_moves: &[PokemonMove]) -> Vec<MenuIte
                 None => move_effect(known.name, state.ruleset).map_or(String::new(), |effect| format!(" — {effect}")),
             };
             MenuItem {
-                id: row.to_string(),
+                id: format!("mimic:{row}"),
                 description: format!(
                     "{} — {}, {}{notes}",
                     known.name,
@@ -2903,7 +2877,10 @@ mod tests {
                 match terminal_names(kind).contains(&tool.function.name) {
                     true => {
                         assert!(has_summary, "{kind:?}'s `{}` has no summary", tool.function.name);
-                        assert!(required, "{kind:?}'s `{}` does not require it", tool.function.name);
+                        // Only the first `choose_action` of a reply needs one, which `classify_reply`
+                        // enforces and a schema cannot say.
+                        assert_eq!(required, tool.function.name != CHOOSE_ACTION,
+                                   "{kind:?}'s `{}`", tool.function.name);
                     }
                     false => assert!(!has_summary, "`{}` is not a decision", tool.function.name),
                 }
@@ -2917,22 +2894,15 @@ mod tests {
     /// `call_summary` tolerates an absent summary; [`classify`] is what demands one.
     #[test]
     fn a_summary_is_read_off_the_call_and_never_demanded() {
-        let call = |arguments: &str| ToolCall {
-            id: "call_1".to_string(),
-            kind: "function".to_string(),
-            function: crate::llm::protocol::FunctionCall {
-                name: "wait".to_string(),
-                arguments: arguments.to_string(),
-            },
-        };
+        let call = |arguments: &str| bare(CHOOSE_ACTION, arguments);
 
         assert_eq!(
-            call_summary(&call(r#"{"ticks": 5, "summary": "  letting the battle text finish  "}"#)),
+            call_summary(&call(r#"{"id": "wait*5", "summary": "  letting the battle text finish  "}"#)),
             Some("letting the battle text finish".to_string()),
             "trimmed, because it is printed on a page",
         );
-        assert_eq!(call_summary(&call(r#"{"ticks": 5}"#)), None);
-        assert_eq!(call_summary(&call(r#"{"ticks": 5, "summary": "   "}"#)), None, "blank is absent");
+        assert_eq!(call_summary(&call(r#"{"id": "wait*5"}"#)), None);
+        assert_eq!(call_summary(&call(r#"{"id": "wait*5", "summary": "   "}"#)), None, "blank is absent");
         assert_eq!(call_summary(&call("not json")), None, "and a broken call is not a panic");
 
         // `maxLength` in a schema is a request.
@@ -2941,74 +2911,77 @@ mod tests {
         assert_eq!(capped.chars().count(), MAX_SUMMARY);
     }
 
-    /// `press_buttons`' `why` is the headline of the record `llm::incident` writes.
-    #[test]
-    fn a_press_without_a_why_is_refused() {
-        let schema = &press_buttons_spec().function.parameters;
-        assert_eq!(schema["required"], json!(["buttons", "why"]), "the model is asked for it");
-
-        let press = |arguments: &str| call("press_buttons", arguments);
-        assert_eq!(
-            call_reason(&press(r#"{"buttons":["a"], "why": "  no action opens the PC  "}"#)),
-            Some("no action opens the PC".to_string()),
-        );
-
-        assert!(matches!(
-            classify(DecisionKind::Stuck, &press(r#"{"buttons":["a"], "why": "a stuck text box"}"#), &[]),
-            CallKind::Terminal(Terminal::PressButtons { .. }),
-        ));
-        for arguments in [r#"{"buttons":["a"]}"#, r#"{"buttons":["a"], "why": " "}"#] {
-            let CallKind::Rejected(complaint) = classify(DecisionKind::Stuck, &press(arguments), &[]) else {
-                panic!("a press with nothing to say is refused: {arguments}");
-            };
-            assert!(complaint.contains("why"), "{complaint}");
-        }
-
-        let long = "x".repeat(MAX_REASON * 2);
-        let capped = call_reason(&press(&format!(r#"{{"why": "{long}"}}"#))).expect("present");
-        assert_eq!(capped.chars().count(), MAX_REASON, "a schema's maxLength is a request");
-    }
-
-    /// The summary is the one note the model keeps about its own turn.
+    /// The summary is the one note the model keeps about its own turn, and a press's headline.
     #[test]
     fn a_terminal_call_must_say_what_it_is_doing() {
-        for (kind, name, arguments) in [
-            (DecisionKind::Overworld, "choose_action", r#"{"id":"PalletTown:5,6:Warp"}"#),
-            (DecisionKind::Battle, "choose_battle_action", r#"{"id":"fight:Tackle"}"#),
-            (DecisionKind::Nickname, "set_nickname", r#"{"name":"Bubbles"}"#),
-            (DecisionKind::MartPurchase, "buy_item", "{}"),
-            (DecisionKind::ForgetMove, "forget_move", r#"{"slot":1}"#),
-            (DecisionKind::MimicMove, "mimic_move", r#"{"slot":1}"#),
-            (DecisionKind::Overworld, "wait", r#"{"ticks":5}"#),
+        for (kind, id) in [
+            (DecisionKind::Overworld, "PalletTown:5,6:Warp"),
+            (DecisionKind::Battle, "fight:Tackle"),
+            (DecisionKind::Nickname, "Bubbles"),
+            (DecisionKind::MartPurchase, "leave"),
+            (DecisionKind::ForgetMove, "forget:1"),
+            (DecisionKind::MimicMove, "mimic:1"),
+            (DecisionKind::Overworld, "wait*5"),
+            (DecisionKind::Stuck, "press:a"),
         ] {
-            let CallKind::Rejected(complaint) = classify(kind, &bare(name, arguments), &[]) else {
-                panic!("{name} on a {kind:?} turn must be made to say what it is doing");
+            let arguments = json!({ "id": id }).to_string();
+            let CallKind::Rejected(complaint) = classify(kind, &bare(CHOOSE_ACTION, &arguments), &[]) else {
+                panic!("{id} on a {kind:?} turn must be made to say what it is doing");
             };
-            assert!(complaint.contains("summary") && complaint.contains(name), "{complaint}");
+            assert!(complaint.contains("summary") && complaint.contains(CHOOSE_ACTION), "{complaint}");
             // The same call with one goes through.
             assert!(
-                matches!(classify(kind, &call(name, arguments), &[]), CallKind::Terminal(_)),
-                "{name} with a summary is fine",
+                matches!(classify(kind, &call(CHOOSE_ACTION, &arguments), &[]), CallKind::Terminal(_)),
+                "{id} with a summary is fine",
             );
+        }
+
+        // One summary covers a reply: the later calls may leave it out, and the first may too.
+        let menu = ["PalletTown:5,6:Warp".to_string(), "PalletTown:Mom".to_string()];
+        for (first, second) in [(true, false), (false, true)] {
+            let with = |id: &str, summary: bool| match summary {
+                true => call(CHOOSE_ACTION, &json!({ "id": id }).to_string()),
+                false => bare(CHOOSE_ACTION, &json!({ "id": id }).to_string()),
+            };
+            let reply = [with("PalletTown:5,6:Warp", first), with("PalletTown:Mom", second)];
+            let classified = classify_reply(DecisionKind::Overworld, &reply, &menu);
+            assert!(matches!(classified[0], CallKind::Terminal(_)) && matches!(classified[1], CallKind::Chained));
+            assert_eq!(reply_summary(&reply, &classified).as_deref(), Some("doing the thing"));
         }
     }
 
-    /// `take_over` is off when absent and when not a boolean.
+    /// `take_over` is a row, offered only where the script handed the turn back, and goes with an action.
     #[test]
-    fn take_over_is_off_unless_it_is_actually_asked_for() {
-        let id = r#""fight:Tackle""#;
-        for (arguments, expected) in [
-            (format!(r#"{{"id":{id}}}"#), false),
-            (format!(r#"{{"id":{id},"take_over":false}}"#), false),
-            (format!(r#"{{"id":{id},"take_over":"yes"}}"#), false),
-            (format!(r#"{{"id":{id},"take_over":true}}"#), true),
-        ] {
-            let classified = classify(DecisionKind::Battle, &call("choose_battle_action", &arguments), &[]);
-            let CallKind::Terminal(Terminal::ChooseBattleAction { take_over, .. }) = classified else {
-                panic!("{arguments} is a battle action");
-            };
-            assert_eq!(take_over, expected, "for {arguments}");
+    fn take_over_is_a_row_sent_beside_the_turns_action() {
+        let reply = |ids: &[&str]| -> Vec<ToolCall> {
+            ids.iter().map(|id| call(CHOOSE_ACTION, &json!({ "id": id }).to_string())).collect()
+        };
+        let offered = ["fight:Tackle".to_string(), "run".to_string(), TAKE_OVER.to_string()];
+        let plain = &offered[..2];
+
+        let classified = classify_reply(DecisionKind::Battle, &reply(&["fight:Tackle"]), &offered);
+        assert!(matches!(&classified[0],
+            CallKind::Terminal(Terminal::ChooseBattleAction { take_over: false, id }) if id == "fight:Tackle"));
+
+        for order in [[TAKE_OVER, "fight:Tackle"], ["fight:Tackle", TAKE_OVER]] {
+            let classified = classify_reply(DecisionKind::Battle, &reply(&order), &offered);
+            assert!(matches!(&classified[0],
+                CallKind::Terminal(Terminal::ChooseBattleAction { take_over: true, id }) if id == "fight:Tackle"),
+                "{order:?}");
+            assert!(matches!(classified[1], CallKind::Chained), "{order:?}");
         }
+
+        let classified = classify_reply(DecisionKind::Battle, &reply(&[TAKE_OVER, "fight:Tackle"]), plain);
+        let CallKind::Rejected(complaint) = &classified[0] else { panic!("not offered, so refused") };
+        assert!(complaint.contains("handed back"), "{complaint}");
+        assert!(matches!(classified[1], CallKind::Rejected(_)), "and the action with it: all or none");
+
+        let CallKind::Rejected(complaint) = &classify_reply(DecisionKind::Battle, &reply(&[TAKE_OVER]), &offered)[0]
+        else { panic!("a take-over alone decides nothing") };
+        assert!(complaint.contains("action"), "{complaint}");
+
+        let classified = classify_reply(DecisionKind::Battle, &reply(&["fight:Tackle", "run"]), &offered);
+        assert!(classified.iter().all(|kind| matches!(kind, CallKind::Rejected(_))), "one action a battle turn");
     }
 
     /// `report_issue`, on every turn that has a menu.
@@ -3051,46 +3024,24 @@ mod tests {
     }
 
     #[test]
-    fn terminal_tools_are_scoped_per_kind() {
-        let overworld = names(DecisionKind::Overworld);
-        let battle = names(DecisionKind::Battle);
-
-        assert!(overworld.contains(&"choose_action"));
-        assert!(!overworld.contains(&"choose_battle_action"));
-        assert!(battle.contains(&"choose_battle_action"));
-        assert!(!battle.contains(&"choose_action"));
-
-        // The three menu prompts are single-question turns: their one terminal tool, and `wait`.
-        for kind in [DecisionKind::Nickname, DecisionKind::MartPurchase, DecisionKind::ForgetMove, DecisionKind::MimicMove] {
+    fn every_kind_ends_with_the_same_action_tool() {
+        let spec = |kind| for_kind(kind).into_iter().find(|tool| tool.function.name == CHOOSE_ACTION)
+            .map(|tool| serde_json::to_string(&tool).expect("serialises"));
+        let overworld = spec(DecisionKind::Overworld).expect("the overworld turn offers it");
+        for kind in KINDS {
+            assert_eq!(spec(kind).as_deref(), Some(overworld.as_str()), "{kind:?} sends a different `{CHOOSE_ACTION}`");
             let offered = names(kind);
-            for elsewhere in
-                ["choose_action", "choose_battle_action", "use_field_move", "press_buttons", REPORT_ISSUE]
-            {
-                assert!(!offered.contains(&elsewhere), "{kind:?} must not offer {elsewhere}");
+            for gone in ["choose_battle_action", "set_nickname", "buy_item", "forget_move", "mimic_move",
+                         "press_buttons", "wait", "resume_after_battle"] {
+                assert!(!offered.contains(&gone), "{kind:?} still offers {gone}");
             }
-        }
-        assert!(names(DecisionKind::Nickname).contains(&"set_nickname"));
-        assert!(names(DecisionKind::MartPurchase).contains(&"buy_item"));
-        assert!(names(DecisionKind::ForgetMove).contains(&"forget_move"));
-        assert!(names(DecisionKind::MimicMove).contains(&"mimic_move"));
-        for kind in [DecisionKind::Overworld, DecisionKind::Battle] {
-            assert!(!names(kind).contains(&"press_buttons"), "{kind:?} must not offer the hatch");
-            assert!(names(kind).contains(&REPORT_ISSUE), "{kind:?} offers the replacement");
+            assert_eq!(offered.contains(&"use_field_move"), kind == DecisionKind::Overworld,
+                       "field moves are overworld-only");
         }
 
+        // The reads are all there on a stuck turn, to work out why it is stuck before pressing anything.
         let stuck = names(DecisionKind::Stuck);
-        assert_eq!(
-            stuck.iter().filter(|name| terminal_names(DecisionKind::Stuck).contains(name)).count(),
-            2,
-        );
-        assert!(stuck.contains(&"press_buttons") && stuck.contains(&"wait"));
-        for elsewhere in ["choose_action", "choose_battle_action", "use_field_move", "set_nickname",
-                          "buy_item", "forget_move", "mimic_move"] {
-            assert!(!stuck.contains(&elsewhere), "a stuck turn must not offer {elsewhere}");
-        }
-        // The reads are all there, to work out why it is stuck before pressing anything.
         assert!(stuck.contains(&"read_map") && stuck.contains(&SCREENSHOT));
-        assert!(!names(DecisionKind::Battle).contains(&"use_field_move"), "field moves are overworld-only");
 
         // The battle-script tools are on the overworld turn only, not even the battle turn.
         for name in BATTLE_SCRIPT_TOOL_NAMES {
@@ -3103,7 +3054,6 @@ mod tests {
 
         for kind in KINDS {
             let offered = names(kind);
-            assert!(offered.contains(&"wait"), "{kind:?} must always be able to wait");
             // The contract in the prompt matches the array actually sent.
             for terminal in terminal_names(kind) {
                 assert!(offered.contains(terminal), "{kind:?} promises {terminal} but does not offer it");
@@ -3137,7 +3087,7 @@ mod tests {
 
         // A single-question turn carries almost nothing.
         assert_eq!(names(DecisionKind::Nickname), ["read_party", SCREENSHOT, "todo_set", "todo_complete",
-                                                   "todo_delete", "set_nickname", "wait"]);
+                                                   "todo_delete", CHOOSE_ACTION]);
 
         // A read that exists but is not offered here is told which turn it belongs to.
         let rejected = classify(DecisionKind::Battle, &call("read_map", "{}"), &[]);
@@ -3165,63 +3115,64 @@ mod tests {
         }
     }
 
-    /// Every id in a `then` is held to the same menu, and an over-long chain is refused, not cut.
+    /// Several calls in one reply are one chain, every id held to the same menu, and an over-long
+    /// chain is refused, not cut.
     #[test]
     fn every_id_in_a_chain_is_held_to_the_menu_the_turn_offered() {
         let menu = ["PalletTown:5,6:Warp".to_string(), "PalletTown:Mom".to_string()];
-        let chain = |arguments: &str| classify(DecisionKind::Overworld, &call("choose_action", arguments), &menu);
+        let chain = |ids: &[&str]| -> Vec<CallKind> {
+            let reply: Vec<ToolCall> =
+                ids.iter().map(|id| call(CHOOSE_ACTION, &json!({ "id": id }).to_string())).collect();
+            classify_reply(DecisionKind::Overworld, &reply, &menu)
+        };
 
-        // The shape the whole feature is for, and both flags defaulted.
-        let CallKind::Terminal(Terminal::ChooseAction { id, then, resume_after_battle }) = chain(
-            r#"{"id":"PalletTown:5,6:Warp","then":["PalletTown:Mom"],"summary":"in, then talk"}"#,
-        ) else {
-            panic!("a chain of two ids from the menu is an ordinary call");
+        let classified = chain(&["PalletTown:5,6:Warp", "PalletTown:Mom"]);
+        let CallKind::Terminal(Terminal::ChooseAction { id, then }) = &classified[0] else {
+            panic!("a chain of two ids from the menu is an ordinary reply");
         };
         assert_eq!(id, "PalletTown:5,6:Warp");
-        assert_eq!(then, ["PalletTown:Mom"]);
-        assert!(resume_after_battle, "a battle does not end the action unless the model says so");
+        assert_eq!(then, &["PalletTown:Mom"]);
+        assert!(matches!(classified[1], CallKind::Chained));
 
         // Each id is checked, not merely the count: a stale id is not let through by being second.
-        let CallKind::Rejected(complaint) = chain(
-            r#"{"id":"PalletTown:5,6:Warp","then":["OaksLab:4,11:Warp"],"summary":"a stale id"}"#,
-        ) else {
+        let classified = chain(&["PalletTown:5,6:Warp", "OaksLab:4,11:Warp"]);
+        let CallKind::Rejected(complaint) = &classified[1] else {
             panic!("a chained id that was never offered is refused");
         };
         assert!(complaint.contains("OaksLab:4,11:Warp"), "it names the one that failed: {complaint}");
+        let CallKind::Rejected(complaint) = &classified[0] else { panic!("and the rest go with it") };
+        assert!(complaint.contains("all or none"), "{complaint}");
 
-        let CallKind::Rejected(complaint) = chain(&format!(
-            r#"{{"id":"PalletTown:5,6:Warp","then":[{}],"summary":"far too many"}}"#,
-            ["\"PalletTown:Mom\""; MAX_CHAINED_ACTIONS].join(","),
-        )) else {
+        let classified = chain(&["PalletTown:Mom"; MAX_CHAINED_ACTIONS + 1]);
+        let CallKind::Rejected(complaint) = &classified[0] else {
             panic!("a chain longer than the cap is refused");
         };
         assert!(complaint.contains(&MAX_CHAINED_ACTIONS.to_string()), "it says what the cap is: {complaint}");
 
-        // Not a list of strings at all.
-        let CallKind::Rejected(complaint) =
-            chain(r#"{"id":"PalletTown:5,6:Warp","then":"PalletTown:Mom","summary":"a bare string"}"#)
-        else {
-            panic!("`then` must be a list");
-        };
-        assert!(complaint.contains("list of further ids"), "{complaint}");
+        // A wait is a whole answer.
+        assert!(chain(&["PalletTown:Mom", "wait*10"]).iter().all(|kind| matches!(kind, CallKind::Rejected(_))));
 
-        let CallKind::Terminal(Terminal::ChooseAction { resume_after_battle, .. }) = chain(
-            r#"{"id":"PalletTown:5,6:Warp","resume_after_battle":false,"summary":"stop and think"}"#,
-        ) else {
-            panic!("the flag is legal on its own");
-        };
-        assert!(!resume_after_battle, "and `false` is what turns it off");
+        // The single-question turns take one call.
+        let reply = [call(CHOOSE_ACTION, r#"{"id":"forget:0"}"#), call(CHOOSE_ACTION, r#"{"id":"forget:1"}"#)];
+        assert!(classify_reply(DecisionKind::ForgetMove, &reply, &[]).iter().all(|kind| matches!(kind, CallKind::Rejected(_))));
     }
 
-    /// A terminal call from another kind is answered with the tool that would have worked.
+    /// An older conversation's tool is answered with the one that replaced it.
     #[test]
-    fn a_terminal_tool_from_the_wrong_kind_is_rejected_with_the_right_one() {
+    fn a_tool_from_an_older_conversation_is_rejected_with_the_one_that_replaced_it() {
         let CallKind::Rejected(complaint) =
-            classify(DecisionKind::Battle, &call("choose_action", r#"{"id":"x"}"#), &[])
+            classify(DecisionKind::Battle, &call("choose_battle_action", r#"{"id":"run"}"#), &[])
         else {
-            panic!("choose_action must not end a battle turn");
+            panic!("choose_battle_action is gone");
         };
-        assert!(complaint.contains("choose_battle_action"), "{complaint}");
+        assert!(complaint.contains(CHOOSE_ACTION), "{complaint}");
+
+        let CallKind::Rejected(complaint) =
+            classify(DecisionKind::Battle, &call("use_field_move", r#"{"move":"dig"}"#), &[])
+        else {
+            panic!("a field move does not end a battle turn");
+        };
+        assert!(complaint.contains(CHOOSE_ACTION), "{complaint}");
 
         let CallKind::Rejected(complaint) = classify(DecisionKind::Overworld, &call("teleport", "{}"), &[]) else {
             panic!("an invented tool is rejected");
@@ -3231,26 +3182,30 @@ mod tests {
 
     #[test]
     fn arguments_are_parsed_or_complained_about() {
+        let chose = |kind, id: &str| classify(kind, &call(CHOOSE_ACTION, &json!({ "id": id }).to_string()), &[]);
         assert!(matches!(
-            classify(DecisionKind::Overworld, &call("choose_action", r#"{"id":"PalletTown:5,6:Warp"}"#), &[]),
+            chose(DecisionKind::Overworld, "PalletTown:5,6:Warp"),
             CallKind::Terminal(Terminal::ChooseAction { ref id, .. }) if id == "PalletTown:5,6:Warp",
         ));
+        assert!(matches!(chose(DecisionKind::Battle, "wait*25"), CallKind::Terminal(Terminal::Wait { ticks: 25 })));
         assert!(matches!(
-            classify(DecisionKind::Battle, &call("wait", r#"{"ticks":25}"#), &[]),
-            CallKind::Terminal(Terminal::Wait { ticks: 25 }),
+            chose(DecisionKind::Battle, "wait"),
+            CallKind::Terminal(Terminal::Wait { ticks: DEFAULT_WAIT_TICKS }),
         ));
         // A model asking to sit out ten minutes of game time is stalling its own run.
         assert!(matches!(
-            classify(DecisionKind::Battle, &call("wait", r#"{"ticks":99999}"#), &[]),
+            chose(DecisionKind::Battle, "wait*99999"),
             CallKind::Terminal(Terminal::Wait { ticks: MAX_WAIT_TICKS }),
         ));
-        assert!(matches!(classify(DecisionKind::Overworld, &call("wait", "{}"), &[]), CallKind::Rejected(_)));
+        assert!(matches!(chose(DecisionKind::Overworld, "wait*soon"), CallKind::Rejected(_)));
+        // Only a mart order takes a count.
+        let CallKind::Rejected(complaint) = chose(DecisionKind::Overworld, "PalletTown:5,6:Warp*3") else {
+            panic!("a walk has no count");
+        };
+        assert!(complaint.contains("*N"), "{complaint}");
+        assert!(matches!(chose(DecisionKind::Overworld, ""), CallKind::Rejected(_)));
         assert!(matches!(
-            classify(DecisionKind::Overworld, &call("choose_action", r#"{"id":""}"#), &[]),
-            CallKind::Rejected(_),
-        ));
-        assert!(matches!(
-            classify(DecisionKind::Overworld, &call("choose_action", "not json at all"), &[]),
+            classify(DecisionKind::Overworld, &call(CHOOSE_ACTION, "not json at all"), &[]),
             CallKind::Rejected(_),
         ));
         // A zero-parameter read tool is routinely called with empty arguments rather than `{}`.
@@ -3293,7 +3248,7 @@ mod tests {
             "ViridianPokecenter:3,7:Warp".to_string(),
             "ViridianPokecenter:Nurse".to_string(),
         ];
-        let chose = |id: &str| call("choose_action", &format!(r#"{{"id":"{id}","summary":"s"}}"#));
+        let chose = |id: &str| call(CHOOSE_ACTION, &format!(r#"{{"id":"{id}","summary":"s"}}"#));
 
         assert!(
             matches!(
@@ -3325,32 +3280,36 @@ mod tests {
     }
 
     #[test]
-    fn press_buttons_parses_a_sequence_and_refuses_what_is_not_one() {
-        let press = |arguments: &str| call("press_buttons", arguments);
-        let CallKind::Terminal(Terminal::PressButtons { buttons }) = classify(
-            DecisionKind::Stuck,
-            &press(r#"{"buttons":["b","b","start"],"why":"a menu nothing closes"}"#),
-            &[],
-        ) else {
+    fn a_press_parses_a_sequence_on_the_stuck_turn_and_nowhere_else() {
+        let press = |id: &str| call(CHOOSE_ACTION, &json!({ "id": id }).to_string());
+        let CallKind::Terminal(Terminal::PressButtons { buttons }) =
+            classify(DecisionKind::Stuck, &press("press:b,b,start"), &[])
+        else {
             panic!("a list of real buttons is a decision");
         };
         assert_eq!(buttons, [JoypadButton::B, JoypadButton::B, JoypadButton::Start]);
 
-        for bad in [r#"{"buttons":["b","x"],"why":"w"}"#, r#"{"buttons":[],"why":"w"}"#, r#"{"why":"w"}"#] {
+        for bad in ["press:b,x", "press:", "b,a", "Route1:Grass"] {
             assert!(
                 matches!(classify(DecisionKind::Stuck, &press(bad), &[]), CallKind::Rejected(_)),
                 "{bad} should have been rejected",
             );
         }
         // The agent's queue capacity is the cap, so a runaway list is trimmed, not half-delivered.
-        let many = format!(r#"{{"buttons":{},"why":"a menu nothing closes"}}"#,
-            serde_json::to_string(&vec!["a"; MANUAL_INPUT_CAPACITY * 2]).unwrap());
-        let CallKind::Terminal(Terminal::PressButtons { buttons }) =
-            classify(DecisionKind::Stuck, &press(&many), &[])
+        let many = format!("press:{}", vec!["a"; MANUAL_INPUT_CAPACITY * 2].join(","));
+        let CallKind::Terminal(Terminal::PressButtons { buttons }) = classify(DecisionKind::Stuck, &press(&many), &[])
         else {
             panic!("an over-long list is still a decision");
         };
         assert_eq!(buttons.len(), MANUAL_INPUT_CAPACITY);
+
+        // A raw press never appears on a turn with a menu.
+        for kind in [DecisionKind::Overworld, DecisionKind::Battle, DecisionKind::MartPurchase] {
+            let CallKind::Rejected(complaint) = classify(kind, &press("press:a"), &[]) else {
+                panic!("{kind:?} must refuse a press");
+            };
+            assert!(complaint.contains("the agent presses the buttons"), "{complaint}");
+        }
     }
 
     /// `screenshot` is a read to the turn contract, but the worker answers it.
@@ -3422,83 +3381,50 @@ mod tests {
         }
     }
 
-    /// In the menu-prompt tools, omitting the argument is a real answer, not a malformed call.
+    /// The menu prompts' ids: a mart order list, the forget rows and Mimic's.
     #[test]
-    fn omitting_the_argument_is_an_answer_for_the_three_menu_prompts() {
-        let parse = |kind, name, arguments: &str| classify(kind, &call(name, arguments), &[]);
-
-        assert!(matches!(
-            parse(DecisionKind::Nickname, "set_nickname", "{}"),
-            CallKind::Terminal(Terminal::SetNickname { name: None }),
-        ));
-        // A blank `name` and an absent one both keep the default, as the naming screen does.
-        assert!(matches!(
-            parse(DecisionKind::Nickname, "set_nickname", r#"{"name":"   "}"#),
-            CallKind::Terminal(Terminal::SetNickname { name: None }),
-        ));
-        let CallKind::Terminal(Terminal::SetNickname { name: Some(name) }) =
-            parse(DecisionKind::Nickname, "set_nickname", r#"{"name":"ABCDEFGHIJKLMNOP"}"#)
-        else {
-            panic!("a name is a name");
+    fn the_menu_prompts_answer_with_their_own_rows() {
+        let reply = |kind, menu: &[String], ids: &[&str]| -> Vec<CallKind> {
+            let calls: Vec<ToolCall> =
+                ids.iter().map(|id| call(CHOOSE_ACTION, &json!({ "id": id }).to_string())).collect();
+            classify_reply(kind, &calls, menu)
         };
-        assert_eq!(name.chars().count(), MAX_NICKNAME, "the buffer is {MAX_NICKNAME} characters");
+        let shop: Vec<String> = ["buy:Potion", "buy:PokeBall", "buy:Antidote", "leave"].map(String::from).to_vec();
+        let mart = |ids: &[&str]| reply(DecisionKind::MartPurchase, &shop, ids);
 
-        assert!(matches!(
-            parse(DecisionKind::MartPurchase, "buy_item", "{}"),
-            CallKind::Terminal(Terminal::BuyItem { item: None, .. }),
-        ));
-        assert_eq!(
-            match parse(DecisionKind::MartPurchase, "buy_item", r#"{"item":"Potion","quantity":4}"#) {
-                CallKind::Terminal(Terminal::BuyItem { item, .. }) => item,
-                _ => panic!("a stocked item is a purchase"),
-            },
-            Some(BagItem::new(ItemId::Potion, 4)),
-        );
-        // An omitted quantity is one: the mart silently refuses zero.
-        assert!(matches!(
-            parse(DecisionKind::MartPurchase, "buy_item", r#"{"item":"Potion"}"#),
-            CallKind::Terminal(Terminal::BuyItem { item: Some(BagItem { quantity: 1, .. }), .. }),
-        ));
+        assert!(matches!(&mart(&["leave"])[0], CallKind::Terminal(Terminal::BuyItem { item: None, then }) if then.is_empty()));
+        // An omitted count is one: the mart silently refuses zero.
+        assert!(matches!(&mart(&["buy:Potion"])[0],
+            CallKind::Terminal(Terminal::BuyItem { item: Some(BagItem { id: ItemId::Potion, quantity: 1 }), .. })));
+        let classified = mart(&["buy:Potion*4", "buy:PokeBall*10", "leave"]);
+        let CallKind::Terminal(Terminal::BuyItem { item, then }) = &classified[0] else {
+            panic!("an order list is a purchase: {:?}", classified.iter().map(CallKind::label).collect::<Vec<_>>());
+        };
+        assert_eq!(*item, Some(BagItem::new(ItemId::Potion, 4)));
+        assert_eq!(*then, vec![BagItem::new(ItemId::PokeBall, 10)], "a trailing `leave` is what happens anyway");
+        assert!(matches!(&mart(&["buy:Potion*500"])[0],
+            CallKind::Terminal(Terminal::BuyItem { item: Some(BagItem { quantity: 99, .. }), .. })));
+        assert!(mart(&["buy:Potion", "buy:Nonsense"]).iter().all(|kind| matches!(kind, CallKind::Rejected(_))),
+                "a name in the tail is checked exactly as the head is");
+        assert!(mart(&["leave", "buy:Potion"]).iter().all(|kind| matches!(kind, CallKind::Rejected(_))));
+        assert!(mart(&["buy:Potion"; MAX_CHAINED_ACTIONS + 1]).iter().all(|kind| matches!(kind, CallKind::Rejected(_))),
+                "over-length is a rejection, not a truncation");
 
-        // A chain is parsed whole before any of it is spent.
-        assert_eq!(
-            match parse(DecisionKind::MartPurchase, "buy_item",
-                        r#"{"item":"Potion","then":[{"item":"PokeBall","quantity":10}]}"#) {
-                CallKind::Terminal(Terminal::BuyItem { then, .. }) => then,
-                _ => panic!("a chained order is a purchase"),
-            },
-            vec![BagItem::new(ItemId::PokeBall, 10)],
-        );
-        assert!(matches!(
-            parse(DecisionKind::MartPurchase, "buy_item",
-                  r#"{"item":"Potion","then":[{"item":"Nonsense"}]}"#),
-            CallKind::Rejected(_),
-        ), "a name in the tail is checked exactly as the head is");
-        assert!(matches!(
-            parse(DecisionKind::MartPurchase, "buy_item",
-                  r#"{"item":"Potion","then":[{"item":"Potion"},{"item":"Potion"},{"item":"Potion"},{"item":"Potion"}]}"#),
-            CallKind::Rejected(_),
-        ), "over-length is a rejection, not a truncation");
+        let forget: Vec<String> = ["forget:0", "forget:1", "forget:2", "forget:3", "keep"].map(String::from).to_vec();
+        assert!(matches!(reply(DecisionKind::ForgetMove, &forget, &["keep"])[0],
+            CallKind::Terminal(Terminal::ForgetMove { slot: None })));
+        assert!(matches!(reply(DecisionKind::ForgetMove, &forget, &["forget:2"])[0],
+            CallKind::Terminal(Terminal::ForgetMove { slot: Some(2) })));
+        assert!(matches!(reply(DecisionKind::ForgetMove, &forget, &["forget:7"])[0], CallKind::Rejected(_)),
+                "a Pokémon has four move slots, and a cursor sent to a fifth never arrives");
+        assert!(matches!(reply(DecisionKind::ForgetMove, &forget, &["2"])[0], CallKind::Rejected(_)));
 
-        assert!(matches!(
-            parse(DecisionKind::ForgetMove, "forget_move", "{}"),
-            CallKind::Terminal(Terminal::ForgetMove { slot: None }),
-        ));
-        assert!(matches!(
-            parse(DecisionKind::ForgetMove, "forget_move", r#"{"slot":2}"#),
-            CallKind::Terminal(Terminal::ForgetMove { slot: Some(2) }),
-        ));
-        assert!(
-            matches!(parse(DecisionKind::ForgetMove, "forget_move", r#"{"slot":7}"#), CallKind::Rejected(_)),
-            "a Pokémon has four move slots, and a cursor sent to a fifth never arrives",
-        );
-        assert!(matches!(
-            parse(DecisionKind::MimicMove, "mimic_move", r#"{"slot":1}"#),
-            CallKind::Terminal(Terminal::MimicMove { slot: 1 }),
-        ));
-        assert!(matches!(parse(DecisionKind::MimicMove, "mimic_move", "{}"), CallKind::Rejected(_)),
+        let mimic: Vec<String> = ["mimic:0", "mimic:1"].map(String::from).to_vec();
+        assert!(matches!(reply(DecisionKind::MimicMove, &mimic, &["mimic:1"])[0],
+            CallKind::Terminal(Terminal::MimicMove { slot: 1 })));
+        assert!(matches!(reply(DecisionKind::MimicMove, &mimic, &["keep"])[0], CallKind::Rejected(_)),
                 "Mimic's menu has no B, so there is nothing to decline");
-        assert!(matches!(parse(DecisionKind::MimicMove, "mimic_move", r#"{"slot":4}"#), CallKind::Rejected(_)));
+        assert!(matches!(reply(DecisionKind::MimicMove, &[], &["mimic:4"])[0], CallKind::Rejected(_)));
     }
 
     /// Resolution against a real game, where the party and bag checks live.
@@ -3597,7 +3523,7 @@ mod tests {
 
         // A ball is the same `ItemUseNotTime`, and the refusal names the alternative.
         let ball = complaint(&holding(ItemId::PokeBall), ItemId::PokeBall);
-        assert!(ball.contains("choose_battle_action"), "{ball}");
+        assert!(ball.contains("`item:` row"), "{ball}");
 
         // A machine never reaches the table (`ItemUseTMHM`), so it is pointed at `teach`.
         let machine = complaint(&holding(ItemId::Hm01Cut), ItemId::Hm01Cut);
@@ -3793,20 +3719,11 @@ mod tests {
             "no Strength, no boulder rows");
     }
 
-    /// The naming screen asks for a name, and takes only names the cartridge can write.
+    /// The naming turn's id is the name, and takes only names the cartridge can write.
     #[test]
-    fn a_nickname_is_asked_for_and_has_to_be_one_the_game_can_write() {
-        let spec = for_kind(DecisionKind::Nickname);
-        let described = spec.iter().find(|tool| tool.function.name == "set_nickname")
-            .map(|tool| tool.function.description.clone())
-            .expect("the naming turn offers set_nickname");
-        assert!(described.contains("nickname"), "{described}");
-        assert!(!described.contains("ordinary answer"),
-                "the tool must not talk the model out of the one thing this turn is for: {described}");
-
-        let parse = |arguments: &str| classify(DecisionKind::Nickname, &call("set_nickname", arguments), &[]);
-        let named = |name: &str| parse(&json!({"name": name}).to_string());
-        assert!(matches!(named("Rocky"), CallKind::Terminal(Terminal::SetNickname { name: Some(_) })));
+    fn a_nickname_is_the_id_and_has_to_be_one_the_game_can_write() {
+        let named = |name: &str| classify(DecisionKind::Nickname, &call(CHOOSE_ACTION, &json!({ "id": name }).to_string()), &[]);
+        assert!(matches!(named("Rocky"), CallKind::Terminal(Terminal::SetNickname { name: Some(ref name) }) if name == "Rocky"));
         // `/` is `$F3` and a space `$7F`, so the check asks the charmap, not "is it alphanumeric".
         assert!(matches!(named("MT/MOON"), CallKind::Terminal(Terminal::SetNickname { name: Some(_) })));
         assert!(
@@ -3814,12 +3731,14 @@ mod tests {
             "a letter with no byte in the charmap must not reach the buffer",
         );
         assert!(matches!(named("🔥"), CallKind::Rejected(_)));
-        // An omitted or blank name is the decline, as the naming screen reads an empty buffer.
-        assert!(matches!(
-            parse("{}"),
-            CallKind::Terminal(Terminal::SetNickname { name: None }),
-        ));
-        assert!(matches!(named("   "), CallKind::Terminal(Terminal::SetNickname { name: None })));
+        let CallKind::Rejected(complaint) = named("ABCDEFGHIJKLMNOP") else { panic!("too long is refused, not cut") };
+        assert!(complaint.contains(&MAX_NICKNAME.to_string()), "{complaint}");
+        // `NONE` in any case keeps the species name, as the naming screen reads an empty buffer.
+        for none in ["NONE", "none", "None"] {
+            assert!(matches!(named(none), CallKind::Terminal(Terminal::SetNickname { name: None })), "{none}");
+        }
+        // `wait` is still a wait, a `*` being no letter a name can hold.
+        assert!(matches!(named("wait*10"), CallKind::Terminal(Terminal::Wait { ticks: 10 })));
     }
 
     /// A tree nobody can cut is not an action.

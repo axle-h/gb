@@ -251,6 +251,8 @@ function describeTool(entry: Extract<Entry, { type: 'tool' }>): string {
       return `Wrote a battle script (${lines} line${lines === 1 ? '' : 's'})`;
     }
     case 'choose_action':
+      return describeAction(text('id'));
+    // The tools below are an older conversation's, which `/api/history` still replays.
     case 'choose_battle_action': {
       const id = text('id');
       return id ? `Chose ${id}` : 'Chose an action';
@@ -289,6 +291,21 @@ function describeTool(entry: Extract<Entry, { type: 'tool' }>): string {
       return rest ? `${entry.name} ${rest}` : entry.name;
     }
   }
+}
+
+/** A `choose_action` id as a sentence: its prefix says what kind of action it is. */
+function describeAction(id: string | undefined): string {
+  if (!id) return 'Chose an action';
+  const [base, count] = id.split('*');
+  if (base === 'wait') return count ? `Waited ${count} ticks` : 'Waited';
+  if (base === 'leave') return 'Bought nothing';
+  if (base === 'keep') return 'Declined the new move';
+  if (base === 'take_over') return 'Took this battle over from its script';
+  if (base.startsWith('press:')) return `Pressed ${base.slice('press:'.length).split(',').join(', ')}`;
+  if (base.startsWith('buy:')) return `Bought ${base.slice('buy:'.length)}${count ? ` ×${count}` : ''}`;
+  if (base.startsWith('forget:')) return `Forgot the move in slot ${base.slice('forget:'.length)}`;
+  if (base.startsWith('mimic:')) return `Copied the enemy's move in row ${base.slice('mimic:'.length)}`;
+  return `Chose ${id}`;
 }
 
 /** The model's arguments, or an empty object — a call whose JSON will not parse is one to show raw. */

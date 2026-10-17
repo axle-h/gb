@@ -72,9 +72,11 @@ How the interface works:
   reorder between turns.
 - The game keeps running while you think. A menu action can therefore disappear before your answer \
   lands — you will be told when that happens, and shown the current menu, so simply pick again.
-- **One decision can be several actions.** Chain the steps you already know onto `choose_action` \
-  with `then` — talk to the Nurse, then take the door out — and set `resume_after_battle` on a walk \
-  a wild encounter might interrupt. Both are pure saving; their descriptions say what ends a chain.
+- **One decision can be several actions.** Every turn ends with `choose_action` and an id from its \
+  menu, and on an overworld or mart turn several `choose_action` calls in one reply are taken in \
+  order: talk to the Nurse, then take the door out. A walk a wild battle interrupts is taken up \
+  again once the battle is over, unless a party member fainted in it. Both are pure saving; the \
+  tool's description says what ends a chain.
 - Read tools do not end the turn, and **most turns should need none of them**: the situation \
   already carries the party, the money, the badges, what is on screen and the menu, and a read \
   whose answer you are already holding costs a whole round trip for nothing. Ask for the ones you \
@@ -299,14 +301,41 @@ fn overworld_script_line(
 
 /// The line that ends every turn request, which is why the loop can rely on one terminal call.
 pub fn contract(kind: DecisionKind) -> String {
+    use crate::llm::tools::{CHOOSE_ACTION, MAX_CHAINED_ACTIONS};
+    let ends = match kind {
+        DecisionKind::Overworld => format!(
+            "End this turn with `{CHOOSE_ACTION}` and an id from the menu, or with `use_field_move`. \
+             Up to {MAX_CHAINED_ACTIONS} `{CHOOSE_ACTION}` calls in one reply are taken in order, so \
+             a step you already know can follow this one."
+        ),
+        DecisionKind::MartPurchase => format!(
+            "End this turn with `{CHOOSE_ACTION}`: one call for each `buy:` order, up to \
+             {MAX_CHAINED_ACTIONS}, in the order to buy them, or `leave`."
+        ),
+        DecisionKind::Battle => format!(
+            "End this turn with one `{CHOOSE_ACTION}` and an id from the menu, and a second for \
+             `{}` only where the menu offers it.",
+            crate::llm::tools::TAKE_OVER,
+        ),
+        DecisionKind::Nickname => format!(
+            "End this turn with one `{CHOOSE_ACTION}` whose id is the nickname, or `NONE` to keep \
+             the species name."
+        ),
+        DecisionKind::Stuck => format!(
+            "End this turn with one `{CHOOSE_ACTION}`: `press:` and the buttons, or `wait*N`."
+        ),
+        DecisionKind::ForgetMove | DecisionKind::MimicMove => {
+            format!("End this turn with one `{CHOOSE_ACTION}` and an id from the menu.")
+        }
+    };
     format!(
-        "End this turn by calling exactly one of: {}. Every one of them takes a `summary`: one or \
-         two sentences saying what you are doing and why. Your thinking is not kept, so that \
-         sentence is the only thing you will still have of this turn when you take the next one.\n\
+        "{ends} The call that ends the turn takes a `summary`: one or two sentences saying what you \
+         are doing and why. Your thinking is not kept, so that sentence is the only thing you will \
+         still have of this turn when you take the next one.\n\
          These do not end the turn ({}) — call as many as you need, in one message, then finish \
-         with a terminal call.",
-        terminal_names(kind).join(", "),
+         with {}.",
         crate::llm::tools::non_terminal_names(kind).join(", "),
+        terminal_names(kind).iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(" or "),
     )
 }
 
@@ -484,7 +513,7 @@ pub fn situation(
              What usually clears it is one button: `A` to advance a text box or confirm a prompt, \
              `B` to back out of a menu, a direction to step off a tile it cannot leave. Look at the \
              screen if you are unsure — `screenshot` is worth it here, because the state description \
-             is exactly what has gone wrong. If you think the game genuinely needs a moment, `wait`.\n\n",
+             is exactly what has gone wrong. If you think the game genuinely needs a moment, `wait*N`.\n\n",
             stuck_for.as_secs(),
         )),
     }
@@ -656,10 +685,10 @@ pub fn situation(
                     opening it puts the second in another bin. Two things are worth knowing before you \
                     start. Checking the wrong bin for the *second* switch resets both locks and moves \
                     the first switch somewhere new, so every bin you had eliminated goes back into the \
-                    pool and a careful sweep can undo itself. And `choose_action` takes {} more ids in \
-                    `then`, all carried out without asking you again, so a sweep is {} bins per request \
-                    rather than one.\n",
-                crate::llm::tools::MAX_CHAINED_ACTIONS - 1,
+                    pool and a careful sweep can undo itself. And one reply takes up to {} \
+                    `choose_action` calls, all carried out without asking you again, so a sweep is {} \
+                    bins per request rather than one.\n",
+                crate::llm::tools::MAX_CHAINED_ACTIONS,
                 crate::llm::tools::MAX_CHAINED_ACTIONS,
             ));
         }
@@ -789,33 +818,44 @@ pub fn situation(
         DecisionKind::Stuck => "\n### What you can do\n",
     });
     if menu.is_empty() {
-        out.push_str(match kind {
+        out.push_str(&match kind {
             DecisionKind::Stuck => {
-                "(no menu — the agent is not offering actions, which is why you are being asked. \
-                 `press_buttons`, or `wait`.)\n"
+                "(no menu — the agent is not offering actions, which is why you are being asked.)\n"
+                    .to_string()
             }
-            DecisionKind::Nickname => {
-                "(there is no menu — call `set_nickname` with the name you have chosen. Omitting \
-                 `name` keeps the species name, and is the answer only if nothing comes to mind.)\n"
+            DecisionKind::Nickname => format!(
+                "(no rows: the id you send is the nickname, at most {} letters, digits, spaces and \
+                 `.,:;'-?!()[]/`. `NONE`, or the species name, keeps the species name, and is the \
+                 answer only if nothing comes to mind.)\n",
+                crate::llm::tools::MAX_NICKNAME,
+            ),
+            DecisionKind::MimicMove => {
+                "(the enemy's moves could not be read. Choose `mimic:0`.)\n".to_string()
             }
             DecisionKind::MartPurchase => {
-                "(the shop's stock could not be read. Call `buy_item` with no `item` to leave.)\n"
+                "(the shop's stock could not be read. Send `buy:` and the item, or `leave`.)\n".to_string()
             }
-            DecisionKind::ForgetMove => {
-                "(the move list could not be read. Call `forget_move` with no `slot` to decline.)\n"
-            }
-            DecisionKind::MimicMove => {
-                "(the enemy's moves could not be read. Call `mimic_move` with `slot` 0.)\n"
-            }
-            _ => {
-                "(nothing — the agent can reach no action from here. `wait` and look again; if it \
-                 stays empty you are boxed in and the run needs a person.)\n"
-            }
+            _ => "(nothing — the agent can reach no action from here. `wait*N` and look again; if \
+                  it stays empty you are boxed in and the run needs a person.)\n"
+                .to_string(),
         });
     }
     for item in menu {
         out.push_str(&format!("- `{}` — {}\n", item.id, item.description));
     }
+    if kind == DecisionKind::Stuck {
+        out.push_str(&format!(
+            "- `press:<buttons>` — press these in order, then hand control back to the agent: \
+             comma-separated, from up, down, left, right, a, b, start and select, at most {}, as \
+             `press:b,a`. B backs out of most menus and closes most boxes; A advances text\n",
+            crate::pokemon::agent::MANUAL_INPUT_CAPACITY,
+        ));
+    }
+    out.push_str(&format!(
+        "- `wait*N` — let the game run N ticks of 20 ms (default {}, at most {}), then decide again\n",
+        crate::llm::tools::DEFAULT_WAIT_TICKS,
+        crate::llm::tools::MAX_WAIT_TICKS,
+    ));
 
     out.push_str(&format!("\n{}\n", contract(kind)));
     out
@@ -886,7 +926,7 @@ fn summarise_events(events: &[String]) -> Vec<String> {
 
 /// What the worker sends when a tool batch was answered and the turn has one request left.
 pub const OUT_OF_STEPS: &str =
-    "You have used every read this turn. Call a terminal tool now to end the turn.";
+    "You have used every read this turn. Call `choose_action` now to end the turn.";
 
 pub fn nudge(kind: DecisionKind) -> String {
     format!(
@@ -1388,7 +1428,7 @@ mod tests {
 
         assert!(turn.contains("resets both locks"), "{turn}");
         assert!(turn.contains("moves the first switch"), "the eliminations go back in the pool: {turn}");
-        assert!(turn.contains("`then`"), "and what a sweep can cost instead: {turn}");
+        assert!(turn.contains("`choose_action` calls"), "and what a sweep can cost instead: {turn}");
 
         // The turn reads `hidden_objects_for` alone, so the puzzle's hidden state cannot move it.
         let mut solved = state.clone();
@@ -1590,7 +1630,7 @@ mod tests {
             "not the one you remember",
             "Read what people say to you",
             "put it on the plan straight away",
-            // `then` and `resume_after_battle` save only when used, so the prompt points at them.
+            // A chain saves only when used, so the prompt points at it.
             "One decision can be several actions",
         ] {
             assert!(SYSTEM_PROMPT.contains(phrase), "the system prompt no longer says {phrase:?}");
@@ -1697,7 +1737,7 @@ mod tests {
         let state = fixture.game_state();
         let mut snapshot = ApiSnapshot::read(&fixture.api());
         snapshot.mart_stock = vec![(ItemId::PokeBall, Some(200)), (ItemId::Potion, Some(300))];
-        for row in crate::llm::tools::mart_menu(&snapshot, &state) {
+        for row in crate::llm::tools::mart_menu(&snapshot, &state).iter().filter(|row| row.id.starts_with("buy:")) {
             assert!(row.description.contains("you have"),
                     "every row says the holding, zero included: {}", row.description);
         }

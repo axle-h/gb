@@ -42,7 +42,7 @@ can break in silence.
   goes back to reading once the menu is off the screen, and only on a tick the policy did not answer:
   the scripted policies answer at once, and their timing is the golden replay.
 - A wild battle lands a hunt rather than stopping it, in both agents (`is_paced_for_encounters`, and a
-  bite for a cast): reported as a stop, `resume_after_battle` hunted on through five battles unasked.
+  bite for a cast): reported as a stop, the walk was taken up again through five battles unasked.
 - A catch's battle ends when the naming screen closes, not when `wIsInBattle` clears, so
   `BattleEnded` and the reader's last box are emitted there.
 

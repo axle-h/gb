@@ -307,7 +307,7 @@ pub fn to_the_rainbow_badge() -> Vec<Step> {
         AtPc(Pc::Deposit("Magikarp")), AtPc(Pc::Deposit("Magikarp")), AtPc(Pc::ChangeBox(2)),
         GoTo("CeladonCity"), Explore { maps: &["CeladonCity"], patience: 200 },
         GoTo("CeladonMart1F"), Clear(&[]),
-        // One `buy_item` takes four kinds at most, and the clerk says goodbye after it.
+        // One reply takes four orders at most, and the clerk says goodbye after it.
         GoTo("CeladonMart2F"), Tidy, Talk("Clerk2"),
         Buy(&[("Tm32DoubleTeam", 1), ("Tm33Reflect", 1), ("Tm02RazorWind", 1), ("Tm07HornDrill", 1)]),
         Tidy, Talk("Clerk2"),
