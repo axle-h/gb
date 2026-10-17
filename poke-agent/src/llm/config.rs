@@ -2,11 +2,21 @@
 
 use crate::llm::protocol::ReasoningBudget;
 
+/// `GB_PROVIDER`: which wire the turn loop talks, and so which key and base URL it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    /// Chat completions, against OpenAI or anything that speaks its dialect.
+    OpenAi,
+    /// The Anthropic Messages API.
+    Anthropic,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmConfig {
-    /// `OPENAI_BASE_URL`: any OpenAI-compatible endpoint, the public one by default.
+    pub provider: Provider,
+    /// `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL`, the provider's public endpoint by default.
     pub base_url: String,
-    /// `OPENAI_API_KEY`, required.
+    /// `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, required.
     pub api_key: String,
     /// `GB_MODEL`, required.
     pub model: String,
@@ -24,10 +34,11 @@ pub struct LlmConfig {
     pub request_timeout: std::time::Duration,
     /// `GB_MAX_TOKENS`: a ceiling on one completion, or `None` for the endpoint's default.
     pub max_tokens: Option<u32>,
-    /// `GB_REASONING_EFFORT`, sent as `reasoning_effort` when set, in the endpoint's vocabulary.
+    /// `GB_REASONING_EFFORT`, sent as `reasoning_effort` (or Anthropic's `output_config.effort`)
+    /// when set, in the endpoint's vocabulary.
     pub reasoning_effort: Option<String>,
     /// `GB_REASONING_MAX_TOKENS`, sent as OpenRouter's `reasoning.max_tokens`, and twice it is
-    /// where the client stops reading a model that ignores it.
+    /// where the client stops reading a model that ignores it; Anthropic's `budget_tokens`.
     pub reasoning_budget: Option<ReasoningBudget>,
     /// `GB_STUCK_TIMEOUT_SECS`: emulated time without any decision point before the watchdog asks
     /// for a nudge; `None` when set to `0`, which turns it off.
@@ -35,6 +46,7 @@ pub struct LlmConfig {
 }
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+pub const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 pub const DEFAULT_CONTEXT_LIMIT: u64 = 128_000;
 pub const DEFAULT_COMPACT_ABOVE: f64 = 0.85;
 /// Above this ceiling the remaining window cannot hold the compaction summary, and the run
@@ -60,6 +72,16 @@ impl LlmConfig {
             }
         };
 
+        let provider = match env("GB_PROVIDER").map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("") | Some("openai") => Provider::OpenAi,
+            Some("anthropic") => Provider::Anthropic,
+            Some(other) => return Err(format!("`GB_PROVIDER={other}` is neither openai nor anthropic")),
+        };
+        let (key, url, default_url) = match provider {
+            Provider::OpenAi => ("OPENAI_API_KEY", "OPENAI_BASE_URL", DEFAULT_BASE_URL),
+            Provider::Anthropic => ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", DEFAULT_ANTHROPIC_BASE_URL),
+        };
+
         let reasoning_effort =
             env("GB_REASONING_EFFORT").map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
         let reasoning_budget =
@@ -70,12 +92,13 @@ impl LlmConfig {
         }
 
         Ok(Self {
+            provider,
             // A trailing slash here and the request path would double it.
-            base_url: env("OPENAI_BASE_URL")
+            base_url: env(url)
                 .map(|url| url.trim().trim_end_matches('/').to_string())
                 .filter(|url| !url.is_empty())
-                .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
-            api_key: required("OPENAI_API_KEY")?,
+                .unwrap_or_else(|| default_url.to_string()),
+            api_key: required(key)?,
             model: required("GB_MODEL")?,
             context_limit: number(env, "GB_CONTEXT_LIMIT", DEFAULT_CONTEXT_LIMIT)?,
             // Rejected, not clamped: `GB_COMPACT_ABOVE=95` meant 0.95, and 0.85 would hide it.
@@ -113,6 +136,10 @@ impl LlmConfig {
 
     pub fn completions_url(&self) -> String {
         format!("{}/chat/completions", self.base_url)
+    }
+
+    pub fn messages_url(&self) -> String {
+        format!("{}/v1/messages", self.base_url)
     }
 }
 
@@ -162,6 +189,7 @@ mod tests {
     #[test]
     fn the_two_required_variables_are_the_only_two_required() {
         let config = LlmConfig::from_lookup(&lookup(MINIMAL)).expect("the defaults cover the rest");
+        assert_eq!(config.provider, Provider::OpenAi);
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
         assert_eq!(config.completions_url(), "https://api.openai.com/v1/chat/completions");
         assert_eq!(config.context_limit, DEFAULT_CONTEXT_LIMIT);
@@ -171,6 +199,29 @@ mod tests {
         assert_eq!(config.reasoning_effort, None, "the key is omitted unless it is asked for");
         assert_eq!(config.max_tool_steps, DEFAULT_MAX_TOOL_STEPS);
         assert_eq!(config.stuck_timeout, Some(std::time::Duration::from_secs(DEFAULT_STUCK_TIMEOUT_SECS)));
+    }
+
+    #[test]
+    fn the_anthropic_provider_reads_its_own_key_and_endpoint() {
+        let pairs = [("GB_PROVIDER", "Anthropic"), ("ANTHROPIC_API_KEY", "sk-ant-test"), ("GB_MODEL", "claude-haiku-5-5")];
+        let config = LlmConfig::from_lookup(&lookup(&pairs)).expect("valid");
+        assert_eq!(config.provider, Provider::Anthropic);
+        assert_eq!(config.api_key, "sk-ant-test");
+        assert_eq!(config.messages_url(), "https://api.anthropic.com/v1/messages");
+
+        // The other provider's key is not a substitute.
+        let pairs = [("GB_PROVIDER", "anthropic"), ("OPENAI_API_KEY", "sk-test"), ("GB_MODEL", "claude-haiku-5-5")];
+        let failure = LlmConfig::from_lookup(&lookup(&pairs)).expect_err("no Anthropic key");
+        assert!(failure.contains("ANTHROPIC_API_KEY"), "{failure}");
+
+        let pairs = [("GB_PROVIDER", "anthropic"), ("ANTHROPIC_API_KEY", "k"), ("GB_MODEL", "m"),
+                     ("ANTHROPIC_BASE_URL", "http://localhost:9000/")];
+        assert_eq!(LlmConfig::from_lookup(&lookup(&pairs)).expect("valid").messages_url(),
+                   "http://localhost:9000/v1/messages");
+
+        let pairs = [("GB_PROVIDER", "gemini"), ("OPENAI_API_KEY", "k"), ("GB_MODEL", "m")];
+        let failure = LlmConfig::from_lookup(&lookup(&pairs)).expect_err("unknown provider");
+        assert!(failure.contains("gemini"), "{failure}");
     }
 
     #[test]

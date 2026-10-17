@@ -324,6 +324,7 @@ mod tests {
     #[test]
     fn a_summary_request_asks_for_prose_and_offers_no_tools() {
         let config = LlmConfig {
+            provider: crate::llm::config::Provider::OpenAi,
             base_url: "http://x".into(),
             api_key: "k".into(),
             model: "m".into(),

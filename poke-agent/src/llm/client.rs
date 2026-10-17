@@ -1,10 +1,11 @@
-//! The HTTP half: one blocking `POST /chat/completions` with `stream: true`.
+//! The HTTP half: one blocking streamed POST per completion, to whichever provider is configured.
 
 use std::io::BufReader;
 use std::time::Duration;
 
 use crate::llm::LlmError;
-use crate::llm::config::LlmConfig;
+use crate::llm::anthropic::AnthropicClient;
+use crate::llm::config::{LlmConfig, Provider};
 use crate::llm::protocol::{
     ChatRequest, Completion, Fragment, ReasoningBudget, describe_error_body, read_stream, reset_at_ms,
 };
@@ -23,6 +24,72 @@ pub trait ChatEndpoint: Send {
 /// How long to wait for the endpoint to start answering.
 const TIMEOUT_CONNECT: Duration = Duration::from_secs(30);
 
+/// The client `config.provider` speaks.
+pub fn connect(config: &LlmConfig) -> Box<dyn ChatEndpoint> {
+    match config.provider {
+        Provider::OpenAi => Box::new(OpenAiClient::new(config)),
+        Provider::Anthropic => Box::new(AnthropicClient::new(config)),
+    }
+}
+
+pub(crate) fn http_agent(config: &LlmConfig) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        // A non-2xx is read by `post_event_stream`, for its body and its rate-limit headers.
+        .http_status_as_error(false)
+        .timeout_connect(Some(TIMEOUT_CONNECT))
+        // Both are `GB_REQUEST_TIMEOUT_SECS`: the wait to start answering, and any gap after.
+        .timeout_recv_response(Some(config.request_timeout))
+        .timeout_recv_body(Some(config.request_timeout))
+        .user_agent("gb-pokemon-agent/0.1")
+        .build()
+        .into()
+}
+
+/// POST `body` and hand back the SSE body of a 2xx; anything else is an error, its message
+/// read out of the provider's envelope by `describe`.
+pub(crate) fn post_event_stream(
+    agent: &ureq::Agent,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: String,
+    describe: fn(&str) -> String,
+) -> Result<ureq::Body, LlmError> {
+    let mut post = agent
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        // A compressed SSE body arrives in whole decoder blocks rather than token by token.
+        .header("Accept-Encoding", "identity");
+    for (name, value) in headers {
+        post = post.header(*name, *value);
+    }
+    let response = post.send(body).map_err(|e| match e {
+        // The endpoint has the request and is sitting on it, unlike never reaching it.
+        ureq::Error::Timeout(_) => LlmError::Timeout(format!("POST {url} was not answered: {e}")),
+        e => LlmError::Transport(format!("POST {url} failed: {e}")),
+    })?;
+
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        // Read before the body, because reading the body consumes the response.
+        let header = |name: &str| {
+            response.headers().get(name).and_then(|value| value.to_str().ok()).map(str::to_owned)
+        };
+        let (retry_after, reset) = (header("retry-after"), header("x-ratelimit-reset"));
+        let message = response
+            .into_body()
+            .read_to_string()
+            .map(|body| describe(&body))
+            .unwrap_or_else(|e| format!("(the error body could not be read: {e})"));
+        if status == 429 {
+            let resets_at_ms = reset_at_ms(retry_after.as_deref(), reset.as_deref(), now_ms());
+            return Err(LlmError::RateLimited { resets_at_ms, message });
+        }
+        return Err(LlmError::Http { status, message });
+    }
+    Ok(response.into_body())
+}
+
 pub struct OpenAiClient {
     agent: ureq::Agent,
     url: String,
@@ -31,18 +98,8 @@ pub struct OpenAiClient {
 
 impl OpenAiClient {
     pub fn new(config: &LlmConfig) -> Self {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            // A non-2xx is read below, for its body and its rate-limit headers.
-            .http_status_as_error(false)
-            .timeout_connect(Some(TIMEOUT_CONNECT))
-            // Both are `GB_REQUEST_TIMEOUT_SECS`: the wait to start answering, and any gap after.
-            .timeout_recv_response(Some(config.request_timeout))
-            .timeout_recv_body(Some(config.request_timeout))
-            .user_agent("gb-pokemon-agent/0.1")
-            .build()
-            .into();
         Self {
-            agent,
+            agent: http_agent(config),
             url: config.completions_url(),
             authorization: format!("Bearer {}", config.api_key),
         }
@@ -58,45 +115,15 @@ impl ChatEndpoint for OpenAiClient {
     ) -> Result<Completion, LlmError> {
         let body = serde_json::to_string(request)
             .map_err(|e| LlmError::Protocol(format!("could not encode the request: {e}")))?;
-
-        let response = self
-            .agent
-            .post(&self.url)
-            .header("Authorization", &self.authorization)
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            // A compressed SSE body arrives in whole decoder blocks rather than token by token.
-            .header("Accept-Encoding", "identity")
-            .send(body)
-            .map_err(|e| match e {
-                // The endpoint has the request and is sitting on it, unlike never reaching it.
-                ureq::Error::Timeout(_) => {
-                    LlmError::Timeout(format!("POST {} was not answered: {e}", self.url))
-                }
-                e => LlmError::Transport(format!("POST {} failed: {e}", self.url)),
-            })?;
-
-        let status = response.status().as_u16();
-        if !(200..300).contains(&status) {
-            // Read before the body, because reading the body consumes the response.
-            let header = |name: &str| {
-                response.headers().get(name).and_then(|value| value.to_str().ok()).map(str::to_owned)
-            };
-            let (retry_after, reset) = (header("retry-after"), header("x-ratelimit-reset"));
-            let message = response
-                .into_body()
-                .read_to_string()
-                .map(|body| describe_error_body(&body))
-                .unwrap_or_else(|e| format!("(the error body could not be read: {e})"));
-            if status == 429 {
-                let resets_at_ms = reset_at_ms(retry_after.as_deref(), reset.as_deref(), now_ms());
-                return Err(LlmError::RateLimited { resets_at_ms, message });
-            }
-            return Err(LlmError::Http { status, message });
-        }
-
+        let response = post_event_stream(
+            &self.agent,
+            &self.url,
+            &[("Authorization", &self.authorization)],
+            body,
+            describe_error_body,
+        )?;
         read_stream(
-            BufReader::new(response.into_body().into_reader()),
+            BufReader::new(response.into_reader()),
             on_delta,
             cancelled,
             request.reasoning.map(ReasoningBudget::cutoff),

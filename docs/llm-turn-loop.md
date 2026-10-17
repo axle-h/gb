@@ -121,6 +121,9 @@ argument lives in the code.
 - A dated 429 parks: clamped, release unconditional, the same request re-sent because the world did
   not move. The pause seam sits below the reset seam and skips the emulator and the agent only. An
   undated 429 keeps the ordinary backoff.
+- `anthropic::render` sends signed thinking back for the turn under way and no earlier one,
+  because a block is bound to the tools and the history it was written under and both move between
+  turns.
 - `GB_COMPACT_ABOVE` headroom is absolute, because a turn grows unchecked to `GB_MAX_TOOL_STEPS`
   between compactions. A local endpoint's limit is its KV cache per slot, not its window.
 

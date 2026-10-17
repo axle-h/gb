@@ -127,7 +127,7 @@ pub fn run(port: u16, policy: ServePolicy, new_run: bool) -> Result<(), String> 
     });
 
     let llm = llm.map(|config| {
-        let endpoint: Box<dyn ChatEndpoint> = Box::new(poke_agent::llm::client::OpenAiClient::new(&config));
+        let endpoint = poke_agent::llm::client::connect(&config);
         (config, endpoint)
     });
     let make_policy = policy_factory(policy, llm, &current, origin, &published)?;

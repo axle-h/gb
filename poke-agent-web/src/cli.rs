@@ -25,6 +25,8 @@ OPTIONS:
 ENVIRONMENT (--policy llm):
     OPENAI_API_KEY, GB_MODEL    Required
     OPENAI_BASE_URL             Any OpenAI-compatible endpoint [default: api.openai.com/v1]
+    GB_PROVIDER                 openai, or anthropic for the Messages API, which reads
+                                ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL instead [default: openai]
     GB_CONTEXT_LIMIT            The model's context window, in tokens [default: 128000]
     GB_COMPACT_ABOVE            How full the context gets before the history is compacted
                                 [default: 0.85]
@@ -32,9 +34,11 @@ ENVIRONMENT (--policy llm):
     GB_MAX_TOOL_STEPS           The most completions one turn may take [default: 12]
     GB_REQUEST_TIMEOUT_SECS     How long the endpoint may take to answer [default: 180]
     GB_MAX_TOKENS               Ceiling on one completion [default: 8192; 0 removes it]
-    GB_REASONING_EFFORT         Sent as reasoning_effort when set; none turns thinking off
-    GB_REASONING_MAX_TOKENS     Sent as OpenRouter's reasoning.max_tokens when set; a reply
-                                still thinking at twice it is cut off [not with the above]
+    GB_REASONING_EFFORT         Sent as reasoning_effort, or Anthropic's effort, when set; none
+                                turns thinking off
+    GB_REASONING_MAX_TOKENS     Sent as OpenRouter's reasoning.max_tokens when set, where a
+                                reply still thinking at twice it is cut off, or as Anthropic's
+                                budget_tokens [not with the above]
     GB_STUCK_TIMEOUT_SECS       Emulated seconds with the agent asking nothing at all before
                                 the watchdog asks on its behalf [default: 300; 0 turns it off]
     GB_RESTORE_HISTORY          Resume a run's conversation as well as its save [default: 1;

@@ -1075,6 +1075,7 @@ mod tests {
             });
 
             let mut config = LlmConfig {
+                provider: crate::llm::config::Provider::OpenAi,
                 base_url: "http://scripted".into(),
                 api_key: "none".into(),
                 model: "scripted".into(),

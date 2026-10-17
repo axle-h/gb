@@ -388,7 +388,7 @@ pub fn read_stream(
 }
 
 /// The deadline expiring rather than the connection breaking: an [`LlmError::Timeout`].
-fn is_timeout(error: &std::io::Error) -> bool {
+pub(crate) fn is_timeout(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::TimedOut
         || format!("{error}").to_ascii_lowercase().contains("timeout")
 }

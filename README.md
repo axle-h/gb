@@ -39,9 +39,9 @@ palette and attribute commands and the VRAM transfers. The desktop window plays 
 emulator runs at roughly 50× real time with the agent on top: the scripted route reaches eight badges
 in about four minutes of wall clock and the Hall of Fame in about twenty-six.
 
-**The LLM layer** drives that same agent over any OpenAI-compatible API. Its end-to-end tests run
-against a mock server, so what is proven here is the plumbing rather than any particular model's
-ability to finish the game.
+**The LLM layer** drives that same agent over any OpenAI-compatible API, or Anthropic's own. Its
+end-to-end tests run against a mock server, so what is proven here is the plumbing rather than any
+particular model's ability to finish the game.
 
 ## Quick start
 
@@ -228,14 +228,15 @@ All environment variables, never flags — the API key has to be one, so the res
 |---|---|
 | `OPENAI_API_KEY`, `GB_MODEL` | required for `--policy llm` |
 | `OPENAI_BASE_URL` | any OpenAI-compatible endpoint |
+| `GB_PROVIDER` | `openai` (default), or `anthropic` for the Messages API, which reads `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` instead |
 | `GB_CONTEXT_LIMIT` | the context window, in tokens — set it to the model's, not the default 128 k |
 | `GB_COMPACT_ABOVE` | how full it gets before the turn loop compacts (`0.85`) |
 | `GB_TEMPERATURE` | sent when set; unset leaves it to the model |
 | `GB_MAX_TOOL_STEPS` | the most completions one turn may take (`12`) |
 | `GB_REQUEST_TIMEOUT_SECS` | how long an endpoint may take to answer (`180`) |
 | `GB_MAX_TOKENS` | ceiling on one completion (`8192`); `0` removes it |
-| `GB_REASONING_EFFORT` | sent as `reasoning_effort` when set — `none` turns thinking off entirely |
-| `GB_REASONING_MAX_TOKENS` | sent as OpenRouter's `reasoning.max_tokens` instead; a model still thinking at twice it is cut off |
+| `GB_REASONING_EFFORT` | sent as `reasoning_effort`, or Anthropic's `output_config.effort`, when set — `none` turns thinking off entirely |
+| `GB_REASONING_MAX_TOKENS` | sent as OpenRouter's `reasoning.max_tokens` instead, where a model still thinking at twice it is cut off, or as Anthropic's `budget_tokens` |
 | `GB_STUCK_TIMEOUT_SECS` | the watchdog (`300`); `0` turns it off |
 | `GB_POLICY` | what plays the game: `llm` (default), `random` or `deterministic`; `--policy` wins |
 | `GB_RUN_DIR` | where runs live (default `./runs`) |

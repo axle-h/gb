@@ -1186,6 +1186,7 @@ mod tests {
 
     fn worker(context_limit: u64, compact_above: f64) -> Worker {
         let config = LlmConfig {
+            provider: crate::llm::config::Provider::OpenAi,
             base_url: "http://x".into(),
             api_key: "k".into(),
             model: "m".into(),

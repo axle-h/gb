@@ -2098,6 +2098,7 @@ mod tests {
     fn mock_llm_config() -> poke_agent::llm::LlmConfig {
         use poke_agent::llm::config::*;
         poke_agent::llm::LlmConfig {
+            provider: poke_agent::llm::config::Provider::OpenAi,
             base_url: "in-process".to_string(),
             api_key: "mock".to_string(),
             model: "mock".to_string(),

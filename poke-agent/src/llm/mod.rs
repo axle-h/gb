@@ -3,6 +3,7 @@
 //! until a terminal tool call ends the turn as a `TurnOutcome`.
 
 pub mod accounting;
+pub mod anthropic;
 pub mod battle_report;
 pub mod battle_script;
 pub mod client;

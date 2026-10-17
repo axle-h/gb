@@ -268,6 +268,7 @@ impl Tour {
 /// `LlmPolicy` on a worker answered by `brain` in this process, configured as the tests' runs are.
 fn llm_policy(brain: Box<dyn poke_agent::tour::turn::Brain>) -> Result<Box<dyn Policy>, String> {
     let config = LlmConfig {
+        provider: poke_agent::llm::config::Provider::OpenAi,
         base_url: String::new(),
         api_key: "mock".to_string(),
         model: "mock".to_string(),

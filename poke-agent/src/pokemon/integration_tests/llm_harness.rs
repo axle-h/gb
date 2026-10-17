@@ -333,6 +333,7 @@ impl LlmRunBuilder {
 
     fn config_for(&self, base_url: &str) -> LlmConfig {
         LlmConfig {
+            provider: crate::llm::config::Provider::OpenAi,
             base_url: base_url.to_string(),
             api_key: "mock".to_string(),
             model: "mock".to_string(),
