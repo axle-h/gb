@@ -1,5 +1,5 @@
-# The tuning knobs, each optional; `poke-agent/src/llm/config.rs` documents the defaults. The API key
-# is in the gitignored `gb/secret.axh.yml`, templated by `../secret.example.yml`.
+# The tuning knobs, each optional; `poke-agent/src/llm/config.rs` documents the defaults. The API keys
+# are in the gitignored `gb/secret.axh.yml`, templated by `../secret.example.yml`.
 # `envFrom` is read at process start, so an edit here needs `kubectl -n gb rollout restart deploy/gb`.
 apiVersion: v1
 kind: ConfigMap
@@ -12,32 +12,30 @@ data:
   #   deterministic  the `full_playthrough` route at 1x; wants a fresh game (`../new-run.sh`)
   GB_POLICY: "llm"
 
-  # Any OpenAI-compatible endpoint; unset means api.openai.com. The Secret's key must be valid here.
-  OPENAI_BASE_URL: "https://openrouter.ai/api/v1"
-  # OpenRouter's free router: a different free model per request, so no spend, and a per-day quota
-  # whose 429 pauses the run until it resets.
-  GB_MODEL: "openrouter/free"
+  # `anthropic` is the Messages API with the Secret's ANTHROPIC_API_KEY; `openai` (the default) is any
+  # OpenAI-compatible endpoint at OPENAI_BASE_URL with its OPENAI_API_KEY.
+  GB_PROVIDER: "anthropic"
+  GB_MODEL: "claude-haiku-5-5"
+  # Anthropic's effort, `low` to `max`; billed thinking grows with it.
+  GB_REASONING_EFFORT: "high"
 
   # What is played: `emulated`, the cartridge, or `native`, the recreation. A run is resumed only by
   # a process playing its kind, so changing this starts a new game.
   GB_GAME: "native"
 
-  # Tokens of history carried before compacting. The free router advertises 200k but routes to models
-  # as small as 64k, so this is the pool's floor rather than any one model's window.
-  GB_CONTEXT_LIMIT: "60000"
+  # Tokens of history carried before compacting. Haiku 5.5's window is 1M, but its input price
+  # quintuples past a 100k prompt, so the history stays under that.
+  GB_CONTEXT_LIMIT: "100000"
   # How full the window gets before compacting; the headroom must fit an in-flight turn and the summary.
   GB_COMPACT_ABOVE: "0.85"
   GB_MAX_TOOL_STEPS: "16"
 
-  # A timeout is not retried, and the free router queues requests for minutes, so this is well above 180.
+  # A timeout is not retried, so this is well above the 180 default.
   GB_REQUEST_TIMEOUT_SECS: "600"
 
-  # Ceiling on one completion, so a repetition loop cannot run until the context window fills.
-  GB_MAX_TOKENS: "8192"
-
-  # OpenRouter's `reasoning.max_tokens`: honoured by Anthropic and Gemini, mapped to an effort elsewhere,
-  # and a model that ignores it is cut off at twice it.
-  GB_REASONING_MAX_TOKENS: "1024"
+  # Ceiling on one completion, so a repetition loop cannot run until the context window fills. The
+  # thinking counts towards it.
+  GB_MAX_TOKENS: "16000"
 
   # Emulated seconds with no decision point before the model is asked for a nudge; `0` turns it off.
   GB_STUCK_TIMEOUT_SECS: "300"
