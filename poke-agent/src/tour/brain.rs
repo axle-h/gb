@@ -87,7 +87,7 @@ pub enum Step {
     /// nearer, so its id moves as they move, and a reply naming the id the turn was rendered with
     /// can land after it has gone.
     Repeat(&'static str),
-    /// A `use_field_move`, by its JSON arguments.
+    /// A row done where the player stands, by its id: `lift:SilphCo3F`, `prize:Tm50Substitute`.
     Field(&'static str),
     /// Answer the mart that is open with these orders, then leave.
     Buy(&'static [(&'static str, u32)]),
@@ -202,6 +202,11 @@ fn bin_at(description: &str) -> Option<(u8, u8)> {
     Some((x.parse().ok()?, y.parse().ok()?))
 }
 
+/// A `choose_action` for a row done where the player stands.
+fn field_row(id: &str, summary: &str) -> Reply {
+    Reply::call(crate::llm::tools::CHOOSE_ACTION, serde_json::json!({ "id": id, "summary": summary }))
+}
+
 /// The tile a row's id names, for every row that carries one: `Map:x,y:Kind`. A sprite's id has no
 /// coordinate, so it has none.
 fn id_at(id: &str) -> Option<(u8, u8)> {
@@ -240,7 +245,7 @@ fn crossing_toward(request: &TurnRequest, target: &str, landing: (u8, u8)) -> Op
 fn enter_toward(request: &TurnRequest, target: &'static str) -> Option<String> {
     let first = Intent::Enter(target).resolve(request);
     let Some(came_in_at) = entered_at(request.situation()) else { return first };
-    request.menu_rows().into_iter()
+    request.walk_rows().into_iter()
         .filter(|(_, what)| names_map(what, target))
         .filter_map(|(id, _)| id_at(&id).map(|at| (id, at)))
         .min_by_key(|(_, at)| at.0.abs_diff(came_in_at.0) as u16 + at.1.abs_diff(came_in_at.1) as u16)
@@ -769,8 +774,8 @@ impl CompletionBrain {
                 self.tidy(request)
             }
             Some(left) => match left.pop_front() {
-                Some(item) => Some(Reply::call("use_field_move",
-                    serde_json::json!({ "move": "toss_item", "item": item, "summary": "making room" }))),
+                Some(item) => Some(Reply::call(crate::llm::tools::CHOOSE_ACTION,
+                    serde_json::json!({ "id": format!("toss:{item}*99"), "summary": "making room" }))),
                 None => { self.tidying = None; None }
             },
         }
@@ -811,17 +816,14 @@ impl CompletionBrain {
             self.stuck(format!("step {} ({op:?}): no such Pokémon to move", self.at + 1));
             return Reply::Calls(vec![Call::wait(10)]);
         };
-        let arguments = match op_sent {
-            PcBoxOp::Deposit { slot } => serde_json::json!({ "op": "deposit", "slot": slot }),
-            PcBoxOp::Withdraw { box_slot } => serde_json::json!({ "op": "withdraw", "box_slot": box_slot }),
-            PcBoxOp::Release { box_slot } => serde_json::json!({ "op": "release", "box_slot": box_slot }),
-            PcBoxOp::ChangeBox { n } => serde_json::json!({ "op": "change_box", "box": n + 1 }),
+        let id = match op_sent {
+            PcBoxOp::Deposit { slot } => format!("pc:deposit@{slot}"),
+            PcBoxOp::Withdraw { box_slot } => format!("pc:withdraw@{box_slot}"),
+            PcBoxOp::Release { box_slot } => format!("pc:release@{box_slot}"),
+            PcBoxOp::ChangeBox { n } => format!("pc:box*{}", n + 1),
         };
-        let mut arguments = arguments;
-        arguments["move"] = serde_json::json!("pc_pokemon");
-        arguments["summary"] = serde_json::json!("sorting the boxes");
         self.pc_sent = Some(format!("PC box: {op_sent:?}"));
-        Reply::call("use_field_move", arguments)
+        field_row(&id, "sorting the boxes")
     }
 
     fn overworld(&mut self, request: &TurnRequest) -> Reply {
@@ -936,7 +938,7 @@ impl CompletionBrain {
         // What this turn offers: the passages, and whether anything is new.
         if let Some(map) = request.location() {
             let mut fresh = false;
-            for (id, what) in request.menu_rows() {
+            for (id, what) in request.walk_rows() {
                 fresh |= self.offered.insert(id.clone());
                 if let Some(to) = destination(&id, &what) {
                     self.graph.entry(map.clone()).or_default().insert(to, id);
@@ -946,7 +948,7 @@ impl CompletionBrain {
         }
         loop {
             let Some(step) = self.steps.get(self.at).cloned() else { return Reply::Calls(vec![Call::wait(50)]) };
-            let rows = request.menu_rows();
+            let rows = request.walk_rows();
             let map = request.location().unwrap_or_default();
             let chosen = self.chosen.get(&map).cloned().unwrap_or_default();
             let resolved: Option<String> = match &step {
@@ -977,12 +979,10 @@ impl CompletionBrain {
                         .or_else(|| self.route(request, on)),
                 Step::Hunt { row, .. } | Step::Train { row, .. } =>
                     rows.iter().map(|(id, _)| id).find(|id| id.ends_with(&format!(":{row}"))).cloned(),
-                Step::Field(arguments) => {
+                Step::Field(id) => {
                     self.field_sent = Some((map.clone(), self.at));
                     self.at += 1;
-                    let mut arguments: serde_json::Value = serde_json::from_str(arguments).expect("a step's JSON");
-                    arguments["summary"] = serde_json::json!("as planned");
-                    return Reply::call("use_field_move", arguments);
+                    return field_row(id, "as planned");
                 }
                 Step::Buy(_) => {
                     // The mart turn answers it; an overworld turn in between means the mart never
@@ -1086,7 +1086,7 @@ impl CompletionBrain {
                     // can interrupt the walk to it, and then nothing happened at all.
                     let at = rows.iter().find(|(id, _)| id.ends_with(&format!(":{row}")))
                         .and_then(|(_, what)| bin_at(what));
-                    let Some((x, y)) = at else {
+                    let Some(_) = at else {
                         if self.used_on {
                             self.used_on = false;
                             self.at += 1;
@@ -1103,13 +1103,17 @@ impl CompletionBrain {
                     if self.unresolved >= Self::PATIENCE {
                         self.stuck(format!("step {} ({step:?}): the {row} on {map} is still there", self.at + 1));
                     }
-                    return Reply::call("use_field_move", serde_json::json!({
-                        "move": "use_item", "item": item, "target": { "x": x, "y": y }, "summary": "waking it" }));
+                    let aimed = request.menu_ids().into_iter()
+                        .find(|id| id.starts_with(&format!("item:{item}@")) && id.ends_with(&format!(":{row}")));
+                    return match aimed {
+                        Some(id) => field_row(&id, "waking it"),
+                        None => Reply::Calls(vec![Call::wait(20)]),
+                    };
                 }
                 Step::Prize(name) => {
                     self.at += 1;
                     self.prize_pending = true;
-                    return Reply::call("use_field_move", serde_json::json!({ "move": "prize", "item": name, "summary": "a prize" }));
+                    return field_row(&format!("prize:{name}"), "a prize");
                 }
                 Step::Evolve { item, species } => {
                     if let Some(slot) = self.evolving {
@@ -1131,8 +1135,10 @@ impl CompletionBrain {
                         return Reply::Calls(vec![Call::wait(10)]);
                     };
                     self.evolving = Some(slot);
-                    return Reply::call("use_field_move", serde_json::json!({
-                        "move": "evolve", "item": item, "slot": slot, "summary": "evolving" }));
+                    return match *item {
+                        "RareCandy" => field_row(&format!("item:RareCandy@{slot}"), "evolving"),
+                        stone => field_row(&format!("evolve:{stone}@{slot}"), "evolving"),
+                    };
                 }
                 Step::DayCare(board) => {
                     let party = text.split("### Party").nth(1).map_or(0, |party| party.lines().skip(1)
@@ -1150,18 +1156,18 @@ impl CompletionBrain {
                         self.at += 1;
                         continue;
                     }
-                    let arguments = match board {
+                    let id = match board {
                         Some(species) => match party_slot_of(&text, species) {
-                            Some(slot) => serde_json::json!({ "move": "day_care", "op": "deposit", "slot": slot, "summary": "boarding" }),
+                            Some(slot) => format!("daycare:deposit@{slot}"),
                             None => {
                                 self.stuck(format!("step {}: no {species} in the party to board", self.at + 1));
                                 return Reply::Calls(vec![Call::wait(10)]);
                             }
                         },
-                        None => serde_json::json!({ "move": "day_care", "op": "withdraw", "summary": "collecting" }),
+                        None => "daycare:withdraw".to_string(),
                     };
                     self.day_care_sent = Some(party);
-                    return Reply::call("use_field_move", arguments);
+                    return field_row(&id, "the Day Care");
                 }
                 // Reached partway through a turn, after a step that needed no row of its own.
                 Step::KeepFromEvolving(species) => {
@@ -1188,9 +1194,17 @@ impl CompletionBrain {
                         self.stuck(format!("step {}: no {species} in the party to feed", self.at + 1));
                         return Reply::Calls(vec![Call::wait(10)]);
                     };
+                    // The row that stops an evolution names only the members the next level evolves:
+                    // short of that level, a plain candy brings it closer and the step waits.
+                    let evolves_next = request.menu_rows().into_iter()
+                        .find(|(id, _)| id == "item:RareCandy@<slot>:stay")
+                        .is_some_and(|(_, what)| what.split(": ").nth(1).unwrap_or("").split("; ")
+                            .any(|member| member.starts_with(&format!("{slot} "))));
+                    if !evolves_next {
+                        return field_row(&format!("item:RareCandy@{slot}"), "a level closer to evolving");
+                    }
                     self.kept_from_evolving = Some((slot, line(slot).and_then(|line| level(&line)).unwrap_or(0)));
-                    return Reply::call("use_field_move", serde_json::json!({
-                        "move": "use_item", "item": "RareCandy", "slot": slot, "evolve": false, "summary": "a level, not an evolution" }));
+                    return field_row(&format!("item:RareCandy@{slot}:stay"), "a level, not an evolution");
                 }
                 Step::Tidy => {
                     self.tidying.get_or_insert(None);
@@ -1209,8 +1223,7 @@ impl CompletionBrain {
                     self.teaching = true;
                     // `Hm02Fly` teaches Fly, `Tm13IceBeam` Ice Beam.
                     self.taught = Some((slot, item.get(4..).unwrap_or(item).to_string()));
-                    return Reply::call("use_field_move", serde_json::json!({
-                        "move": "teach", "item": item, "slot": slot, "summary": "teaching" }));
+                    return field_row(&format!("teach:{item}@{slot}"), "teaching");
                 }
                 Step::Trade(npc) => Intent::Row(npc).resolve(request),
                 Step::AtPc(op) => {

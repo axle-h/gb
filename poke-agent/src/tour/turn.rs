@@ -61,6 +61,12 @@ impl TurnRequest {
             .collect()
     }
 
+    /// The overworld rows that walk somewhere: every id that starts with a map's name, which is
+    /// capitalised. The rest (`fly:`, `item:`, `lead:`, …) are done where the player stands.
+    pub fn walk_rows(&self) -> Vec<(String, String)> {
+        self.menu_rows().into_iter().filter(|(id, _)| id.starts_with(|c: char| c.is_ascii_uppercase())).collect()
+    }
+
     /// The map the situation says the player is on; `None` on every kind but the overworld.
     pub fn location(&self) -> Option<String> {
         self.situation()

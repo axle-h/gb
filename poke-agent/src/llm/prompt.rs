@@ -82,7 +82,9 @@ How the interface works:
   whose answer you are already holding costs a whole round trip for nothing. Ask for the ones you \
   do need together in one message; the list at the foot of each turn is the one that applies, and \
   `screenshot` is the expensive one, for something the others do not describe.
-- Not everything is walking: `use_field_move` covers the rest, and its own description says what.
+- Not everything is walking: teaching a move, using an item, flying, the lead, the PC, a lift and \
+  the rest are overworld rows too, each offered only where the game would allow it. A row whose id \
+  holds `<slot>` is one row for every party slot, and its description names the slots that work.
 - **The agent can be wrong, and `report_issue` is how you say so.** If the action menu does not \
   describe what is in front of you, or an action keeps failing for a reason you cannot see, file \
   one: what you were trying to do, what you expected, what happened instead. An action the game \
@@ -304,7 +306,7 @@ pub fn contract(kind: DecisionKind) -> String {
     use crate::llm::tools::{CHOOSE_ACTION, MAX_CHAINED_ACTIONS};
     let ends = match kind {
         DecisionKind::Overworld => format!(
-            "End this turn with `{CHOOSE_ACTION}` and an id from the menu, or with `use_field_move`. \
+            "End this turn with `{CHOOSE_ACTION}` and an id from the menu. \
              Up to {MAX_CHAINED_ACTIONS} `{CHOOSE_ACTION}` calls in one reply are taken in order, so \
              a step you already know can follow this one."
         ),
@@ -529,7 +531,6 @@ pub fn situation(
             None => format!("Entered this map at ({}, {})\n", arrival.at.x, arrival.at.y),
         });
     }
-    // Half of `use_field_move` acts on the tile in front.
     if let Some((at, tile)) = state.map.tile_in_front() {
         out.push_str(&format!("Facing: {tile} at ({}, {})\n", at.x, at.y));
     }
@@ -568,7 +569,7 @@ pub fn situation(
                 // Everything is in hand: this is one tool call away, so say which one.
                 (true, Some(slot), true) => format!(
                     "teaching {name} to a party member. {hm} is in your bag and slot {slot} can learn \
-                     it, so `use_field_move` with `teach` is all that is left"),
+                     it, so its `teach:` row is all that is left"),
                 (true, Some(slot), false) => format!(
                     "the {badge}, which you do not have yet. {hm} is already in your bag and slot \
                      {slot} can learn it, so the gym is the only thing in the way"),
@@ -590,19 +591,6 @@ pub fn situation(
             ));
         }
 
-        // The menu withholds the PC's row, so this line is the only sign there is one.
-        if let Some((at, pokemon)) = crate::llm::tools::usable_pc(state.map.map) {
-            out.push_str(&match pokemon {
-                true => format!(
-                    "A PC is at ({}, {}). It has no row in the menu: `use_field_move` with \
-                     `pc_pokemon` or `pc_items` walks to it and does the deposit or withdrawal, and \
-                     `read_pc` shows what is stored.\n", at.x, at.y),
-                false => format!(
-                    "Your own PC is at ({}, {}), and it stores items only. It has no row in the \
-                     menu: `use_field_move` with `pc_items` walks to it and does the deposit or \
-                     withdrawal.\n", at.x, at.y),
-            });
-        }
         // Boulders, said every turn there are any, whether or not they can be moved.
         let boulders = state.map.boulders();
         if !boulders.is_empty() {
@@ -873,7 +861,7 @@ fn stood_on_the_map(state: &GameState, enemy: crate::pokemon::species::PokemonSp
 }
 
 /// The nickname, and the species too when they differ.
-fn named(mon: &crate::pokemon::pokemon::Pokemon) -> String {
+pub(crate) fn named(mon: &crate::pokemon::pokemon::Pokemon) -> String {
     let nickname = mon.nickname.to_default_string();
     let species = mon.species.to_string();
     match nickname.eq_ignore_ascii_case(&species) {
@@ -902,7 +890,7 @@ fn types_of(mon: &crate::pokemon::pokemon::Pokemon) -> String {
 }
 
 /// A status worth mentioning, or nothing at all.
-fn ailment(status: crate::pokemon::status::PokemonStatus) -> String {
+pub(crate) fn ailment(status: crate::pokemon::status::PokemonStatus) -> String {
     match status {
         crate::pokemon::status::PokemonStatus::None => String::new(),
         other => format!(", {other}"),
@@ -1539,7 +1527,7 @@ mod tests {
         let mut ready = hopeless.clone();
         ready.pokemon.get_mut(0).expect("one member").species = crate::pokemon::species::PokemonSpecies::Venusaur;
         let teachable = rendered(DecisionKind::Overworld, &ready);
-        assert!(teachable.contains("`use_field_move` with `teach`"), "{teachable}");
+        assert!(teachable.contains("its `teach:` row"), "{teachable}");
 
         // And it stops once it stops being true.
         state.can_use_cut = true;

@@ -305,7 +305,43 @@ function describeAction(id: string | undefined): string {
   if (base.startsWith('buy:')) return `Bought ${base.slice('buy:'.length)}${count ? ` ×${count}` : ''}`;
   if (base.startsWith('forget:')) return `Forgot the move in slot ${base.slice('forget:'.length)}`;
   if (base.startsWith('mimic:')) return `Copied the enemy's move in row ${base.slice('mimic:'.length)}`;
-  return `Chose ${id}`;
+  const field = describeFieldRow(base, count);
+  return field ?? `Chose ${id}`;
+}
+
+/** An overworld row done where the player stands: `fly:`, `item:`, `teach:`, the PC's and the rest. */
+function describeFieldRow(base: string, count: string | undefined): string | undefined {
+  const [head, ...parts] = base.split(':');
+  const rest = parts.join(':');
+  const [thing, on] = rest.split('@');
+  let slot = '';
+  if (on?.endsWith(':stay')) slot = ` on slot ${on.slice(0, -':stay'.length)}, kept from evolving`;
+  else if (on !== undefined && /^\d+$/.test(on)) slot = ` on slot ${on}`;
+  else if (on !== undefined) slot = ` on ${on.split(':').pop()}`;
+  const many = count ? ` ×${count}` : '';
+  switch (head) {
+    case 'dig': return 'Dug out';
+    case 'teleport': return 'Teleported';
+    case 'flash': return 'Used Flash';
+    case 'fly': return `Flew to ${rest}`;
+    case 'lift': return `Rode the lift to ${rest}`;
+    case 'prize': return `Bought the ${rest} prize`;
+    case 'lead': return `Made slot ${rest} the leader`;
+    case 'toss': return `Tossed ${rest}${many}`;
+    case 'item': return `Used ${thing}${slot}`;
+    case 'teach': return `Taught ${thing}${slot}`;
+    case 'evolve': return `Used ${thing}${slot}`;
+    case 'daycare': return rest === 'withdraw' ? 'Collected a Pokémon from the Day Care' : `Boarded slot ${on} at the Day Care`;
+    case 'pc':
+      if (thing === 'box') return `Opened PC box ${count ?? '1'}`;
+      if (thing.startsWith('store:')) return `Stored ${thing.slice('store:'.length)}${many} in the PC`;
+      if (thing.startsWith('take:')) return `Took ${thing.slice('take:'.length)}${many} from the PC`;
+      if (thing === 'deposit') return `Deposited slot ${on} in the PC`;
+      if (thing === 'withdraw') return `Withdrew box slot ${on} from the PC`;
+      if (thing === 'release') return `Released box slot ${on}`;
+      return undefined;
+    default: return undefined;
+  }
 }
 
 /** The model's arguments, or an empty object — a call whose JSON will not parse is one to show raw. */

@@ -24,6 +24,18 @@ pub fn never_usable(item: ItemId) -> bool {
     use_effect(item) == Some(pokered_symbols::UnusableItem.address)
 }
 
+/// Whether the effect routine answers `ItemUseNotTime` whenever `wIsInBattle` is clear.
+pub fn battle_only(item: ItemId) -> bool {
+    let Some(effect) = use_effect(item) else { return false };
+    [
+        pokered_symbols::ItemUseXAccuracy.address,
+        pokered_symbols::ItemUsePokeDoll.address,
+        pokered_symbols::ItemUseGuardSpec.address,
+        pokered_symbols::ItemUseDireHit.address,
+        pokered_symbols::ItemUseXStat.address,
+    ].contains(&effect)
+}
+
 /// `ItemUseBall` refuses outside a battle with the same `ItemUseNotTime` as an unusable item, and
 /// wedges the driver the same way.
 pub fn is_ball(item: ItemId) -> bool {
@@ -65,13 +77,13 @@ pub fn restores_pp(item: ItemId, moves: &[Option<crate::pokemon::move_name::Poke
     }
 }
 
-/// What to say when `use_item` is aimed at something the game will not use.
+/// What to say when an item is used on something the game will not use it for.
 pub fn field_use_refusal(item: ItemId) -> Option<String> {
     if item.is_hm() || is_machine(item) {
         return Some(format!(
-            "{item} is a machine, and `use_item` cannot teach one: USE on a TM or an HM opens the \
-             party menu, which this action does not drive. Use `use_field_move` with \
-             `move: \"teach\"`, the `item` and the party `slot` that is to learn it."
+            "{item} is a machine, and an `item:` row cannot teach one: USE on a TM or an HM opens \
+             the party menu, which that row does not drive. Its `teach:` row teaches it, to a party \
+             slot that can learn it."
         ));
     }
     if is_ball(item) {
@@ -99,6 +111,17 @@ fn is_machine(item: ItemId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rom_says_which_items_only_work_in_a_battle() {
+        for item in [ItemId::XAttack, ItemId::XSpecial, ItemId::XAccuracy, ItemId::GuardSpec,
+                     ItemId::DireHit, ItemId::PokeDoll] {
+            assert!(battle_only(item), "{item:?}");
+        }
+        for item in [ItemId::Potion, ItemId::Repel, ItemId::RareCandy, ItemId::EscapeRope] {
+            assert!(!battle_only(item), "{item:?}");
+        }
+    }
 
     #[test]
     fn the_rom_says_which_items_have_no_bag_use() {

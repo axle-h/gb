@@ -1974,7 +1974,7 @@ pub fn elevator_for(map: Map) -> Option<(Point8, &'static [Map])> {
     }
 }
 
-/// The word `use_field_move`'s `direction` takes, so a refusal names a push as the model types it.
+/// A push direction as a person would write it, for a row's prose and a refusal.
 pub(crate) fn push_word(dir: JoypadButton) -> &'static str {
     match dir {
         JoypadButton::Up => "up", JoypadButton::Down => "down",

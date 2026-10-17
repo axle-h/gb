@@ -41,8 +41,11 @@ impl OverworldAction {
     }
 
     /// Whether `id` names a person or an object: the only `map:name` id that is not [`ONE_PER_MAP`].
+    /// A map name is capitalised and the menu's other rows (`fly:`, `item:`, `lead:`) are not.
     pub fn names_a_sprite(id: &str) -> bool {
-        id.matches(':').count() == 1 && id.rsplit(':').next().is_some_and(|kind| !ONE_PER_MAP.contains(&kind))
+        id.starts_with(|c: char| c.is_ascii_uppercase())
+            && id.matches(':').count() == 1
+            && id.rsplit(':').next().is_some_and(|kind| !ONE_PER_MAP.contains(&kind))
     }
 }
 

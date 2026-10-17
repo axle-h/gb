@@ -302,6 +302,7 @@ impl NativeGame {
             repel_steps: location.repel_steps,
             on_bicycle: location.walk_bike_surf == pokered::systems::overworld::location::BIKING,
             day_care_in_use: world.day_care.is_some(),
+            towns_visited: location.towns_visited,
         })
     }
 }

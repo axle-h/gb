@@ -555,7 +555,7 @@ pub struct ExploringBrain {
     /// Maps already paced for encounters, by kind: a pacing row is renamed by every step, so
     /// without this the walk paces again after every move and spends its budget there.
     paced: std::collections::BTreeSet<(String, String)>,
-    /// Times each lift has been ridden to each floor, which no menu row leads to either.
+    /// Times each lift has been ridden to each floor.
     rides: std::collections::BTreeMap<(String, crate::pokemon::map::Map), usize>,
     /// Set by a ride and cleared off the lift, so a visit rides once and then walks out.
     ridden: bool,
@@ -570,11 +570,12 @@ pub struct ExploringBrain {
 
 #[cfg(feature = "slow-tests")]
 /// The PC operations the walk exercises, in order, as (`move`, `op`, extra arguments).
-const PC_OPS: [(&str, &str, &str); 4] = [
-    ("pc_items", "deposit", r#""item":"PokeBall","quantity":1"#),
-    ("pc_items", "withdraw", r#""item":"PokeBall","quantity":1"#),
-    ("pc_pokemon", "deposit", r#""slot":5"#),
-    ("pc_pokemon", "change_box", r#""box":2"#),
+/// Each PC operation the walk tries once per PC: the row that offers it, and the id it sends.
+const PC_OPS: [(&str, &str); 4] = [
+    ("pc:store:<item>*N", "pc:store:PokeBall"),
+    ("pc:take:<item>*N", "pc:take:PokeBall"),
+    ("pc:deposit@<slot>", "pc:deposit@5"),
+    ("pc:box*N", "pc:box*2"),
 ];
 
 #[cfg(feature = "slow-tests")]
@@ -738,22 +739,14 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
             *self.maps.entry(map).or_insert(0) += 1;
         }
 
-        // The PC, which no menu row leads to.
-        if let Some(map) = request.location()
-            && request.has_tool("use_field_move")
-            && (map.ends_with("Pokecenter") || map == "RedsHouse2F" || map == "CeladonHotel")
-        {
-            if let Some((field_move, op, extra)) = PC_OPS.iter()
-                .find(|(field_move, op, _)| {
-                    !self.pc_ops_tried.contains(&(map.clone(), *field_move))
-                        || !self.pc_ops_tried.contains(&(map.clone(), *op))
-                })
-                .filter(|(_, op, _)| self.pc_ops_tried.insert((map.clone(), *op)))
+        // The PC's rows, each tried once per PC.
+        if let Some(map) = request.location() {
+            let offered = request.menu_ids();
+            if let Some((_, id)) = PC_OPS.iter()
+                .find(|(row, id)| offered.iter().any(|offer| offer == row) && !self.pc_ops_tried.contains(&(map.clone(), *id)))
             {
-                let arguments: serde_json::Value = serde_json::from_str(&format!(
-                    r#"{{"move":"{field_move}","op":"{op}",{extra},"summary":"exercise the PC"}}"#
-                )).expect("the arguments are valid JSON");
-                return Reply::call("use_field_move", arguments);
+                self.pc_ops_tried.insert((map.clone(), *id));
+                return Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "exercise the PC" }));
             }
         }
 
@@ -764,7 +757,6 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
         self.ridden &= lift_here;
         if let Some(here) = request.location()
             && !self.ridden
-            && request.has_tool("use_field_move")
             && let Some(lift) = <crate::pokemon::map::Map as strum::IntoEnumIterator>::iter().find(|map| format!("{map:?}") == here)
             && let Some((_, floors)) = crate::pokemon::tile_map::elevator_for(lift)
             && let Some(&floor) = floors.iter()
@@ -772,10 +764,7 @@ impl crate::pokemon::integration_tests::llm_harness::Brain for ExploringBrain {
         {
             *self.rides.entry((here, floor)).or_insert(0) += 1;
             self.ridden = true;
-            let arguments = serde_json::json!({
-                "move": "elevator", "map": format!("{floor:?}"), "summary": "ride the lift",
-            });
-            return Reply::call("use_field_move", arguments);
+            return Reply::call("choose_action", serde_json::json!({ "id": format!("lift:{floor:?}"), "summary": "ride the lift" }));
         }
 
         // Reaching the Hall of Fame ends the walk, because it ends the game.
@@ -1235,8 +1224,8 @@ fn kind_cross_check(offered: &std::collections::BTreeSet<&String>, pc_ops: usize
         MetaTile::Water => Expect::Terrain,
         // Withheld from the action menu, and covered by the PC operations.
         MetaTile::Pc => Expect::Absent(
-            "withheld from the action menu on purpose (llm::tools); the walk drives it through \
-             use_field_move instead, and pc ops are counted separately"),
+            "withheld from the action menu as a walk on purpose (llm::tools); the walk drives it \
+             through the `pc:` rows instead, and pc ops are counted separately"),
         // Bill's cell separator is offered only while pressing it does something
         // (`MetaTileMap::bill_cell_separator`), and every start is past Bill.
         MetaTile::Switch { object: HiddenObject::CellSeparator, .. } => Expect::Absent(

@@ -22,7 +22,7 @@ impl Intent {
     pub fn satisfied_by(&self, request: &TurnRequest) -> bool {
         match self {
             Self::Enter(map) => request.location().as_deref() == Some(map),
-            Self::Repeat(fragment) => !request.menu_rows().iter()
+            Self::Repeat(fragment) => !request.walk_rows().iter()
                 .any(|(_, description)| description.contains(fragment)),
             // A situation cannot show that a person was talked to, so these are one intent per
             // turn.
@@ -32,7 +32,7 @@ impl Intent {
 
     /// The id that carries this intent out, or `None` if the menu does not offer one.
     pub fn resolve(&self, request: &TurnRequest) -> Option<String> {
-        let rows = request.menu_rows();
+        let rows = request.walk_rows();
         match self {
             Self::Wait => None,
             Self::Enter(map) => rows

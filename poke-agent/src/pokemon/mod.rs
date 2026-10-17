@@ -481,6 +481,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             repel_steps: postgame::items::repel_steps(mmu),
             on_bicycle: postgame::items::on_bicycle(mmu),
             day_care_in_use: mmu.read_pointer(&pokered_symbols::wDayCareInUse) != 0,
+            towns_visited: mmu.read_pointer_u16_le(&pokered_symbols::wTownVisitedFlag),
             safari: postgame::safari::read_state(mmu),
             map,
             battle: mmu.read_battle_state(),
@@ -762,6 +763,8 @@ pub struct GameState {
     pub on_bicycle: bool,
     /// The Day Care is boarding a Pokémon, one at a time.
     pub day_care_in_use: bool,
+    /// `wTownVisitedFlag`: bit n is map id n, and only those towns are on Fly's town map.
+    pub towns_visited: u16,
 }
 
 /// State of the Vermilion Gym two-switch trash-can puzzle that unlocks the door to Lt. Surge.

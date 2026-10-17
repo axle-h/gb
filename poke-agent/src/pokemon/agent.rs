@@ -582,7 +582,8 @@ pub(crate) enum AgentState {
                      resume: Option<(Point8, JoypadButton)>, settle: u8 },
 
     /// Tossing a bag item to make room: START→ITEM→(bag list)→TOSS→quantity→YES.
-    TossingItem { item: crate::pokemon::item::ItemId, press: bool, entered_menu: bool },
+    /// `keep` is how many to leave in the bag: 0 tosses the whole stack.
+    TossingItem { item: crate::pokemon::item::ItemId, keep: u8, press: bool, entered_menu: bool },
     /// Depositing an item into, or withdrawing it from, PC item storage.
     UsingItemPc(crate::pokemon::postgame::item_storage::ItemPcState),
     /// Bill's PC box menus: deposit, withdraw, release, change box.
@@ -2025,7 +2026,13 @@ CascadeBadge; not cutting".to_string(),
                         }
                         Some(crate::pokemon::policy::FieldMove::TossItem { item }) => {
                             api.release_all_buttons();
-                            self.set_state(AgentState::TossingItem { item, press: true, entered_menu: false });
+                            self.set_state(AgentState::TossingItem { item, keep: 0, press: true, entered_menu: false });
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::TossSome { item, count }) => {
+                            api.release_all_buttons();
+                            let keep = api.bag_item_quantity(item).saturating_sub(count);
+                            self.set_state(AgentState::TossingItem { item, keep, press: true, entered_menu: false });
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::UseItemPc { op, item, qty, pc }) => {
@@ -3399,17 +3406,23 @@ CascadeBadge; not cutting".to_string(),
                 api.press_button(button);
                 self.set_state(AgentState::UsingFieldMove { press: false, entered_menu, slot, move_index, from_map, resume, settle: 0 });
             }
-            AgentState::TossingItem { item, press, entered_menu } => {
+            AgentState::TossingItem { item, keep, press, entered_menu } => {
                 use crate::pokemon::menu::TextBoxId;
-                if entered_menu && api.bag_item_position(item).is_none() {
+                let tossed = api.bag_item_position(item).is_none()
+                    || (keep > 0 && api.bag_item_quantity(item) <= keep);
+                if entered_menu && tossed {
                     if game_mode != GameMode::Overworld {
                         api.release_all_buttons();
                         if press { api.press_button(JoypadButton::B); }
-                        self.set_state(AgentState::TossingItem { item, press: !press, entered_menu });
+                        self.set_state(AgentState::TossingItem { item, keep, press: !press, entered_menu });
                         return Ok(());
                     }
                     api.release_all_buttons();
-                    self.event(AgentEvent::TextBox { message: format!("Tossed {item:?} to free a bag slot") });
+                    let message = match keep {
+                        0 => format!("Tossed {item:?} to free a bag slot"),
+                        keep => format!("Tossed {item:?}, keeping {keep}"),
+                    };
+                    self.event(AgentEvent::TextBox { message });
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
@@ -3422,7 +3435,7 @@ CascadeBadge; not cutting".to_string(),
                 let entered_menu = entered_menu || game_mode != GameMode::Overworld;
                 if !press {
                     api.release_all_buttons();
-                    self.set_state(AgentState::TossingItem { item, press: true, entered_menu });
+                    self.set_state(AgentState::TossingItem { item, keep, press: true, entered_menu });
                     return Ok(());
                 }
                 let (top_x, top_y, current, scroll) = api.menu_geometry();
@@ -3451,7 +3464,7 @@ CascadeBadge; not cutting".to_string(),
                 };
                 api.release_all_buttons();
                 api.press_button(button);
-                self.set_state(AgentState::TossingItem { item, press: false, entered_menu });
+                self.set_state(AgentState::TossingItem { item, keep, press: false, entered_menu });
             }
             AgentState::SolvingBoulderPuzzle { boulder: which, target, hole, pushes, settle } => {
                 /// Absolute ceiling on the shoves one goal may spend.

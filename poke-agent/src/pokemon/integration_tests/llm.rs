@@ -662,8 +662,8 @@ fn native_full_party_at_a_pc() -> pokered::Game {
     game
 }
 
-/// A Pokémon Centre's PC has no menu row, so the turn says where it is, and the two field moves
-/// that use it walk there from the door: a deposit makes room and a withdrawal fills it.
+/// A Pokémon Centre's PC is rows, and the two that move a Pokémon walk there from the door: a
+/// deposit makes room and a withdrawal fills it.
 #[test]
 fn a_model_swaps_a_boxed_mon_into_a_full_party_at_the_pc() {
     use poke_core::species::PokemonSpecies;
@@ -680,10 +680,8 @@ fn a_model_swaps_a_boxed_mon_into_a_full_party_at_the_pc() {
         seen.lock().unwrap().push(request.situation().to_string());
         asked += 1;
         match asked {
-            1 => Reply::call("use_field_move", serde_json::json!({
-                "move": "pc_pokemon", "op": "deposit", "slot": 2, "summary": "Making room." })),
-            2 => Reply::call("use_field_move", serde_json::json!({
-                "move": "pc_pokemon", "op": "withdraw", "box_slot": 0, "summary": "Taking Articuno." })),
+            1 => Reply::call("choose_action", serde_json::json!({ "id": "pc:deposit@2", "summary": "Making room." })),
+            2 => Reply::call("choose_action", serde_json::json!({ "id": "pc:withdraw@0", "summary": "Taking Articuno." })),
             _ => Reply::Calls(vec![Call::wait(1)]),
         }
     };
@@ -692,7 +690,10 @@ fn a_model_swaps_a_boxed_mon_into_a_full_party_at_the_pc() {
         run.agent().game().world().party.iter().any(|named| named.mon.mon.species == PokemonSpecies::Articuno)
     }).unwrap();
     let situations = situations.lock().unwrap().clone();
-    assert!(situations[0].contains("A PC is at (13, 3)"), "{}", situations[0]);
+    assert!(situations[0].contains("- `pc:deposit@<slot>` — put a party member into the PC's open box"), "{}", situations[0]);
+    // The party is full, so nothing can come out of the box until something has gone in.
+    assert!(!situations[0].contains("`pc:withdraw@<box slot>`"), "{}", situations[0]);
+    assert!(situations[1].contains("`pc:withdraw@<box slot>` — take a Pokémon out of Box 1 into the party: 0 Articuno Lv30; 1 Mankey Lv30"), "{}", situations[1]);
     assert!(swapped, "Articuno never left the box: {situations:#?}");
     let world = run.agent().game().world();
     assert_eq!(world.party.len(), 6);

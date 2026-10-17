@@ -488,12 +488,21 @@ impl LlmPolicy {
         self.take_current(state)
     }
 
-    /// Resolve the id at the head of the queue against a fresh action list and hand it over.
+    /// Resolve the id at the head of the queue against the live game and hand it over: a walk
+    /// from here, a field move through the next `pick_field_move`.
     fn take_current(&mut self, state: &GameState) -> Option<OverworldAction> {
         let id = self.queue.as_ref()?.current.clone();
-        match tools::resolve_overworld(state, &id) {
-            Some(action) => Some(action),
-            None => {
+        match tools::resolve_row(state, &id) {
+            tools::Row::Walk(action) => Some(action),
+            tools::Row::Field(Ok(field_move)) => {
+                self.field_move = Some(field_move);
+                None
+            }
+            tools::Row::Field(Err(refusal)) => {
+                self.drop_queue(Dropped::Unresolved(format!("`{id}` was not done: {refusal}")));
+                None
+            }
+            tools::Row::Gone => {
                 self.drop_queue(Dropped::Unresolved(unresolved_note(&id, state)));
                 None
             }
@@ -629,14 +638,6 @@ impl Policy for LlmPolicy {
                 self.outcome = None;
                 self.take_current(state)
             }
-            // Stashed: this method returns a walk, and a field move is not one.
-            Terminal::UseFieldMove(request) => {
-                match tools::resolve_field_move(state, &request) {
-                    Ok(field_move) => self.field_move = Some(field_move),
-                    Err(complaint) => self.reject(complaint),
-                }
-                None
-            }
             Terminal::PressButtons { buttons } => {
                 self.manual.extend(buttons);
                 None
@@ -692,9 +693,14 @@ impl Policy for LlmPolicy {
         }
     }
 
-    /// Not a decision point, and must never become one.
+    /// Not a decision point, and must never become one. A field move reports no ending of its own,
+    /// so handing it over is what lands it in a chain; a driver that stops it still says so.
     fn pick_field_move(&mut self, _state: &GameState) -> Option<FieldMove> {
-        self.field_move.take()
+        let field_move = self.field_move.take();
+        if field_move.is_some() && self.queue.is_some() {
+            self.outcome = Some(ActionOutcome::Landed);
+        }
+        field_move
     }
 
     fn pick_nickname(&mut self, species: PokemonSpecies) -> Option<Option<String>> {
@@ -1388,7 +1394,8 @@ mod tests {
         assert_eq!(requests.len(), 1, "the `pending` guard let {} turns out", requests.len());
         // …and the turn it did send was the overworld one, with the overworld tools.
         let offered: Vec<&str> = requests[0].tools.iter().map(|t| t.function.name).collect();
-        assert!(offered.contains(&"choose_action") && offered.contains(&"use_field_move"));
+        assert_eq!(offered.iter().filter(|name| **name == "choose_action").count(), 1);
+        assert!(!offered.contains(&"use_field_move"), "a field move is a row now: {offered:?}");
         assert!(last_user_message(&requests[0]).contains(&id), "the menu must carry the id it expects back");
     }
 
@@ -2360,36 +2367,65 @@ mod tests {
         assert_eq!(rig.requests().len(), 2, "the chain must not advance on silence");
     }
 
-    /// A field move is decided by an overworld turn and collected by a different method.
-    #[test]
-    fn a_field_move_decision_is_collected_by_the_next_field_move_poll() {
-        let (mut rig, mut policy) = Rig::new(vec![calls(&[(
-            "use_field_move",
-            r#"{"move":"reorder_party","slot":0}"#,
-        )])]);
-
-        // The overworld poll never yields an action for this…
-        assert!(rig.pump_overworld_for(&mut policy, Duration::from_secs(2)).is_none());
-        let state = rig.state();
-        assert_eq!(policy.pick_field_move(&state), Some(FieldMove::ReorderParty { slot: 0 }));
-        assert_eq!(policy.pick_field_move(&state), None, "it is taken, not repeated every tick");
+    /// Ticks in `agent.rs`'s order until a field move is handed over: the decision poll, then the
+    /// field-move poll that collects what it stashed.
+    fn pump_field_move(rig: &mut Rig, policy: &mut LlmPolicy) -> Option<FieldMove> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            assert!(rig.tick_overworld(policy).is_none(), "a field row is not a walk");
+            if let Some(field_move) = policy.pick_field_move(&rig.state()) {
+                return Some(field_move);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        None
     }
 
-    /// A field move that cannot be carried out is a sentence to the model, never a silent no-op.
+    /// A field row is decided by an overworld turn and collected by a different method, and an
+    /// action chained behind it is taken once it has been handed over, without asking again.
     #[test]
-    fn an_impossible_field_move_is_explained_rather_than_attempted() {
+    fn a_field_row_is_collected_by_the_next_field_move_poll_and_its_chain_goes_on() {
+        use crate::pokemon::postgame::items::UseTarget;
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        PokemonApi::new(&mut rig.gb).debug_give_item(crate::pokemon::item::ItemId::Repel, 2).expect("room in the bag");
+        let walk = rig.first_action_id();
+        let menu = tools::overworld_menu(&rig.state(), None);
+        assert!(menu.iter().any(|row| row.id == "item:Repel"), "a Repel in the bag is a row: {menu:#?}");
+        rig.push(vec![calls(&[
+            ("choose_action", r#"{"id":"item:Repel"}"#),
+            ("choose_action", &format!(r#"{{"id":"{walk}"}}"#)),
+        ])]);
+
+        assert_eq!(pump_field_move(&mut rig, &mut policy),
+                   Some(FieldMove::UseBagItem { item: crate::pokemon::item::ItemId::Repel, target: UseTarget::Nothing }));
+        assert_eq!(policy.pick_field_move(&rig.state()), None, "it is taken, not repeated every tick");
+        let next = rig.tick_overworld(&mut policy).expect("the walk chained behind it is taken at once");
+        assert_eq!(tools::overworld_id(&rig.state(), &next), walk);
+        assert_eq!(rig.requests().len(), 1, "the chain asked nothing more");
+    }
+
+    /// A field row the game would refuse by the time it is taken is a sentence to the model, never
+    /// a silent no-op, and the sentence is the one `resolve_field_move` gives.
+    #[test]
+    fn a_field_row_refused_when_it_is_taken_says_why() {
+        let release = Arc::new(AtomicBool::new(false));
         let (mut rig, mut policy) = Rig::new(vec![
-            // Nobody in Oak's lab is facing a tree, and the starter does not know Cut.
-            calls(&[("use_field_move", r#"{"move":"cut"}"#)]),
+            held(calls(&[("choose_action", r#"{"id":"item:Repel"}"#)]), &release),
             calls(&[("choose_action", r#"{"id":"wait*1"}"#)]),
         ]);
+        PokemonApi::new(&mut rig.gb).debug_give_item(crate::pokemon::item::ItemId::Repel, 1).expect("room in the bag");
+        assert!(rig.tick_overworld(&mut policy).is_none());
+        rig.wait_for_requests(1, Duration::from_secs(5));
+        // Used up while the model was thinking.
+        PokemonApi::new(&mut rig.gb).debug_take_item(crate::pokemon::item::ItemId::Repel).expect("it was there");
+        release.store(true, Ordering::SeqCst);
 
         rig.pump_overworld_for(&mut policy, Duration::from_secs(2));
         assert_eq!(policy.pick_field_move(&rig.state()), None, "nothing was handed to the agent");
-
         let requests = rig.requests();
-        assert!(requests.len() >= 2, "a fresh turn is asked after a field move that could not run");
-        assert!(last_user_message(&requests[1]).contains("facing"), "{}", last_user_message(&requests[1]));
+        assert!(requests.len() >= 2, "a fresh turn is asked after a row that could not run");
+        let next = last_user_message(&requests[1]);
+        assert!(next.contains("`item:Repel` was not done: There is no Repel in the bag"), "{next}");
     }
 
     /// On a turn with a menu, presses never reach the agent and the turn carries on to a decision.

@@ -806,6 +806,8 @@ pub enum FieldMove {
     UseFieldMove { slot: u8, move_index: u8 },
     /// Toss `item` from the bag (START → ITEM → the item → TOSS → quantity → YES) to free a slot.
     TossItem { item: ItemId },
+    /// Toss `count` of `item`, fewer than the bag holds, so its slot stays taken.
+    TossSome { item: ItemId, count: u8 },
     /// Move `qty` of `item` between the bag and PC item storage at the PC at `pc`.
     UseItemPc { op: crate::pokemon::postgame::item_storage::PcItemOp, item: ItemId, qty: u8, pc: poke_core::geometry::Point8 },
     /// Walk to the PC at `pc` and drive Bill's PC box menus.

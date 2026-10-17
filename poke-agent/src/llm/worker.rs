@@ -1131,7 +1131,6 @@ fn describe(decision: &Terminal) -> String {
             true => format!("choose_action {id} (taking over this battle)"),
             false => format!("choose_action {id}"),
         },
-        Terminal::UseFieldMove(request) => format!("use_field_move {request:?}"),
         Terminal::PressButtons { buttons } => format!(
             "choose_action press:{}",
             buttons.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(","),

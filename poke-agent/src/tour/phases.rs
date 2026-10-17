@@ -10,19 +10,19 @@ use crate::tour::completion::{Entry, Legend, Way};
 /// or a pickup finds no room. Deposited at the first PC of every phase from there on, since a phase
 /// played from its fixture may still carry them; one already in the PC, or not found yet, is refused.
 const SPENT: [&str; 13] = [
-    r#"{"move":"pc_items","op":"deposit","item":"TownMap"}"#,
-    r#"{"move":"pc_items","op":"deposit","item":"SSTicket"}"#,
-    r#"{"move":"pc_items","op":"deposit","item":"OldRod"}"#,
-    r#"{"move":"pc_items","op":"deposit","item":"CoinCase"}"#,
-    r#"{"move":"pc_items","op":"deposit","item":"LiftKey"}"#,
-    r#"{"move":"pc_items","op":"deposit","item":"SilphScope"}"#,
-    r#"{"move":"pc_items","op":"deposit","item":"PokeFlute"}"#,
-    r#"{"move":"pc_items","op":"deposit","item":"CardKey"}"#,
-    r#"{"move":"pc_items","op":"deposit","item":"Hm01Cut"}"#,
-    r#"{"move":"pc_items","op":"deposit","item":"Hm02Fly"}"#,
-    r#"{"move":"pc_items","op":"deposit","item":"Hm03Surf"}"#,
-    r#"{"move":"pc_items","op":"deposit","item":"Hm04Strength"}"#,
-    r#"{"move":"pc_items","op":"deposit","item":"SecretKey"}"#,
+    "pc:store:TownMap",
+    "pc:store:SSTicket",
+    "pc:store:OldRod",
+    "pc:store:CoinCase",
+    "pc:store:LiftKey",
+    "pc:store:SilphScope",
+    "pc:store:PokeFlute",
+    "pc:store:CardKey",
+    "pc:store:Hm01Cut",
+    "pc:store:Hm02Fly",
+    "pc:store:Hm03Surf",
+    "pc:store:Hm04Strength",
+    "pc:store:SecretKey",
 ];
 
 /// Pallet Town to the Boulder Badge: the starter, the parcel, the Pokédex and Viridian Forest.
@@ -53,10 +53,10 @@ pub fn to_the_boulder_badge() -> Vec<Step> {
         Go(&["ViridianForest"]),
         Hunt { species: "Weedle", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "" },
         // The catch is the last of three in the party: it leads, and fights until it evolves at 7.
-        Field(r#"{"move":"reorder_party","slot":2}"#),
+        Field("lead:2"),
         // A Kakuna or Metapod only hardens, and the fight never ends.
         Train { row: "Grass", until: "evolved into", way: Way::EvolvedInBattle, flee: &["Kakuna", "Metapod"] },
-        Field(r#"{"move":"reorder_party","slot":1}"#),
+        Field("lead:1"),
         Clear(&[]),
         Go(&["ViridianForestNorthGate"]), Clear(&[]),
         Go(&["Route2", "PewterCity"]), Clear(&[]),
@@ -327,13 +327,13 @@ pub fn to_the_rainbow_badge() -> Vec<Step> {
         // Getting out of the lift crosses the lift's own door and not the floor's; a floor's door
         // is crossed by walking into the lift from it, so the ride down is taken a floor at a time.
         GoTo("CeladonMart5F"),
-        GoTo("CeladonMartElevator"), Field(r#"{"move":"elevator","map":"CeladonMart4F"}"#), GoTo("CeladonMart4F"),
+        GoTo("CeladonMartElevator"), Field("lift:CeladonMart4F"), GoTo("CeladonMart4F"),
         // And the stairs down from the fifth floor, which every walk up the shop climbs the other way.
         GoTo("CeladonMart5F"), GoTo("CeladonMart4F"),
-        GoTo("CeladonMartElevator"), Field(r#"{"move":"elevator","map":"CeladonMart3F"}"#), GoTo("CeladonMart3F"),
-        GoTo("CeladonMartElevator"), Field(r#"{"move":"elevator","map":"CeladonMart2F"}"#), GoTo("CeladonMart2F"),
-        GoTo("CeladonMartElevator"), Field(r#"{"move":"elevator","map":"CeladonMart1F"}"#), GoTo("CeladonMart1F"),
-        GoTo("CeladonMartElevator"), Field(r#"{"move":"elevator","map":"CeladonMart2F"}"#), GoTo("CeladonMart2F"),
+        GoTo("CeladonMartElevator"), Field("lift:CeladonMart3F"), GoTo("CeladonMart3F"),
+        GoTo("CeladonMartElevator"), Field("lift:CeladonMart2F"), GoTo("CeladonMart2F"),
+        GoTo("CeladonMartElevator"), Field("lift:CeladonMart1F"), GoTo("CeladonMart1F"),
+        GoTo("CeladonMartElevator"), Field("lift:CeladonMart2F"), GoTo("CeladonMart2F"),
         GoTo("CeladonMart1F"),
         // The mart's other street door, at the far end of its ground floor.
         Take("CeladonCity, arriving at (11, 13)"),
@@ -365,9 +365,9 @@ pub fn to_the_rainbow_badge() -> Vec<Step> {
         GoTo("CeladonCity"), GoTo("GameCornerPrizeRoom"), Clear(&[]),
         // The machines are items, and the bag holds twenty kinds.
         Tidy,
-        Prize("Abra"), Field(r#"{"move":"prize","item":"Tm15HyperBeam"}"#), Field(r#"{"move":"prize","item":"Tm23DragonRage"}"#),
+        Prize("Abra"), Field("prize:Tm15HyperBeam"), Field("prize:Tm23DragonRage"),
         GoTo("CeladonCity"), GoTo("GameCorner"), Coins(7700),
-        GoTo("CeladonCity"), GoTo("GameCornerPrizeRoom"), Field(r#"{"move":"prize","item":"Tm50Substitute"}"#),
+        GoTo("CeladonCity"), GoTo("GameCornerPrizeRoom"), Field("prize:Tm50Substitute"),
         GoTo("CeladonCity"), GoTo("CeladonGym"), Explore { maps: &["CeladonGym"], patience: 200 },
         GoTo("CeladonCity"), GoTo("Route16"), Explore { maps: &["Route16"], patience: 100 },
         // The Fly house is on the west side, through the gate's top corridor, which has no guard.
@@ -397,14 +397,14 @@ pub fn to_the_poke_flute() -> Vec<Step> {
         // Each floor's lift lobby is a room of its own, and B4F's is the only way into Giovanni's
         // half of that floor, so the lift is both the ride and the route.
         GoTo("RocketHideoutElevator"),
-        Field(r#"{"move":"elevator","map":"RocketHideoutB1F"}"#),
+        Field("lift:RocketHideoutB1F"),
         // The lobby has a Rocket in it, and beating him is what opens its door.
         Talk("Rocket5"),
         // The ride ends outside the lift, so the next one starts by walking back in.
-        GoTo("RocketHideoutElevator"), Field(r#"{"move":"elevator","map":"RocketHideoutB4F"}"#),
+        GoTo("RocketHideoutElevator"), Field("lift:RocketHideoutB4F"),
         Explore { maps: &["RocketHideoutB1F", "RocketHideoutB2F", "RocketHideoutB3F", "RocketHideoutB4F"],
                   patience: 900 },
-        GoTo("RocketHideoutElevator"), Field(r#"{"move":"elevator","map":"RocketHideoutB2F"}"#),
+        GoTo("RocketHideoutElevator"), Field("lift:RocketHideoutB2F"),
         GoTo("RocketHideoutB1F"), GoTo("GameCorner"), GoTo("CeladonCity"),
     ];
     steps.extend(celadon_to_lavender());
@@ -472,7 +472,7 @@ pub fn to_the_marsh_badge() -> Vec<Step> {
         GoTo("SilphCo1F"), Explore { maps: SILPH, patience: 2500 },
         // 11F's office is walled off from its own lift and stairs. The way in is a chain of
         // teleport pads: 3F (11, 11) lands on 7F (5, 3), and 7F (5, 7) lands inside the office.
-        GoTo("SilphCoElevator"), Field(r#"{"move":"elevator","map":"SilphCo3F"}"#),
+        GoTo("SilphCoElevator"), Field("lift:SilphCo3F"),
         Take("warp to SilphCo7F, arriving at (5, 3)"),
         Take("warp to SilphCo11F, arriving at (3, 2)"),
         // The president reaches into his pocket for a Master Ball.
@@ -485,18 +485,18 @@ pub fn to_the_marsh_badge() -> Vec<Step> {
         // Getting out of the lift crosses the lift's own door and not the floor's: a floor's door
         // is crossed by walking into the lift from it, so the ride down is taken a floor at a time.
         GoTo("SilphCoElevator"),
-        Field(r#"{"move":"elevator","map":"SilphCo11F"}"#), GoTo("SilphCo11F"), GoTo("SilphCoElevator"),
-        Field(r#"{"move":"elevator","map":"SilphCo10F"}"#), GoTo("SilphCo10F"), GoTo("SilphCoElevator"),
-        Field(r#"{"move":"elevator","map":"SilphCo9F"}"#), GoTo("SilphCo9F"), GoTo("SilphCoElevator"),
-        Field(r#"{"move":"elevator","map":"SilphCo8F"}"#), GoTo("SilphCo8F"), GoTo("SilphCoElevator"),
-        Field(r#"{"move":"elevator","map":"SilphCo7F"}"#), GoTo("SilphCo7F"), GoTo("SilphCoElevator"),
-        Field(r#"{"move":"elevator","map":"SilphCo6F"}"#), GoTo("SilphCo6F"), GoTo("SilphCoElevator"),
-        Field(r#"{"move":"elevator","map":"SilphCo5F"}"#), GoTo("SilphCo5F"), GoTo("SilphCoElevator"),
-        Field(r#"{"move":"elevator","map":"SilphCo4F"}"#), GoTo("SilphCo4F"), GoTo("SilphCoElevator"),
-        Field(r#"{"move":"elevator","map":"SilphCo3F"}"#), GoTo("SilphCo3F"), GoTo("SilphCoElevator"),
-        Field(r#"{"move":"elevator","map":"SilphCo2F"}"#), GoTo("SilphCo2F"), GoTo("SilphCoElevator"),
-        Field(r#"{"move":"elevator","map":"SilphCo1F"}"#), GoTo("SilphCo1F"), GoTo("SilphCoElevator"),
-        Field(r#"{"move":"elevator","map":"SilphCo2F"}"#), GoTo("SilphCo2F"),
+        Field("lift:SilphCo11F"), GoTo("SilphCo11F"), GoTo("SilphCoElevator"),
+        Field("lift:SilphCo10F"), GoTo("SilphCo10F"), GoTo("SilphCoElevator"),
+        Field("lift:SilphCo9F"), GoTo("SilphCo9F"), GoTo("SilphCoElevator"),
+        Field("lift:SilphCo8F"), GoTo("SilphCo8F"), GoTo("SilphCoElevator"),
+        Field("lift:SilphCo7F"), GoTo("SilphCo7F"), GoTo("SilphCoElevator"),
+        Field("lift:SilphCo6F"), GoTo("SilphCo6F"), GoTo("SilphCoElevator"),
+        Field("lift:SilphCo5F"), GoTo("SilphCo5F"), GoTo("SilphCoElevator"),
+        Field("lift:SilphCo4F"), GoTo("SilphCo4F"), GoTo("SilphCoElevator"),
+        Field("lift:SilphCo3F"), GoTo("SilphCo3F"), GoTo("SilphCoElevator"),
+        Field("lift:SilphCo2F"), GoTo("SilphCo2F"), GoTo("SilphCoElevator"),
+        Field("lift:SilphCo1F"), GoTo("SilphCo1F"), GoTo("SilphCoElevator"),
+        Field("lift:SilphCo2F"), GoTo("SilphCo2F"),
         GoTo("SilphCo1F"), GoTo("SaffronCity"),
         // Sabrina's gym opens once Silph Co is clear of Rockets, and freeing the president is what
         // clears the streets the Rockets were standing in.
@@ -775,7 +775,7 @@ pub fn to_the_earth_badge() -> Vec<Step> {
         // The one flight of the tour, and the one the cartridge makes the natural thing: Viridian
         // is the whole world away from Fuchsia, and the gym that was shut when the run first
         // walked past it is the last badge. Every other leg is walked.
-        Field(r#"{"move":"fly","map":"ViridianCity"}"#), GoTo("ViridianCity"),
+        Field("fly:ViridianCity"), GoTo("ViridianCity"),
         GoTo("ViridianPokecenter"),
     ];
     steps.extend(SPENT.map(Field));
@@ -1016,7 +1016,7 @@ pub fn to_the_safari_game() -> Vec<Step> {
         AtPc(Pc::Deposit("MrMime")), AtPc(Pc::Deposit("Flareon")),
     ];
     // A Fish row casts the best rod in the bag, so the Super Rod waits in the PC for the Good Rod.
-    steps.push(Field(r#"{"move":"pc_items","op":"deposit","item":"SuperRod"}"#));
+    steps.push(Field("pc:store:SuperRod"));
     steps.extend([
         GoTo("FuchsiaCity"), GoTo("SafariZoneGate"), GoTo("SafariZoneCenter"),
         // One for the underground trade, and one a Rare Candy makes the Nidorino Route 11 wants.
@@ -1190,7 +1190,7 @@ pub fn to_the_cinnabar_errands() -> Vec<Step> {
         AtPc(Pc::Deposit("Nidorina")), AtPc(Pc::Deposit("Lickitung")), AtPc(Pc::Deposit("NidoranFemale")),
         AtPc(Pc::Withdraw("Raichu")), AtPc(Pc::ChangeBox(3)), AtPc(Pc::Withdraw("Venonat")),
         // The gym's door is locked to anyone not carrying the key, Blaine beaten or not.
-        Field(r#"{"move":"pc_items","op":"withdraw","item":"SecretKey"}"#),
+        Field("pc:take:SecretKey"),
         GoTo("CinnabarIsland"),
         GoTo("PokemonMansion1F"),
         Hunt { species: "Ponyta", row: "Pace", ball: "MasterBall", way: Way::WildOnACaveFloor, on: "PokemonMansion1F" },
@@ -1225,7 +1225,7 @@ pub fn to_the_cinnabar_errands() -> Vec<Step> {
         GoTo("Route21"), GoTo("PalletTown"),
         // Route 15's aide again, for a run that met fewer than fifty species by the first visit:
         // this phase's catch and trades are the last new ones the tour makes.
-        Tidy, Field(r#"{"move":"fly","map":"FuchsiaCity"}"#), GoTo("FuchsiaCity"),
+        Tidy, Field("fly:FuchsiaCity"), GoTo("FuchsiaCity"),
         GoTo("Route15"), GoTo("Route15Gate1F"), GoTo("Route15Gate2F"), Talk("OaksAide"),
     ]
 }

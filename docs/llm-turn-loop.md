@@ -47,21 +47,26 @@ argument lives in the code.
 - A refused battle id carries the cartridge's rule, read off the menu rather than the game, and says
   nothing where the menu cannot settle which rule it is. The turn's own `### On screen` line names
   the row, so a bare "not one of this turn's actions" is a contradiction with no way out.
-- A row that leads to a coordinate being asked for says both squares in its prose, where the player
-  stands and where the thing is (`use_field_move`'s `target`). Its id names only the thing.
-- `use_item`'s `target` is optional: the Bicycle, a Repel and the Itemfinder have no tile to aim at,
-  and requiring one had shut off half of `ItemUsePtrTable` with a driver and tests behind it.
-  `items::blocked` is asked up front, because `ItemUseNotTime` consumes nothing and prints a box that
-  reads like success.
+- A row that acts on something on the map names the thing in its id, as
+  `item:PokeFlute@Route12:Snorlax` does (`tools::thing_at`), never a square the model must work out.
+- A field row is generated only where `resolve_field_move` accepts it (`tools::field_rows`), so the
+  game's refusals belong there, and a use no driver can finish (Softboiled's target, a bare Poké
+  Flute) gets no row. `items::blocked` is asked up front, because `ItemUseNotTime` consumes nothing
+  and prints a box that reads like success.
+- A `<slot>`, `<box slot>` or `<item>` row is one row for every value: `classify` takes any value on
+  its syntax (`tools::fills`) and a refused one is refused when the row is taken, in
+  `resolve_field_move`'s own sentence, so the row's prose names the values that work.
+- A field move reports no ending of its own, so handing it over is what lands it in a chain
+  (`LlmPolicy::pick_field_move`); a driver that stops it still says so.
 - An action the game would refuse is not offered, on the map so scripted policies are held to it too.
   `prompt`'s `Blocked here:` line names what would clear a cuttable tree and nothing else — naming
   water fired on every coast.
 - There is no way to name a party member, so the Day Care and the Name Rater are declined rather than
   guessed at. All nine in-game trades work, because each has exactly one legal answer and the agent
   gives it.
-- `cut`, `push_boulder` and `strength` are not verbs. Each was the second half of a pair whose first
-  half was a menu row, so one decision cost two paid requests and the first completed looking like
-  success. A boulder row is one per *target*: its prose names the boulder, because a floor with two
+- Cut, Strength and Surf have no rows of their own: each is the ending of a walk row. As a second
+  half of a pair whose first half was a menu row, one decision cost two paid requests and the first
+  completed looking like success. A boulder row is one per *target*: its prose names the boulder, because a floor with two
   holes has exactly one boulder that can reach each — but its id names only the target, because the
   boulder and the start square move on every push and an id built from either is a new id after every
   shove. There is no per-shove row and no route step for one, so the two layers cannot disagree about
@@ -70,15 +75,15 @@ argument lives in the code.
   unconditionally, and says either that each reachable target is a row below or which half of
   Strength or Cut is missing. The "no boulder rows" branch counts rows off `actions()`, never off
   `boulder_pushes()`: a floor can have legal shoves left and still offer no goal.
-- The PC has no menu row, so the overworld turn names it, out of `usable_pc` rather than
-  `pc_locations_for`: Bill's is his cell separator and the bedroom's stores items only.
+- The PC's rows come out of `usable_pc` rather than `pc_locations_for`: Bill's is his cell separator
+  and the bedroom's stores items only.
 - The bin line reads `hidden_objects_for(map)` and nothing else — handing over `trash_cans` would
   walk the gym in two requests, and a test asserts the turn is byte-identical whatever the puzzle
   state says.
 - A reply's `choose_action` calls fold into one `Terminal` in `classify_reply`, all or none, each
-  checked against the same menu, and each hop is re-resolved against a fresh `actions()`. Only a
-  landed action advances it. A walk a battle stopped is taken up again, capped, unless a party
-  member fainted in that battle (`LlmPolicy::battle_faints`).
+  checked against the same menu, and each hop is re-resolved against the live game
+  (`tools::resolve_row`). Only a landed action advances it. A walk a battle stopped is taken up
+  again, capped, unless a party member fainted in that battle (`LlmPolicy::battle_faints`).
   A walk stopped by a message that left the player on the same square, with no battle after it, is
   taken up again without asking (`MAX_NOTICE_RESUMES`); a walk-back or a trainer still hands it back.
 - A chain stalls on a pace that ended in an encounter and reported nothing. No test in this file

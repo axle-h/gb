@@ -1287,7 +1287,7 @@ fn the_item_row_of_the_start_menu_is_found_without_the_pokedex() {
     let item: ItemId = fixture.api().game_state().expect("game state")
         .bag.iter().next().expect("Route 1's bag should not be empty").id;
 
-    fixture.agent.set_state(AgentState::TossingItem { item, press: true, entered_menu: false });
+    fixture.agent.set_state(AgentState::TossingItem { item, keep: 0, press: true, entered_menu: false });
 
     let mut reached_the_bag = false;
     for _ in 0..600 {
@@ -1303,6 +1303,33 @@ fn the_item_row_of_the_start_menu_is_found_without_the_pokedex() {
         }
     }
     assert!(reached_the_bag, "the toss driver never reached the bag");
+}
+
+/// A toss of some of a stack stops at the count asked for and closes the bag behind it.
+#[test]
+fn a_toss_of_part_of_a_stack_keeps_the_rest() {
+    use crate::pokemon::agent::AgentState;
+    use crate::pokemon::item::ItemId;
+
+    let mut fixture = TestFixture::new(ROUTE1_STATE, Duration::from_secs(60), vec![]);
+    for _ in 0..20 { fixture.step(); }
+    fixture.api().debug_give_item(ItemId::Antidote, 5).expect("room in the bag");
+    fixture.agent.set_state(AgentState::TossingItem { item: ItemId::Antidote, keep: 2, press: true, entered_menu: false });
+
+    let mut settled = false;
+    for _ in 0..1500 {
+        fixture.step();
+        let state = fixture.game_state();
+        if state.mode == GameMode::Overworld && crate::pokemon::postgame::items::bag_quantity(&state, ItemId::Antidote) <= 2 {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "the toss never came back to the overworld with the stack cut down");
+    for _ in 0..100 { fixture.step(); }
+    let state = fixture.game_state();
+    assert_eq!(crate::pokemon::postgame::items::bag_quantity(&state, ItemId::Antidote), 2, "three were to go, not the stack");
+    assert_eq!(state.mode, GameMode::Overworld, "the bag was left open");
 }
 
 /// A menu the agent did not open is closed, not confirmed.

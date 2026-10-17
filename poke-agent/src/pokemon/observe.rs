@@ -201,7 +201,7 @@ pub fn bag(state: &GameState, readout: &(impl Readout + ?Sized)) -> BagView {
 
 view! {
     pub struct BoxedPokemonView {
-        /// The slot `use_field_move` wants for `withdraw` and `release`.
+        /// The slot the `pc:withdraw@` and `pc:release@` rows want.
         pub box_slot: u8,
         pub species: String,
         pub nickname: String,

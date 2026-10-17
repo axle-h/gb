@@ -168,10 +168,8 @@ fn walk_in_then(
     }
 }
 
-fn field_move(arguments: serde_json::Value) -> Call {
-    let mut arguments = arguments;
-    arguments["summary"] = serde_json::json!("doing the thing");
-    Call::new("use_field_move", arguments)
+fn row(id: &str) -> Call {
+    Call::new("choose_action", serde_json::json!({ "id": id, "summary": "doing the thing" }))
 }
 
 /// A Pokémon is boarded at the Day Care and collected again, each by a call a model can make.
@@ -190,10 +188,10 @@ fn a_pokemon_is_boarded_at_the_day_care_and_collected() {
 
     let seen = Arc::new(Mutex::new(Seen::default()));
     let brain = walk_in_then(&["Daycare"], vec![
-        // The gentleman's own refusal, answered inside the turn.
-        field_move(serde_json::json!({ "move": "day_care", "op": "deposit", "slot": refused })),
-        field_move(serde_json::json!({ "move": "day_care", "op": "deposit", "slot": free })),
-        field_move(serde_json::json!({ "move": "day_care", "op": "withdraw" })),
+        // A slot the row does not name, which the gentleman refuses.
+        row(&format!("daycare:deposit@{refused}")),
+        row(&format!("daycare:deposit@{free}")),
+        row("daycare:withdraw"),
     ], Arc::clone(&seen));
     let mut run = LlmRun::builder(include_bytes!("../data/postgame-daycare.bin"))
         .named("day-care")
@@ -217,8 +215,14 @@ fn a_pokemon_is_boarded_at_the_day_care_and_collected() {
     let after = run.fixture().game_state();
     assert_eq!(after.pokemon.len(), before.pokemon.len(), "the party did not get it back");
     assert!(after.money < before.money, "the Day Care was not paid");
-    // A field move resolves once the turn has ended, so the refusal opens the next one.
-    let told = seen.lock().expect("not poisoned").overworld_turns.iter().any(|turn| turn.contains("knows an HM move"));
+    // The row names only the slots the gentleman takes.
+    let turns = seen.lock().expect("not poisoned").overworld_turns.clone();
+    let offer = turns.iter().flat_map(|turn| turn.lines())
+        .find(|line| line.starts_with("- `daycare:deposit@<slot>`")).expect("a deposit row");
+    assert!(offer.contains(&crate::llm::prompt::named(&party[free])), "{offer}");
+    assert!(!offer.contains(&format!("{refused} {}", crate::llm::prompt::named(&party[refused]))), "{offer}");
+    // A row resolves once the turn has ended, so the refusal opens the next one.
+    let told = turns.iter().any(|turn| turn.contains("knows an HM move"));
     assert!(told, "boarding a Pokémon that knows an HM was not refused with the gentleman's reason");
     assert!(!seen.lock().expect("not poisoned").was_stuck, "the watchdog fired at the Day Care");
 }
@@ -230,8 +234,8 @@ fn a_rare_candy_evolution_runs_or_is_stopped_as_the_model_says() {
     const SAFARI: &[u8] = include_bytes!("../data/completion-safari.bin");
     for (evolve, becomes) in [(false, PokemonSpecies::NidoranMale), (true, PokemonSpecies::Nidorino)] {
         let seen = Arc::new(Mutex::new(Seen::default()));
-        let brain = walk_in_then(&["Route19"], vec![field_move(serde_json::json!({
-            "move": "use_item", "item": "RareCandy", "slot": 4, "evolve": evolve }))], Arc::clone(&seen));
+        let id = match evolve { true => "item:RareCandy@4", false => "item:RareCandy@4:stay" };
+        let brain = walk_in_then(&["Route19"], vec![row(id)], Arc::clone(&seen));
         let mut run = LlmRun::builder(SAFARI)
             .named("rare-candy")
             .game_time(Duration::from_secs(10 * 60))
@@ -257,7 +261,7 @@ fn a_rare_candy_evolution_runs_or_is_stopped_as_the_model_says() {
 fn a_prize_is_bought_at_the_game_corner() {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let brain = walk_in_then(&["GameCornerPrizeRoom"], vec![
-        field_move(serde_json::json!({ "move": "prize", "item": "Abra" })),
+        row("prize:Abra"),
     ], Arc::clone(&seen));
     let mut run = LlmRun::builder(include_bytes!("../data/postgame-game-corner.bin"))
         .named("prize")
@@ -286,7 +290,7 @@ fn a_prize_below_the_first_row_is_bought() {
     use crate::pokemon::item::ItemId;
     let seen = Arc::new(Mutex::new(Seen::default()));
     let brain = walk_in_then(&["GameCornerPrizeRoom"], vec![
-        field_move(serde_json::json!({ "move": "prize", "item": "Tm50Substitute" })),
+        row("prize:Tm50Substitute"),
     ], Arc::clone(&seen));
     let mut run = LlmRun::builder(include_bytes!("../data/postgame-game-corner.bin"))
         .named("prize-tm")
@@ -300,14 +304,12 @@ fn a_prize_below_the_first_row_is_bought() {
     assert_eq!(run.fixture().game_state().coins, 9000 - 7700, "TM50 costs 7700 coins");
 }
 
-/// A machine prize with no room in the bag is refused before the walk, with the clerk's reason.
+/// A machine prize with no room in the bag is not offered, and asking for it costs no walk.
 #[test]
-fn a_machine_prize_is_refused_to_a_full_bag() {
+fn a_machine_prize_is_not_offered_to_a_full_bag() {
     use crate::pokemon::item::ItemId;
     let seen = Arc::new(Mutex::new(Seen::default()));
-    let brain = walk_in_then(&["GameCornerPrizeRoom"], vec![
-        field_move(serde_json::json!({ "move": "prize", "item": "Tm50Substitute" })),
-    ], Arc::clone(&seen));
+    let brain = walk_in_then(&["GameCornerPrizeRoom"], vec![row("prize:Tm50Substitute")], Arc::clone(&seen));
     let mut run = LlmRun::builder(include_bytes!("../data/postgame-game-corner.bin"))
         .named("prize-full-bag")
         .game_time(Duration::from_secs(20 * 60))
@@ -322,10 +324,12 @@ fn a_machine_prize_is_refused_to_a_full_bag() {
             run.fixture().api().debug_give_item(filler, 1).ok();
         }
     }
-    // A field move resolves once the turn has ended, so the refusal opens the next one.
-    let told = run.tick_until(PATIENCE, |_| seen.lock().expect("not poisoned").overworld_turns.iter()
-        .any(|turn| turn.contains("enough room")));
-    assert!(told, "the full bag was not given as the reason");
+    let refused = run.tick_until(PATIENCE, |_| seen.lock().expect("not poisoned").tool_results.iter()
+        .any(|result| result.contains("`prize:Tm50Substitute` is not one of this turn's actions")));
+    assert!(refused, "the machine the bag has no room for was not refused");
+    let turns = seen.lock().expect("not poisoned").overworld_turns.clone();
+    let here = turns.last().expect("a turn in the prize room");
+    assert!(here.contains("`prize:Abra`") && !here.contains("`prize:Tm50Substitute`"), "{here}");
     assert_eq!(run.fixture().game_state().coins, 9000, "coins were spent on a prize that could not be held");
 }
 
@@ -337,8 +341,8 @@ fn a_lift_goes_to_every_floor_its_panel_lists() {
     let seen = Arc::new(Mutex::new(Seen::default()));
     // Down to B1F, the panel's first floor, and back up to B4F, its third.
     let brain = walk_in_then(&["RocketHideoutElevator"], vec![
-        field_move(serde_json::json!({ "move": "elevator", "map": "RocketHideoutB1F" })),
-        field_move(serde_json::json!({ "move": "elevator", "map": "RocketHideoutB4F" })),
+        row("lift:RocketHideoutB1F"),
+        row("lift:RocketHideoutB4F"),
     ], Arc::clone(&seen));
     let mut run = LlmRun::builder(include_bytes!("../data/post-silph-scope.bin"))
         .named("lift-third-floor")
@@ -538,7 +542,7 @@ fn teaches_strength(forget: Option<u8>, name: &'static str) -> (LlmRun, Arc<Mute
     use crate::pokemon::item::ItemId;
     let seen = Arc::new(Mutex::new(Seen::default()));
     let mut walk = walk_in_then(&["CeruleanCity"], vec![
-        field_move(serde_json::json!({ "move": "teach", "item": "Hm04Strength", "slot": 0 })),
+        row("teach:Hm04Strength@0"),
     ], Arc::clone(&seen));
     let brain = move |request: &TurnRequest| match request.is_forget_move() {
         true => Reply::choose(&forget.map_or("keep".to_string(), |slot| format!("forget:{slot}"))),

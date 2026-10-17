@@ -258,7 +258,8 @@ struct BagUse {
 #[derive(Debug, Clone, Copy)]
 enum BagHow {
     Use(UseTarget),
-    Toss,
+    /// How many to toss; `None` is the whole stack, which is what frees the slot.
+    Toss(Option<u8>),
     Teach { slot: u8 },
     Evolve { slot: u8 },
     /// A rod at the water faced; a bite is a battle, which ends the task where it starts.
@@ -1408,7 +1409,8 @@ impl NativeAgent {
                 self.task = Some(Task::Push(Push { boulder, dir, armed: false, goal: false }));
                 self.push_step(state)
             }
-            FieldMove::TossItem { item } => self.start_bag(item, BagHow::Toss, None, state),
+            FieldMove::TossItem { item } => self.start_bag(item, BagHow::Toss(None), None, state),
+            FieldMove::TossSome { item, count } => self.start_bag(item, BagHow::Toss(Some(count)), None, state),
             FieldMove::UseBagItem { item, target } => self.start_bag(item, BagHow::Use(target), None, state),
             FieldMove::TeachMove { item, target_slot } => {
                 // Nothing the menus do could take this back, so it is refused here.
@@ -1929,7 +1931,7 @@ impl NativeAgent {
         let slot = match how {
             BagHow::Use(target) => target.slot(),
             BagHow::Teach { slot } | BagHow::Evolve { slot } => Some(slot),
-            BagHow::Toss | BagHow::Cast { .. } => None,
+            BagHow::Toss(_) | BagHow::Cast { .. } => None,
         };
         let mon = slot.and_then(|slot| state.pokemon.get(slot as usize));
         let before = Before {
@@ -1946,7 +1948,7 @@ impl NativeAgent {
         let slot = match bag.how {
             BagHow::Use(target) => target.slot(),
             BagHow::Teach { slot } | BagHow::Evolve { slot } => Some(slot),
-            BagHow::Toss | BagHow::Cast { .. } => None,
+            BagHow::Toss(_) | BagHow::Cast { .. } => None,
         };
         let command = match status {
             // A Rare Candy's level-up can be kept from evolving the mon, as B would.
@@ -1990,7 +1992,7 @@ impl NativeAgent {
                     None => Some(Command::CancelList),
                 }
             }
-            Status::Waiting(Decision::UseToss) => Some(Command::ChooseOption(matches!(bag.how, BagHow::Toss) as u8)),
+            Status::Waiting(Decision::UseToss) => Some(Command::ChooseOption(matches!(bag.how, BagHow::Toss(_)) as u8)),
             Status::Waiting(Decision::PartyMenu) => match slot.filter(|_| !bag.party) {
                 Some(slot) => {
                     bag.party = true;
@@ -2005,9 +2007,11 @@ impl NativeAgent {
                 }
                 _ => Some(Command::CancelOption),
             },
-            // A toss is of the whole stack, which is what frees the slot.
             Status::Waiting(Decision::Quantity) => match self.native.game().modes().last() {
-                Some(Mode::QuantityMenu(menu)) => Some(Command::ChooseQuantity(menu.max())),
+                Some(Mode::QuantityMenu(menu)) => Some(Command::ChooseQuantity(match bag.how {
+                    BagHow::Toss(Some(count)) => count.clamp(1, menu.max()),
+                    _ => menu.max(),
+                })),
                 _ => return Err("a quantity is waiting but its menu is not on top".into()),
             },
             Status::Waiting(Decision::TwoOption | Decision::ForgetMove) if self.learning().is_some() => self.learn_answer(&status)?,
@@ -2026,8 +2030,9 @@ impl NativeAgent {
         let mon = |slot: u8| world.party.get(slot as usize).map(|named| &named.mon.mon);
         let item = bag.item;
         let message = match bag.how {
-            BagHow::Toss if quantity < bag.before.quantity => format!("Tossed {item:?} to free a bag slot"),
-            BagHow::Toss => format!("the game would not toss {item:?}"),
+            BagHow::Toss(_) if quantity == 0 => format!("Tossed {item:?} to free a bag slot"),
+            BagHow::Toss(_) if quantity < bag.before.quantity => format!("Tossed {item:?}, keeping {quantity}"),
+            BagHow::Toss(_) => format!("the game would not toss {item:?}"),
             BagHow::Teach { slot } if mon(slot).is_some_and(|mon| mon.moves != bag.before.moves) =>
                 format!("Taught {item:?} to party slot {slot}"),
             BagHow::Teach { slot } => format!("Party slot {slot} did not learn the move from {item:?}"),
@@ -3372,6 +3377,14 @@ mod tests {
         assert_eq!(quantity(&agent, ItemId::Potion), 0, "{events:#?}");
         assert_eq!(quantity(&agent, ItemId::Antidote), 1);
         assert!(says(&events, "Tossed Potion"), "{events:#?}");
+    }
+
+    #[test]
+    fn a_toss_of_part_of_a_stack_keeps_the_rest() {
+        let game = with_bag(&[(ItemId::Potion, 5)], |_| {});
+        let (agent, events) = ask(game, FieldMove::TossSome { item: ItemId::Potion, count: 3 }, None);
+        assert_eq!(quantity(&agent, ItemId::Potion), 2, "{events:#?}");
+        assert!(says(&events, "Tossed Potion, keeping 2"), "{events:#?}");
     }
 
     #[test]

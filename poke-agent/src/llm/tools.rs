@@ -70,8 +70,6 @@ pub enum Terminal {
     },
     /// One battle action, and whether the rest of this battle belongs to the model.
     ChooseBattleAction { id: String, take_over: bool },
-    /// Something the agent does without walking: teach an HM, use an item, ride a lift.
-    UseFieldMove(FieldMoveRequest),
     PressButtons { buttons: Vec<JoypadButton> },
     SetNickname { name: Option<String> },
     BuyItem {
@@ -98,7 +96,7 @@ pub const DEFAULT_WAIT_TICKS: u16 = 50;
 /// The most of one item a mart order may ask for.
 pub const MAX_ORDER: u32 = 99;
 
-/// The action tool, the one tool that ends a turn on every kind but the overworld's field moves.
+/// The action tool, the one tool that ends a turn.
 pub const CHOOSE_ACTION: &str = "choose_action";
 
 /// The longest nickname the naming screen's buffer holds.
@@ -141,7 +139,8 @@ impl CallKind {
 
 // ── Field moves ──────────────────────────────────────────────────────────────────────────────────
 
-/// A `use_field_move` call, parsed; [`resolve_field_move`] resolves it against the live state.
+/// An overworld row that is not a walk, parsed from its id by [`field_request`];
+/// [`resolve_field_move`] resolves it against the live state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldMoveRequest {
     PartyMove { name: PokemonMoveName, slot: Option<u8> },
@@ -152,8 +151,8 @@ pub enum FieldMoveRequest {
     Evolve { stone: ItemId, slot: u8 },
     /// Use a bag item on `target` if given (the Poké Flute on Snorlax), else the player or `slot`.
     UseItem { item: ItemId, target: Option<Point8>, slot: Option<u8>, evolve: bool },
-    /// Throw an item away to free one of the bag's 20 slots.
-    TossItem { item: ItemId },
+    /// Throw `count` of an item away; all of it frees one of the bag's 20 slots.
+    TossItem { item: ItemId, count: u8 },
     /// Rearrange the party so `slot` leads.
     ReorderParty { slot: u8 },
     /// Deposit, withdraw or change box at the PC.
@@ -252,6 +251,16 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
     Ok(match request {
         FieldMoveRequest::PartyMove { name, slot } => {
             hm_available(state, *name)?;
+            match name {
+                PokemonMoveName::Dig if !escape_allowed(state) => return Err(format!(
+                    "Dig only gets out of somewhere the game counts as a dungeon: a cave, a forest, \
+                     a building like the Pokémon Tower or Silph Co. On {} it answers \"This isn't \
+                     the time to use that!\"", state.map.map)),
+                PokemonMoveName::Teleport if !outside(state) => return Err(format!(
+                    "Teleport only works outside, on a town or a route, and {} is not one.",
+                    state.map.map)),
+                _ => {}
+            }
             let slot = match slot {
                 Some(slot) => {
                     let slot = party_slot(*slot)?;
@@ -270,6 +279,16 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
         }
         FieldMoveRequest::Fly { to } => {
             hm_available(state, PokemonMoveName::Fly)?;
+            if !outside(state) {
+                return Err(format!(
+                    "Fly only takes off outside, from a town or a route, and {} is not one. Walk out \
+                     first.", state.map.map));
+            }
+            if !flies_to(state, *to) {
+                return Err(format!(
+                    "{to} is not on Fly's map: only towns you have set foot in are, and you have not \
+                     been to that one, or it is not a town."));
+            }
             FieldMove::Fly { to: *to }
         }
         FieldMoveRequest::Teach { item, slot } => {
@@ -279,6 +298,12 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             if state.pokemon.get(slot as usize)
                 .is_some_and(|mon| !crate::pokemon::learnset::can_learn(mon.species, item)) {
                 return Err(crate::pokemon::learnset::teach_refusal(state, item, slot));
+            }
+            // Refused by the game with nothing used up, which a teach driver would retry for ever.
+            if let Some(taught) = crate::pokemon::learnset::machine_move(item)
+                && knows(state, slot, taught) {
+                return Err(format!("The Pokémon in slot {slot} already knows {taught}, and the game \
+                                    will not teach a move twice."));
             }
             FieldMove::TeachMove { item, target_slot: slot }
         }
@@ -290,12 +315,28 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
                 .get(slot as usize)
                 .map(|mon| mon.species)
                 .ok_or_else(|| format!("Slot {slot} is empty."))?;
-            FieldMove::EvolveWithStone { stone: held(*stone)?, target_slot: slot, evolve_from }
+            let stone = held(*stone)?;
+            if !stone_evolves(state, slot, stone) {
+                return Err(format!(
+                    "The {stone:?} does nothing for the {evolve_from} in slot {slot}: the game says \
+                     \"It won't have any effect.\" A stone evolves only the species it is made for."));
+            }
+            FieldMove::EvolveWithStone { stone, target_slot: slot, evolve_from }
         }
         FieldMoveRequest::UseItem { item, target: None, slot, evolve } => {
             let item = held(*item)?;
             if let Some(refusal) = crate::pokemon::item_use::field_use_refusal(item) {
                 return Err(refusal);
+            }
+            if crate::pokemon::item_use::battle_only(item) {
+                return Err(format!("The {item:?} only does anything in a battle; out here the game \
+                                    says \"This isn't the time to use that!\""));
+            }
+            if item == ItemId::EscapeRope && !escape_allowed(state) {
+                return Err(format!(
+                    "An Escape Rope only gets out of somewhere the game counts as a dungeon: a cave, \
+                     a forest, a building like the Pokémon Tower or Silph Co. On {} it answers \
+                     \"This isn't the time to use that!\"", state.map.map));
             }
             let target = match slot {
                 Some(slot) => crate::pokemon::postgame::items::UseTarget::Party {
@@ -364,7 +405,17 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             }
             FieldMove::UseFieldItem { item, target: at }
         }
-        FieldMoveRequest::TossItem { item } => FieldMove::TossItem { item: held(*item)? },
+        FieldMoveRequest::TossItem { item, count } => {
+            let item = held(*item)?;
+            if poke_core::item::is_key_item(item) {
+                return Err(format!("The {item:?} cannot be thrown away: the game says \"That's too \
+                                    important to toss!\" of every key item and HM."));
+            }
+            match *count >= crate::pokemon::postgame::items::bag_quantity(state, item) {
+                true => FieldMove::TossItem { item },
+                false => FieldMove::TossSome { item, count: (*count).max(1) },
+            }
+        }
         FieldMoveRequest::ReorderParty { slot } => FieldMove::ReorderParty { slot: party_slot(*slot)? },
         FieldMoveRequest::UsePcBox { op } => {
             let pc = the_pc_here(state, true)?;
@@ -473,6 +524,32 @@ fn unencodable(name: &str) -> Option<char> {
     })
 }
 
+/// `CheckIfInOutsideMap`: the tilesets Fly and Teleport are allowed from.
+fn outside(state: &GameState) -> bool {
+    use crate::pokemon::map_header::TileSetId;
+    matches!(state.map.tileset, TileSetId::Overworld | TileSetId::Plateau)
+}
+
+/// `ItemUseEscapeRope`, which Dig borrows: `EscapeRopeTilesets`, and never Agatha's room.
+fn escape_allowed(state: &GameState) -> bool {
+    state.map.map != Map::AgathasRoom
+        && poke_core::tables::ESCAPE_ROPE_TILESETS.contains(&(state.map.tileset as u8))
+}
+
+/// Whether `to` is a town on Fly's map: `wTownVisitedFlag` has a bit per town id.
+fn flies_to(state: &GameState, to: Map) -> bool {
+    let id = to as u8;
+    id < crate::pokemon::postgame::fly_bike::FLY_DESTINATIONS && state.towns_visited & (1 << id) != 0
+}
+
+/// Whether `stone` evolves the party member in `slot`, per `EvosMovesPointerTable`.
+fn stone_evolves(state: &GameState, slot: u8, stone: ItemId) -> bool {
+    use poke_core::evos_moves::{EvosMoves, Evolution};
+    state.pokemon.get(slot as usize).is_some_and(|mon| EvosMoves::of(mon.species).evolutions.iter()
+        .any(|evolution| matches!(*evolution, Evolution::Item { item, min_level, .. }
+            if item == stone && mon.level >= min_level)))
+}
+
 fn knows(state: &GameState, slot: u8, name: PokemonMoveName) -> bool {
     state
         .pokemon
@@ -480,13 +557,316 @@ fn knows(state: &GameState, slot: u8, name: PokemonMoveName) -> bool {
         .is_some_and(|mon| mon.moves.iter().flatten().any(|m| m.name == name))
 }
 
-/// The moves `use_field_move` accepts under [`FieldMoveRequest::PartyMove`], and what each is for.
-const PARTY_MOVES: &[(&str, PokemonMoveName, &str)] = &[
-    ("flash", PokemonMoveName::Flash, "light a dark map (Rock Tunnel)"),
-    ("dig", PokemonMoveName::Dig, "warp straight out of a cave or dungeon"),
-    ("teleport", PokemonMoveName::Teleport, "warp back to the last Pokémon Center"),
-    ("softboiled", PokemonMoveName::Softboiled, "heal another party member from Chansey's HP"),
+// ── Field rows ───────────────────────────────────────────────────────────────────────────────────
+
+/// What a row that is not a walk resolves to against the live game.
+pub enum Row {
+    Walk(OverworldAction),
+    /// The field move, or `resolve_field_move`'s sentence for why the game would refuse it.
+    Field(Result<FieldMove, String>),
+    /// A walk id the fresh action list no longer has.
+    Gone,
+}
+
+/// Resolve one overworld id, a walk or a field row, against the live game.
+pub fn resolve_row(state: &GameState, id: &str) -> Row {
+    match field_request(state, id, None) {
+        Some(request) => Row::Field(request.and_then(|request| resolve_field_move(state, &request))),
+        None => resolve_overworld(state, id).map_or(Row::Gone, Row::Walk),
+    }
+}
+
+/// The request a field row's id names, or `None` for a walk's id, whose first part is a map.
+/// `actions` is the walk list to find a named thing in; `None` computes a fresh one if needed.
+pub fn field_request(state: &GameState, id: &str, actions: Option<&[OverworldAction]>)
+    -> Option<Result<FieldMoveRequest, String>> {
+    use crate::pokemon::postgame::item_storage::PcItemOp;
+    use crate::pokemon::postgame::pc_box::{PcBoxOp, BOX_COUNT};
+    let (base, count) = match id.rsplit_once('*') {
+        Some((base, count)) => (base, count.parse::<u32>().ok().filter(|count| *count >= 1)),
+        None => (id, None),
+    };
+    let quantity = count.unwrap_or(1).min(MAX_ORDER) as u8;
+    let slot = |text: &str| text.parse::<u8>()
+        .map_err(|_| format!("`{id}`: `{text}` is not a slot number."));
+    let item = |name: &str| item_by_name(name)
+        .ok_or_else(|| format!("`{name}` is not an item this game has. `read_bag` spells them."));
+    let map = |name: &str| map_by_name(name).ok_or_else(|| format!("`{name}` is not a map."));
+    let (head, rest) = match base.split_once(':') {
+        Some((head, rest)) => (head, Some(rest)),
+        None => (base, None),
+    };
+    let party_move = |name| Ok(FieldMoveRequest::PartyMove { name, slot: None });
+    let slotted = |rest: &str| -> Result<(ItemId, u8), String> {
+        let (name, at) = rest.split_once('@').ok_or_else(|| format!("`{id}` needs a party slot after an `@`."))?;
+        Ok((item(name)?, slot(at)?))
+    };
+    Some(match (head, rest) {
+        ("dig", None) => party_move(PokemonMoveName::Dig),
+        ("teleport", None) => party_move(PokemonMoveName::Teleport),
+        ("flash", None) => party_move(PokemonMoveName::Flash),
+        ("fly", Some(to)) => map(to).map(|to| FieldMoveRequest::Fly { to }),
+        ("lift", Some(to)) => map(to).map(|to| FieldMoveRequest::UseElevator { to }),
+        ("prize", Some(name)) => crate::pokemon::postgame::game_corner::Prize::named(name)
+            .map(|prize| FieldMoveRequest::RedeemPrize { prize })
+            .ok_or_else(|| format!("`{name}` is not one of the prize counter's prizes.")),
+        ("lead", Some(at)) => slot(at).map(|slot| FieldMoveRequest::ReorderParty { slot }),
+        ("toss", Some(name)) => item(name).map(|item| FieldMoveRequest::TossItem { item, count: quantity }),
+        ("teach", Some(rest)) => slotted(rest).map(|(item, slot)| FieldMoveRequest::Teach { item, slot }),
+        ("evolve", Some(rest)) => slotted(rest).map(|(stone, slot)| FieldMoveRequest::Evolve { stone, slot }),
+        ("item", Some(rest)) => match rest.split_once('@') {
+            None => item(rest).map(|item| FieldMoveRequest::UseItem { item, target: None, slot: None, evolve: true }),
+            Some((name, at)) => {
+                let (at, evolve) = match at.strip_suffix(STAY) {
+                    Some(at) => (at, false),
+                    None => (at, true),
+                };
+                match at.parse::<u8>() {
+                    Ok(slot) => item(name).map(|item| FieldMoveRequest::UseItem { item, target: None, slot: Some(slot), evolve }),
+                    // Anything else after the `@` is the id of the thing on the map it is used on.
+                    Err(_) => item(name).and_then(|item| {
+                        let fresh;
+                        let actions = match actions {
+                            Some(actions) => actions,
+                            None => { fresh = state.map.actions(); &fresh }
+                        };
+                        thing_at(state, actions, at)
+                            .map(|target| FieldMoveRequest::UseItem { item, target: Some(target), slot: None, evolve: true })
+                            .ok_or_else(|| format!("`{at}` is not on this map any more, so there is nothing to use the {item:?} on."))
+                    }),
+                }
+            }
+        },
+        ("pc", Some(rest)) => match rest.split_once(['@', ':']) {
+            Some(("deposit", at)) => slot(at).map(|slot| FieldMoveRequest::UsePcBox { op: PcBoxOp::Deposit { slot } }),
+            Some(("withdraw", at)) => slot(at).map(|box_slot| FieldMoveRequest::UsePcBox { op: PcBoxOp::Withdraw { box_slot } }),
+            Some(("release", at)) => slot(at).map(|box_slot| FieldMoveRequest::UsePcBox { op: PcBoxOp::Release { box_slot } }),
+            Some(("store", name)) => item(name).map(|item| FieldMoveRequest::UseItemPc { op: PcItemOp::Deposit, item, qty: quantity }),
+            Some(("take", name)) => item(name).map(|item| FieldMoveRequest::UseItemPc { op: PcItemOp::Withdraw, item, qty: quantity }),
+            None if rest == "box" => match count.unwrap_or(1) {
+                n @ 1.. if n <= u32::from(BOX_COUNT) => Ok(FieldMoveRequest::UsePcBox { op: PcBoxOp::ChangeBox { n: n as u8 - 1 } }),
+                n => Err(format!("There is no box {n}; the boxes are 1 to {BOX_COUNT}.")),
+            },
+            _ => Err(format!("`{id}` is not one of the PC's rows.")),
+        },
+        ("daycare", Some("withdraw")) => Ok(FieldMoveRequest::DayCare { deposit: None }),
+        ("daycare", Some(rest)) => match rest.strip_prefix("deposit@") {
+            Some(at) => slot(at).map(|slot| FieldMoveRequest::DayCare { deposit: Some(slot) }),
+            None => Err(format!("`{id}` is not one of the Day Care's rows.")),
+        },
+        _ => return None,
+    })
+}
+
+/// The suffix of the Rare Candy row that stops the evolution its level starts, as B does.
+const STAY: &str = ":stay";
+
+/// Where the person or object a walk row's id names is standing.
+fn thing_at(state: &GameState, actions: &[OverworldAction], id: &str) -> Option<Point8> {
+    use crate::pokemon::tile::MetaTile;
+    let action = actions.iter().find(|action| action.id() == id)?;
+    let MetaTile::Sprite(name) = action.tile else { return None };
+    state.map.sprites.iter().find(|sprite| sprite.name == name).map(|sprite| sprite.position)
+}
+
+/// The items a row may use with nothing to aim at: the rest either ask which Pokémon, or have a
+/// row of their own (a rod's `Fish`), or never report back from a bare use (the Poké Flute).
+const UNAIMED_ITEMS: &[ItemId] = &[
+    ItemId::Repel, ItemId::SuperRepel, ItemId::MaxRepel, ItemId::Bicycle, ItemId::EscapeRope,
+    ItemId::Itemfinder,
 ];
+
+/// The items a row may aim at someone on the map, and the picture that someone has.
+const AIMED_ITEMS: &[(ItemId, crate::pokemon::sprite::PictureId)] =
+    &[(ItemId::PokeFlute, crate::pokemon::sprite::PictureId::Snorlax)];
+
+/// The overworld rows that are not walks, each kept only where [`resolve_field_move`] accepts it,
+/// so a row is offered only when the game would allow it. A row with an `@<slot>` stands for one
+/// per party slot, and its prose names the slots that work.
+pub fn field_rows(state: &GameState, actions: &[OverworldAction]) -> Vec<MenuItem> {
+    use crate::pokemon::postgame::pc_box::BOX_CAPACITY;
+    let accepted = |id: &str| matches!(field_request(state, id, Some(actions)),
+        Some(Ok(request)) if resolve_field_move(state, &request).is_ok());
+    let party = 0..state.pokemon.len() as u8;
+    let working = |make: &dyn Fn(u8) -> String| -> Vec<u8> {
+        party.clone().filter(|&slot| accepted(&make(slot))).collect()
+    };
+    let who = |slot: u8| state.pokemon.get(slot as usize)
+        .map_or_else(|| format!("{slot}"), |mon| format!("{slot} {}", crate::llm::prompt::named(mon)));
+    let hurt = |slot: u8| state.pokemon.get(slot as usize).map_or_else(String::new, |mon| format!(
+        "{} {}/{} HP{}", who(slot), mon.current_hp, mon.stats.hp, crate::llm::prompt::ailment(mon.status)));
+    let list = |slots: &[u8], each: &dyn Fn(u8) -> String| slots.iter().map(|&slot| each(slot))
+        .collect::<Vec<_>>().join("; ");
+    let mut rows = Vec::new();
+    let mut row = |id: String, description: String| rows.push(MenuItem { id, description });
+
+    for to in (0..crate::pokemon::postgame::fly_bike::FLY_DESTINATIONS).filter_map(Map::from_repr) {
+        let id = format!("fly:{to}");
+        if to != state.map.map && accepted(&id) {
+            row(id, format!("fly to {to}"));
+        }
+    }
+    if accepted("dig") {
+        row("dig".to_string(), "dig out of here, back to the town of the last Pokémon Center you used".to_string());
+    }
+    if accepted("teleport") {
+        row("teleport".to_string(), "teleport to the town of the last Pokémon Center you used".to_string());
+    }
+    if state.map_is_dark && accepted("flash") {
+        row("flash".to_string(), "light up this dark map with Flash".to_string());
+    }
+
+    for entry in state.bag.iter() {
+        let (item, held) = (entry.id, entry.quantity);
+        if UNAIMED_ITEMS.contains(&item) && accepted(&format!("item:{item:?}")) {
+            row(format!("item:{item:?}"), match item {
+                ItemId::Repel => format!("Repel ×{held}; keeps wild Pokémon weaker than your lead away for 100 steps"),
+                ItemId::SuperRepel => format!("SuperRepel ×{held}; keeps wild Pokémon weaker than your lead away for 200 steps"),
+                ItemId::MaxRepel => format!("MaxRepel ×{held}; keeps wild Pokémon weaker than your lead away for 250 steps"),
+                ItemId::Bicycle if state.on_bicycle => "get off the Bicycle".to_string(),
+                ItemId::Bicycle => "ride the Bicycle, twice as fast as walking".to_string(),
+                ItemId::EscapeRope => format!("EscapeRope ×{held}; back to the town of the last Pokémon Center you used"),
+                _ => format!("use the {item:?}"),
+            });
+        }
+        if let Some(&(_, picture)) = AIMED_ITEMS.iter().find(|(aimed, _)| *aimed == item) {
+            for action in actions {
+                let crate::pokemon::tile::MetaTile::Sprite(name) = action.tile else { continue };
+                let Some(sprite) = state.map.sprites.iter().find(|s| s.name == name && s.picture_id == picture) else { continue };
+                let id = format!("item:{item:?}@{}", action.id());
+                if accepted(&id) {
+                    row(id, format!("walk up to the {name} at ({}, {}) and play the {item:?} to it",
+                                    sprite.position.x, sprite.position.y));
+                }
+            }
+        }
+        if poke_core::item::opens_party_menu(item) && !is_stone(item) {
+            let slots = working(&|slot| format!("item:{item:?}@{slot}"));
+            if !slots.is_empty() {
+                let each: &dyn Fn(u8) -> String = match restores_hp_or_status(item) { true => &hurt, false => &who };
+                row(format!("item:{item:?}@<slot>"), format!("{item:?} ×{held} on a party member: {}", list(&slots, each)));
+            }
+            if item == ItemId::RareCandy {
+                let evolving: Vec<u8> = slots.iter().copied().filter(|&slot| levels_into_evolution(state, slot)).collect();
+                if !evolving.is_empty() {
+                    row(format!("item:{item:?}@<slot>{STAY}"), format!(
+                        "{item:?} ×{held} on a party member, stopping the evolution the new level starts: {}",
+                        list(&evolving, &who)));
+                }
+            }
+        }
+        if is_stone(item) {
+            let slots = working(&|slot| format!("evolve:{item:?}@{slot}"));
+            if !slots.is_empty() {
+                row(format!("evolve:{item:?}@<slot>"), format!("evolve a party member with the {item:?} ×{held}: {}",
+                    list(&slots, &|slot| format!("{} can use it", who(slot)))));
+            }
+        }
+        if let Some(taught) = crate::pokemon::learnset::machine_move(item) {
+            let slots = working(&|slot| format!("teach:{item:?}@{slot}"));
+            if !slots.is_empty() {
+                let metadata = taught.metadata();
+                let power = metadata.power.map_or_else(|| "no damage".to_string(), |power| format!("{power} power"));
+                row(format!("teach:{item:?}@<slot>"), format!("{taught} ({}, {power}){}: {} can learn it",
+                    metadata.move_type, if item.is_hm() { ", an HM, which cannot be forgotten" } else { "" },
+                    list(&slots, &who)));
+            }
+        }
+    }
+
+    let leads: Vec<u8> = party.clone().skip(1).filter(|&slot| accepted(&format!("lead:{slot}"))).collect();
+    if !leads.is_empty() {
+        row("lead:<slot>".to_string(), format!("make that party member the leader: {}", list(&leads, &who)));
+    }
+    if state.bag.iter().any(|entry| accepted(&format!("toss:{:?}", entry.id))) {
+        row("toss:<item>*N".to_string(), "throw away N of a bag item, as `toss:Antidote*3` does (default 1); all of \
+             it frees its bag slot, and a key item or an HM cannot be thrown away. `read_bag` lists what you carry".to_string());
+    }
+
+    if let Some((_, pokemon)) = usable_pc(state.map.map) {
+        let open = state.current_box + 1;
+        let boxed = state.boxed_pokemon.len();
+        if pokemon {
+            let slots = working(&|slot| format!("pc:deposit@{slot}"));
+            if !slots.is_empty() {
+                row("pc:deposit@<slot>".to_string(), format!(
+                    "put a party member into the PC's open box, Box {open} ({boxed} of {BOX_CAPACITY} used): {}",
+                    list(&slots, &who)));
+            }
+            let in_box: Vec<String> = state.boxed_pokemon.iter().enumerate()
+                .map(|(at, mon)| format!("{at} {} Lv{}", mon.species, mon.level)).collect();
+            if accepted("pc:withdraw@0") {
+                row("pc:withdraw@<box slot>".to_string(), format!(
+                    "take a Pokémon out of Box {open} into the party: {}", in_box.join("; ")));
+            }
+            if accepted("pc:release@0") {
+                row("pc:release@<box slot>".to_string(), format!(
+                    "release one of Box {open}'s Pokémon for good, numbered as `pc:withdraw` numbers them"));
+            }
+            row("pc:box*N".to_string(), format!(
+                "open box N of {} instead of Box {open}, as `pc:box*2` does; only the open box can be read or used",
+                crate::pokemon::postgame::pc_box::BOX_COUNT));
+        }
+        if state.bag.iter().any(|entry| accepted(&format!("pc:store:{:?}", entry.id))) {
+            row("pc:store:<item>*N".to_string(), "put N of a bag item into PC item storage, as `pc:store:Potion*5` \
+                 does (default 1); `read_bag` lists what you carry".to_string());
+        }
+        row("pc:take:<item>*N".to_string(), "take N of an item out of PC item storage into the bag, as \
+             `pc:take:Potion*5` does (default 1); `read_pc` lists what is stored".to_string());
+    }
+
+    if let Some((_, floors)) = crate::pokemon::tile_map::elevator_for(state.map.map) {
+        for floor in floors {
+            let id = format!("lift:{floor}");
+            if accepted(&id) {
+                row(id, format!("ride the lift to {floor}"));
+            }
+        }
+    }
+    if state.map.map == Map::Daycare {
+        let slots = working(&|slot| format!("daycare:deposit@{slot}"));
+        if !slots.is_empty() {
+            row("daycare:deposit@<slot>".to_string(), format!(
+                "board a party member at the Day Care, to gain a level for every so many steps you walk: {}",
+                list(&slots, &who)));
+        }
+        if accepted("daycare:withdraw") {
+            row("daycare:withdraw".to_string(), "pay for and collect the Pokémon boarded here".to_string());
+        }
+    }
+    if state.map.map == Map::GameCornerPrizeRoom {
+        use crate::pokemon::postgame::game_corner::Prize;
+        for prize in [Prize::Abra, Prize::Clefairy, Prize::Nidorina, Prize::Dratini, Prize::Scyther,
+                      Prize::Porygon, Prize::HyperBeam, Prize::DragonRage, Prize::Substitute] {
+            let name = prize.item().map_or_else(|| format!("{prize:?}"), |item| format!("{item:?}"));
+            let id = format!("prize:{name}");
+            if accepted(&id) {
+                row(id, format!("buy the {name} for {} coins", prize.cost()));
+            }
+        }
+    }
+    rows
+}
+
+/// The items whose row is worth showing each Pokémon's HP and status beside.
+fn restores_hp_or_status(item: ItemId) -> bool {
+    use ItemId::*;
+    matches!(item, Potion | SuperPotion | HyperPotion | MaxPotion | FullRestore | FreshWater | SodaPop
+        | Lemonade | Revive | MaxRevive | Antidote | BurnHeal | IceHeal | Awakening | ParlyzHeal | FullHeal)
+}
+
+/// The evolution stones, which have `evolve:` rows rather than `item:` ones.
+fn is_stone(item: ItemId) -> bool {
+    matches!(item, ItemId::MoonStone | ItemId::FireStone | ItemId::ThunderStone | ItemId::WaterStone | ItemId::LeafStone)
+}
+
+/// Whether one more level evolves the party member in `slot`.
+fn levels_into_evolution(state: &GameState, slot: u8) -> bool {
+    use poke_core::evos_moves::{EvosMoves, Evolution};
+    state.pokemon.get(slot as usize).is_some_and(|mon| mon.level < 100
+        && EvosMoves::of(mon.species).evolutions.iter()
+            .any(|evolution| matches!(*evolution, Evolution::Level { level, .. } if mon.level + 1 >= level)))
+}
 
 // ── The catalogue ────────────────────────────────────────────────────────────────────────────────
 
@@ -528,9 +908,9 @@ pub const READ_TOOLS: &[ReadTool] = &[
     },
     ReadTool {
         name: "read_pc",
-        description: "What is in the PC: the Pokémon in the open box with the slot numbers \
-                      `use_field_move` wants, what is in PC item storage, and which of the twelve \
-                      boxes is open. Only the open box can be read.",
+        description: "What is in the PC: the Pokémon in the open box with the slot numbers the \
+                      `pc:` rows want, what is in PC item storage, and which of the twelve boxes is \
+                      open. Only the open box can be read.",
         kinds: &[DecisionKind::Overworld],
         parameters: None,
     },
@@ -538,7 +918,7 @@ pub const READ_TOOLS: &[ReadTool] = &[
         name: "read_bag",
         description: "Every item in the bag with its quantity and shop price, plus money and how \
                       many of the bag's 20 slots are used.",
-        // The bag is nowhere in a turn request, and `use_field_move` needs its exact names.
+        // The bag is nowhere in a turn request, and the `toss:` and `pc:store:` rows need its names.
         kinds: &[DecisionKind::Overworld, DecisionKind::Battle, DecisionKind::MartPurchase],
         parameters: None,
     },
@@ -780,11 +1160,6 @@ pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
         tools.extend(battle_script_tools());
     }
     tools.push(choose_action_spec());
-    if kind == DecisionKind::Overworld {
-        let mut field_move = use_field_move_spec();
-        add_summary_argument(&mut field_move);
-        tools.push(field_move);
-    }
     if offers_issue_report(kind) {
         tools.push(report_issue_spec());
     }
@@ -797,8 +1172,10 @@ fn choose_action_spec() -> ToolSpec {
         CHOOSE_ACTION,
         format!(
             "ENDS THE TURN. Take one of the actions in this turn's menu. `id` is an id from that \
-             menu, copied exactly — never a position in the list. Where a row says so, `*N` on the \
-             end asks for N of it: `buy:PokeBall*10`, `wait*50`. Every turn also takes `wait*N`, \
+             menu, copied exactly — never a position in the list. An id holding `<slot>`, `<box \
+             slot>` or `<item>` stands for one per slot or item: send it with that filled in, as \
+             `item:Potion@2` or `teach:Tm28Dig@0`. `*N` on the end of a `buy:` row or a row whose id \
+             ends in `*N` asks for N of it: `buy:PokeBall*10`, `toss:Antidote*3`. Every turn also takes `wait*N`, \
              which lets the game run N ticks of 20 ms (default {DEFAULT_WAIT_TICKS}, at most \
              {MAX_WAIT_TICKS}) and then asks again. On an overworld or mart turn up to \
              {MAX_CHAINED_ACTIONS} calls in one reply are taken in order without asking you again, \
@@ -876,91 +1253,6 @@ fn no_arguments() -> Value {
     json!({ "type": "object", "properties": {}, "additionalProperties": false })
 }
 
-/// One tool for every non-walking field action, discriminated by `move`, to keep `tools` short.
-fn use_field_move_spec() -> ToolSpec {
-    let party_moves: Vec<String> =
-        PARTY_MOVES.iter().map(|(name, _, why)| format!("`{name}` — {why}")).collect();
-    ToolSpec::new(
-        "use_field_move",
-        format!(
-            "ENDS THE TURN. Do something that is not walking. `move` picks which, and decides which \
-             of the other arguments are needed:\n\
-             - {}. Each takes an optional `slot`; without one the first Pokémon that knows the move \
-             is used.\n\
-             - `fly` — fly to `map`, which must be a town you have already visited with a Pokémon \
-             Center.\n\
-             - `teach` — teach the HM or TM `item` to the Pokémon in `slot`.\n\
-             - `evolve` — use the evolution stone `item` on the Pokémon in `slot`.\n\
-             - `use_item` — use bag `item`: on `target`, facing it (the Poké Flute on Snorlax, the \
-             Card Key on a door); on the party member in `slot` (a Potion, a vitamin); or on \
-             neither, for the Bicycle, a Repel or the Itemfinder.\n\
-             - `toss_item` — throw `item` away to free a bag slot. The bag holds only 20 kinds.\n\
-             - `reorder_party` — make the Pokémon in `slot` the party leader.\n\
-             - `pc_pokemon` — on a map with a PC; walks there: `op` is `deposit` (party `slot` → box), `withdraw` or \
-             `release` (a `box_slot`), or `change_box` (`box`, 1-12). \
-             Only the open box can be read; `read_pc` shows it.\n\
-             - `pc_items` — the same PC: `op` `deposit` or `withdraw` moves `quantity` of `item` \
-             between the bag and PC storage. The bag holds only 20 kinds.\n\
-             - `elevator` — inside a lift, ride it to `map`. The three lifts are in the Rocket \
-             Hideout, Celadon Mart and Silph Co.\n\
-             - `day_care` — in the Day Care, `op` `deposit` boards `slot`; `withdraw` pays and \
-             collects.\n\
-             - `prize` — in the prize room, buy `item` with coins.\n\
-             Cutting a tree, pushing a boulder and mounting Surf are not here: each of the three is \
-             a walk with one legal ending, so the walk does it. A `:CutTree` row cuts the tree it \
-             walks up to, a `:PushBoulder…` row names a boulder and a target and does the whole \
-             puzzle, arming Strength and shoving until that boulder is on that switch or down that \
-             hole, and any route that crosses water mounts Surf on its own. All three rows are withheld \
-             while the game would refuse them, and the turn says so in a line above the menu.\n\
-             `fly` and `flash` each need a Pokémon taught that HM *and* a particular badge; until \
-             you have both the game refuses them, and retrying will not change it.",
-            party_moves.join("\n- "),
-        ),
-        json!({
-            "type": "object",
-            "properties": {
-                "move": {
-                    "type": "string",
-                    "enum": field_move_names(),
-                    "description": "Which field action to take.",
-                },
-                "slot": { "type": "integer", "minimum": 0, "maximum": 5, "description": "A party slot, 0-based." },
-                "item": { "type": "string", "description": "A bag item, named as `read_bag` names it." },
-                "map": { "type": "string", "description": "A map name, for `fly` and `elevator`." },
-                "target": {
-                    "type": "object",
-                    "properties": { "x": { "type": "integer" }, "y": { "type": "integer" } },
-                    "required": ["x", "y"],
-                    "additionalProperties": false,
-                    "description": "A tile on the current map, in the coordinates `read_map` uses. \
-                                    For `use_item`, the square the *thing* is on; omit it for an \
-                                    item used on nobody.",
-                },
-                "op": {
-                    "type": "string",
-                    "enum": ["deposit", "withdraw", "release", "change_box"],
-                    "description": "For `pc_pokemon` and `pc_items`: which way things move.",
-                },
-                "box_slot": { "type": "integer", "minimum": 0, "maximum": 19, "description": "A slot in the open box, 0-based." },
-                "box": { "type": "integer", "minimum": 1, "maximum": 12, "description": "Which box to open, for `change_box`." },
-                "quantity": { "type": "integer", "minimum": 1, "maximum": 99, "description": "How many, for `pc_items`. Default 1." },
-                "evolve": { "type": "boolean", "description": "false stops the evolution a Rare Candy starts, as B does." },
-            },
-            "required": ["move"],
-            "additionalProperties": false,
-        }),
-    )
-}
-
-fn field_move_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = PARTY_MOVES.iter().map(|(name, _, _)| *name).collect();
-    names.extend([
-        "fly", "teach", "evolve", "use_item", "toss_item", "reorder_party",
-        "pc_pokemon", "pc_items", "elevator", "day_care", "prize",
-    ]);
-    names
-}
-
 pub const REPORT_ISSUE: &str = "report_issue";
 
 /// Longer than a summary: an issue is written to disk once and read by a person.
@@ -1014,18 +1306,15 @@ pub fn offers_issue_report(kind: DecisionKind) -> bool {
     matches!(kind, DecisionKind::Overworld | DecisionKind::Battle | DecisionKind::Stuck)
 }
 
-pub fn terminal_names(kind: DecisionKind) -> &'static [&'static str] {
-    match kind {
-        DecisionKind::Overworld => &[CHOOSE_ACTION, "use_field_move"],
-        _ => &[CHOOSE_ACTION],
-    }
+pub fn terminal_names(_kind: DecisionKind) -> &'static [&'static str] {
+    &[CHOOSE_ACTION]
 }
 
 // ── Classification ───────────────────────────────────────────────────────────────────────────────
 
 /// The complaint when the model chose an id this turn never offered, or `None` when it did.
 fn not_on_the_menu(id: &str, menu: &[String]) -> Option<String> {
-    if menu.is_empty() || menu.iter().any(|offered| offered == id) {
+    if menu.is_empty() || menu.iter().any(|offered| fills(offered.strip_suffix(COUNTED).unwrap_or(offered), id)) {
         return None;
     }
     // Tested against `Map::iter()`: a battle id such as `item:Potion` also has a colon.
@@ -1046,6 +1335,26 @@ fn not_on_the_menu(id: &str, menu: &[String]) -> Option<String> {
          list you were given: {}. Pick one of those.",
         menu.iter().map(|offered| format!("`{offered}`")).collect::<Vec<_>>().join(", "),
     ))
+}
+
+/// What a row's id ends in when it takes a count.
+const COUNTED: &str = "*N";
+
+/// Whether `sent` is the row `row`, or fills the one `<placeholder>` in it: a party slot, a box
+/// slot or an item.
+fn fills(row: &str, sent: &str) -> bool {
+    if row == sent {
+        return true;
+    }
+    let Some((prefix, rest)) = row.split_once('<') else { return false };
+    let Some((placeholder, suffix)) = rest.split_once('>') else { return false };
+    let Some(middle) = sent.strip_prefix(prefix).and_then(|tail| tail.strip_suffix(suffix)) else { return false };
+    match placeholder {
+        "slot" => middle.parse::<u8>().is_ok_and(|slot| slot < 6),
+        "box slot" => middle.parse::<usize>().is_ok_and(|slot| slot < crate::pokemon::postgame::pc_box::BOX_CAPACITY),
+        "item" => item_by_name(middle).is_some(),
+        _ => false,
+    }
 }
 
 /// The cartridge's own rule behind a battle id the menu did not offer, or `""` where the menu
@@ -1307,10 +1616,13 @@ fn pick(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> Result<Pick, St
             _ => return Err(format!("`{id}`: `*` takes a whole number after it, as `buy:PokeBall*10` does.")),
         },
     };
-    let buying = kind == DecisionKind::MartPurchase && base.starts_with("buy:");
-    if count.is_some() && !buying {
+    let counted = (kind == DecisionKind::MartPurchase && base.starts_with("buy:"))
+        || (kind == DecisionKind::Overworld
+            && menu.iter().any(|row| row.strip_suffix(COUNTED).is_some_and(|row| fills(row, base))));
+    if count.is_some() && !counted {
         return Err(format!(
-            "`{id}`: only a mart's `buy:` rows and `wait` take a `*N`. Send `{base}` on its own."
+            "`{id}`: only a mart's `buy:` rows, the rows whose id ends in `{COUNTED}`, and `wait` take \
+             a count. Send `{base}` on its own."
         ));
     }
 
@@ -1331,7 +1643,10 @@ fn pick(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> Result<Pick, St
     }
 
     match kind {
-        DecisionKind::Overworld => Ok(Pick::Overworld(base.to_string())),
+        DecisionKind::Overworld => Ok(Pick::Overworld(match count {
+            Some(count) => format!("{base}*{count}"),
+            None => base.to_string(),
+        })),
         DecisionKind::Battle => Ok(Pick::Battle(base.to_string())),
         DecisionKind::MartPurchase => match base.strip_prefix("buy:") {
             None if base == "leave" => Ok(Pick::Leave),
@@ -1464,17 +1779,9 @@ fn classify_call(kind: DecisionKind, call: &ToolCall) -> CallKind {
     }
 
     match name {
-        "use_field_move" if kind == DecisionKind::Overworld => match field_move_arguments(&arguments) {
-            Ok(request) => CallKind::Terminal(Terminal::UseFieldMove(request)),
-            Err(complaint) => CallKind::Rejected(complaint),
-        },
-        "use_field_move" => CallKind::Rejected(format!(
-            "`use_field_move` is not available in a {} turn. End this turn with `{CHOOSE_ACTION}`.",
-            kind.label(),
-        )),
         // An older conversation's tools, which a resumed history still shows the model calling.
         "choose_battle_action" | "set_nickname" | "buy_item" | "forget_move" | "mimic_move"
-        | "press_buttons" | "wait" => CallKind::Rejected(format!(
+        | "press_buttons" | "wait" | "use_field_move" => CallKind::Rejected(format!(
             "There is no `{name}` any more: every turn ends with `{CHOOSE_ACTION}`, and the id says \
              what. Take an id from this turn's menu."
         )),
@@ -1491,143 +1798,6 @@ fn string_argument(arguments: &Value, key: &str) -> Result<String, String> {
     match arguments.get(key).and_then(Value::as_str) {
         Some(value) if !value.trim().is_empty() => Ok(value.to_string()),
         _ => Err(format!("`{key}` is required and must be a non-empty string.")),
-    }
-}
-
-// ── Parsing the awkward arguments ────────────────────────────────────────────────────────────────
-
-fn field_move_arguments(arguments: &Value) -> Result<FieldMoveRequest, String> {
-    let which = string_argument(arguments, "move")?;
-    let which = which.trim().to_ascii_lowercase();
-
-    let slot = || -> Result<u8, String> {
-        match arguments.get("slot").and_then(Value::as_u64) {
-            Some(slot) if slot < 6 => Ok(slot as u8),
-            Some(slot) => Err(format!("There is no party slot {slot}; a party has 0 to 5.")),
-            None => Err(format!("`{which}` needs a `slot` — which party member to use it on.")),
-        }
-    };
-    let item = |key: &str| -> Result<ItemId, String> {
-        let name = string_argument(arguments, key)?;
-        item_by_name(&name)
-            .ok_or_else(|| format!("`{name}` is not an item this game has. `read_bag` names them as they are spelled."))
-    };
-    let target = || -> Result<Point8, String> {
-        let target = arguments
-            .get("target")
-            .ok_or_else(|| format!("`{which}` needs a `target` tile, as `{{\"x\": …, \"y\": …}}`."))?;
-        let coordinate = |axis: &str| {
-            target
-                .get(axis)
-                .and_then(Value::as_u64)
-                .filter(|value| *value < 256)
-                .ok_or_else(|| format!("`target.{axis}` must be a tile coordinate on the current map."))
-        };
-        Ok(Point8 { x: coordinate("x")? as u8, y: coordinate("y")? as u8 })
-    };
-
-    if let Some((_, name, _)) = PARTY_MOVES.iter().find(|(label, _, _)| *label == which) {
-        let slot = match arguments.get("slot") {
-            Some(Value::Null) | None => None,
-            Some(_) => Some(slot()?),
-        };
-        return Ok(FieldMoveRequest::PartyMove { name: *name, slot });
-    }
-
-    match which.as_str() {
-        "fly" => {
-            let name = string_argument(arguments, "map")?;
-            map_by_name(&name)
-                .map(|to| FieldMoveRequest::Fly { to })
-                .ok_or_else(|| format!("`{name}` is not a map. `read_world_graph` lists the ones you know."))
-        }
-        "teach" => Ok(FieldMoveRequest::Teach { item: item("item")?, slot: slot()? }),
-        "evolve" => Ok(FieldMoveRequest::Evolve { stone: item("item")?, slot: slot()? }),
-        // Both optional, and a `target` that is present is still checked.
-        "use_item" => Ok(FieldMoveRequest::UseItem {
-            item: item("item")?,
-            target: match arguments.get("target") {
-                Some(Value::Null) | None => None,
-                Some(_) => Some(target()?),
-            },
-            slot: match arguments.get("slot") {
-                Some(Value::Null) | None => None,
-                Some(_) => Some(slot()?),
-            },
-            evolve: match arguments.get("evolve") {
-                Some(Value::Null) | None => true,
-                Some(Value::Bool(evolve)) => *evolve,
-                Some(other) => return Err(format!("`evolve` is true or false, not {other}.")),
-            },
-        }),
-        "toss_item" => Ok(FieldMoveRequest::TossItem { item: item("item")? }),
-        "pc_pokemon" => {
-            use crate::pokemon::postgame::pc_box::{PcBoxOp, BOX_CAPACITY, BOX_COUNT};
-            let op = string_argument(arguments, "op")?;
-            let box_slot = || -> Result<u8, String> {
-                match arguments.get("box_slot").and_then(Value::as_u64) {
-                    Some(slot) if (slot as usize) < BOX_CAPACITY => Ok(slot as u8),
-                    Some(slot) => Err(format!("There is no box slot {slot}; a box holds {BOX_CAPACITY}.")),
-                    None => Err(format!("`{op}` needs a `box_slot` — `read_pc` numbers them.")),
-                }
-            };
-            Ok(FieldMoveRequest::UsePcBox {
-                op: match op.trim().to_ascii_lowercase().as_str() {
-                    "deposit" => PcBoxOp::Deposit { slot: slot()? },
-                    "withdraw" => PcBoxOp::Withdraw { box_slot: box_slot()? },
-                    "release" => PcBoxOp::Release { box_slot: box_slot()? },
-                    "change_box" => match arguments.get("box").and_then(Value::as_u64) {
-                        // 1-based for the model, because the game's own menu is; 0-based inside.
-                        Some(n) if (1..=u64::from(BOX_COUNT)).contains(&n) => PcBoxOp::ChangeBox { n: n as u8 - 1 },
-                        Some(n) => return Err(format!("There is no box {n}; there are {BOX_COUNT}.")),
-                        None => return Err("`change_box` needs a `box`, 1 to 12.".to_string()),
-                    },
-                    other => return Err(format!(
-                        "`{other}` is not a PC operation: deposit, withdraw, release or change_box.")),
-                },
-            })
-        }
-        "pc_items" => {
-            use crate::pokemon::postgame::item_storage::PcItemOp;
-            let op = string_argument(arguments, "op")?;
-            Ok(FieldMoveRequest::UseItemPc {
-                op: match op.trim().to_ascii_lowercase().as_str() {
-                    "deposit" => PcItemOp::Deposit,
-                    "withdraw" => PcItemOp::Withdraw,
-                    other => return Err(format!("`{other}` is not a PC item operation: deposit or withdraw.")),
-                },
-                item: item("item")?,
-                qty: match arguments.get("quantity").and_then(Value::as_u64) {
-                    Some(qty) if (1..=99).contains(&qty) => qty as u8,
-                    Some(qty) => return Err(format!("{qty} is not a quantity the game can move; 1 to 99.")),
-                    None => 1,
-                },
-            })
-        }
-        "elevator" => {
-            let name = string_argument(arguments, "map")?;
-            map_by_name(&name)
-                .map(|to| FieldMoveRequest::UseElevator { to })
-                .ok_or_else(|| format!("`{name}` is not a map. The lift's own panel lists the floors it serves."))
-        }
-        "reorder_party" => Ok(FieldMoveRequest::ReorderParty { slot: slot()? }),
-        "day_care" => match string_argument(arguments, "op")?.trim().to_ascii_lowercase().as_str() {
-            "deposit" => Ok(FieldMoveRequest::DayCare { deposit: Some(slot()?) }),
-            "withdraw" => Ok(FieldMoveRequest::DayCare { deposit: None }),
-            other => Err(format!("`{other}` is not a Day Care operation: deposit or withdraw.")),
-        },
-        "prize" => {
-            let name = string_argument(arguments, "item")?;
-            crate::pokemon::postgame::game_corner::Prize::named(&name)
-                .map(|prize| FieldMoveRequest::RedeemPrize { prize })
-                .ok_or_else(|| format!(
-                    "`{name}` is not a prize. The counter sells Abra, Clefairy, Nidorina, Dratini, \
-                     Scyther and Porygon, and TM23, TM15 and TM50."))
-        }
-        other => Err(format!(
-            "`{other}` is not one of the field moves. They are: {}.",
-            field_move_names().join(", "),
-        )),
     }
 }
 
@@ -1846,10 +2016,9 @@ fn overworld_description(state: &GameState, action: &OverworldAction) -> String 
             "fish at the water's edge with the {} to find wild water Pokemon", rod.name()),
         MetaTile::Sprite(name) => {
             let sprite = state.map.sprites.iter().find(|s| s.name == name);
-            // Both squares: the id's is where the player stands, `target` is where the thing is.
             let stand_and_target = |verb: &str| match sprite {
                 Some(sprite) => format!(
-                    "{verb} (you stand at ({}, {}); it is at ({}, {}), which is the `target`)",
+                    "{verb} (you stand at ({}, {}); it is at ({}, {}))",
                     action.destination.x, action.destination.y, sprite.position.x, sprite.position.y),
                 None => verb.to_string(),
             };
@@ -1892,6 +2061,7 @@ pub fn overworld_menu(state: &GameState, arrival: Option<crate::pokemon::world_g
         }
     };
     let mut actions = state.map.actions();
+    let field = field_rows(state, &actions);
     actions.retain(|action| !matches!(action.tile, MetaTile::Pc));
     actions.retain(|action| !matches!(action.tile, MetaTile::Sprite(name)
         if state.map.sprites.iter().any(|s| s.name == name
@@ -1923,6 +2093,7 @@ pub fn overworld_menu(state: &GameState, arrival: Option<crate::pokemon::world_g
                 description
             },
         })
+        .chain(field)
         .collect()
 }
 
@@ -2378,31 +2549,30 @@ mod tests {
     }
 
     #[test]
-    fn the_pc_and_the_lift_are_field_moves_a_model_can_name() {
+    fn the_pc_and_the_lift_are_rows_a_model_can_name() {
         use crate::pokemon::postgame::item_storage::PcItemOp;
         use crate::pokemon::postgame::pc_box::PcBoxOp;
-        let request = |arguments: &str| field_move_arguments(
-            &serde_json::from_str::<Value>(arguments).expect("valid JSON")).expect("parses");
+        let state = GameState::default();
+        let request = |id: &str| field_request(&state, id, Some(&[])).expect("a field row").expect("parses");
 
-        assert_eq!(request(r#"{"move":"pc_pokemon","op":"deposit","slot":2}"#),
-                   FieldMoveRequest::UsePcBox { op: PcBoxOp::Deposit { slot: 2 } });
-        assert_eq!(request(r#"{"move":"pc_pokemon","op":"withdraw","box_slot":7}"#),
-                   FieldMoveRequest::UsePcBox { op: PcBoxOp::Withdraw { box_slot: 7 } });
-        // 1-based on the wire, as the cartridge's CHANGE BOX menu counts, and 0-based inside.
-        assert_eq!(request(r#"{"move":"pc_pokemon","op":"change_box","box":1}"#),
-                   FieldMoveRequest::UsePcBox { op: PcBoxOp::ChangeBox { n: 0 } });
-        assert_eq!(request(r#"{"move":"pc_items","op":"withdraw","item":"Potion","quantity":3}"#),
+        assert_eq!(request("pc:deposit@2"), FieldMoveRequest::UsePcBox { op: PcBoxOp::Deposit { slot: 2 } });
+        assert_eq!(request("pc:withdraw@7"), FieldMoveRequest::UsePcBox { op: PcBoxOp::Withdraw { box_slot: 7 } });
+        // 1-based in the id, as the cartridge's CHANGE BOX menu counts, and 0-based inside.
+        assert_eq!(request("pc:box*1"), FieldMoveRequest::UsePcBox { op: PcBoxOp::ChangeBox { n: 0 } });
+        assert_eq!(request("pc:take:Potion*3"),
                    FieldMoveRequest::UseItemPc { op: PcItemOp::Withdraw, item: ItemId::Potion, qty: 3 });
-        // A quantity nobody gave is one, which is what a model omitting it means.
-        assert_eq!(request(r#"{"move":"pc_items","op":"deposit","item":"Potion"}"#),
+        // A count nobody gave is one.
+        assert_eq!(request("pc:store:Potion"),
                    FieldMoveRequest::UseItemPc { op: PcItemOp::Deposit, item: ItemId::Potion, qty: 1 });
-        assert_eq!(request(r#"{"move":"elevator","map":"SilphCo5F"}"#),
-                   FieldMoveRequest::UseElevator { to: Map::SilphCo5F });
+        assert_eq!(request("toss:Antidote*3"), FieldMoveRequest::TossItem { item: ItemId::Antidote, count: 3 });
+        assert_eq!(request("lift:SilphCo5F"), FieldMoveRequest::UseElevator { to: Map::SilphCo5F });
+        assert_eq!(request("item:RareCandy@1:stay"),
+                   FieldMoveRequest::UseItem { item: ItemId::RareCandy, target: None, slot: Some(1), evolve: false });
+        assert!(field_request(&state, "PalletTown:5,5:Warp", Some(&[])).is_none(), "a walk is not a field row");
 
-        // A misspelt operation is named rather than falling through to a wrong default.
-        let bad = field_move_arguments(&serde_json::from_str::<Value>(
-            r#"{"move":"pc_pokemon","op":"store","slot":0}"#).expect("valid JSON")).expect_err("refused");
-        assert!(bad.contains("deposit, withdraw, release or change_box"), "{bad}");
+        // A box that does not exist is named rather than falling through to a wrong default.
+        let bad = field_request(&state, "pc:box*13", Some(&[])).expect("a field row").expect_err("refused");
+        assert!(bad.contains("1 to 12"), "{bad}");
     }
 
     /// Two menu rows may never share an id.
@@ -2423,9 +2593,10 @@ mod tests {
             assert!(seen.insert(row.id.clone()), "`{}` is offered twice; one of them can never be chosen", row.id);
         }
 
-        // And every one of them still resolves.
-        for row in &menu {
-            assert!(resolve_overworld(&state, &row.id).is_some(), "`{}` is offered but does not resolve", row.id);
+        // And every one of them still resolves, a slot row with any slot it names.
+        for row in menu.iter().filter(|row| !row.id.contains('<')) {
+            assert!(matches!(resolve_row(&state, &row.id), Row::Walk(_) | Row::Field(Ok(_))),
+                    "`{}` is offered but does not resolve", row.id);
         }
     }
 
@@ -2575,9 +2746,9 @@ mod tests {
     /// What the `tools` array costs, per kind, with a ceiling on each.
     #[test]
     fn the_tool_array_stays_within_its_budget() {
-        // Overworld is the big one: it carries `use_field_move`.
+        // Overworld is the big one: it carries the battle-script tools.
         for (kind, ceiling) in [
-            (DecisionKind::Overworld, 13_250),
+            (DecisionKind::Overworld, 8_400),
             (DecisionKind::Battle, 5_575),
             (DecisionKind::Nickname, 4_075),
             (DecisionKind::MartPurchase, 4_825),
@@ -3032,11 +3203,9 @@ mod tests {
             assert_eq!(spec(kind).as_deref(), Some(overworld.as_str()), "{kind:?} sends a different `{CHOOSE_ACTION}`");
             let offered = names(kind);
             for gone in ["choose_battle_action", "set_nickname", "buy_item", "forget_move", "mimic_move",
-                         "press_buttons", "wait", "resume_after_battle"] {
+                         "press_buttons", "wait", "resume_after_battle", "use_field_move"] {
                 assert!(!offered.contains(&gone), "{kind:?} still offers {gone}");
             }
-            assert_eq!(offered.contains(&"use_field_move"), kind == DecisionKind::Overworld,
-                       "field moves are overworld-only");
         }
 
         // The reads are all there on a stuck turn, to work out why it is stuck before pressing anything.
@@ -3168,9 +3337,9 @@ mod tests {
         assert!(complaint.contains(CHOOSE_ACTION), "{complaint}");
 
         let CallKind::Rejected(complaint) =
-            classify(DecisionKind::Battle, &call("use_field_move", r#"{"move":"dig"}"#), &[])
+            classify(DecisionKind::Overworld, &call("use_field_move", r#"{"move":"dig"}"#), &[])
         else {
-            panic!("a field move does not end a battle turn");
+            panic!("use_field_move is gone");
         };
         assert!(complaint.contains(CHOOSE_ACTION), "{complaint}");
 
@@ -3320,64 +3489,37 @@ mod tests {
         assert!(READ_TOOLS.iter().any(|tool| tool.name == SCREENSHOT), "it is still offered as a read");
     }
 
-    /// Every argument shape `use_field_move` accepts, and the complaint each malformed one earns.
+    /// Every id shape a field row takes, and the ids a template refuses.
     #[test]
-    fn a_field_move_call_parses_into_the_move_it_names() {
-        let parse = |arguments: &str| classify(DecisionKind::Overworld, &call("use_field_move", arguments), &[]);
-        let request = |arguments: &str| match parse(arguments) {
-            CallKind::Terminal(Terminal::UseFieldMove(request)) => request,
-            CallKind::Rejected(complaint) => panic!("{arguments} was rejected: {complaint}"),
-            _ => panic!("{arguments} did not end the turn"),
-        };
+    fn a_field_row_parses_into_the_move_it_names() {
+        let state = GameState::default();
+        let request = |id: &str| field_request(&state, id, Some(&[])).expect("a field row").expect("parses");
+        assert_eq!(request("flash"), FieldMoveRequest::PartyMove { name: PokemonMoveName::Flash, slot: None },
+                   "a party move is whoever knows it, not slot 0");
+        assert_eq!(request("fly:PewterCity"), FieldMoveRequest::Fly { to: Map::PewterCity });
+        assert_eq!(request("teach:Hm03Surf@0"), FieldMoveRequest::Teach { item: ItemId::Hm03Surf, slot: 0 });
+        assert_eq!(request("evolve:MoonStone@4"), FieldMoveRequest::Evolve { stone: ItemId::MoonStone, slot: 4 });
+        assert_eq!(request("item:Bicycle"),
+                   FieldMoveRequest::UseItem { item: ItemId::Bicycle, target: None, slot: None, evolve: true });
+        assert_eq!(request("item:Potion@1"),
+                   FieldMoveRequest::UseItem { item: ItemId::Potion, target: None, slot: Some(1), evolve: true });
+        assert_eq!(request("lead:3"), FieldMoveRequest::ReorderParty { slot: 3 });
+        assert_eq!(request("daycare:deposit@2"), FieldMoveRequest::DayCare { deposit: Some(2) });
 
-        assert_eq!(
-            request(r#"{"move":"flash"}"#),
-            FieldMoveRequest::PartyMove { name: PokemonMoveName::Flash, slot: None },
-            "an omitted slot means 'whoever knows it', not slot 0",
-        );
-        assert_eq!(
-            request(r#"{"move":"flash","slot":2}"#),
-            FieldMoveRequest::PartyMove { name: PokemonMoveName::Flash, slot: Some(2) },
-        );
-        assert_eq!(request(r#"{"move":"fly","map":"Pewter City"}"#), FieldMoveRequest::Fly { to: Map::PewterCity });
-        assert_eq!(
-            request(r#"{"move":"teach","item":"Hm03Surf","slot":0}"#),
-            FieldMoveRequest::Teach { item: ItemId::Hm03Surf, slot: 0 },
-        );
-        assert_eq!(
-            request(r#"{"move":"use_item","item":"PokeFlute","target":{"x":12,"y":9}}"#),
-            FieldMoveRequest::UseItem { item: ItemId::PokeFlute, target: Some(Point8 { x: 12, y: 9 }), slot: None, evolve: true },
-        );
-        assert_eq!(
-            request(r#"{"move":"use_item","item":"Bicycle"}"#),
-            FieldMoveRequest::UseItem { item: ItemId::Bicycle, target: None, slot: None, evolve: true },
-        );
-        assert_eq!(
-            request(r#"{"move":"use_item","item":"Potion","slot":1}"#),
-            FieldMoveRequest::UseItem { item: ItemId::Potion, target: None, slot: Some(1), evolve: true },
-        );
-        assert_eq!(request(r#"{"move":"reorder_party","slot":3}"#), FieldMoveRequest::ReorderParty { slot: 3 });
-
-        // Each is a tool result the model can correct in the same turn.
-        for (arguments, expected) in [
-            (r#"{"move":"teleportation"}"#, "not one of the field moves"),
-            (r#"{"move":"fly","map":"Atlantis"}"#, "is not a map"),
-            (r#"{"move":"teach","item":"Hm03Surf"}"#, "needs a `slot`"),
-            (r#"{"move":"toss_item","item":"Sandwich"}"#, "is not an item"),
-            // A `target` that is present is still checked.
-            (r#"{"move":"use_item","item":"PokeFlute","target":{"x":"here"}}"#, "must be a tile coordinate"),
-            // `cut`, `push_boulder` and `strength` are menu rows, not verbs.
-            (r#"{"move":"cut"}"#, "not one of the field moves"),
-            (r#"{"move":"push_boulder","target":{"x":1,"y":1},"direction":"left"}"#, "not one of the field moves"),
-            (r#"{"move":"strength"}"#, "not one of the field moves"),
-            (r#"{"move":"reorder_party","slot":9}"#, "no party slot 9"),
-            (r#"{"move":"interact","target":{"x":1,"y":2}}"#, "not one of the field moves"),
-            ("{}", "`move` is required"),
-        ] {
-            let CallKind::Rejected(complaint) = parse(arguments) else {
-                panic!("{arguments} should have been rejected");
-            };
-            assert!(complaint.contains(expected), "{arguments} → {complaint}");
+        // A slot row's template takes any party slot in its place, and checks the rest of the id.
+        let menu: Vec<String> = ["item:Potion@<slot>", "toss:<item>*N", "pc:withdraw@<box slot>", "pc:box*N"]
+            .iter().map(|id| id.to_string()).collect();
+        let chose = |id: &str| classify(DecisionKind::Overworld,
+            &call(CHOOSE_ACTION, &json!({ "id": id, "summary": "s" }).to_string()), &menu);
+        for (sent, taken) in [("item:Potion@2", "item:Potion@2"), ("toss:Antidote*3", "toss:Antidote*3"),
+                              ("toss:Antidote", "toss:Antidote"), ("pc:withdraw@19", "pc:withdraw@19"),
+                              ("pc:box*4", "pc:box*4")] {
+            assert!(matches!(chose(sent), CallKind::Terminal(Terminal::ChooseAction { ref id, .. }) if id == taken),
+                    "{sent} was not taken as {taken}");
+        }
+        for refused in ["item:Potion@6", "item:Potion", "item:Ether@1", "toss:Sandwich*2", "pc:withdraw@20",
+                        "item:Potion@1*2", "lead:1"] {
+            assert!(matches!(chose(refused), CallKind::Rejected(_)), "{refused} should have been refused");
         }
     }
 
@@ -3437,11 +3579,13 @@ mod tests {
             Ok(resolved) => panic!("{request:?} should not have resolved to {resolved:?}"),
         };
         assert!(complaint(FieldMoveRequest::ReorderParty { slot: 3 }).contains("no party member in slot 3"));
-        assert!(complaint(FieldMoveRequest::TossItem { item: ItemId::Hm01Cut }).contains("no Hm01Cut in the bag"));
+        assert!(complaint(FieldMoveRequest::TossItem { item: ItemId::Hm01Cut, count: 1 }).contains("no Hm01Cut in the bag"));
 
-        // The one that needs nothing but its own HM resolves as itself.
+        // Fly needs its HM, its badge, to be outside and to have been to the town.
         let mut flier = fixture_state();
         flier.badges |= crate::pokemon::badge::Badge::ThunderBadge;
+        flier.map.tileset = crate::pokemon::map_header::TileSetId::Overworld;
+        flier.towns_visited = 1 << Map::PalletTown as u8;
         flier.pokemon.get_mut(0).expect("the fixture has a starter").moves[1] =
             Some(PokemonMove::with_max_pp(PokemonMoveName::Fly));
         assert_eq!(
@@ -3452,6 +3596,46 @@ mod tests {
             resolve_field_move(&state, &FieldMoveRequest::ReorderParty { slot: 0 }),
             Ok(FieldMove::ReorderParty { slot: 0 }),
         );
+    }
+
+    /// The game's own refusals are `resolve_field_move`'s, so a row it refuses is never offered.
+    #[test]
+    fn a_use_the_game_would_refuse_is_refused_in_the_game_s_terms() {
+        use crate::pokemon::bag::BagItem;
+        use crate::pokemon::map_header::TileSetId;
+        let mut state = fixture_state();
+        for item in [ItemId::OaksParcel, ItemId::MoonStone, ItemId::Tm11Bubblebeam, ItemId::EscapeRope, ItemId::XAttack] {
+            state.bag.push(BagItem { id: item, quantity: 1 }).expect("room");
+        }
+        let starter = state.pokemon.get_mut(0).expect("the fixture has a starter");
+        starter.moves[1] = Some(PokemonMove::with_max_pp(PokemonMoveName::Dig));
+        starter.moves[2] = Some(PokemonMove::with_max_pp(PokemonMoveName::Teleport));
+        starter.moves[3] = Some(PokemonMove::with_max_pp(PokemonMoveName::Bubblebeam));
+        let refusal = |state: &GameState, id: &str| match field_request(state, id, Some(&[])) {
+            Some(Ok(request)) => resolve_field_move(state, &request).err(),
+            other => panic!("{id} did not parse: {other:?}"),
+        };
+
+        assert!(refusal(&state, "toss:OaksParcel").is_some_and(|why| why.contains("too important to toss")));
+        assert!(refusal(&state, "evolve:MoonStone@0").is_some_and(|why| why.contains("won't have any effect")));
+        assert!(refusal(&state, "teach:Tm11Bubblebeam@0").is_some_and(|why| why.contains("already knows")));
+        assert!(refusal(&state, "item:XAttack@0").is_some_and(|why| why.contains("only does anything in a battle")));
+        // Oak's lab is neither a dungeon nor outside.
+        assert!(refusal(&state, "dig").is_some_and(|why| why.contains("dungeon")));
+        assert!(refusal(&state, "item:EscapeRope").is_some_and(|why| why.contains("dungeon")));
+        assert!(refusal(&state, "teleport").is_some_and(|why| why.contains("only works outside")));
+
+        state.map.tileset = TileSetId::Cavern;
+        assert_eq!(refusal(&state, "dig"), None, "a cave is dug out of");
+        assert_eq!(refusal(&state, "item:EscapeRope"), None);
+        state.map.tileset = TileSetId::Overworld;
+        assert_eq!(refusal(&state, "teleport"), None, "a route is teleported from");
+
+        // And a row is generated for exactly the uses that resolve.
+        let ids: Vec<String> = field_rows(&state, &[]).into_iter().map(|row| row.id).collect();
+        assert!(ids.contains(&"teleport".to_string()) && !ids.contains(&"dig".to_string()), "{ids:?}");
+        assert!(!ids.iter().any(|id| id.starts_with("evolve:") || id.starts_with("teach:") || id.starts_with("item:XAttack")),
+                "{ids:?}");
     }
 
     /// The machine gate: a teach the party cannot learn is refused.
@@ -3797,3 +3981,4 @@ mod tests {
         );
     }
 }
+
