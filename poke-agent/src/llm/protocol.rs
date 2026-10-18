@@ -316,6 +316,12 @@ pub struct Usage {
     pub completion_tokens: u64,
     #[serde(default)]
     pub total_tokens: u64,
+    /// The part of `prompt_tokens` served from the endpoint's prompt cache.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    /// The part of `prompt_tokens` written to the cache by this request.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
     /// The numbers came from [`Usage::estimate`], so the UI can call them a guess.
     #[serde(default, skip_deserializing)]
     pub estimated: bool,
@@ -329,7 +335,7 @@ impl Usage {
         let reply = Message::assistant(completion.content.clone(), completion.tool_calls.clone())
             .approximate_tokens()
             + Message::assistant(completion.reasoning.clone(), Vec::new()).approximate_tokens();
-        Self { prompt_tokens: prompt, completion_tokens: reply, total_tokens: prompt + reply, estimated: true }
+        Self { prompt_tokens: prompt, completion_tokens: reply, total_tokens: prompt + reply, estimated: true, ..Self::default() }
     }
 }
 
@@ -438,7 +444,7 @@ impl StreamAccumulator {
         }
         // The usage frame is the last one and carries an empty `choices` array.
         if let Some(usage) = chunk.usage {
-            self.usage = Some(usage);
+            self.usage = Some(usage.into());
         }
 
         for choice in chunk.choices {
@@ -518,12 +524,48 @@ impl StreamAccumulator {
     }
 }
 
+/// The usage frame as OpenAI-compatible endpoints spell it, cache figures nested.
+#[derive(Debug, Deserialize)]
+struct WireUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    #[serde(default)]
+    total_tokens: u64,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromptDetails {
+    #[serde(default)]
+    cached_tokens: u64,
+    /// OpenRouter only.
+    #[serde(default)]
+    cache_write_tokens: u64,
+}
+
+impl From<WireUsage> for Usage {
+    fn from(wire: WireUsage) -> Self {
+        let details = wire.prompt_tokens_details;
+        Self {
+            prompt_tokens: wire.prompt_tokens,
+            completion_tokens: wire.completion_tokens,
+            total_tokens: wire.total_tokens,
+            cache_read_tokens: details.as_ref().map_or(0, |d| d.cached_tokens),
+            cache_write_tokens: details.as_ref().map_or(0, |d| d.cache_write_tokens),
+            estimated: false,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct StreamChunk {
     #[serde(default)]
     choices: Vec<StreamChoice>,
     #[serde(default)]
-    usage: Option<Usage>,
+    usage: Option<WireUsage>,
     #[serde(default)]
     error: Option<ApiError>,
     /// Which upstream OpenRouter routed this request to.
@@ -766,13 +808,23 @@ mod tests {
         assert_eq!(completion.content, "Heading north.");
         assert_eq!(completion.finish_reason.as_deref(), Some("tool_calls"));
         assert_eq!(completion.usage, Some(Usage {
-            prompt_tokens: 900, completion_tokens: 31, total_tokens: 931, estimated: false,
+            prompt_tokens: 900, completion_tokens: 31, total_tokens: 931, estimated: false, ..Usage::default()
         }));
         assert_eq!(completion.tool_calls.len(), 1);
         let call = &completion.tool_calls[0];
         assert_eq!(call.id, "call_a");
         assert_eq!(call.function.name, "choose_action");
         assert_eq!(call.arguments().unwrap()["id"], "PalletTown:5,6:Warp");
+    }
+
+    #[test]
+    fn cached_prompt_tokens_are_read_from_the_usage_frame() {
+        let completion = drain(&[
+            r#"data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":31,"total_tokens":931,"prompt_tokens_details":{"cached_tokens":640,"cache_write_tokens":100}}}"#,
+            "data: [DONE]",
+        ]);
+        let usage = completion.usage.unwrap();
+        assert_eq!((usage.prompt_tokens, usage.cache_read_tokens, usage.cache_write_tokens), (900, 640, 100));
     }
 
     #[test]

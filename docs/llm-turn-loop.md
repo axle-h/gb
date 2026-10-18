@@ -162,3 +162,6 @@ argument lives in the code.
 - Only an account refusal counts toward `RefusalPark`: a 401, 402 or 403. A timeout, a dropped
   connection, exhausted 5xx retries or a rejected request must neither count nor park, and any other
   answer resets the streak, or one bad hour of a flaky endpoint stops the game for thirty minutes.
+- `Usage::prompt_tokens` counts cached tokens too; the cache reads and writes ride beside it
+  (`cache_read_tokens`, `cache_write_tokens`) and reach the transcript on `UiEventBody::Usage`, one
+  per completion, from `Worker::account_for` and `ask_for_summary`.

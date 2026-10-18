@@ -14,6 +14,8 @@ pub struct Accounting {
     context_tokens: u64,
     prompt_total: u64,
     completion_total: u64,
+    cache_read_total: u64,
+    cache_write_total: u64,
     /// Completions billed this run.
     completions: u64,
     /// Whether the most recent figures came from [`Usage::estimate`] rather than the endpoint.
@@ -29,6 +31,8 @@ impl Accounting {
             context_tokens: 0,
             prompt_total: 0,
             completion_total: 0,
+            cache_read_total: 0,
+            cache_write_total: 0,
             completions: 0,
             estimated: false,
             calibration: 1.0,
@@ -62,6 +66,8 @@ impl Accounting {
         self.context_tokens = usage.prompt_tokens + usage.completion_tokens;
         self.prompt_total += usage.prompt_tokens;
         self.completion_total += usage.completion_tokens;
+        self.cache_read_total += usage.cache_read_tokens;
+        self.cache_write_total += usage.cache_write_tokens;
         self.completions += 1;
         self.estimated = usage.estimated;
     }
@@ -92,6 +98,8 @@ impl Accounting {
             context_limit: self.limit,
             prompt_tokens: self.prompt_total,
             completion_tokens: self.completion_total,
+            cache_read_tokens: self.cache_read_total,
+            cache_write_tokens: self.cache_write_total,
             completions: self.completions,
             estimated: self.estimated,
         }
@@ -103,7 +111,7 @@ mod tests {
     use super::*;
 
     fn reported(prompt: u64, completion: u64) -> Usage {
-        Usage { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion, estimated: false }
+        Usage { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion, estimated: false, ..Usage::default() }
     }
 
     fn history(chars: usize) -> Vec<Message> {
@@ -122,6 +130,7 @@ mod tests {
         assert_eq!(view.context_tokens, 1_420, "the gauge is the last request, not the sum");
         assert_eq!(view.prompt_tokens, 2_400);
         assert_eq!(view.completion_tokens, 70);
+        assert_eq!((view.cache_read_tokens, view.cache_write_tokens), (0, 0));
         assert_eq!(view.completions, 2, "a turn can be several completions and the bill counts them");
         assert!(!view.estimated);
         assert!(accounting.has_figures());

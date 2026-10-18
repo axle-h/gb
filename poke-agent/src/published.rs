@@ -73,6 +73,17 @@ pub enum UiEventBody {
     /// What one tool call answered, paired with its [`Self::ToolCall`] by `id`.
     ToolResult { turn: u64, id: String, name: String, ok: bool, content: String, image: bool },
     Decision { turn: u64, summary: String, narration: Option<String>, usage: Option<UsageView> },
+    /// One completion's bill, with `kind` the turn's decision kind or `summary` for the compaction
+    /// request (`turn` is then `None`). `prompt_tokens` counts cached tokens too.
+    Usage {
+        turn: Option<u64>,
+        kind: String,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+        estimated: bool,
+    },
     /// The turn was abandoned: the game moved on, or the model produced no decision.
     TurnCancelled { turn: u64, reason: String },
 
@@ -121,6 +132,9 @@ pub struct UsageView {
     /// Cumulative for the whole run — this is the bill, not the gauge.
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// The part of `prompt_tokens` the endpoint served from its prompt cache, and the part it wrote.
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
     /// Completions billed this run; a turn that reads before deciding costs several.
     pub completions: u64,
     /// These came from `Usage::estimate`, not from the endpoint.
@@ -447,6 +461,8 @@ mod tests {
             context_limit: 1000,
             prompt_tokens: prompt,
             completion_tokens: 7,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             completions: 3,
             estimated: false,
         };

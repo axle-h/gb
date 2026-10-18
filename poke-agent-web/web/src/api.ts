@@ -102,6 +102,9 @@ export interface UsageView {
   context_limit: number;
   prompt_tokens: number;
   completion_tokens: number;
+  /** Absent from older transcripts. */
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
   completions: number;
   estimated: boolean;
 }
@@ -147,6 +150,18 @@ export type UiEvent = At &
       summary: string;
       narration: string | null;
       usage: UsageView | null;
+    }
+  /** One completion's bill; `turn` is null for the compaction summary request. The page draws none of it. */
+  | {
+      seq: number;
+      type: 'usage';
+      turn: number | null;
+      kind: string;
+      prompt_tokens: number;
+      completion_tokens: number;
+      cache_read_tokens: number;
+      cache_write_tokens: number;
+      estimated: boolean;
     }
   | { seq: number; type: 'turn_cancelled'; turn: number; reason: string }
   | { seq: number; type: 'run_status'; status: RunStatus }

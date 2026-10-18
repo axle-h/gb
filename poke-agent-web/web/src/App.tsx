@@ -156,6 +156,9 @@ function describeUsage(usage: UsageView): string {
   return [
     `${usage.context_tokens.toLocaleString()} of ${usage.context_limit.toLocaleString()} tokens in context`,
     `${usage.prompt_tokens.toLocaleString()} prompt + ${usage.completion_tokens.toLocaleString()} completion`,
+    ...(usage.cache_read_tokens
+      ? [`${Math.round((100 * usage.cache_read_tokens) / Math.max(usage.prompt_tokens, 1))}% of the prompt read from the cache`]
+      : []),
     `over ${usage.completions.toLocaleString()} completions (${source})`,
   ].join('\n');
 }

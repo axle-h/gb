@@ -961,7 +961,7 @@ mod tests {
     use crate::llm::LlmError;
     use crate::llm::client::ChatEndpoint;
     use crate::llm::config::LlmConfig;
-    use crate::llm::protocol::{ChatRequest, Completion, Fragment, FunctionCall, Message, Role, ToolCall};
+    use crate::llm::protocol::{ChatRequest, Completion, Fragment, FunctionCall, Message, Role, ToolCall, Usage};
     use crate::llm::worker;
     use crate::pokemon::PokemonApiTrait;
     use crate::pokemon::actions::OverworldAction;
@@ -2675,6 +2675,53 @@ mod tests {
             UiEventBody::Compacted { summarised, .. } => Some(*summarised),
             _ => None,
         })
+    }
+
+    fn reporting(mut reply: Reply, prompt: u64, read: u64, write: u64) -> Reply {
+        reply.completion.usage = Some(Usage {
+            prompt_tokens: prompt,
+            completion_tokens: 10,
+            total_tokens: prompt + 10,
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+            estimated: false,
+        });
+        reply
+    }
+
+    /// The endpoint's cache figures reach the transcript per completion, labelled by the turn's
+    /// kind, or `summary` for the compaction request.
+    #[test]
+    fn cache_figures_reach_the_transcript_per_completion() {
+        let (mut rig, mut policy) = Rig::with_config(vec![], |config| config.context_limit = 8_000);
+        let id = rig.first_action_id();
+        let choose = format!(r#"{{"id":"{id}"}}"#);
+        rig.push(vec![
+            reporting(calls(&[("choose_action", &choose)]), 500, 0, 400),
+            // Fills the window, so a compaction follows this turn.
+            reporting(
+                saying_calls(&"I am thinking very hard about this. ".repeat(500), &[("choose_action", &choose)]),
+                7_000, 6_000, 0,
+            ),
+            reporting(says("I am in Oak's lab."), 7_100, 7_000, 50),
+        ]);
+        rig.pump_overworld(&mut policy).expect("turn 1");
+        rig.pump_overworld(&mut policy).expect("turn 2");
+        let events = rig.events_until(Duration::from_secs(10), |event| matches!(event, UiEventBody::Compacted { .. }));
+        let usages: Vec<(Option<u64>, String, u64, u64, u64)> = events.iter().filter_map(|event| match event {
+            UiEventBody::Usage { turn, kind, prompt_tokens, cache_read_tokens, cache_write_tokens, .. } =>
+                Some((*turn, kind.clone(), *prompt_tokens, *cache_read_tokens, *cache_write_tokens)),
+            _ => None,
+        }).collect();
+        let kind = events.iter().find_map(|event| match event {
+            UiEventBody::TurnStarted { kind, .. } => Some(kind.to_string()),
+            _ => None,
+        }).expect("a turn started");
+        assert_eq!(usages.len(), 3, "{usages:?}");
+        assert_eq!((usages[0].1.as_str(), usages[0].2, usages[0].3, usages[0].4), (kind.as_str(), 500, 0, 400));
+        assert!(usages[0].0.is_some());
+        assert_eq!((usages[1].3, usages[1].4), (6_000, 0));
+        assert_eq!(usages[2], (None, "summary".to_string(), 7_100, 7_000, 50));
     }
 
     fn tools_of(request: &ChatRequest) -> String {

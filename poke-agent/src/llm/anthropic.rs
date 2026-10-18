@@ -285,6 +285,8 @@ pub struct StreamAccumulator {
     reasoning: String,
     /// Everything the prompt cost, cached or not, which is how full the context is.
     input_tokens: Option<u64>,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
     output_tokens: u64,
     stop_reason: Option<String>,
 }
@@ -335,6 +337,14 @@ impl StreamAccumulator {
         if usage.get("input_tokens").is_some() {
             let fields = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
             self.input_tokens = Some(fields.iter().map(|field| usage[*field].as_u64().unwrap_or(0)).sum());
+            // `message_delta` may repeat `input_tokens` without the cache fields: keep what
+            // `message_start` set.
+            if let Some(read) = usage["cache_read_input_tokens"].as_u64() {
+                self.cache_read_tokens = read;
+            }
+            if let Some(write) = usage["cache_creation_input_tokens"].as_u64() {
+                self.cache_write_tokens = write;
+            }
         }
         if let Some(output) = usage["output_tokens"].as_u64() {
             self.output_tokens = output;
@@ -419,6 +429,8 @@ impl StreamAccumulator {
             prompt_tokens: prompt,
             completion_tokens: self.output_tokens,
             total_tokens: prompt + self.output_tokens,
+            cache_read_tokens: self.cache_read_tokens,
+            cache_write_tokens: self.cache_write_tokens,
             estimated: false,
         });
         let completion = Completion {
@@ -748,8 +760,9 @@ mod tests {
         assert_eq!(completion.tool_calls[0].id, "toolu_1");
         assert_eq!(completion.tool_calls[0].function.arguments, r#"{"id": "Room:5,7:Warp"}"#, "as written");
         assert_eq!(completion.usage, Some(Usage {
-            prompt_tokens: 5312, completion_tokens: 87, total_tokens: 5399, estimated: false,
-        }), "cached tokens fill the context like any other");
+            prompt_tokens: 5312, completion_tokens: 87, total_tokens: 5399,
+            cache_read_tokens: 5000, cache_write_tokens: 300, estimated: false,
+        }), "cached tokens fill the context like any other and are also counted apart");
 
         assert_eq!(blocks, vec![
             json!({ "type": "thinking", "thinking": "The door is south.", "signature": "EqQB" }),

@@ -807,7 +807,7 @@ impl Worker {
                 }
             };
 
-            self.account_for(&completion);
+            self.account_for(id, kind, &completion);
             self.history.push(Message::assistant(completion.content.clone(), completion.tool_calls.clone()));
 
             if completion.tool_calls.is_empty() {
@@ -1050,9 +1050,22 @@ impl Worker {
         self.generation.load(Ordering::SeqCst) != id
     }
 
-    fn account_for(&mut self, completion: &Completion) {
+    fn account_for(&mut self, id: u64, kind: DecisionKind, completion: &Completion) {
         let usage = completion.usage.unwrap_or_else(|| Usage::estimate(&self.history, completion));
         self.accounting.record(usage, &self.history);
+        self.publish_usage(Some(id), kind.label(), usage);
+    }
+
+    fn publish_usage(&self, turn: Option<u64>, kind: &str, usage: Usage) {
+        self.published.publish_event(UiEventBody::Usage {
+            turn,
+            kind: kind.to_string(),
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            estimated: usage.estimated,
+        });
     }
 
     fn over_threshold(&self) -> bool {
@@ -1162,6 +1175,7 @@ impl Worker {
             let completion = self.stream_summary(&request)?;
             let usage = completion.usage.unwrap_or_else(|| Usage::estimate(&request.messages, &completion));
             self.accounting.record(usage, &request.messages);
+            self.publish_usage(None, "summary", usage);
             messages = request.messages;
 
             if completion.tool_calls.is_empty() {

@@ -172,6 +172,7 @@ export function fold(entries: Entry[], event: UiEvent): Entry[] {
     case 'plan':
     case 'battle_script':
     case 'timeline':
+    case 'usage':
       return entries; // handled separately — none of these may re-render the log
     case 'moment':
       return push(entries, { type: 'notice', level: 'info', message: `📸 ${event.title}` }, event);
