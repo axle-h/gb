@@ -29,11 +29,9 @@ pub struct Restored {
 pub struct CompactionNote {
     pub before: u64,
     pub after: u64,
-    pub images_evicted: usize,
-    /// How many messages left the history, to the summary or a last resort; the summary itself is
-    /// not counted. Zero when stage 1 was the whole compaction.
+    /// How many messages left the history; the summary replacing them is not counted.
     pub dropped: usize,
-    /// The prose stage 2 wrote, when it ran.
+    /// The summary, when one could be had.
     pub summary: Option<String>,
 }
 
@@ -185,7 +183,6 @@ impl History {
             "at": crate::published::now_ms(),
             "before": note.before,
             "after": note.after,
-            "images_evicted": note.images_evicted,
             "dropped": note.dropped,
             "summarised": note.summary.is_some(),
         }));
@@ -541,11 +538,10 @@ mod tests {
         }
         history.checkpoint(1, 1.0);
 
-        let dropped = compaction::apply_summary(&mut history, "the story so far", 2);
+        let dropped = compaction::replace_with(&mut history, compaction::summary_message("the story so far"), 2);
         history.note_compaction(8, &CompactionNote {
             before: 900,
             after: 100,
-            images_evicted: 0,
             dropped,
             summary: Some("the story so far".into()),
         });
@@ -573,7 +569,6 @@ mod tests {
         history.note_compaction(2, &CompactionNote {
             before: 900,
             after: 100,
-            images_evicted: 3,
             dropped: 4,
             summary: Some("the story so far".into()),
         });
@@ -583,7 +578,6 @@ mod tests {
         assert_eq!(marker["before"], 900);
         assert_eq!(marker["after"], 100);
         assert!(marker["after"].as_u64() < marker["before"].as_u64(), "a compaction that shrank it");
-        assert_eq!(marker["images_evicted"], 3);
         assert_eq!(marker["dropped"], 4);
         assert_eq!(marker["summarised"], true);
 

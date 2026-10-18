@@ -1,25 +1,23 @@
 //! Keeping the history inside the context window.
 
-use crate::llm::config::LlmConfig;
-use crate::llm::protocol::{ChatRequest, Content, Message, Role, StreamOptions};
+use crate::llm::protocol::{Content, Message, Role};
 
-/// Screenshots that survive stage 1: two, because the model compares now against its last look.
-pub const KEEP_IMAGES: usize = 2;
-
-/// How many messages survive stage 2, before the cut is moved forward to a turn boundary.
-pub const KEEP_MESSAGES: usize = 8;
+/// The complete turns a compaction keeps as they were, pictures and all.
+pub const KEEP_TURNS: usize = 2;
 
 /// What an evicted picture leaves behind, so the turn does not read as if the model imagined it.
 pub const EVICTED: &str = "[image removed to save context]";
 
-/// The rule every summary restates. It names no tools, because
-/// [`prompt::contract`](crate::llm::prompt::contract) lists them at the bottom of every turn.
+/// The rule every summary restates. It names no menu, because
+/// [`prompt::contract`](crate::llm::prompt::contract) closes every turn with that.
 pub const CONTRACT_REMINDER: &str = "\
 Whatever else has changed, the rule for every turn is the same as it was: end each turn with \
-`choose_action` and an id from the menu at the bottom of the turn request. Read tools \
-do not end the turn, and a reply with no tool call at all does nothing in the game.";
+`choose_action` and an id from the menu at the bottom of the turn request. `read_file`, \
+`write_file` and `edit_file` do not end the turn, and a reply with no tool call at all does \
+nothing in the game.";
 
-/// What stage 2 asks the model to write about its own history.
+/// What the summary request asks the model to write about its own history. Its first line is how
+/// a scripted endpoint tells the request apart.
 pub const SUMMARY_INSTRUCTION: &str = "\
 Your context is nearly full, so this conversation is about to be replaced by a summary of it.
 
@@ -32,10 +30,41 @@ Write that summary now, as a note to your future self. Cover, in prose and in th
 were blocked, people who wanted something, places you have not been yet, things that did not work.
 
 Be specific — names, places, levels — and do not pad it. Nothing else from this conversation is \
-kept, so anything you leave out is forgotten. Reply with the summary itself and nothing else; do \
-not call a tool.";
+kept except `plan.md`, which survives as it is, so anything in neither is forgotten. Reply with the \
+summary itself and nothing else; do not call a tool.";
 
-/// Stage 1: replace every image but the `keep` newest with [`EVICTED`], keeping each caption.
+/// Added to [`SUMMARY_INSTRUCTION`] when the oldest turns were left out of the request.
+const START_MISSING: &str = "\
+The start of this conversation has been left out of this request, because a summary of the whole \
+of it could not be had. Summarise what is here, and do not guess at what came before it.";
+
+/// What a compaction that could get no summary puts where the summary would have gone.
+const DROPPED: &str = "\
+The earlier conversation was dropped without a summary, because none could be written. `plan.md` \
+survived it.";
+
+/// A summary request's answer to `choose_action`.
+pub const NOT_AN_ACTION: &str = "\
+Not taken: this request asks for the summary, not an action, and nothing happens in the game until \
+it is written. Reply with the summary as text.";
+
+/// A summary request's answer to a write of anything but `plan.md`.
+pub const PLAN_ONLY: &str = "\
+Nothing was written: while the summary is being written only `plan.md` can be changed. Reply with \
+the summary as text.";
+
+/// What a summary request is told when it has one request left.
+pub const OUT_OF_READS: &str = "You have used every read. Reply with the summary now, as text, and call no tool.";
+
+/// What a summary request ends with.
+pub fn instruction(start_missing: bool) -> Message {
+    Message::user(match start_missing {
+        false => SUMMARY_INSTRUCTION.to_string(),
+        true => SUMMARY_INSTRUCTION.replacen("\n\n", &format!("\n\n{START_MISSING}\n\n"), 1),
+    })
+}
+
+/// Replace every image but the `keep` newest with [`EVICTED`], keeping each caption.
 pub fn evict_images(messages: &mut [Message], keep: usize) -> usize {
     let total = messages.iter().filter(|message| message.has_image()).count();
     let mut to_evict = total.saturating_sub(keep);
@@ -59,25 +88,6 @@ pub fn evict_images(messages: &mut [Message], keep: usize) -> usize {
     evicted
 }
 
-/// The request that produces a summary: the whole history, plus [`SUMMARY_INSTRUCTION`].
-pub fn summary_request(config: &LlmConfig, messages: &[Message]) -> ChatRequest {
-    let mut messages = messages.to_vec();
-    messages.push(Message::user(SUMMARY_INSTRUCTION));
-    ChatRequest {
-        model: config.model.clone(),
-        messages,
-        tools: Vec::new(),
-        parallel_tool_calls: None,
-        // Capped too: a runaway summary is the outage this request exists to prevent.
-        max_tokens: config.max_tokens,
-        reasoning_effort: config.reasoning_effort.clone(),
-        reasoning: config.reasoning_budget,
-        temperature: config.temperature,
-        stream: true,
-        stream_options: StreamOptions { include_usage: true },
-    }
-}
-
 /// What [`summary_message`] opens with, and therefore how [`is_summary`] recognises one.
 pub const SUMMARY_HEADING: &str = "## The story so far";
 
@@ -86,46 +96,80 @@ pub fn summary_message(summary: &str) -> Message {
     Message::user(format!("{SUMMARY_HEADING}\n\n{}\n\n{CONTRACT_REMINDER}", summary.trim()))
 }
 
+/// [`summary_message`]'s place, held when no summary could be had.
+pub fn dropped_message() -> Message {
+    summary_message(DROPPED)
+}
+
 pub fn is_summary(message: &Message) -> bool {
     message.role == Role::User && message.text().is_some_and(|text| text.starts_with(SUMMARY_HEADING))
 }
 
-/// Whether the history holds more than the system prompt, a summary and the kept tail.
-pub fn worth_summarising(messages: &[Message], keep: usize) -> bool {
-    messages.len() > keep + 2
-}
-
-/// Stage 2: keep the system prompt, the summary and the tail, and drop everything between.
-/// Returns how many messages were dropped; the summary replacing them is not counted.
-pub fn apply_summary(messages: &mut Vec<Message>, summary: &str, keep: usize) -> usize {
-    let before = messages.len();
-    let system = messages.first().filter(|first| first.role == Role::System).cloned();
-    let first_body = usize::from(system.is_some());
-
-    let from = messages.len().saturating_sub(keep).max(first_body);
-    let tail = messages[from..]
-        .iter()
-        .position(is_turn_start)
-        .map(|offset| offset + from)
-        // No boundary in the tail: all of it belongs to a turn begun further back.
-        .unwrap_or(messages.len());
-
-    let mut kept = Vec::with_capacity(keep + 2);
-    kept.extend(system);
-    kept.push(summary_message(summary));
-    kept.extend_from_slice(&messages[tail..]);
-    *messages = kept;
-
-    before.saturating_sub(messages.len().saturating_sub(1))
-}
-
-/// Where the history may be cut: a `user` message opening a turn, never a picture.
+/// A `user` message that is not a picture: where a provider's turn begins.
 pub fn is_turn_start(message: &Message) -> bool {
     message.role == Role::User && !message.has_image() && !is_evicted_image(message)
 }
 
 fn is_evicted_image(message: &Message) -> bool {
     message.text().is_some_and(|text| text.ends_with(EVICTED))
+}
+
+/// The situation that opens one of the game's turns; nudges and notes inside a turn are not one.
+fn opens_turn(message: &Message) -> bool {
+    message.role == Role::User && message.text().is_some_and(|text| text.starts_with(crate::llm::prompt::DECISION))
+}
+
+/// How many leading messages a compaction never removes: the system prompt and an earlier summary.
+fn head_len(messages: &[Message]) -> usize {
+    let system = usize::from(messages.first().is_some_and(|first| first.role == Role::System));
+    system + usize::from(messages.get(system).is_some_and(is_summary))
+}
+
+/// Where each turn after the head starts.
+fn turn_starts(messages: &[Message]) -> Vec<usize> {
+    let head = head_len(messages);
+    (head..messages.len()).filter(|&index| opens_turn(&messages[index])).collect()
+}
+
+/// Whether there is anything past the head to summarise or drop.
+pub fn has_body(messages: &[Message]) -> bool {
+    messages.len() > head_len(messages)
+}
+
+/// The history with the oldest half of its turns removed, cut at turn boundaries. The head and the
+/// last [`KEEP_TURNS`] turns are never removed. The flag says whether anything was.
+pub fn without_oldest_half(messages: &[Message]) -> (Vec<Message>, bool) {
+    let head = head_len(messages);
+    let starts = turn_starts(messages);
+    let removable = starts.len().saturating_sub(KEEP_TURNS);
+    let removed = removable.div_ceil(2);
+    if removed == 0 {
+        return (messages.to_vec(), false);
+    }
+    let mut kept = messages[..head].to_vec();
+    kept.extend_from_slice(&messages[starts[removed]..]);
+    (kept, true)
+}
+
+/// Keep the system prompt, put `opening` after it and then the last `keep` turns, and drop the
+/// rest. Returns how many messages left; `opening` is not counted against them.
+pub fn replace_with(messages: &mut Vec<Message>, opening: Message, keep: usize) -> usize {
+    let before = messages.len();
+    let system = messages.first().filter(|first| first.role == Role::System).cloned();
+    let starts = turn_starts(messages);
+    let from = match (keep, starts.len().checked_sub(keep)) {
+        (0, _) => messages.len(),
+        (_, Some(index)) => starts[index],
+        (_, None) => starts.first().copied().unwrap_or(messages.len()),
+    };
+
+    let mut kept = Vec::with_capacity(messages.len() - from + 2);
+    kept.extend(system);
+    kept.push(opening);
+    kept.extend_from_slice(&messages[from..]);
+    *messages = kept;
+
+    before.saturating_sub(messages.len().saturating_sub(1))
 }
 
 /// Some endpoints take only a plain string on some roles, so eviction must not leave parts.
@@ -154,12 +198,12 @@ mod tests {
         }
     }
 
-    /// One turn as the worker builds it: situation, read call and result, picture, terminal call.
+    /// One turn as the worker builds it: situation, read call and result, picture, action.
     fn turn(n: usize, with_picture: bool) -> Vec<Message> {
         let mut messages = vec![
             Message::user(format!("## Decision: what to do next in the overworld\n\nturn {n}")),
-            Message::assistant(String::new(), vec![call(&format!("r{n}"), "read_map")]),
-            Message::tool_result(format!("r{n}"), "{\"map\": \"PalletTown\"}"),
+            Message::assistant(String::new(), vec![call(&format!("r{n}"), "read_file")]),
+            Message::tool_result(format!("r{n}"), "map.png"),
         ];
         if with_picture {
             messages.push(picture(n));
@@ -177,39 +221,44 @@ mod tests {
         messages
     }
 
+    fn says(messages: &[Message], needle: &str) -> bool {
+        messages.iter().any(|m| m.text().is_some_and(|t| t.contains(needle)))
+    }
+
+    /// A `tool` message whose call was dropped is a 400.
+    fn well_formed(messages: &[Message]) {
+        let mut outstanding: Vec<&str> = Vec::new();
+        for message in messages {
+            for call in &message.tool_calls {
+                outstanding.push(&call.id);
+            }
+            if let Some(id) = message.tool_call_id.as_deref() {
+                let position = outstanding.iter().position(|open| *open == id);
+                assert!(position.is_some(), "result for `{id}` survived without its call");
+                outstanding.remove(position.unwrap());
+            }
+        }
+        assert!(outstanding.is_empty(), "a call survived with no result: {outstanding:?}");
+    }
+
     #[test]
-    fn eviction_keeps_the_two_most_recent_pictures_and_costs_nothing_else() {
+    fn eviction_replaces_pictures_with_their_captions_and_costs_nothing_else() {
         let mut messages = history(5, true);
         let before = messages.len();
         let heavy: u64 = messages.iter().map(Message::approximate_tokens).sum();
 
-        let evicted = evict_images(&mut messages, KEEP_IMAGES);
-
-        assert_eq!(evicted, 3, "five pictures, two kept");
+        assert_eq!(evict_images(&mut messages, 0), 5);
         assert_eq!(messages.len(), before, "eviction replaces messages, it does not remove them");
-        let survivors: Vec<usize> = messages
-            .iter()
-            .enumerate()
-            .filter(|(_, message)| message.has_image())
-            .map(|(index, _)| index)
-            .collect();
-        assert_eq!(survivors.len(), KEEP_IMAGES);
-        assert!(survivors[0] > 3 * 6, "the survivors are the *recent* ones, not the first two: {survivors:?}");
+        assert!(!messages.iter().any(Message::has_image));
 
         // The caption stays, so the model can see that it did look.
-        let evicted_message = messages.iter().find(|m| m.text().is_some_and(|t| t.ends_with(EVICTED)));
-        let text = evicted_message.expect("something was evicted").text().unwrap();
-        assert!(text.contains("Screenshot of the Game Boy screen (frame 0)"), "{text}");
-        assert!(!is_multi_part(evicted_message.unwrap()), "an evicted picture is a plain string again");
+        let evicted = messages.iter().find(|m| m.text().is_some_and(|t| t.ends_with(EVICTED))).expect("evicted");
+        assert!(evicted.text().unwrap().contains("Screenshot of the Game Boy screen (frame 0)"));
+        assert!(!is_multi_part(evicted), "an evicted picture is a plain string again");
 
         let after: u64 = messages.iter().map(Message::approximate_tokens).sum();
-        assert!(
-            heavy - after >= 2 * crate::llm::protocol::IMAGE_TOKENS,
-            "eviction must actually save: {heavy} → {after}",
-        );
-
-        // Idempotent: running it again finds only the two it is meant to keep.
-        assert_eq!(evict_images(&mut messages, KEEP_IMAGES), 0);
+        assert!(heavy - after >= 2 * crate::llm::protocol::IMAGE_TOKENS, "{heavy} → {after}");
+        assert_eq!(evict_images(&mut messages, 0), 0, "idempotent");
     }
 
     /// An evicted picture is a plain-string `user` message mid-turn: a turn boundary's shape.
@@ -222,79 +271,91 @@ mod tests {
                 assert!(!is_turn_start(message), "message {index} became a legal cut point");
             }
         }
-        assert!(messages.iter().filter(|m| is_turn_start(m)).count() == 3, "one per turn, no more");
+        assert_eq!(turn_starts(&messages).len(), 3, "one per turn, no more");
     }
 
     #[test]
-    fn a_summary_replaces_the_middle_and_leaves_a_well_formed_history() {
-        let mut messages = history(6, false);
+    fn a_summary_keeps_the_last_two_turns_untouched_pictures_and_all() {
+        let mut messages = history(6, true);
+        let tail: Vec<Message> = messages[messages.len() - 2 * turn(0, true).len()..].to_vec();
         let before = messages.len();
 
-        let dropped = apply_summary(&mut messages, "I am in Pallet Town with a Squirtle.", KEEP_MESSAGES);
+        let dropped = replace_with(&mut messages, summary_message("I am in Pallet Town with a Squirtle."), KEEP_TURNS);
 
-        assert!(dropped > 0 && dropped < before, "{dropped} of {before}");
         assert_eq!(messages[0].role, Role::System, "the system prompt is never compacted");
         assert!(messages[0].text().unwrap().contains("Pokémon Red"));
-        assert_eq!(messages[1].role, Role::User);
+        assert!(is_summary(&messages[1]));
         assert!(messages[1].text().unwrap().contains("I am in Pallet Town with a Squirtle."));
-        assert!(messages.len() <= 2 + KEEP_MESSAGES, "the tail is bounded: {}", messages.len());
-
-        // A `tool` message whose call was dropped is a 400.
-        let mut outstanding: Vec<&str> = Vec::new();
-        for message in &messages {
-            for call in &message.tool_calls {
-                outstanding.push(&call.id);
-            }
-            if let Some(id) = message.tool_call_id.as_deref() {
-                let position = outstanding.iter().position(|open| *open == id);
-                assert!(position.is_some(), "result for `{id}` survived without its call");
-                outstanding.remove(position.unwrap());
-            }
-        }
-        assert!(outstanding.is_empty(), "a call survived with no result: {outstanding:?}");
-
-        assert!(!messages.iter().any(|m| m.text().is_some_and(|t| t.contains("turn 0"))));
-        assert!(messages.iter().any(|m| m.text().is_some_and(|t| t.contains("turn 5"))), "the newest turn is kept");
-    }
-
-    /// The cut moves forward to a boundary, even when that keeps fewer messages than asked for.
-    #[test]
-    fn the_tail_starts_at_a_turn_and_never_in_the_middle_of_one() {
-        for keep in 1..14 {
-            let mut messages = history(4, true);
-            evict_images(&mut messages, 1);
-            apply_summary(&mut messages, "story", keep);
-
-            assert_eq!(messages[0].role, Role::System);
-            assert!(messages[1].text().unwrap().starts_with("## The story so far"));
-            match messages.get(2) {
-                None => {}
-                Some(third) => assert!(
-                    is_turn_start(third),
-                    "keep={keep}: the tail starts with {:?} / {:?}",
-                    third.role,
-                    third.text().map(|t| t.chars().take(40).collect::<String>()),
-                ),
-            }
-        }
+        assert_eq!(&messages[2..], &tail[..], "the last two turns, exactly as they were");
+        assert_eq!(messages.iter().filter(|m| m.has_image()).count(), 2, "their pictures with them");
+        assert_eq!(dropped, before - 1 - tail.len(), "every message that left, and not the summary");
+        well_formed(&messages);
+        assert!(!says(&messages, "turn 3"));
+        assert!(says(&messages, "turn 4") && says(&messages, "turn 5"));
     }
 
     #[test]
-    fn a_summary_is_recognisable_and_a_short_history_is_not_worth_one() {
+    fn a_compaction_can_keep_one_turn_or_none() {
+        let mut one = history(4, false);
+        replace_with(&mut one, dropped_message(), 1);
+        assert!(says(&one, "turn 3") && !says(&one, "turn 2"));
+        well_formed(&one);
+
+        let mut none = history(4, false);
+        replace_with(&mut none, dropped_message(), 0);
+        assert_eq!(none.len(), 2, "the system prompt and the note");
+        assert!(none[1].text().unwrap().contains("dropped without a summary"));
+        assert!(is_summary(&none[1]), "the note holds the summary's place");
+
+        // Fewer turns than asked for keeps them all.
+        let mut short = history(1, false);
+        let was = short.len();
+        assert_eq!(replace_with(&mut short, dropped_message(), KEEP_TURNS), 0);
+        assert_eq!(short.len(), was + 1);
+    }
+
+    /// A nudge or a resume note inside the history is not a turn of its own.
+    #[test]
+    fn only_a_situation_opens_a_turn() {
+        let mut messages = history(3, false);
+        messages.insert(6, Message::user(crate::llm::prompt::RESUMED_NOTE));
+        messages.push(Message::user("That reply contained no tool call, so nothing happened in the game."));
+        messages.push(Message::assistant("sorry".into(), vec![]));
+        assert_eq!(turn_starts(&messages).len(), 3);
+
+        replace_with(&mut messages, summary_message("story"), KEEP_TURNS);
+        assert!(says(&messages, "turn 1") && says(&messages, "turn 2") && !says(&messages, "turn 0"));
+    }
+
+    #[test]
+    fn halving_removes_the_oldest_turns_and_never_the_head_or_the_last_two() {
         let mut messages = history(6, false);
-        assert!(worth_summarising(&messages, KEEP_MESSAGES));
-        assert!(!messages.iter().any(is_summary));
+        replace_with(&mut messages, summary_message("an earlier story"), 6);
+        assert_eq!(turn_starts(&messages).len(), 6);
 
-        apply_summary(&mut messages, "story", KEEP_MESSAGES);
-        assert_eq!(messages.iter().filter(|m| is_summary(m)).count(), 1);
-        assert!(is_summary(&messages[1]), "and it is where the trim would look first");
-        assert!(
-            !worth_summarising(&messages, KEEP_MESSAGES),
-            "summarising a just-summarised history only adds a message",
-        );
+        let (halved, removed) = without_oldest_half(&messages);
+        assert!(removed);
+        assert_eq!(halved[0].role, Role::System);
+        assert!(halved[1].text().unwrap().contains("an earlier story"), "an earlier summary stays");
+        assert_eq!(turn_starts(&halved).len(), 4, "two of the four removable turns went");
+        assert!(!says(&halved, "turn 1") && says(&halved, "turn 2"));
+        well_formed(&halved);
 
-        // A context limit smaller than the system prompt.
-        assert!(!worth_summarising(&history(1, false), KEEP_MESSAGES));
+        // Nothing to remove when only the kept turns are left.
+        let (same, removed) = without_oldest_half(&history(2, false));
+        assert!(!removed);
+        assert_eq!(same.len(), history(2, false).len());
+    }
+
+    #[test]
+    fn the_instruction_says_when_the_start_is_missing_and_keeps_its_first_line() {
+        let whole = instruction(false);
+        let halved = instruction(true);
+        assert_eq!(whole.text(), Some(SUMMARY_INSTRUCTION));
+        let first_line = SUMMARY_INSTRUCTION.lines().next().unwrap();
+        assert!(halved.text().unwrap().starts_with(first_line));
+        assert!(halved.text().unwrap().contains("left out of this request"));
+        assert!(SUMMARY_INSTRUCTION.contains("`plan.md`"), "the model is told its plan survives");
     }
 
     #[test]
@@ -304,62 +365,33 @@ mod tests {
 
         assert!(text.ends_with(CONTRACT_REMINDER), "the reminder is the last thing the model reads");
         assert!(CONTRACT_REMINDER.contains("`choose_action` and an id from the menu"));
-        assert!(CONTRACT_REMINDER.contains("do not end the turn"));
         // The wording has to stay recognisably the same rule as the one every turn ends with.
         let real = crate::llm::prompt::contract(crate::llm::tools::DecisionKind::Overworld);
         for phrase in ["`choose_action`", "do not end the turn"] {
             assert!(real.contains(phrase) && CONTRACT_REMINDER.contains(phrase), "`{phrase}` has drifted");
         }
-
-        let mut messages = history(6, false);
-        apply_summary(&mut messages, "I am somewhere doing something.", KEEP_MESSAGES);
-        assert!(messages.iter().any(|m| m.text().is_some_and(|t| t.contains(CONTRACT_REMINDER))));
-        assert!(messages[0].text().unwrap().contains("do not end the turn"), "and so does the system prompt's copy");
+        for tool in crate::llm::tools::non_terminal_names() {
+            assert!(CONTRACT_REMINDER.contains(&format!("`{tool}`")), "`{tool}` is missing");
+        }
+        assert!(crate::llm::prompt::SYSTEM_PROMPT.contains("do not end the turn"), "and so does the system prompt's copy");
     }
 
-    /// OpenAI rejects `parallel_tool_calls` without `tools`, which would make a compaction a 400.
-    #[test]
-    fn a_summary_request_asks_for_prose_and_offers_no_tools() {
-        let config = LlmConfig {
-            provider: crate::llm::config::Provider::OpenAi,
-            base_url: "http://x".into(),
-            api_key: "k".into(),
-            model: "m".into(),
-            context_limit: 1000,
-            compact_above: crate::llm::config::DEFAULT_COMPACT_ABOVE,
-            temperature: Some(0.4),
-            max_tool_steps: 4,
-            request_timeout: std::time::Duration::from_secs(crate::llm::config::DEFAULT_REQUEST_TIMEOUT_SECS),
-            max_tokens: Some(crate::llm::config::DEFAULT_MAX_TOKENS),
-            reasoning_effort: None,
-            reasoning_budget: None,
-            stuck_timeout: None,
-        };
-        let messages = history(2, false);
-        let request = summary_request(&config, &messages);
-
-        assert_eq!(request.messages.len(), messages.len() + 1);
-        assert_eq!(request.messages.last().unwrap().text(), Some(SUMMARY_INSTRUCTION));
-        assert_eq!(request.temperature, Some(0.4));
-        assert!(request.tools.is_empty());
-
-        let json = serde_json::to_value(&request).expect("serialises");
-        assert!(json.get("tools").is_none(), "an empty tools array is not the same as no tools");
-        assert!(json.get("parallel_tool_calls").is_none(), "illegal without tools");
-    }
-
-    /// A history with no system message, or shorter than the tail, must not panic.
+    /// A history with no system message, or no turns, must not panic.
     #[test]
     fn degenerate_histories_survive_a_compaction() {
         let mut messages: Vec<Message> = Vec::new();
-        assert_eq!(apply_summary(&mut messages, "nothing happened", KEEP_MESSAGES), 0);
+        assert!(!has_body(&messages));
+        assert_eq!(replace_with(&mut messages, summary_message("nothing happened"), KEEP_TURNS), 0);
         assert_eq!(messages.len(), 1, "the summary is all there is");
+        assert!(!has_body(&messages), "a lone summary is a head and nothing more");
 
         let mut messages = vec![Message::user("just the one")];
-        apply_summary(&mut messages, "story", KEEP_MESSAGES);
-        assert!(messages[0].text().unwrap().starts_with("## The story so far"));
-        assert_eq!(messages.len(), 2, "no system prompt to keep, and the tail is the one message");
+        assert!(has_body(&messages));
+        replace_with(&mut messages, summary_message("story"), KEEP_TURNS);
+        assert!(messages[0].text().unwrap().starts_with(SUMMARY_HEADING));
+        assert_eq!(messages.len(), 1, "a message that opens no turn is summarised away");
 
-        assert_eq!(evict_images(&mut [], KEEP_IMAGES), 0);
+        assert!(!without_oldest_half(&[]).1);
+        assert_eq!(evict_images(&mut [], 0), 0);
     }
 }

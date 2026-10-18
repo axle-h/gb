@@ -593,8 +593,10 @@ impl Policy for LlmPolicy {
         }
 
         while let Ok(batch) = self.handles.tool_calls.try_recv() {
-            let current = batch.turn == live
-                && self.pending.is_some_and(|(kind, id)| kind == asking && id == batch.turn);
+            let current = match batch.turn {
+                None => true,
+                Some(turn) => turn == live && self.pending.is_some_and(|(kind, id)| kind == asking && id == turn),
+            };
             let result = match current {
                 // All-or-nothing, from one observed state.
                 true => {
@@ -971,6 +973,8 @@ mod tests {
     struct Reply {
         completion: Completion,
         release: Option<Arc<AtomicBool>>,
+        /// Answered instead of the completion.
+        failure: Option<LlmError>,
     }
 
     #[derive(Default)]
@@ -1000,6 +1004,9 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(1));
                 }
             }
+            if let Some(failure) = reply.failure {
+                return Err(failure);
+            }
             // Reasoning before content, as a real endpoint sends them.
             if !reply.completion.reasoning.is_empty() {
                 on_delta(Fragment::Reasoning(&reply.completion.reasoning));
@@ -1012,7 +1019,7 @@ mod tests {
     }
 
     fn says(text: &str) -> Reply {
-        Reply { completion: Completion { content: text.into(), ..Completion::default() }, release: None }
+        Reply { completion: Completion { content: text.into(), ..Completion::default() }, release: None, failure: None }
     }
 
     /// Adds a `summary` to every well-formed call without one, as `tools::classify` requires.
@@ -1026,7 +1033,12 @@ mod tests {
                 function: FunctionCall { name: (*name).into(), arguments: with_summary(arguments) },
             })
             .collect();
-        Reply { completion: Completion { tool_calls, ..Completion::default() }, release: None }
+        Reply { completion: Completion { tool_calls, ..Completion::default() }, release: None, failure: None }
+    }
+
+    /// A request the endpoint fails.
+    fn fails(failure: LlmError) -> Reply {
+        Reply { completion: Completion::default(), release: None, failure: Some(failure) }
     }
 
     /// See [`calls`].
@@ -1145,6 +1157,12 @@ mod tests {
                 crate::llm::battle_script::BattleScript::open(run_dir),
                 crate::llm::history::History::open(run_dir),
             );
+            // Retried at once, so a test of a failing endpoint waits on nothing.
+            let worker = worker.with_retry(crate::llm::client::RetryPolicy {
+                attempts: 2,
+                base: Duration::ZERO,
+                max: Duration::ZERO,
+            });
             let handle = worker.spawn().expect("the worker thread starts");
 
             let rig = Rig {
@@ -2579,9 +2597,9 @@ mod tests {
                 UiEventBody::Compacted { before, after, summarised, .. } => Some((*before, *after, *summarised)),
                 _ => None,
             })
-            .expect("four turns of that should have filled a 6 000-token window");
+            .expect("four turns of that should have filled an 8 000-token window");
         let (before, after, summarised) = compaction;
-        assert!(summarised, "eviction cannot help a history with no pictures in it");
+        assert!(summarised, "the model wrote a summary");
         assert!(after < before, "the compaction saved nothing: {before} → {after}");
         assert!(
             Rig::statuses(&events).contains(&RunStatus::Compacting),
@@ -2606,17 +2624,293 @@ mod tests {
             last.messages[1].text().unwrap_or_default().contains("`choose_action` and an id from the menu"),
             "the one-terminal-call contract has to survive the compaction",
         );
-        // The tail is kept, so the turn that filled the window is still there.
-        assert!(
-            last.messages.len() <= 2 + crate::llm::compaction::KEEP_MESSAGES,
-            "the middle of the conversation is still there: {} messages",
-            last.messages.len(),
-        );
+        // Nothing between the summary and the turns it kept: no instruction, no reply.
+        assert!(last.messages[2].text().unwrap_or_default().starts_with(crate::llm::prompt::DECISION),
+                "{:?}", last.messages[2].text());
+        assert!(!last.messages.iter().any(|m| m.text().is_some_and(|t| t.contains("I am in Oak's lab with a Squirtle, about to leave")
+            && !t.starts_with("## The story so far"))), "the summary's own reply is not kept");
         assert!(
             last.messages.len() < requests[3].messages.len(),
             "the turn after a compaction must be cheaper than the turn before it",
         );
         history_is_well_formed(last);
+    }
+
+    // ── Compaction against a failing endpoint ──
+
+    /// Four overworld turns whose last fills an 8 000-token window, so a compaction follows it.
+    /// `after` is what the endpoint answers from the summary request on.
+    fn compacting_rig(after: Vec<Reply>) -> (Rig, LlmPolicy, String) {
+        let (mut rig, mut policy) = Rig::with_config(vec![], |config| config.context_limit = 8_000);
+        let id = rig.first_action_id();
+        let choose = format!(r#"{{"id":"{id}"}}"#);
+        rig.push(vec![
+            saying_calls("I am on the very first turn.", &[("choose_action", &choose)]),
+            calls(&[("choose_action", &choose)]),
+            calls(&[("choose_action", &choose)]),
+            saying_calls(&"I am thinking very hard about this. ".repeat(500), &[("choose_action", &choose)]),
+        ]);
+        rig.push(after);
+        for turn in 1..=4 {
+            rig.pump_overworld(&mut policy).unwrap_or_else(|| panic!("turn {turn} did not land"));
+        }
+        (rig, policy, choose)
+    }
+
+    fn is_summary_request(request: &ChatRequest) -> bool {
+        request.messages.iter().rev().filter(|m| m.role == Role::User).filter_map(Message::text)
+            .find(|t| t.starts_with(crate::llm::prompt::DECISION) || t.starts_with("Your context is nearly full"))
+            .is_some_and(|t| t.starts_with("Your context is nearly full"))
+    }
+
+    fn notices(events: &[UiEventBody]) -> Vec<String> {
+        events.iter().filter_map(|event| match event {
+            UiEventBody::Notice { message, .. } => Some(message.clone()),
+            _ => None,
+        }).collect()
+    }
+
+    fn compacted(events: &[UiEventBody]) -> Option<bool> {
+        events.iter().find_map(|event| match event {
+            UiEventBody::Compacted { summarised, .. } => Some(*summarised),
+            _ => None,
+        })
+    }
+
+    fn tools_of(request: &ChatRequest) -> String {
+        serde_json::to_string(&request.tools).expect("the tools serialise")
+    }
+
+    /// Every kind of turn and the summary request send the same tools, byte for byte.
+    #[test]
+    fn every_request_sends_the_same_tools_byte_for_byte() {
+        let catalogue = serde_json::to_string(&tools::catalogue()).expect("serialises");
+        let (mut rig, mut policy) = Rig::new(vec![
+            calls(&[("choose_action", r#"{"id":"Bubbles"}"#)]),
+            calls(&[("choose_action", r#"{"id":"buy:Potion*3"}"#)]),
+            calls(&[("choose_action", r#"{"id":"keep"}"#)]),
+            calls(&[("read_file", r#"{"path":"party.md"}"#)]),
+        ]);
+        let id = rig.first_action_id();
+        rig.push(vec![
+            calls(&[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]),
+            calls(&[("choose_action", r#"{"id":"press:a"}"#)]),
+            calls(&[("choose_action", r#"{"id":"run"}"#)]),
+            calls(&[("choose_action", r#"{"id":"mimic:0"}"#)]),
+        ]);
+        let moves: Vec<PokemonMove> = [PokemonMoveName::Tackle, PokemonMoveName::TailWhip, PokemonMoveName::Bubble, PokemonMoveName::WaterGun]
+            .into_iter().map(PokemonMove::with_max_pp).collect();
+
+        rig.pump_prompt(&mut policy, |policy, _| policy.pick_nickname(PokemonSpecies::Squirtle)).expect("nickname");
+        rig.pump_prompt(&mut policy, |policy, state| policy.pick_mart_purchase(state)).expect("mart");
+        rig.pump_prompt(&mut policy, |policy, _| policy.pick_move_to_forget(0, &moves, PokemonMoveName::Bite)).expect("forget");
+        rig.pump_overworld(&mut policy).expect("overworld");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && policy.take_manual_input().is_empty() {
+            rig.tick_stuck(&mut policy, "script");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        rig.enter_battle();
+        rig.pump_battle(&mut policy, Duration::from_secs(5)).expect("battle");
+        let enemy = enemy_moves(&mut rig);
+        rig.pump_prompt(&mut policy, |policy, state| policy.pick_move_to_mimic(state, &enemy)).expect("mimic");
+
+        let requests = rig.requests();
+        let decisions: Vec<&str> = requests.iter().filter_map(|request| {
+            request.messages.iter().rev().filter_map(Message::text).find_map(|t| t.strip_prefix(crate::llm::prompt::DECISION))
+        }).map(|t| t.lines().next().unwrap_or_default()).collect();
+        assert_eq!(decisions.iter().collect::<std::collections::HashSet<_>>().len(), tools::ALL_KINDS.len(),
+                   "every kind of turn was asked: {decisions:?}");
+        for request in &requests {
+            assert_eq!(tools_of(request), catalogue);
+        }
+
+        let (rig, _policy, _) = compacting_rig(vec![says("I am in Oak's lab."), calls(&[("choose_action", r#"{"id":"wait*1"}"#)])]);
+        rig.events_until(Duration::from_secs(5), |event| matches!(event, UiEventBody::Compacted { .. }));
+        let requests = rig.requests();
+        let summary = requests.iter().find(|request| is_summary_request(request)).expect("a summary request");
+        assert_eq!(tools_of(summary), catalogue, "the summary request too");
+        assert_eq!(summary.parallel_tool_calls, requests[0].parallel_tool_calls);
+    }
+
+    /// The summary request answers reads and takes a write to `plan.md`, and refuses the rest.
+    #[test]
+    fn a_summary_request_answers_reads_and_writes_only_the_plan() {
+        let (mut rig, mut policy, choose) = compacting_rig(vec![
+            calls(&[
+                ("read_file", r#"{"path":"plan.md"}"#),
+                ("write_file", r#"{"path":"plan.md","content":"1. Leave the lab for Route 1."}"#),
+                ("choose_action", r#"{"id":"wait*1"}"#),
+                ("write_file", r#"{"path":"battle-script.rhai","content":"// fight\n"}"#),
+                ("write_file", r#"{"path":"issues/door.md","content":"the door is missing"}"#),
+                ("read_file", r#"{"path":"party.md"}"#),
+            ]),
+            says("I am in Oak's lab with a Squirtle."),
+        ]);
+        rig.push(vec![calls(&[("choose_action", &choose)])]);
+        // The party read needs the emulator thread, which the next turn's polls service.
+        rig.pump_overworld(&mut policy).expect("the run continues after a compaction");
+
+        let requests = rig.requests();
+        assert!(is_summary_request(&requests[4]) && is_summary_request(&requests[5]));
+        let answers: Vec<&str> = requests[5].messages.iter().rev().take(6).filter(|m| m.role == Role::Tool)
+            .filter_map(Message::text).collect::<Vec<_>>().into_iter().rev().collect();
+        assert_eq!(answers.len(), 6, "{answers:?}");
+        assert!(answers[0].starts_with("plan.md"), "{}", answers[0]);
+        assert!(answers[1].starts_with("plan.md written"), "{}", answers[1]);
+        assert_eq!(answers[2], crate::llm::compaction::NOT_AN_ACTION);
+        assert_eq!(answers[3], crate::llm::compaction::PLAN_ONLY);
+        assert_eq!(answers[4], crate::llm::compaction::PLAN_ONLY);
+        assert!(answers[5].starts_with("party.md") && answers[5].contains("Squirtle"), "{}", answers[5]);
+        assert!(rig.drained_events().iter().any(|event| matches!(event,
+            UiEventBody::Plan { text } if text.contains("Leave the lab"))), "the plan was written");
+
+        // The compacted history keeps neither the instruction nor the summary's own steps.
+        let last = requests.last().expect("the next turn");
+        assert!(last.messages[1].text().unwrap_or_default().contains("I am in Oak's lab with a Squirtle."));
+        assert!(!is_summary_request(last));
+        assert!(!last.messages.iter().any(|m| m.text().is_some_and(|t| t.starts_with("plan.md written"))));
+        history_is_well_formed(last);
+    }
+
+    /// A transient failure is retried until it clears: a 5xx, a dropped connection, a timeout,
+    /// an account refusal short of a park, and a dated rate limit, which parks.
+    #[test]
+    fn a_summary_request_is_retried_through_every_transient_failure() {
+        let resets_at_ms = Some(crate::published::now_ms() + 1_500);
+        let (mut rig, mut policy, choose) = compacting_rig(vec![
+            fails(LlmError::Http { status: 503, message: "overloaded".into() }),
+            fails(LlmError::Http { status: 503, message: "overloaded".into() }),
+            fails(LlmError::Transport("connection reset".into())),
+            fails(LlmError::Timeout("waited 180s".into())),
+            fails(LlmError::Http { status: 402, message: "no credit".into() }),
+            fails(LlmError::RateLimited { resets_at_ms, message: "50/day".into() }),
+            says("I am in Oak's lab with a Squirtle."),
+        ]);
+        let events = rig.events_until(Duration::from_secs(10), |event| matches!(event, UiEventBody::Compacted { .. }));
+        assert_eq!(compacted(&events), Some(true), "the summary landed in the end: {:?}", notices(&events));
+        let said = notices(&events).join("\n");
+        for named in ["503", "connection reset", "waited 180s", "402", "quota"] {
+            assert!(said.contains(named), "`{named}` was not named: {said}");
+        }
+        assert!(!said.contains("dropping the earlier conversation"), "{said}");
+
+        rig.push(vec![calls(&[("choose_action", &choose)])]);
+        rig.pump_overworld(&mut policy).expect("the run continues after a compaction");
+        let last = rig.requests().last().cloned().expect("the next turn");
+        assert!(last.messages[1].text().unwrap_or_default().contains("I am in Oak's lab with a Squirtle."));
+    }
+
+    /// A genuine failure is asked once more without the oldest half of the turns.
+    #[test]
+    fn a_summary_that_fails_genuinely_is_asked_again_without_its_oldest_turns() {
+        let (mut rig, mut policy, choose) = compacting_rig(vec![
+            fails(LlmError::Http { status: 400, message: "prompt is too long".into() }),
+            says("The second half of the story."),
+        ]);
+        rig.push(vec![calls(&[("choose_action", &choose)])]);
+        rig.pump_overworld(&mut policy).expect("the run continues after a compaction");
+        let events = rig.events_until(Duration::from_secs(1), |_| false);
+
+        let requests = rig.requests();
+        let (whole, halved) = (&requests[4], &requests[5]);
+        assert!(is_summary_request(whole) && is_summary_request(halved));
+        let first_turn = |request: &ChatRequest| request.messages.iter()
+            .any(|m| m.text().is_some_and(|t| t.contains("I am on the very first turn.")));
+        assert!(first_turn(whole) && !first_turn(halved), "the oldest turn was left out");
+        assert!(halved.messages.len() < whole.messages.len());
+        assert!(last_user_message(halved).contains("left out of this request"), "{}", last_user_message(halved));
+        assert!(!last_user_message(whole).contains("left out"));
+        assert!(notices(&events).iter().any(|n| n.contains("could not summarise the history") && n.contains("400")),
+                "{:?}", notices(&events));
+        assert_eq!(compacted(&events), Some(true));
+        assert!(requests[6].messages[1].text().unwrap_or_default().contains("The second half of the story."));
+    }
+
+    /// Two genuine failures leave the system prompt, a note saying so, and the last turns.
+    #[test]
+    fn a_summary_that_fails_genuinely_twice_drops_the_earlier_conversation_and_says_so() {
+        let (mut rig, mut policy, choose) = compacting_rig(vec![
+            fails(LlmError::Http { status: 400, message: "prompt is too long".into() }),
+            fails(LlmError::Protocol("not a stream".into())),
+        ]);
+        rig.push(vec![calls(&[("choose_action", &choose)])]);
+        rig.pump_overworld(&mut policy).expect("the run continues after a compaction");
+        let events = rig.events_until(Duration::from_secs(1), |_| false);
+
+        assert_eq!(compacted(&events), Some(false));
+        assert!(notices(&events).iter().any(|n| n.contains("a second time") && n.contains("not a stream")),
+                "{:?}", notices(&events));
+        let last = rig.requests().last().cloned().expect("the next turn");
+        assert_eq!(last.messages[0].role, Role::System);
+        assert!(last.messages[1].text().unwrap_or_default().contains("dropped without a summary"));
+        assert!(!last.messages.iter().any(|m| m.text().is_some_and(|t| t.contains("I am on the very first turn."))));
+        assert!(last_user_message(&last).contains(crate::llm::prompt::PlanReminder::Compacted.line()));
+        history_is_well_formed(&last);
+    }
+
+    /// A turn's request the endpoint rejects as too long compacts and asks the same question again.
+    #[test]
+    fn a_turn_whose_prompt_is_too_long_compacts_and_is_asked_again_once() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        let choose = format!(r#"{{"id":"{id}"}}"#);
+        rig.push(vec![
+            saying_calls("I am on the very first turn.", &[("choose_action", &choose)]),
+            calls(&[("choose_action", &choose)]),
+            calls(&[("choose_action", &choose)]),
+            fails(LlmError::Http { status: 400, message: "prompt is too long: 200000 tokens > 128000".into() }),
+            says("I am in Oak's lab with a Squirtle."),
+            calls(&[("choose_action", &choose)]),
+        ]);
+        for turn in 1..=4 {
+            rig.pump_overworld(&mut policy).unwrap_or_else(|| panic!("turn {turn} did not land"));
+        }
+        let events = rig.events_until(Duration::from_secs(1), |_| false);
+
+        let requests = rig.requests();
+        assert_eq!(requests.len(), 6, "three turns, the refused one, the summary, the same again");
+        assert!(is_summary_request(&requests[4]));
+        let (refused, again) = (&requests[3], &requests[5]);
+        assert_eq!(again.messages[0].role, Role::System);
+        assert!(again.messages[1].text().unwrap_or_default().contains("I am in Oak's lab with a Squirtle."));
+        assert!(!again.messages.iter().any(|m| m.text().is_some_and(|t| t.contains("I am on the very first turn."))));
+        let question = |request: &ChatRequest| last_user_message(request).split("\nYour").next().unwrap_or_default().to_string();
+        assert_eq!(question(again), question(refused), "the same question");
+        assert!(last_user_message(again).contains(crate::llm::prompt::PlanReminder::Compacted.line()));
+        let said = notices(&events);
+        assert!(said.iter().any(|n| n.contains("rejected the turn's request") && n.contains("prompt is too long")), "{said:?}");
+        assert!(!said.iter().any(|n| n.contains("could not be completed") || n.contains("refused")), "{said:?}");
+        history_is_well_formed(again);
+    }
+
+    /// Rejected again after the compaction, the turn fails as any failed turn does.
+    #[test]
+    fn a_turn_rejected_twice_fails_and_is_not_asked_a_third_time() {
+        let (mut rig, mut policy) = Rig::new(vec![]);
+        let id = rig.first_action_id();
+        let choose = format!(r#"{{"id":"{id}"}}"#);
+        let too_long = || fails(LlmError::Http { status: 413, message: "request too large".into() });
+        rig.push(vec![
+            calls(&[("choose_action", &choose)]),
+            calls(&[("choose_action", &choose)]),
+            too_long(),
+            says("I am in Oak's lab with a Squirtle."),
+            too_long(),
+        ]);
+        rig.pump_overworld(&mut policy).expect("turn 1");
+        rig.pump_overworld(&mut policy).expect("turn 2");
+        for _ in 0..50 {
+            rig.tick_overworld(&mut policy);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let events = rig.events_until(Duration::from_secs(5), |event| {
+            matches!(event, UiEventBody::Notice { message, .. } if message.contains("could not be completed"))
+        });
+        let said = notices(&events);
+        assert!(said.iter().any(|n| n.contains("could not be completed") && n.contains("413")), "{said:?}");
+        assert!(!said.iter().any(|n| n.contains("refused")), "a rejected request is not a refusal: {said:?}");
+        assert_eq!(rig.requests().len(), 5, "not asked a third time");
     }
 
     /// A second process's first request opens on the conversation the first one left.

@@ -339,8 +339,8 @@ pub fn contract(kind: DecisionKind) -> String {
          are doing and why. Your thinking is not kept, so that sentence is the only thing you will \
          still have of this turn when you take the next one.\n\
          {} do not end the turn — call as many as you need, in one message, then finish with {}.",
-        crate::llm::tools::non_terminal_names(kind).iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", "),
-        terminal_names(kind).iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(" or "),
+        crate::llm::tools::non_terminal_names().iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", "),
+        terminal_names().iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(" or "),
     )
 }
 
@@ -406,6 +406,9 @@ pub enum TurnContext<'a> {
     Battle { script: ScriptState },
 }
 
+/// What every [`situation`] opens with, and so where a compaction may cut.
+pub const DECISION: &str = "## Decision: ";
+
 /// The user message that opens a turn.
 pub fn situation(
     kind: DecisionKind,
@@ -419,14 +422,15 @@ pub fn situation(
 ) -> String {
     let mut out = String::with_capacity(2048);
 
+    out.push_str(DECISION);
     out.push_str(match kind {
-        DecisionKind::Overworld => "## Decision: what to do next in the overworld\n\n",
-        DecisionKind::Battle => "## Decision: what to do this battle turn\n\n",
-        DecisionKind::Nickname => "## Decision: name this Pokémon\n\n",
-        DecisionKind::MartPurchase => "## Decision: what to buy here, if anything\n\n",
-        DecisionKind::ForgetMove => "## Decision: which move to forget, if any\n\n",
-        DecisionKind::MimicMove => "## Decision: which of the enemy's moves Mimic copies\n\n",
-        DecisionKind::Stuck => "## Decision: the game is stuck — get it moving\n\n",
+        DecisionKind::Overworld => "what to do next in the overworld\n\n",
+        DecisionKind::Battle => "what to do this battle turn\n\n",
+        DecisionKind::Nickname => "name this Pokémon\n\n",
+        DecisionKind::MartPurchase => "what to buy here, if anything\n\n",
+        DecisionKind::ForgetMove => "which move to forget, if any\n\n",
+        DecisionKind::MimicMove => "which of the enemy's moves Mimic copies\n\n",
+        DecisionKind::Stuck => "the game is stuck — get it moving\n\n",
     });
 
     match context {
@@ -1124,7 +1128,7 @@ mod tests {
             let request = ChatRequest {
                 model: config.model.clone(),
                 messages: messages.clone(),
-                tools: tools::for_kind(kind),
+                tools: tools::catalogue(),
                 parallel_tool_calls: Some(true),
                 max_tokens: config.max_tokens,
                 reasoning_effort: None,
@@ -1196,7 +1200,7 @@ mod tests {
     fn the_contract_names_every_tool_the_turn_is_actually_sent() {
         for kind in crate::llm::tools::ALL_KINDS {
             let contract = contract(kind);
-            for tool in crate::llm::tools::for_kind(kind) {
+            for tool in crate::llm::tools::catalogue() {
                 assert!(contract.contains(tool.function.name),
                         "{kind:?}'s contract does not mention `{}`", tool.function.name);
             }

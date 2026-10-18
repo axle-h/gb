@@ -876,7 +876,7 @@ pub const ALL_KINDS: [DecisionKind; 7] = [
 ];
 
 /// The four tools, the same on every kind of turn: what varies is the menu the turn carries.
-pub fn for_kind(_kind: DecisionKind) -> Vec<ToolSpec> {
+pub fn catalogue() -> Vec<ToolSpec> {
     let mut tools = vec![choose_action_spec()];
     tools.extend(files::specs());
     tools
@@ -968,11 +968,11 @@ fn call_string(call: &ToolCall, field: &str, cap: usize) -> Option<String> {
 pub const MAX_ISSUE: usize = 1_000;
 
 /// The tools that do not end the turn.
-pub fn non_terminal_names(_kind: DecisionKind) -> Vec<&'static str> {
-    vec![files::READ_FILE, files::WRITE_FILE, files::EDIT_FILE]
+pub fn non_terminal_names() -> [&'static str; 3] {
+    [files::READ_FILE, files::WRITE_FILE, files::EDIT_FILE]
 }
 
-pub fn terminal_names(_kind: DecisionKind) -> &'static [&'static str] {
+pub fn terminal_names() -> &'static [&'static str] {
     &[CHOOSE_ACTION]
 }
 
@@ -1075,7 +1075,7 @@ pub fn classify_reply(kind: DecisionKind, calls: &[ToolCall], menu: &[String]) -
                 picks.push((index, pick(kind, call, menu)));
                 classified.push(CallKind::Chained);
             }
-            false => classified.push(match classify_call(kind, call) {
+            false => classified.push(match classify_call(call) {
                 CallKind::Terminal(_) if call_summary(call).is_none() => CallKind::Rejected(summary_missing(&call.function.name)),
                 other => other,
             }),
@@ -1383,7 +1383,7 @@ fn press(list: &str) -> Result<Vec<JoypadButton>, String> {
 }
 
 /// Every call but `choose_action`.
-fn classify_call(_kind: DecisionKind, call: &ToolCall) -> CallKind {
+pub(crate) fn classify_call(call: &ToolCall) -> CallKind {
     if let Some(parsed) = files::parse(call) {
         return match parsed {
             Err(complaint) => CallKind::Rejected(complaint),
@@ -1409,8 +1409,8 @@ fn classify_call(_kind: DecisionKind, call: &ToolCall) -> CallKind {
         None => CallKind::Rejected(format!(
             "There is no tool called `{name}`. The tools that do not end the turn are {}; end the \
              turn with {}.",
-            non_terminal_names(DecisionKind::Overworld).iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", "),
-            terminal_names(DecisionKind::Overworld).iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(" or "),
+            non_terminal_names().iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", "),
+            terminal_names().iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(" or "),
         )),
     }
 }
@@ -1927,8 +1927,8 @@ mod tests {
         }
     }
 
-    fn names(kind: DecisionKind) -> Vec<&'static str> {
-        for_kind(kind).into_iter().map(|tool| tool.function.name).collect()
+    fn names() -> Vec<&'static str> {
+        catalogue().into_iter().map(|tool| tool.function.name).collect()
     }
 
     /// Oak's lab after the starter: a party of one, an ordinary bag, and no trees.
@@ -2317,52 +2317,28 @@ mod tests {
         assert!(!typo.contains("ids are minted for the map"), "`foo` was called a map: {typo}");
     }
 
-    /// What the `tools` array costs, per kind, with a ceiling on each.
+    /// What the `tools` array costs, with a ceiling.
     #[test]
     fn the_tool_array_stays_within_its_budget() {
-        // Overworld is the big one: it carries the battle-script tools.
-        for (kind, ceiling) in [
-            (DecisionKind::Overworld, 8_400),
-            (DecisionKind::Battle, 5_575),
-            (DecisionKind::Nickname, 4_075),
-            (DecisionKind::MartPurchase, 4_825),
-            (DecisionKind::ForgetMove, 4_275),
-            (DecisionKind::MimicMove, 4_275),
-            (DecisionKind::Stuck, 6_025),
-        ] {
-            let bytes = serde_json::to_string(&for_kind(kind)).expect("the specs serialise").len();
-            assert!(bytes <= ceiling, "{kind:?}'s tools are {bytes} bytes, over the {ceiling} budget");
-        }
+        const CEILING: usize = 3_900;
+        let bytes = serde_json::to_string(&catalogue()).expect("the specs serialise").len();
+        assert!(bytes <= CEILING, "the tools are {bytes} bytes, over the {CEILING} budget");
     }
 
     #[test]
     fn no_tool_text_carries_a_run_of_spaces() {
-        fn walk(value: &Value, path: &str, kind: DecisionKind) {
+        fn walk(value: &Value, path: &str) {
             match value {
                 Value::String(text) => assert!(
                     !text.contains("  "),
-                    "{kind:?}: {path} has a run of spaces, a literal continued without `\\`: {text:?}",
+                    "{path} has a run of spaces, a literal continued without `\\`: {text:?}",
                 ),
-                Value::Array(items) => {
-                    items.iter().enumerate().for_each(|(i, item)| walk(item, &format!("{path}[{i}]"), kind))
-                }
-                Value::Object(fields) => {
-                    fields.iter().for_each(|(key, field)| walk(field, &format!("{path}.{key}"), kind))
-                }
+                Value::Array(items) => items.iter().enumerate().for_each(|(i, item)| walk(item, &format!("{path}[{i}]"))),
+                Value::Object(fields) => fields.iter().for_each(|(key, field)| walk(field, &format!("{path}.{key}"))),
                 _ => {}
             }
         }
-        for kind in [
-            DecisionKind::Overworld,
-            DecisionKind::Battle,
-            DecisionKind::Nickname,
-            DecisionKind::MartPurchase,
-            DecisionKind::ForgetMove,
-            DecisionKind::MimicMove,
-            DecisionKind::Stuck,
-        ] {
-            walk(&serde_json::to_value(for_kind(kind)).expect("the specs serialise"), "tools", kind);
-        }
+        walk(&serde_json::to_value(catalogue()).expect("the specs serialise"), "tools");
     }
 
     /// `routes.md` and `routes/<Map>.md`, each a different next step for the model.
@@ -2607,26 +2583,24 @@ mod tests {
     /// Every terminal tool asks for a summary, and nothing else does.
     #[test]
     fn every_terminal_tool_asks_the_model_to_say_why() {
-        for kind in ALL_KINDS {
-            for tool in for_kind(kind) {
-                let has_summary = tool.function.parameters["properties"].get("summary").is_some();
-                let required = tool.function.parameters["required"]
-                    .as_array()
-                    .is_some_and(|required| required.iter().any(|name| name == "summary"));
-                match terminal_names(kind).contains(&tool.function.name) {
-                    true => {
-                        assert!(has_summary, "{kind:?}'s `{}` has no summary", tool.function.name);
-                        // Only the first `choose_action` of a reply needs one, which `classify_reply`
-                        // enforces and a schema cannot say.
-                        assert_eq!(required, tool.function.name != CHOOSE_ACTION,
-                                   "{kind:?}'s `{}`", tool.function.name);
-                    }
-                    false => assert!(!has_summary, "`{}` is not a decision", tool.function.name),
+        for tool in catalogue() {
+            let has_summary = tool.function.parameters["properties"].get("summary").is_some();
+            let required = tool.function.parameters["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|name| name == "summary"));
+            match terminal_names().contains(&tool.function.name) {
+                true => {
+                    assert!(has_summary, "`{}` has no summary", tool.function.name);
+                    // Only the first `choose_action` of a reply needs one, which `classify_reply`
+                    // enforces and a schema cannot say.
+                    assert_eq!(required, tool.function.name != CHOOSE_ACTION,
+                               "`{}`", tool.function.name);
                 }
-                // `additionalProperties: false`, so an undeclared argument is schema-invalid.
-                assert_eq!(tool.function.parameters["additionalProperties"], json!(false),
-                           "`{}` would accept an undeclared argument", tool.function.name);
+                false => assert!(!has_summary, "`{}` is not a decision", tool.function.name),
             }
+            // `additionalProperties: false`, so an undeclared argument is schema-invalid.
+            assert_eq!(tool.function.parameters["additionalProperties"], json!(false),
+                       "`{}` would accept an undeclared argument", tool.function.name);
         }
     }
 
@@ -2746,17 +2720,12 @@ mod tests {
         }
     }
 
-    /// Four tools, byte-identical on every kind of turn.
+    /// The four tools, and the contract in the prompt names what is actually sent.
     #[test]
-    fn every_kind_ends_with_the_same_action_tool() {
-        let overworld = serde_json::to_string(&for_kind(DecisionKind::Overworld)).expect("serialises");
-        for kind in KINDS {
-            assert_eq!(serde_json::to_string(&for_kind(kind)).expect("serialises"), overworld, "{kind:?}");
-            assert_eq!(names(kind), [CHOOSE_ACTION, files::READ_FILE, files::WRITE_FILE, files::EDIT_FILE]);
-            // The contract in the prompt matches the array actually sent.
-            for name in terminal_names(kind).iter().chain(&non_terminal_names(kind)) {
-                assert!(names(kind).contains(name), "{kind:?} promises {name} but does not offer it");
-            }
+    fn the_catalogue_is_the_action_tool_and_the_three_file_tools() {
+        assert_eq!(names(), [CHOOSE_ACTION, files::READ_FILE, files::WRITE_FILE, files::EDIT_FILE]);
+        for name in terminal_names().iter().chain(&non_terminal_names()) {
+            assert!(names().contains(name), "the prompt promises {name} but it is not offered");
         }
     }
 
@@ -2779,17 +2748,15 @@ mod tests {
     /// A malformed schema is a 400 on the first turn of a run.
     #[test]
     fn every_schema_is_a_well_formed_object() {
-        for kind in KINDS {
-            for tool in for_kind(kind) {
-                let schema = &tool.function.parameters;
-                assert_eq!(schema["type"], "object", "{}", tool.function.name);
-                assert!(schema.get("properties").is_some(), "{}", tool.function.name);
-                assert!(!tool.function.description.is_empty(), "{}", tool.function.name);
-                for required in schema.get("required").and_then(Value::as_array).unwrap_or(&vec![]) {
-                    let key = required.as_str().expect("required names are strings");
-                    assert!(schema["properties"].get(key).is_some(),
-                            "{} requires `{key}` but does not describe it", tool.function.name);
-                }
+        for tool in catalogue() {
+            let schema = &tool.function.parameters;
+            assert_eq!(schema["type"], "object", "{}", tool.function.name);
+            assert!(schema.get("properties").is_some(), "{}", tool.function.name);
+            assert!(!tool.function.description.is_empty(), "{}", tool.function.name);
+            for required in schema.get("required").and_then(Value::as_array).unwrap_or(&vec![]) {
+                let key = required.as_str().expect("required names are strings");
+                assert!(schema["properties"].get(key).is_some(),
+                        "{} requires `{key}` but does not describe it", tool.function.name);
             }
         }
     }

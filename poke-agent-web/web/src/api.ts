@@ -162,7 +162,6 @@ export type UiEvent = At &
       type: 'compacted';
       before: number;
       after: number;
-      images_evicted: number;
       summarised: boolean;
     }
   );
@@ -188,7 +187,7 @@ export type EntryBody =
     }
   | { type: 'decision'; turn: number; summary: string; narration?: string }
   | { type: 'cancelled'; turn: number; reason: string }
-  | { type: 'compacted'; before: number; after: number; images_evicted: number; summarised: boolean };
+  | { type: 'compacted'; before: number; after: number; summarised: boolean };
 
 /** One row of the log; `raw` is the wire event as it arrived, shown when the row is expanded. */
 export type Entry = EntryBody & {

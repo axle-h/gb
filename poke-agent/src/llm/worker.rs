@@ -2,7 +2,8 @@
 //! up to `GB_MAX_TOOL_STEPS` completions: reads go to the policy as a `ToolBatch`, a reply with no
 //! call is nudged once, and a terminal call ends the turn, while running out forces a `wait`. The
 //! generation is checked while streaming and while a batch is out, and a stale one abandons the
-//! turn. Compaction runs after the outcome is sent.
+//! turn. Compaction runs after the outcome is sent, or at once when the endpoint rejects a turn's
+//! request.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -55,7 +56,8 @@ pub struct TurnOutcome {
 /// Read tool calls from one assistant message, to be answered at one poll.
 #[derive(Debug, Clone)]
 pub struct ToolBatch {
-    pub turn: u64,
+    /// `None` for the summary request, which no turn owns: answered from whatever state is current.
+    pub turn: Option<u64>,
     pub calls: Vec<ToolCall>,
 }
 
@@ -135,8 +137,8 @@ const MAX_PARK: Duration = Duration::from_secs(25 * 60 * 60);
 /// How finely the park is chopped.
 const PARK_SLICE: Duration = Duration::from_millis(200);
 
-/// Parking a run the endpoint keeps refusing. Only an [`LlmError::Http`] that
-/// [`LlmError::is_retryable`] rejects is a refusal; a timeout or spent 5xx retries is not.
+/// Parking a run the endpoint keeps refusing. Only [`LlmError::is_account_refusal`] is a refusal; a
+/// timeout, spent 5xx retries or a request rejected as malformed is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefusalPark {
     /// Refusals in a row that only fail the turn, since a changed conversation may cure one.
@@ -158,6 +160,31 @@ impl RefusalPark {
         let doublings = in_a_row.checked_sub(self.after)?;
         Some(self.first.saturating_mul(1u32 << doublings.min(16)).min(self.max))
     }
+}
+
+/// What ends a [`Worker::park_until`] early.
+#[derive(Debug, Clone, Copy)]
+enum Watch {
+    /// The turn went stale.
+    Turn(u64),
+    /// A reset is waiting, which makes the summary moot.
+    Compaction,
+}
+
+/// What [`Worker::summarise`] came back with.
+enum Summarised {
+    Prose(String),
+    /// Two genuine failures: the history is compacted without a summary.
+    Failed,
+    /// A reset is waiting.
+    Abandoned,
+}
+
+/// Why a summary request stopped without a summary.
+enum Stop {
+    /// Asking the same again will not help, so it is not asked again.
+    Genuine(String),
+    Abandoned,
 }
 
 /// Why [`Worker::park_until`] is stopping the run, which is what the page is told.
@@ -195,9 +222,6 @@ fn describe_wait(ms: u64) -> String {
 
 /// How much of a tool's answer the page and the transcript keep.
 const MAX_TOOL_RESULT: usize = 2_000;
-
-/// Where [`Worker::trim_history`] drops back to, as a fraction of the window.
-const TRIM_TO: f64 = 0.50;
 
 /// Where a turn started, so a failed turn is rolled back to a length rather than by one `pop`: it
 /// can fail on its second tool step, with an assistant message and results already appended.
@@ -445,12 +469,10 @@ impl Worker {
         let TurnRequest { id, kind, situation, headline, menu } = request;
         self.published.publish_event(UiEventBody::TurnStarted { turn: id, kind: kind.label(), headline });
 
-        self.turn_open = TurnOpen { at: self.history.len(), reminder: self.reminder };
         self.publish_plan();
         self.publish_battle_script();
-        self.history.push(Message::user(format!("{situation}\n{}\n", self.reminder.line())));
-        self.reminder = prompt::PlanReminder::Ordinary;
-        let outcome = self.decide(id, kind, &menu);
+        self.open_turn(&situation);
+        let outcome = self.decide(id, kind, &situation, &menu);
         // Before the outcome is sent: a winning action has the archiver copy the run next tick.
         self.history.checkpoint(id, self.accounting.calibration());
         match outcome {
@@ -476,13 +498,14 @@ impl Worker {
             self.published.set_status(RunStatus::Playing);
         }
         // The log was flushed above, so everything a compaction destroys is already written down.
-        if let Some(note) = self.compact_if_needed() {
-            if note.summary.is_some() || note.dropped > 0 {
-                self.reminder = prompt::PlanReminder::Compacted;
-            }
-            self.history.note_compaction(id, &note);
-            self.history.checkpoint(id, self.accounting.calibration());
-        }
+        self.compact(id, false);
+    }
+
+    /// Append the situation, closed by what it says about `plan.md`.
+    fn open_turn(&mut self, situation: &str) {
+        self.turn_open = TurnOpen { at: self.history.len(), reminder: self.reminder };
+        self.history.push(Message::user(format!("{situation}\n{}\n", self.reminder.line())));
+        self.reminder = prompt::PlanReminder::Ordinary;
     }
 
     /// Put the conversation back exactly as this turn found it.
@@ -608,8 +631,15 @@ impl Worker {
         self.published.publish_event(UiEventBody::BattleScript { source, armed, is_default, last_failure });
     }
 
+    fn abandoned(&self, watch: Watch) -> bool {
+        match watch {
+            Watch::Turn(id) => self.is_stale(id),
+            Watch::Compaction => reset_waiting(&self.reset),
+        }
+    }
+
     /// Stop the run until `until_ms`, and stop the emulator with it.
-    fn park_until(&mut self, id: u64, until_ms: u64, park: Park, message: &str) -> bool {
+    fn park_until(&mut self, watch: Watch, until_ms: u64, park: Park, message: &str) -> bool {
         let now = now_ms();
         // Clamped, because the wait is driven by a number the endpoint chose.
         let until_ms = until_ms.min(now.saturating_add(MAX_PARK.as_millis() as u64));
@@ -631,7 +661,7 @@ impl Worker {
 
         let mut cancelled = false;
         while now_ms() < until_ms {
-            if self.is_stale(id) {
+            if self.abandoned(watch) {
                 cancelled = true;
                 break;
             }
@@ -648,30 +678,60 @@ impl Worker {
         !cancelled
     }
 
-    /// `None` means the turn was cancelled and abandoned.
-    fn decide(&mut self, id: u64, kind: DecisionKind, menu: &[String]) -> Option<(Terminal, Option<String>)> {
-        let specs = tools::for_kind(kind);
+    /// `None` means the turn was cancelled and abandoned. A request the endpoint rejects as wrong, a
+    /// prompt too long among them, forces a compaction and is asked once more.
+    fn decide(
+        &mut self,
+        id: u64,
+        kind: DecisionKind,
+        situation: &str,
+        menu: &[String],
+    ) -> Option<(Terminal, Option<String>)> {
+        let rejected = match self.ask(id, kind, menu) {
+            Ok(outcome) => return outcome,
+            Err(failure) if failure.is_rejected_request() => failure,
+            Err(failure) => return Some(self.fail_turn(&failure)),
+        };
+        self.published.publish_event(UiEventBody::Notice {
+            level: "warn",
+            message: format!(
+                "the endpoint rejected the turn's request ({rejected}); compacting the conversation \
+                 and asking the same question again"
+            ),
+        });
+        self.roll_back_failed_turn();
+        self.compact(id, true);
+        self.open_turn(situation);
+        match self.ask(id, kind, menu) {
+            Ok(outcome) => outcome,
+            Err(failure) => Some(self.fail_turn(&failure)),
+        }
+    }
+
+    /// A turn the endpoint could not answer resolves to a wait, and leaves no trace in the history.
+    fn fail_turn(&mut self, failure: &LlmError) -> (Terminal, Option<String>) {
+        self.published.set_status(RunStatus::Error { message: failure.to_string() });
+        self.published.publish_event(UiEventBody::Notice {
+            level: "error",
+            message: format!("the turn could not be completed: {failure}"),
+        });
+        // Nothing this turn appended was answered, so all of it goes.
+        self.roll_back_failed_turn();
+        (Terminal::Wait { ticks: FAILURE_WAIT_TICKS }, None)
+    }
+
+    /// The turn's requests, up to `GB_MAX_TOOL_STEPS`. `Err` is a failure the turn cannot survive.
+    fn ask(&mut self, id: u64, kind: DecisionKind, menu: &[String]) -> Result<Option<(Terminal, Option<String>)>, LlmError> {
         let mut nudged = false;
 
         for step in 0..self.config.max_tool_steps {
             if self.is_stale(id) {
-                return None;
+                return Ok(None);
             }
 
             self.published.set_status(RunStatus::AwaitingLlm { kind: kind.label() });
             let completion = {
-                let request = ChatRequest {
-                    model: self.config.model.clone(),
-                    messages: self.history.to_vec(),
-                    tools: specs.clone(),
-                    parallel_tool_calls: Some(true),
-                    max_tokens: self.config.max_tokens,
-                    reasoning_effort: self.config.reasoning_effort.clone(),
-                    reasoning: self.config.reasoning_budget,
-                    temperature: self.config.temperature,
-                    stream: true,
-                    stream_options: StreamOptions { include_usage: true },
-                };
+                let request = chat_request(&self.config, self.history.to_vec());
                 // A loop, so a parked turn asks the same question when the quota reopens.
                 let result = loop {
                     let published = Arc::clone(&self.published);
@@ -712,21 +772,21 @@ impl Worker {
                     match result {
                         // A dated 429 parks the game, then asks the same question again.
                         Err(LlmError::RateLimited { resets_at_ms: Some(until_ms), message }) => {
-                            if !self.park_until(id, until_ms, Park::Quota, &message) {
+                            if !self.park_until(Watch::Turn(id), until_ms, Park::Quota, &message) {
                                 break Err(LlmError::Cancelled);
                             }
                             // Back to `AwaitingLlm` before asking again.
                             self.published.set_status(RunStatus::AwaitingLlm { kind: kind.label() });
                         }
                         // Refused again: park rather than ask every two seconds, longer each time.
-                        Err(refusal @ LlmError::Http { .. }) if !refusal.is_retryable() => {
+                        Err(refusal) if refusal.is_account_refusal() => {
                             self.refused_in_a_row += 1;
                             let Some(window) = self.refusal_park.window(self.refused_in_a_row) else {
                                 break Err(refusal);
                             };
                             let until_ms = now_ms().saturating_add(window.as_millis() as u64);
                             let park = Park::Refused { in_a_row: self.refused_in_a_row };
-                            if !self.park_until(id, until_ms, park, &refusal.to_string()) {
+                            if !self.park_until(Watch::Turn(id), until_ms, park, &refusal.to_string()) {
                                 break Err(LlmError::Cancelled);
                             }
                             self.published.set_status(RunStatus::AwaitingLlm { kind: kind.label() });
@@ -742,17 +802,8 @@ impl Worker {
                 };
                 match result {
                     Ok(completion) => completion,
-                    Err(LlmError::Cancelled) => return None,
-                    Err(failure) => {
-                        self.published.set_status(RunStatus::Error { message: failure.to_string() });
-                        self.published.publish_event(UiEventBody::Notice {
-                            level: "error",
-                            message: format!("the turn could not be completed: {failure}"),
-                        });
-                        // Nothing this turn appended was answered, so all of it goes.
-                        self.roll_back_failed_turn();
-                        return Some((Terminal::Wait { ticks: FAILURE_WAIT_TICKS }, None));
-                    }
+                    Err(LlmError::Cancelled) => return Ok(None),
+                    Err(failure) => return Err(failure),
                 }
             };
 
@@ -762,10 +813,10 @@ impl Worker {
             if completion.tool_calls.is_empty() {
                 let truncated = completion.finish_reason.as_deref() == Some("length");
                 if nudged {
-                    return Some((self.give_up(id, match truncated {
+                    return Ok(Some((self.give_up(id, match truncated {
                         true => "the model twice ran past the length limit without deciding",
                         false => "the model replied twice with no tool call",
-                    }), None));
+                    }), None)));
                 }
                 nudged = true;
                 self.history.push(Message::user(match truncated {
@@ -828,98 +879,115 @@ impl Worker {
                     let report = incident::Report::Press { buttons, why: &why };
                     self.record_report(id, kind, report, summary.as_deref());
                 }
-                return Some((decision, summary));
+                return Ok(Some((decision, summary)));
             }
 
             // No terminal call, so this is a read step.
             let out_of_reads = step + 2 >= self.config.max_tool_steps;
-            let reads: Vec<ToolCall> = completion
-                .tool_calls
-                .iter()
-                .zip(&classified)
-                .filter(|(_, kind)| matches!(kind, CallKind::Read(_)))
-                .map(|(call, _)| call.clone())
-                .collect();
-
-            let answers = match reads.is_empty() {
-                true => Vec::new(),
-                false => match self.run_batch(id, reads.clone()) {
-                    Some(answers) => answers,
-                    None => {
-                        self.history.pop();
-                        return None;
-                    }
-                },
+            let Some(answers) = self.answer_calls(Some((id, kind)), &completion.tool_calls, &classified) else {
+                self.history.pop();
+                return Ok(None);
             };
-            let mut answers = answers.into_iter();
-
-            // Pictures cannot ride on a `tool` message, so they follow every tool result.
-            let mut pictures: Vec<Message> = Vec::new();
-            for (call, classification) in completion.tool_calls.iter().zip(&classified) {
-                // The picture this call answered with, for the page too.
-                let mut png: Option<Vec<u8>> = None;
-                let (content, ok) = match classification {
-                    CallKind::Read(read) => {
-                        let answer = answers.next().unwrap_or_else(|| ToolAnswer::text(
-                            "The agent returned no answer for this read."));
-                        let content = match answer.map {
-                            None => files::window(&read.node.path(), &answer.json, read.offset, read.limit),
-                            // As `screenshot` below: the result says a picture follows.
-                            Some(map) => match map_image::render(&map) {
-                                // The ASCII grid is the safety net, not dead code.
-                                None => format!(
-                                    "{}\n{}\nThis map could not be drawn, so here it is as characters \
-                                     instead — one per square, {} wide, and you are the `P`:\n{map}",
-                                    files::MAP_PNG, answer.json, map.width),
-                                Some(mut canvas) => {
-                                    if answer.is_dark {
-                                        map_image::darken(&mut canvas);
-                                    }
-                                    let (width, height) = canvas.dimensions();
-                                    let caption = map_image::caption(&map, answer.is_dark);
-                                    // Encoded once, for the model's message and the page.
-                                    let encoded = map_image::encode(&canvas);
-                                    let url = screenshot::png_data_url(&encoded);
-                                    png = Some(encoded);
-                                    pictures.push(Message::user_with_image_detail(
-                                        caption.clone(),
-                                        url,
-                                        // `high`: one 512 px tile turns a 1600 px map to mush.
-                                        ImageDetail::High,
-                                        protocol::image_tokens(ImageDetail::High, width, height),
-                                    ));
-                                    format!("{}\n{}\n{caption} It is attached to the message after \
-                                             this one.", files::MAP_PNG, answer.json)
-                                }
-                            },
-                        };
-                        (content, true)
-                    }
-                    CallKind::Screenshot => {
-                        self.published.set_status(RunStatus::RunningTool { name: files::READ_FILE.into() });
-                        let frame = self.published.latest_frame();
-                        let caption = screenshot::caption(frame.seq);
-                        let encoded = screenshot::encode(&frame.pixels);
-                        let url = screenshot::png_data_url(&encoded);
-                        png = Some(encoded);
-                        pictures.push(Message::user_with_image(caption.clone(), url));
-                        (format!("{}\n{caption} It is attached to the message after this one.", files::SCREEN_PNG), true)
-                    }
-                    CallKind::File(file) => self.apply_file(file),
-                    CallKind::Issue { name, message } => (self.file_issue(id, kind, name, message, None), true),
-                    CallKind::Rejected(complaint) => (complaint.clone(), false),
-                    CallKind::Terminal(_) | CallKind::Chained => unreachable!("handled above"),
-                };
-                self.publish_tool_result(id, call, ok, &content, png);
-                self.history.push(Message::tool_result(&call.id, content));
-            }
-            self.history.extend(pictures);
+            self.history.extend(answers);
             if out_of_reads {
                 self.history.push(Message::user(prompt::OUT_OF_STEPS));
             }
         }
 
-        Some((self.give_up(id, "the model used its whole tool budget without deciding"), None))
+        Ok(Some((self.give_up(id, "the model used its whole tool budget without deciding"), None)))
+    }
+
+    /// Answer the calls of one reply that did not end its turn, in order: reads of the game go to
+    /// the policy as one batch, and the pictures follow every tool result. `turn` is `None` for
+    /// the summary request, whose answers the page is not shown. `None` if the batch was cancelled.
+    fn answer_calls(
+        &mut self,
+        turn: Option<(u64, DecisionKind)>,
+        calls: &[ToolCall],
+        classified: &[CallKind],
+    ) -> Option<Vec<Message>> {
+        let reads: Vec<ToolCall> = calls
+            .iter()
+            .zip(classified)
+            .filter(|(_, kind)| matches!(kind, CallKind::Read(_)))
+            .map(|(call, _)| call.clone())
+            .collect();
+        let answers = match reads.is_empty() {
+            true => Vec::new(),
+            false => self.run_batch(turn.map(|(id, _)| id), reads)?,
+        };
+        let mut answers = answers.into_iter();
+        let mut results: Vec<Message> = Vec::new();
+
+        // Pictures cannot ride on a `tool` message, so they follow every tool result.
+        let mut pictures: Vec<Message> = Vec::new();
+        for (call, classification) in calls.iter().zip(classified) {
+            // The picture this call answered with, for the page too.
+            let mut png: Option<Vec<u8>> = None;
+            let (content, ok) = match classification {
+                CallKind::Read(read) => {
+                    let answer = answers.next().unwrap_or_else(|| ToolAnswer::text(
+                        "The agent returned no answer for this read."));
+                    let content = match answer.map {
+                        None => files::window(&read.node.path(), &answer.json, read.offset, read.limit),
+                        // As `screenshot` below: the result says a picture follows.
+                        Some(map) => match map_image::render(&map) {
+                            // The ASCII grid is the safety net, not dead code.
+                            None => format!(
+                                "{}\n{}\nThis map could not be drawn, so here it is as characters \
+                                 instead — one per square, {} wide, and you are the `P`:\n{map}",
+                                files::MAP_PNG, answer.json, map.width),
+                            Some(mut canvas) => {
+                                if answer.is_dark {
+                                    map_image::darken(&mut canvas);
+                                }
+                                let (width, height) = canvas.dimensions();
+                                let caption = map_image::caption(&map, answer.is_dark);
+                                // Encoded once, for the model's message and the page.
+                                let encoded = map_image::encode(&canvas);
+                                let url = screenshot::png_data_url(&encoded);
+                                png = Some(encoded);
+                                pictures.push(Message::user_with_image_detail(
+                                    caption.clone(),
+                                    url,
+                                    // `high`: one 512 px tile turns a 1600 px map to mush.
+                                    ImageDetail::High,
+                                    protocol::image_tokens(ImageDetail::High, width, height),
+                                ));
+                                format!("{}\n{}\n{caption} It is attached to the message after \
+                                         this one.", files::MAP_PNG, answer.json)
+                            }
+                        },
+                    };
+                    (content, true)
+                }
+                CallKind::Screenshot => {
+                    if turn.is_some() {
+                        self.published.set_status(RunStatus::RunningTool { name: files::READ_FILE.into() });
+                    }
+                    let frame = self.published.latest_frame();
+                    let caption = screenshot::caption(frame.seq);
+                    let encoded = screenshot::encode(&frame.pixels);
+                    let url = screenshot::png_data_url(&encoded);
+                    png = Some(encoded);
+                    pictures.push(Message::user_with_image(caption.clone(), url));
+                    (format!("{}\n{caption} It is attached to the message after this one.", files::SCREEN_PNG), true)
+                }
+                CallKind::File(file) => self.apply_file(file),
+                CallKind::Issue { name, message } => match turn {
+                    Some((id, kind)) => (self.file_issue(id, kind, name, message, None), true),
+                    None => (compaction::PLAN_ONLY.to_string(), false),
+                },
+                CallKind::Rejected(complaint) => (complaint.clone(), false),
+                CallKind::Terminal(_) | CallKind::Chained => unreachable!("handled above"),
+            };
+            if let Some((id, _)) = turn {
+                self.publish_tool_result(id, call, ok, &content, png);
+            }
+            results.push(Message::tool_result(&call.id, content));
+        }
+        results.extend(pictures);
+        Some(results)
     }
 
     /// Say on the page what one tool call answered, and hold its picture for the page to fetch.
@@ -953,10 +1021,12 @@ impl Worker {
     }
 
     /// Hand a batch to the policy and block until it comes back.
-    fn run_batch(&mut self, id: u64, calls: Vec<ToolCall>) -> Option<Vec<ToolAnswer>> {
+    fn run_batch(&mut self, turn: Option<u64>, calls: Vec<ToolCall>) -> Option<Vec<ToolAnswer>> {
         // Nothing may stop the emulator between here and the answer.
-        self.published.set_status(RunStatus::RunningTool { name: names(&calls) });
-        let answers = self.tool_calls.send(ToolBatch { turn: id, calls }).ok().and_then(|()| {
+        if turn.is_some() {
+            self.published.set_status(RunStatus::RunningTool { name: names(&calls) });
+        }
+        let answers = self.tool_calls.send(ToolBatch { turn, calls }).ok().and_then(|()| {
             // Blocking: this thread is supposed to wait.
             match self.tool_results.recv() {
                 Ok(ToolBatchResult::Answered(answers)) => Some(answers),
@@ -985,172 +1055,254 @@ impl Worker {
         self.accounting.record(usage, &self.history);
     }
 
-    /// The two-stage compaction, run after every turn.
-    fn compact_if_needed(&mut self) -> Option<CompactionNote> {
-        if self.accounting.occupancy(&self.history) < self.config.compact_above {
+    fn over_threshold(&self) -> bool {
+        self.accounting.occupancy(&self.history) >= self.config.compact_above
+    }
+
+    /// Compact when the history is over `GB_COMPACT_ABOVE`, or regardless when `forced`, and write
+    /// down what it did.
+    fn compact(&mut self, id: u64, forced: bool) {
+        let Some(note) = self.compact_if_needed(forced) else { return };
+        if note.summary.is_some() || note.dropped > 0 {
+            self.reminder = prompt::PlanReminder::Compacted;
+        }
+        self.history.note_compaction(id, &note);
+        self.history.checkpoint(id, self.accounting.calibration());
+    }
+
+    /// One move: the summary of the history as it stands, then the system prompt, the summary and
+    /// the last [`compaction::KEEP_TURNS`] turns, or fewer while those alone are over the threshold.
+    fn compact_if_needed(&mut self, forced: bool) -> Option<CompactionNote> {
+        if !forced && !self.over_threshold() {
             return None;
         }
         let resume = self.published.run_status();
         self.published.set_status(RunStatus::Compacting);
         let before = self.accounting.tokens_in(&self.history);
-        let mut dropped = 0;
 
-        let images_evicted = compaction::evict_images(&mut self.history, compaction::KEEP_IMAGES);
+        let mut dropped = 0;
         let mut summary = None;
-        let still_over = self.accounting.occupancy(&self.history) >= self.config.compact_above;
-        if still_over && compaction::worth_summarising(&self.history, compaction::KEEP_MESSAGES) {
-            if let Some(prose) = self.summarise() {
-                dropped += compaction::apply_summary(&mut self.history, &prose, compaction::KEEP_MESSAGES);
-                summary = Some(prose);
+        if compaction::has_body(&self.history) {
+            let opening = match self.summarise() {
+                Summarised::Prose(prose) => {
+                    let message = compaction::summary_message(&prose);
+                    summary = Some(prose);
+                    message
+                }
+                Summarised::Failed => compaction::dropped_message(),
+                Summarised::Abandoned => {
+                    self.published.set_status(resume);
+                    return None;
+                }
+            };
+            let whole = self.history.to_vec();
+            for keep in (0..=compaction::KEEP_TURNS).rev() {
+                let mut kept = whole.clone();
+                dropped = compaction::replace_with(&mut kept, opening.clone(), keep);
+                *self.history = kept;
+                if !self.over_threshold() {
+                    break;
+                }
             }
-            // A summary could not be had — the endpoint is down, or the model returned nothing.
-        }
-        // Still over: the summary was refused, or what it kept is itself too big.
-        if self.accounting.occupancy(&self.history) >= self.config.compact_above {
-            dropped += self.trim_history();
-        }
-        // And the last resort has a last resort, because a history can hold no turns to drop.
-        if self.accounting.occupancy(&self.history) >= self.config.compact_above {
-            dropped += self.drop_unanswered();
         }
 
         let after = self.accounting.tokens_in(&self.history);
-        let summarised = summary.is_some();
-        self.published.publish_event(UiEventBody::Compacted { before, after, images_evicted, summarised });
-        // A compaction that reclaimed nothing has to say so.
-        if after >= before && self.accounting.occupancy(&self.history) >= self.config.compact_above {
+        self.published.publish_event(UiEventBody::Compacted { before, after, summarised: summary.is_some() });
+        if self.over_threshold() {
             self.published.publish_event(UiEventBody::Notice {
                 level: "error",
                 message: format!(
-                    "compaction reclaimed nothing: the history is still {after} tokens against a \
-                     limit of {}, and there is nothing left in it that can be dropped safely. Every \
-                     request from here will be over the window.",
+                    "compaction could not bring the history under the threshold: it is still {after} \
+                     tokens against a limit of {}, and there is nothing left in it that can be \
+                     dropped safely. Every request from here may be over the window.",
                     self.accounting.limit(),
                 ),
             });
         }
         self.published.set_status(resume);
-        Some(CompactionNote {
-            before,
-            after,
-            images_evicted,
-            dropped,
-            summary,
-        })
+        Some(CompactionNote { before, after, dropped, summary })
     }
 
-    /// One extra completion, asking the model to write the story so far.
-    fn summarise(&mut self) -> Option<String> {
-        let request = compaction::summary_request(&self.config, &self.history);
-        let published = Arc::clone(&self.published);
-        let result = stream_with_retries(
-            self.retry,
-            self.endpoint.as_ref(),
-            &request,
-            // Not published: the summary is bookkeeping, not the model talking.
-            &mut |_| {},
-            &|| false,
-            &mut |retry| {
-                published.publish_event(UiEventBody::Notice {
-                    level: "warn",
-                    message: format!("compaction attempt {}/{} failed ({})", retry.attempt, retry.of, retry.failure),
-                });
-            },
-        );
-
-        match result {
-            Ok(completion) if !completion.content.trim().is_empty() => {
-                let usage = completion
-                    .usage
-                    .unwrap_or_else(|| Usage::estimate(&request.messages, &completion));
-                self.accounting.record(usage, &request.messages);
-                Some(completion.content)
-            }
-            Ok(_) => {
-                self.published.publish_event(UiEventBody::Notice {
-                    level: "warn",
-                    message: "the model returned an empty summary; dropping the oldest turns instead".to_string(),
-                });
-                None
-            }
-            Err(failure) => {
+    /// The story so far: asked of the whole history, then once more without its oldest half.
+    fn summarise(&mut self) -> Summarised {
+        let whole = self.history.to_vec();
+        let failure = match self.ask_for_summary(whole.clone(), false) {
+            Ok(prose) => return Summarised::Prose(prose),
+            Err(Stop::Abandoned) => return Summarised::Abandoned,
+            Err(Stop::Genuine(failure)) => failure,
+        };
+        self.published.publish_event(UiEventBody::Notice {
+            level: "error",
+            message: format!("could not summarise the history ({failure}); asking again without its oldest turns"),
+        });
+        let (halved, start_missing) = compaction::without_oldest_half(&whole);
+        match self.ask_for_summary(halved, start_missing) {
+            Ok(prose) => Summarised::Prose(prose),
+            Err(Stop::Abandoned) => Summarised::Abandoned,
+            Err(Stop::Genuine(failure)) => {
                 self.published.publish_event(UiEventBody::Notice {
                     level: "error",
-                    message: format!("could not summarise the history ({failure}); dropping the oldest turns instead"),
+                    message: format!(
+                        "could not summarise the history a second time ({failure}); dropping the \
+                         earlier conversation without a summary"
+                    ),
                 });
-                None
+                Summarised::Failed
             }
         }
     }
 
-    /// The last resort: drop whole turns from the front until the history is under [`TRIM_TO`].
-    /// Returns how many messages went.
-    fn trim_history(&mut self) -> usize {
-        let target = (self.accounting.limit() as f64 * TRIM_TO) as u64;
-        // Index 0 is the system prompt; index 1 is the summary, if a stage 2 has ever run.
-        let first = 1 + usize::from(self.history.get(1).is_some_and(compaction::is_summary));
-        let mut dropped = 0;
-        let mut messages = 0;
-        while self.accounting.tokens_in(&self.history) > target {
-            let Some(boundary) =
-                self.history.iter().skip(first).position(compaction::is_turn_start).map(|i| i + first)
-            else {
-                break;
-            };
-            let Some(next) = self
-                .history
-                .iter()
-                .skip(boundary + 1)
-                .position(compaction::is_turn_start)
-                .map(|i| i + boundary + 1)
-            else {
-                break; // only one turn left; dropping it would leave nothing to answer
-            };
-            self.history.drain(boundary..next);
-            dropped += 1;
-            messages += next - boundary;
-        }
-        if dropped > 0 {
-            self.published.publish_event(UiEventBody::Notice {
-                level: "info",
-                message: format!("context is full; dropped the {dropped} oldest turns"),
-            });
-        }
-        messages
-    }
+    /// The summary request, looping like a turn until the reply is text: reads are answered,
+    /// `plan.md` may be written, and everything else is refused.
+    fn ask_for_summary(&mut self, mut messages: Vec<Message>, start_missing: bool) -> Result<String, Stop> {
+        messages.push(compaction::instruction(start_missing));
+        for step in 0..self.config.max_tool_steps {
+            self.published.set_status(RunStatus::Compacting);
+            let request = chat_request(&self.config, messages);
+            let completion = self.stream_summary(&request)?;
+            let usage = completion.usage.unwrap_or_else(|| Usage::estimate(&request.messages, &completion));
+            self.accounting.record(usage, &request.messages);
+            messages = request.messages;
 
-    /// The last resort's last resort: drop `user` messages that were never answered.
-    fn drop_unanswered(&mut self) -> usize {
-        // Index 0 is the system prompt; index 1 is the summary, if a stage 2 has ever run.
-        let first = 1 + usize::from(self.history.get(1).is_some_and(compaction::is_summary));
-        let protected = self.history.len().saturating_sub(compaction::KEEP_MESSAGES);
-        if protected <= first {
-            return 0;
-        }
-        let mut keep = Vec::with_capacity(self.history.len());
-        let mut dropped = 0;
-        for index in 0..self.history.len() {
-            let unanswered = index >= first
-                && index < protected
-                && self.history[index].role == crate::llm::protocol::Role::User
-                && self.history[index + 1].role == crate::llm::protocol::Role::User;
-            match unanswered {
-                true => dropped += 1,
-                false => keep.push(self.history[index].clone()),
+            if completion.tool_calls.is_empty() {
+                return match completion.content.trim().is_empty() {
+                    true => Err(Stop::Genuine("the model returned an empty summary".to_string())),
+                    false => Ok(completion.content),
+                };
+            }
+            let classified: Vec<CallKind> = completion.tool_calls.iter().map(summary_call).collect();
+            messages.push(Message::assistant(completion.content.clone(), completion.tool_calls.clone()));
+            let answers = self.answer_calls(None, &completion.tool_calls, &classified).ok_or(Stop::Abandoned)?;
+            messages.extend(answers);
+            if step + 2 >= self.config.max_tool_steps {
+                messages.push(Message::user(compaction::OUT_OF_READS));
             }
         }
-        if dropped > 0 {
-            *self.history = keep;
-            self.published.publish_event(UiEventBody::Notice {
-                level: "warn",
-                message: format!(
-                    "context is full and holds no completed turn to drop; removed {dropped} \
-                     questions the endpoint never answered",
-                ),
-            });
-        }
-        dropped
+        Err(Stop::Genuine(format!(
+            "the model was still calling tools after {} requests",
+            self.config.max_tool_steps,
+        )))
     }
+
+    /// One summary request, retried through every transient failure and parked as a turn is.
+    fn stream_summary(&mut self, request: &ChatRequest) -> Result<Completion, Stop> {
+        loop {
+            if reset_waiting(&self.reset) {
+                return Err(Stop::Abandoned);
+            }
+            let published = Arc::clone(&self.published);
+            let reset = Arc::clone(&self.reset);
+            let result = stream_with_retries(
+                self.retry,
+                self.endpoint.as_ref(),
+                request,
+                // Not published: the summary is bookkeeping, not the model talking.
+                &mut |_| {},
+                &|| reset_waiting(&reset),
+                &mut |retry| {
+                    published.publish_event(UiEventBody::Notice {
+                        level: "warn",
+                        message: format!(
+                            "compaction attempt {}/{} failed ({}); retrying in {:?}",
+                            retry.attempt, retry.of, retry.failure, retry.waiting,
+                        ),
+                    });
+                },
+            );
+            let failure = match result {
+                Ok(completion) => {
+                    self.refused_in_a_row = 0;
+                    return Ok(completion);
+                }
+                Err(LlmError::Cancelled) => return Err(Stop::Abandoned),
+                Err(failure) => failure,
+            };
+            match &failure {
+                LlmError::RateLimited { resets_at_ms: Some(until_ms), message } => {
+                    if !self.park_until(Watch::Compaction, *until_ms, Park::Quota, message) {
+                        return Err(Stop::Abandoned);
+                    }
+                }
+                refusal if refusal.is_account_refusal() => {
+                    self.refused_in_a_row += 1;
+                    match self.refusal_park.window(self.refused_in_a_row) {
+                        Some(window) => {
+                            let until_ms = now_ms().saturating_add(window.as_millis() as u64);
+                            let park = Park::Refused { in_a_row: self.refused_in_a_row };
+                            if !self.park_until(Watch::Compaction, until_ms, park, &refusal.to_string()) {
+                                return Err(Stop::Abandoned);
+                            }
+                        }
+                        None => self.wait_to_ask_again(refusal)?,
+                    }
+                }
+                transient if transient.is_retryable() || matches!(transient, LlmError::Timeout(_)) => {
+                    self.refused_in_a_row = 0;
+                    self.wait_to_ask_again(transient)?;
+                }
+                _ => {
+                    self.refused_in_a_row = 0;
+                    return Err(Stop::Genuine(failure.to_string()));
+                }
+            }
+        }
+    }
+
+    /// The pause between two rounds of a summary request's retries, cut short by a reset.
+    fn wait_to_ask_again(&self, failure: &LlmError) -> Result<(), Stop> {
+        let waiting = self.retry.backoff_for(self.retry.attempts);
+        self.published.publish_event(UiEventBody::Notice {
+            level: "warn",
+            message: format!(
+                "the summary request failed ({failure}); asking again in {}",
+                describe_wait(waiting.as_millis() as u64),
+            ),
+        });
+        let until = std::time::Instant::now() + waiting;
+        while std::time::Instant::now() < until {
+            if reset_waiting(&self.reset) {
+                return Err(Stop::Abandoned);
+            }
+            std::thread::sleep(PARK_SLICE.min(until - std::time::Instant::now()));
+        }
+        Ok(())
+    }
+}
+
+/// Every request the worker sends, a turn's or a summary's: the same tools and settings, so all of
+/// them share one cached prefix.
+fn chat_request(config: &LlmConfig, messages: Vec<Message>) -> ChatRequest {
+    ChatRequest {
+        model: config.model.clone(),
+        messages,
+        tools: tools::catalogue(),
+        parallel_tool_calls: Some(true),
+        max_tokens: config.max_tokens,
+        reasoning_effort: config.reasoning_effort.clone(),
+        reasoning: config.reasoning_budget,
+        temperature: config.temperature,
+        stream: true,
+        stream_options: StreamOptions { include_usage: true },
+    }
+}
+
+/// What one call in a summary request is: reads are answered and `plan.md` may be written; an
+/// action and any other write are refused, since the request asks for prose.
+fn summary_call(call: &ToolCall) -> CallKind {
+    if call.function.name == tools::CHOOSE_ACTION {
+        return CallKind::Rejected(compaction::NOT_AN_ACTION.to_string());
+    }
+    match tools::classify_call(call) {
+        CallKind::File(FileCall::Write { node, .. } | FileCall::Edit { node, .. }) if node != Node::Plan => {
+            CallKind::Rejected(compaction::PLAN_ONLY.to_string())
+        }
+        CallKind::Issue { .. } => CallKind::Rejected(compaction::PLAN_ONLY.to_string()),
+        other => other,
+    }
+}
+
+fn reset_waiting(reset: &Resets) -> bool {
+    reset.lock().map(|cell| cell.is_some()).unwrap_or(false)
 }
 
 /// What the status shows while a batch is out.
@@ -1259,38 +1411,90 @@ mod tests {
         worker
     }
 
+    /// A history of `turns` turns of `bulk` prose each, behind the system prompt.
+    fn turns(worker: &mut Worker, turns: usize, bulk: &str) {
+        for turn in 1..=turns {
+            worker.history.push(Message::user(format!("{}turn {turn}\n{bulk}", prompt::DECISION)));
+            worker.history.push(Message::assistant("done".into(), vec![]));
+        }
+    }
+
+    fn notices(published: &Published, run: impl FnOnce()) -> Vec<String> {
+        let mut events = published.subscribe_events();
+        run();
+        std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event.body {
+                UiEventBody::Notice { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_compaction_counts_every_message_that_left_and_not_the_summary() {
+    fn a_compaction_keeps_the_summary_and_the_last_two_turns() {
         let bulk = "a long turn. ".repeat(600);
         let mut probe = worker(1, 1.0);
-        for turn in 1..=40 {
-            probe.history.push(Message::user(format!("### Turn {turn}\n{bulk}")));
-            probe.history.push(Message::assistant("done".into(), vec![]));
-        }
+        turns(&mut probe, 40, &bulk);
         let full = probe.accounting.tokens_in(&probe.history);
 
         let mut worker = worker(full, 0.5);
         *worker.history = probe.history.to_vec();
         let was = worker.history.len();
-        let note = worker.compact_if_needed().expect("a history at its limit compacts");
+        let note = worker.compact_if_needed(false).expect("a history at its limit compacts");
 
-        assert!(note.summary.is_some(), "stage 2 ran");
+        assert!(note.summary.is_some());
         assert!(note.after < note.before);
+        assert_eq!(worker.history.len(), 2 + 2 * 2, "the system prompt, the summary and two turns");
+        assert!(worker.history[2].text().unwrap().contains("turn 39"));
         assert_eq!(note.dropped, was - (worker.history.len() - 1), "every message that left, and not the summary");
     }
 
     #[test]
-    fn a_compaction_that_reclaims_nothing_says_so_in_one_sentence() {
+    fn a_compaction_under_the_threshold_happens_only_when_forced() {
+        let mut worker = worker(1_000_000, 0.85);
+        turns(&mut worker, 4, "short");
+        assert!(worker.compact_if_needed(false).is_none());
+        let note = worker.compact_if_needed(true).expect("forced");
+        assert!(note.summary.is_some());
+        assert_eq!(worker.history.len(), 2 + 2 * 2);
+    }
+
+    /// The last two turns alone over the threshold: one is kept, then none.
+    #[test]
+    fn a_compaction_keeps_fewer_turns_while_those_alone_are_too_big() {
+        let bulk = "a long turn. ".repeat(600);
+        let mut probe = worker(1, 1.0);
+        let system = probe.accounting.tokens_in(&probe.history);
+        turns(&mut probe, 1, &bulk);
+        let turn = probe.accounting.tokens_in(&probe.history) - system;
+
+        // Two turns are over half the window, one is not.
+        let mut worker = worker(2 * system + 3 * turn, 0.5);
+        turns(&mut worker, 4, &bulk);
+        worker.compact_if_needed(false).expect("compacts");
+        assert_eq!(worker.history.len(), 2 + 2, "one turn kept");
+        assert!(worker.history[2].text().unwrap().contains("turn 4"));
+
+        // Not even one fits.
+        let mut worker = self::worker(2 * system + turn, 0.5);
+        turns(&mut worker, 4, &bulk);
+        let said = notices(&Arc::clone(&worker.published), || {
+            worker.compact_if_needed(false).expect("compacts");
+        });
+        assert_eq!(worker.history.len(), 2, "the system prompt and the summary");
+        assert!(compaction::is_summary(&worker.history[1]));
+        assert!(!worker.over_threshold(), "and that fits: {said:?}");
+    }
+
+    #[test]
+    fn a_compaction_that_cannot_get_under_the_threshold_says_so_in_one_sentence() {
         let mut worker = worker(1, 0.5);
-        let mut notices = worker.published.subscribe_events();
-        worker.compact_if_needed().expect("a system prompt alone is over a one-token limit");
-        let said: Vec<String> = std::iter::from_fn(|| notices.try_recv().ok())
-            .filter_map(|event| match event.body {
-                UiEventBody::Notice { message, .. } => Some(message),
-                _ => None,
-            })
-            .collect();
-        let notice = said.iter().find(|m| m.starts_with("compaction reclaimed nothing")).expect("the notice");
+        let published = Arc::clone(&worker.published);
+        let said = notices(&published, || {
+            let note = worker.compact_if_needed(false).expect("a system prompt alone is over a one-token limit");
+            assert!(note.summary.is_none(), "there was nothing to summarise");
+        });
+        let notice = said.iter().find(|m| m.starts_with("compaction could not bring the history under")).expect("the notice");
         assert!(!notice.contains("  "), "a `\\` was eaten out of a continued literal: {notice}");
     }
 }

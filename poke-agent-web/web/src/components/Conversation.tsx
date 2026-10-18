@@ -189,15 +189,9 @@ function render(entry: Entry, unfolded: boolean): Rendered {
       return { gutter: 'dropped', body: entry.reason, title: `turn ${entry.turn}`, modifier: '' };
     case 'compacted': {
       // A compaction changes what the model knows without it acting, so it gets a row.
-      const how = [
-        entry.summarised ? 'summarised' : null,
-        entry.images_evicted > 0 ? `${entry.images_evicted} screenshot${entry.images_evicted === 1 ? '' : 's'} dropped` : null,
-      ]
-        .filter(Boolean)
-        .join(', ');
       return {
         gutter: 'context',
-        body: `compacted ${entry.before.toLocaleString()} → ${entry.after.toLocaleString()} tokens${how ? ` (${how})` : ''}`,
+        body: `compacted ${entry.before.toLocaleString()} → ${entry.after.toLocaleString()} tokens${entry.summarised ? ' (summarised)' : ''}`,
         title: 'the history was compacted to fit the context window',
         modifier: 'compacted',
       };

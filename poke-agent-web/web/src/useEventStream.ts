@@ -216,7 +216,6 @@ export function fold(entries: Entry[], event: UiEvent): Entry[] {
           type: 'compacted',
           before: event.before,
           after: event.after,
-          images_evicted: event.images_evicted,
           summarised: event.summarised,
         },
         event,

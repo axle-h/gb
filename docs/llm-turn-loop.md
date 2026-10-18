@@ -34,8 +34,9 @@ argument lives in the code.
   does not end the turn and its answer must not read like a fix. Both write a record whose save is taken for each edge into
   `AwaitingLlm` (`Published::asks`), never the periodic checkpoint, and waited for, since an
   endpoint can answer before the emulator thread's next tick.
-- The tools are the same four on every request (`tools::for_kind`); a file is readable, and the
-  writable ones writable, on every turn. `files::resolve` is the path table, and
+- The tools are the same four on every request, the summary request's too (`worker::chat_request`),
+  because every provider's cache prefix starts with them; a file is readable, and the writable ones
+  writable, on every turn. `files::resolve` is the path table, and
   `Node::on_the_emulator_thread` says which reads need the game.
 - Nothing a read answers may duplicate the situation. A route file's "not walked there yet" is
   never "unreachable" — it answers out of the map-header graph while the action menu answers out
@@ -147,10 +148,17 @@ argument lives in the code.
 
 - A failed turn is rolled back whole, to a *length* rather than by one `pop`: a turn can fail on its
   second tool step with an assistant message and its results already appended.
-- A compaction that can drop nothing says so. `trim_history` cuts only at turn boundaries, so a
-  history of unanswered questions had no boundary anywhere in it and published `before == after` as
-  a success. `drop_unanswered` is the pass below it. A compaction that still reclaims nothing raises
-  an error notice, because from there on every request is over the window.
-- Only a refusal counts toward `RefusalPark`: an `Http` that `is_retryable` rejects. A timeout, a
-  dropped connection or exhausted 5xx retries must neither count nor park, and any other answer
-  resets the streak, or one bad hour of a flaky endpoint stops the game for thirty minutes.
+- A compaction asks for the summary of the history as it stands, nothing evicted first, and keeps
+  the system prompt, the summary and the last two turns untouched; the instruction, the summary's
+  own reads and its reply are not kept. Its reads are answered from whatever state is current
+  (`ToolBatch::turn` is `None`), and only `plan.md` may be written.
+- A summary request's failure is classified before anything is dropped (`Worker::stream_summary`):
+  a transient one is retried until it clears, parked as a turn is; a genuine one is asked once more
+  without the oldest half of the turns, and a second leaves a note in the summary's place. Still
+  over the threshold, it keeps one turn, then none, then raises an error notice, because from there
+  on every request may be over the window.
+- A turn's request the endpoint rejects as wrong (`LlmError::is_rejected_request`, a prompt too
+  long among them) forces a compaction and asks the same question again, once (`Worker::decide`).
+- Only an account refusal counts toward `RefusalPark`: a 401, 402 or 403. A timeout, a dropped
+  connection, exhausted 5xx retries or a rejected request must neither count nor park, and any other
+  answer resets the streak, or one bad hour of a flaky endpoint stops the game for thirty minutes.

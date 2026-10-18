@@ -89,9 +89,7 @@ pub enum UiEventBody {
     Compacted {
         before: u64,
         after: u64,
-        /// Screenshots stage 1 turned into a line of text.
-        images_evicted: usize,
-        /// Stage 2 ran: eviction was not enough and the model wrote a summary.
+        /// The model wrote a summary; without one the earlier conversation was dropped.
         summarised: bool,
     },
 }

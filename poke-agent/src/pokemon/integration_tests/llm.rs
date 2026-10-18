@@ -459,24 +459,19 @@ fn a_completion_with_nothing_in_it_is_nudged_then_forced() {
 }
 
 #[test]
-fn a_compaction_with_no_turn_to_drop_says_so() {
-    /// Plays normally until asked to summarise, then refuses, as an endpoint out of credit does.
+fn a_compaction_whose_summary_is_refused_drops_the_earlier_conversation_and_says_so() {
+    /// Plays normally until asked to summarise, then refuses the request as malformed.
     struct RefusesToSummarise;
 
     impl Brain for RefusesToSummarise {
         fn respond(&mut self, request: &TurnRequest) -> Reply {
             match request.is_summary() {
-                true => Reply::Fault(Fault::Http {
-                    status: 402,
-                    message: "Prompt tokens limit exceeded".into(),
-                }),
+                true => Reply::Fault(Fault::Http { status: 400, message: "prompt is too long".into() }),
                 false => plays_the_menu(request),
             }
         }
     }
 
-    // Small enough that the prompt and two turns overrun it, so every compaction falls to the last
-    // resort.
     let mut run = LlmRun::builder(FIXTURE)
         .named("dead-compaction")
         .context_limit(4_000)
@@ -488,23 +483,17 @@ fn a_compaction_with_no_turn_to_drop_says_so() {
         "no compaction ever fired: {:?}",
         run.notices(),
     );
+    assert!(run.said("could not summarise the history"), "the refusal was not named: {:?}", run.notices());
     assert!(
-        run.said("could not summarise the history"),
-        "the summary was refused and nothing said so: {:?}",
+        run.said("dropping the earlier conversation without a summary"),
+        "the second refusal was not named: {:?}",
         run.notices(),
     );
-
-    // Every compaction reclaimed something or said it could not.
-    for (before, after, summarised) in run.compactions() {
-        if after < before || summarised {
-            continue;
-        }
-        assert!(
-            run.said("compaction reclaimed nothing") || run.said("dropped the"),
-            "a compaction reported {before} → {after} and said nothing about it: {:?}",
-            run.notices(),
-        );
-    }
+    assert!(run.compactions().iter().all(|(_, _, summarised)| !summarised));
+    let decided = run.decisions().len();
+    assert!(run.tick_until(PATIENCE, |run| run.decisions().len() > decided), "the run stopped after it");
+    let last = run.endpoint.requests().into_iter().rev().find(|request| !request.is_summary()).expect("a turn");
+    assert!(last.messages[1].text.contains("dropped without a summary"), "{:.300}", last.messages[1].text);
 }
 
 // ── The bundled strategy, against real battles ──

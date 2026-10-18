@@ -51,6 +51,20 @@ impl LlmError {
             Self::Protocol(_) | Self::Cancelled => false,
         }
     }
+
+    /// 401, 402 or 403: the account was refused, not the request. The only failures
+    /// [`RefusalPark`](crate::llm::worker::RefusalPark) counts.
+    pub fn is_account_refusal(&self) -> bool {
+        matches!(self, Self::Http { status: 401..=403, .. })
+    }
+
+    /// Any other 4xx but 408 and 429: this request is wrong, a prompt too long among them, and
+    /// asking it again unchanged will not help.
+    pub fn is_rejected_request(&self) -> bool {
+        matches!(self, Self::Http { status: 400..=499, .. })
+            && !self.is_account_refusal()
+            && !self.is_retryable()
+    }
 }
 
 impl std::fmt::Display for LlmError {
@@ -88,6 +102,20 @@ mod tests {
         assert!(LlmError::Http { status: 503, message: String::new() }.is_retryable());
         assert!(!LlmError::Http { status: 400, message: String::new() }.is_retryable());
         assert!(!LlmError::Cancelled.is_retryable());
+    }
+
+    /// Every 4xx is exactly one of retried, an account refusal and a rejected request.
+    #[test]
+    fn a_4xx_is_retried_refused_or_rejected_and_never_two_of_them() {
+        for status in 400..500 {
+            let failure = LlmError::Http { status, message: String::new() };
+            let classes = [failure.is_retryable(), failure.is_account_refusal(), failure.is_rejected_request()];
+            assert_eq!(classes.iter().filter(|class| **class).count(), 1, "{status}: {classes:?}");
+        }
+        assert!(LlmError::Http { status: 402, message: String::new() }.is_account_refusal());
+        assert!(LlmError::Http { status: 413, message: String::new() }.is_rejected_request());
+        assert!(!LlmError::Http { status: 500, message: String::new() }.is_rejected_request());
+        assert!(!LlmError::Protocol(String::new()).is_rejected_request());
     }
 
     #[test]

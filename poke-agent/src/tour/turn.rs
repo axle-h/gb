@@ -134,12 +134,16 @@ impl TurnRequest {
         }
     }
 
-    /// Compaction's own request: no tools, and the last user message is the instruction.
+    /// Compaction's own request: the instruction is newer than any turn's situation, though the
+    /// summary's own reads may have come after it.
     pub fn is_summary(&self) -> bool {
-        self.tools.is_empty()
-            && self.situation().starts_with(
-                crate::llm::compaction::SUMMARY_INSTRUCTION.split('\n').next().unwrap_or_default(),
-            )
+        let instruction = crate::llm::compaction::SUMMARY_INSTRUCTION.lines().next().unwrap_or_default();
+        self.messages
+            .iter()
+            .rev()
+            .filter(|message| message.role == "user")
+            .find(|message| message.text.starts_with(instruction) || message.text.starts_with(crate::llm::prompt::DECISION))
+            .is_some_and(|message| message.text.starts_with(instruction))
     }
 
     /// Every `(data_url, detail)` the endpoint has been sent in this request, in order.
