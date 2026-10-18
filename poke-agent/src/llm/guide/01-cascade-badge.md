@@ -25,7 +25,8 @@ Route: `PewterCity` > `Route3` > `Route4` > `MtMoon1F` > `MtMoonB1F` > `MtMoonB2
 7. `CeruleanTrashedHouse` has a hole knocked in its back wall. Go in the front and out
    the back into the yard behind it: a Rocket is standing there, and beating him gives
    you TM28 (Dig), 100 power and an escape from any cave. That yard is also the only
-   way east out of the city, so you will come back through this house later.
+   way east or south out of the city, to `Route9` and to `Route5`, so you will come
+   back through this house later.
 8. `CeruleanGym`: a Swimmer, a Jr. Trainer, then Misty with Staryu 18 and Starmie 21,
    both Water. Grass is the answer, because it resists her attacks and hits for double.
    Electric hits as hard but takes full damage back.
