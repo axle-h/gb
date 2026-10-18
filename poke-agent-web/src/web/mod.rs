@@ -33,7 +33,7 @@ use gb::model::Model;
 use poke_agent::llm::LlmConfig;
 use poke_agent::llm::client::ChatEndpoint;
 use poke_agent::pokemon::policy::{Policy, RandomPolicy};
-use poke_agent::run::{CurrentRun, GameKind, Origin, RunDir, transcript};
+use poke_agent::run::{CurrentRun, GameKind, Origin, RunDir, files, transcript, versions};
 use poke_agent::published::{self, Published};
 
 /// Proxies close an idle connection.
@@ -336,6 +336,8 @@ fn routes() -> Router<AppState> {
         .route("/api/healthz", get(healthz))
         .route("/api/events", get(events))
         .route("/api/history", get(history))
+        .route("/api/plan-history", get(plan_history))
+        .route("/api/battle-script-history", get(battle_script_history))
         .route("/api/leaderboard", get(leaderboard::leaderboard))
         .route("/api/video", get(video_stream))
         .route("/api/audio", get(audio_stream))
@@ -549,6 +551,37 @@ async fn history(State(state): State<AppState>, Query(query): Query<Since>) -> J
         .await
         .unwrap_or_default();
     Json(serde_json::Value::Array(events))
+}
+
+/// How many versions a page of `/api/plan-history` holds when it does not say, and at most.
+const VERSIONS_PAGE: usize = 50;
+const MAX_VERSIONS_PAGE: usize = 500;
+
+#[derive(serde::Deserialize)]
+struct VersionPage {
+    limit: Option<usize>,
+    /// Only versions older than this one, to page back from the oldest a page already holds.
+    before: Option<u64>,
+}
+
+/// The newest versions of the model's plan, oldest first.
+async fn plan_history(State(state): State<AppState>, Query(page): Query<VersionPage>) -> Json<Vec<versions::Version>> {
+    versions_of(&state, files::PLAN_HISTORY, page).await
+}
+
+/// The same, for the battle script's source.
+async fn battle_script_history(
+    State(state): State<AppState>,
+    Query(page): Query<VersionPage>,
+) -> Json<Vec<versions::Version>> {
+    versions_of(&state, files::BATTLE_SCRIPT_HISTORY, page).await
+}
+
+async fn versions_of(state: &AppState, file: &'static str, page: VersionPage) -> Json<Vec<versions::Version>> {
+    let path = state.run.get().path().join(file);
+    let limit = page.limit.unwrap_or(VERSIONS_PAGE).clamp(1, MAX_VERSIONS_PAGE);
+    let page = tokio::task::spawn_blocking(move || versions::page(&path, limit, page.before));
+    Json(page.await.unwrap_or_default())
 }
 
 /// The conversation and status stream.

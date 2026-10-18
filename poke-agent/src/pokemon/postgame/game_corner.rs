@@ -3,7 +3,7 @@
 use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
 use crate::pokemon::actions::OverworldAction;
-use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent, Reach};
+use crate::pokemon::agent::{AgentState, PokemonAgent, Reach};
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::BagItem;
@@ -207,7 +207,7 @@ pub fn sell_tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: SellStat
 
     let abort = |agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, why: String| {
         api.release_all_buttons();
-        agent.event(AgentEvent::TextBox { message: format!("sell: {why}") });
+        agent.field_move_report(false, format!("sell: {why}"));
         agent.set_state(AgentState::Idle);
     };
 
@@ -219,7 +219,7 @@ pub fn sell_tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: SellStat
             return Ok(());
         }
         api.release_all_buttons();
-        agent.event(AgentEvent::TextBox { message: format!("sold {}x {:?}", s.item.quantity, s.item.id) });
+        agent.field_move_report(true, format!("sold {}x {:?}", s.item.quantity, s.item.id));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }
@@ -238,6 +238,7 @@ pub fn sell_tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: SellStat
     // Back outside having sold nothing: the attempt fizzled.
     if s.entered_menu && game_mode == GameMode::Overworld {
         api.release_all_buttons();
+        agent.field_move_report(false, format!("Sold no {}", s.item.id));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }
@@ -417,7 +418,7 @@ pub fn prize_tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PrizeSt
 
     let abort = |agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, why: String| {
         api.release_all_buttons();
-        agent.event(AgentEvent::TextBox { message: format!("prize: {why}") });
+        agent.field_move_report(false, format!("prize: {why}"));
         agent.set_state(AgentState::Idle);
     };
 
@@ -430,9 +431,7 @@ pub fn prize_tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PrizeSt
             return Ok(());
         }
         api.release_all_buttons();
-        agent.event(AgentEvent::TextBox {
-            message: format!("bought {:?} for {} coins ({coins} left)", s.prize, s.start_coins - coins),
-        });
+        agent.field_move_report(true, format!("bought {:?} for {} coins ({coins} left)", s.prize, s.start_coins - coins));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }
@@ -445,6 +444,7 @@ pub fn prize_tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PrizeSt
     // Back outside having bought nothing: the attempt fizzled.
     if s.entered_menu && game_mode == GameMode::Overworld {
         api.release_all_buttons();
+        agent.field_move_report(false, format!("prize: {:?} was not handed over", s.prize));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }

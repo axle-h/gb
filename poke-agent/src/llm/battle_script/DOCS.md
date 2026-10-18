@@ -137,8 +137,9 @@ trying to catch: ask, decide it yourself, and let the script have the routine on
 ## What happens when it goes wrong
 
 If the script fails — it errors, runs too long, chooses nothing, or chooses something the game will
-not accept — it is **disarmed** and that turn comes back to you with the reason. It stays on disk, so
-reading `battle-script.rhai` shows it and why it stopped, and a corrected write installs it again. It will never quietly keep failing.
+not accept — it is **disarmed** and that turn comes back to you with the reason. It stays on disk,
+so reading `battle-script.rhai` shows it and why it stopped, and a corrected write installs it
+again. It will never quietly keep failing.
 
 A write runs your script against seven made-up battles before installing it and tells you
 what it chose in each. Read that table: it is your only chance to notice that a rule you meant does

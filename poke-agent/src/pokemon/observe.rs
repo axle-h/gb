@@ -154,8 +154,8 @@ fn move_view(m: &crate::pokemon::move_name::PokemonMove) -> MoveView {
     let metadata = m.name.metadata();
     MoveView {
         name: format!("{:?}", m.name),
-        pp: m.pp,
-        max_pp: metadata.pp,
+        pp: crate::pokemon::postgame::items::move_pp(m),
+        max_pp: crate::pokemon::postgame::items::max_pp(m),
         power: metadata.power,
         accuracy: metadata.accuracy,
         move_type: format!("{:?}", metadata.move_type),

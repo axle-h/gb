@@ -31,7 +31,7 @@ use crate::pokemon::move_name::PokemonMoveName;
 use crate::pokemon::bag::BagItem;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::agent::MANUAL_INPUT_CAPACITY;
-use crate::pokemon::policy::{field_move_at, field_move_carrier, FieldMove, Jam, Policy};
+use crate::pokemon::policy::{field_move_at, field_move_carrier, FieldMove, FieldMoveOutcome, Jam, Policy};
 use crate::pokemon::map_metadata::PlayerFacingDirection;
 use crate::pokemon::postgame::item_storage::PcItemOp;
 use crate::pokemon::postgame::items::{Effect, UseTarget};
@@ -291,6 +291,16 @@ struct FieldMoveUse {
     chosen: bool,
     refused: bool,
     then: Then,
+    /// SOFTBOILED's target, chosen on the party menu `.softboiled` brings back.
+    heal: Option<Heal>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Heal {
+    target: u8,
+    /// The target's HP before, which is how the heal is told from a refusal.
+    before: u16,
+    aimed: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -348,6 +358,8 @@ pub struct NativeAgent {
     last_map: Option<Map>,
     walk: Option<Walk>,
     task: Option<Task>,
+    /// A `FieldMove` was handed over and nothing has yet told the policy how it ended.
+    field_move_in_flight: bool,
     /// The row being walked is a quiz answer of NO, so the next yes/no is answered NO.
     answer_no: bool,
     /// The row the next cursor menu is answered with: a vending machine's drink, or a
@@ -434,6 +446,7 @@ impl NativeAgent {
             slots: None,
             slot_bet: None,
             boulder_goal: None,
+            field_move_in_flight: false,
             frames: 0,
             free: ASK_AFTER_FRAMES,
             running: None,
@@ -762,6 +775,12 @@ impl NativeAgent {
             if matches!(self.task, Some(Task::Bag(BagUse { how: BagHow::Cast { row: true, .. }, .. }))) {
                 self.complete();
             }
+            // A bite is what a cast is for, and a battle what the Poké Flute is used to start.
+            self.field_move_ended(match self.task {
+                Some(Task::Bag(BagUse { how: BagHow::Cast { .. }, .. } | BagUse { how: BagHow::Use(_), face: Some(_), .. })) =>
+                    FieldMoveOutcome::Took,
+                _ => FieldMoveOutcome::Stopped(OverworldActionAbortedReason::Battle),
+            });
             self.task = None;
         }
         // An arrow tile carries the walk on rather than taking the screen from it, as the emulated
@@ -905,6 +924,12 @@ impl NativeAgent {
             }
             Some(Reply::Refused(Refusal::Invalid(reason))) if matches!(command, Command::Step(_)) && let Some(task) = self.task =>
                 self.task_blocked(task, format!("gave up walking: {reason}")),
+            // A talk faced nothing that answers: the game's word on it.
+            Some(Reply::Refused(Refusal::Invalid(reason))) if command == Command::Interact && matches!(self.task, Some(Task::Talk(_) | Task::Pc(_) | Task::Mart(_))) => {
+                self.task = None;
+                self.field_move_report(false, &format!("nothing answered the press: {reason}"));
+                Ok(())
+            }
             Some(Reply::Refused(Refusal::Busy)) => Ok(()),
             other => Err(format!("{command:?} was not taken: {other:?}")),
         }
@@ -1030,7 +1055,10 @@ impl NativeAgent {
             return Ok(None);
         }
         self.asked();
+        // Every task says how it ended; this is the net under one the screen was taken from.
+        self.field_move_ended(FieldMoveOutcome::Refused(crate::pokemon::policy::FIELD_MOVE_UNREPORTED.to_string()));
         if let Some(field_move) = self.policy.pick_field_move(&state) {
+            self.field_move_in_flight = true;
             return self.field_move(field_move, &state);
         }
         let Some(action) = self.policy.pick_overworld_action(&state, &self.graph) else { return Ok(None) };
@@ -1219,7 +1247,7 @@ impl NativeAgent {
     fn give_up(&mut self, why: &str) {
         self.task_blocked = 0;
         self.task = None;
-        self.say(why);
+        self.field_move_report(false, why);
     }
 
     /// Wait out a task's refused step, up to [`MAX_TASK_BLOCKED_POLLS`], then give the task up saying
@@ -1260,7 +1288,7 @@ impl NativeAgent {
         if self.task_blocked > bound {
             self.task_blocked = 0;
             self.task = None;
-            self.say(&why);
+            self.field_move_report(false, &why);
         } else {
             self.task = Some(task);
         }
@@ -1374,14 +1402,25 @@ impl NativeAgent {
     fn field_move(&mut self, field_move: FieldMove, state: &GameState) -> Result<Option<Command>, String> {
         match field_move {
             FieldMove::UseFieldMove { slot, move_index } => {
-                let name = state.pokemon.get(slot as usize).and_then(|mon| field_move_at(mon, move_index))
-                    .ok_or_else(|| format!("slot {slot} has no field move on row {move_index}"))?;
+                let Some(name) = state.pokemon.get(slot as usize).and_then(|mon| field_move_at(mon, move_index)) else {
+                    self.field_move_report(false, &format!("party slot {slot} has no field move on row {move_index}"));
+                    return Ok(None);
+                };
                 self.start_field_move(FieldMoveUse::new(slot, name, Then::Report))
+            }
+            FieldMove::Softboiled { giver, target, .. } => {
+                let Some(before) = state.pokemon.get(target as usize).map(|mon| mon.current_hp) else {
+                    self.field_move_report(false, &format!("Softboiled: there is no party slot {target}"));
+                    return Ok(None);
+                };
+                let mut softboiled = FieldMoveUse::new(giver, PokemonMoveName::Softboiled, Then::Report);
+                softboiled.heal = Some(Heal { target, before, aimed: false });
+                self.start_field_move(softboiled)
             }
             FieldMove::CutTree => {
                 let carrier = field_move_carrier(state, PokemonMoveName::Cut).filter(|_| state.can_use_cut);
                 let Some((slot, _)) = carrier else {
-                    self.say("Cut needs a party member that knows it, and the CascadeBadge; not cutting");
+                    self.field_move_report(false, "Cut needs a party member that knows it, and the CascadeBadge; not cutting");
                     return Ok(None);
                 };
                 let at = state.map.tile_in_front().map(|(at, _)| at);
@@ -1395,8 +1434,8 @@ impl NativeAgent {
                     None
                 };
                 match (why, field_move_carrier(state, PokemonMoveName::Fly)) {
-                    (Some(why), _) => self.say(&format!("Fly: {why}")),
-                    (None, None) => self.say("Fly: no party member knows FLY"),
+                    (Some(why), _) => self.field_move_report(false, &format!("Fly: {why}")),
+                    (None, None) => self.field_move_report(false, "Fly: no party member knows FLY"),
                     (None, Some((slot, _))) => {
                         let mut fly = FieldMoveUse::new(slot, PokemonMoveName::Fly, Then::Report);
                         fly.to = Some(to);
@@ -1406,6 +1445,12 @@ impl NativeAgent {
                 Ok(None)
             }
             FieldMove::PushBoulder { boulder, dir } => {
+                // The emulated agent's last line of defence, so a boulder that is not there is refused.
+                if let Some(refusal) = state.map.boulder_push_refusal(boulder, dir)
+                    && !state.map.push_blocked_by_people(boulder, dir) {
+                    self.field_move_report(false, &refusal);
+                    return Ok(None);
+                }
                 self.task = Some(Task::Push(Push { boulder, dir, armed: false, goal: false }));
                 self.push_step(state)
             }
@@ -1415,7 +1460,7 @@ impl NativeAgent {
             FieldMove::TeachMove { item, target_slot } => {
                 // Nothing the menus do could take this back, so it is refused here.
                 if state.pokemon.get(target_slot as usize).is_some_and(|mon| !crate::pokemon::learnset::can_learn(mon.species, item)) {
-                    self.say(&crate::pokemon::learnset::teach_refusal(state, item, target_slot));
+                    self.field_move_report(false, &crate::pokemon::learnset::teach_refusal(state, item, target_slot));
                     return Ok(None);
                 }
                 self.start_bag(item, BagHow::Teach { slot: target_slot }, None, state)
@@ -1424,7 +1469,7 @@ impl NativeAgent {
                 self.start_bag(stone, BagHow::Evolve { slot: target_slot }, None, state),
             FieldMove::UseFieldItem { item, target } => {
                 if let Some(refusal) = crate::pokemon::item_use::field_use_refusal(item) {
-                    self.say(&refusal);
+                    self.field_move_report(false, &refusal);
                     return Ok(None);
                 }
                 self.start_bag(item, BagHow::Use(UseTarget::Nothing), Some(target), state)
@@ -1436,14 +1481,17 @@ impl NativeAgent {
             FieldMove::RedeemPrize { prize } => self.start_talk(prize.vendor_tile(), None, Talk::Prize(prize)),
             FieldMove::UsePartyScript { script, slot, npc } => self.start_talk(npc.0, Some(npc.1), Talk::Party { script, slot }),
             FieldMove::Fish { rod, at } => self.start_bag(rod.item(), BagHow::Cast { rod, row: false }, Some(at), state),
-            FieldMove::ReorderParty { slot: 0 } => Ok(None),
+            FieldMove::ReorderParty { slot: 0 } => {
+                self.field_move_ended(FieldMoveOutcome::Took);
+                Ok(None)
+            }
             FieldMove::ReorderParty { slot } => {
                 self.task = Some(Task::Switch(SwitchUse { slot, at: slot, opened: false, stage: 0 }));
                 self.task_step(self.native.game().status())
             }
             FieldMove::SellToMart { item, clerk } => {
                 if let Some(why) = crate::pokemon::postgame::game_corner::sale_refusal(item, bag_quantity(self.native.game().world(), item.id)) {
-                    self.say(&format!("sell: {why}"));
+                    self.field_move_report(false, &format!("sell: {why}"));
                     return Ok(None);
                 }
                 self.task = Some(Task::Mart(MartVisit {
@@ -1553,13 +1601,13 @@ impl NativeAgent {
         let world = self.native.game().world();
         let message = match talk.what {
             Talk::Press => None,
-            Talk::Elevator { floor } if is_elevator(world.location.map) => Some(format!("elevator: floor {floor} was not reached")),
+            Talk::Elevator { floor } if is_elevator(world.location.map) => Some((false, format!("elevator: floor {floor} was not reached"))),
             Talk::Elevator { .. } => None,
             Talk::Prize(prize) => {
                 let coins = bcd(&world.coins);
                 Some(match talk.before.coins.checked_sub(coins).filter(|&spent| spent > 0) {
-                    Some(spent) => format!("bought {prize:?} for {spent} coins ({coins} left)"),
-                    None => format!("prize: {prize:?} was not handed over"),
+                    Some(spent) => (true, format!("bought {prize:?} for {spent} coins ({coins} left)")),
+                    None => (false, format!("prize: {prize:?} was not handed over")),
                 })
             }
             Talk::Party { script, slot } => {
@@ -1573,13 +1621,14 @@ impl NativeAgent {
                         .then(|| format!("traded away {give:?}")),
                 };
                 Some(match done {
-                    Some(done) => format!("{script:?}: {done}"),
-                    None => format!("party-script: {script:?} changed nothing"),
+                    Some(done) => (true, format!("{script:?}: {done}")),
+                    None => (false, format!("party-script: {script:?} changed nothing")),
                 })
             }
         };
-        if let Some(message) = message {
-            self.say(&message);
+        match message {
+            Some((took, message)) => self.field_move_report(took, &message),
+            None => self.field_move_ended(FieldMoveOutcome::Took),
         }
         Ok(None)
     }
@@ -1589,11 +1638,11 @@ impl NativeAgent {
             Status::Busy | Status::Idle => None,
             Status::Waiting(Decision::Overworld) if switch.opened => {
                 self.task = None;
-                if switch.stage >= 3 {
-                    self.say(&format!("Moved party slot {} to the front", switch.slot));
-                } else {
-                    self.say(&format!("party slot {} was not moved", switch.slot));
-                }
+                let moved = switch.stage >= 3;
+                self.field_move_report(moved, &match moved {
+                    true => format!("Moved party slot {} to the front", switch.slot),
+                    false => format!("party slot {} was not moved", switch.slot),
+                });
                 return Ok(None);
             }
             Status::Waiting(Decision::Overworld) => {
@@ -1650,7 +1699,7 @@ impl NativeAgent {
             }
             (kind, _) => return Err(format!("no native answer yet for naming the {kind:?}")),
         };
-        let bytes = name.and_then(|name| poke_core::charmap::encode(&name).ok())
+        let bytes = name.and_then(|name| pokered::modes::naming_screen::NamingScreen::typed(&name).ok())
             .filter(|bytes| bytes.len() <= limit && bytes.iter().all(|&byte| pokered::modes::naming_screen::NamingScreen::position_of(byte).is_some()))
             .unwrap_or_default();
         Ok(Some(Command::EnterName(bytes)))
@@ -1661,6 +1710,7 @@ impl NativeAgent {
             Status::Busy | Status::Idle => None,
             Status::Waiting(Decision::Overworld) if mart.opened => {
                 self.task = None;
+                self.field_move_ended(FieldMoveOutcome::Refused("sell: the clerk's menu closed before anything was sold".to_string()));
                 return Ok(None);
             }
             Status::Waiting(Decision::Overworld) => {
@@ -1738,17 +1788,17 @@ impl NativeAgent {
 
     fn mart_report(&mut self, want: MartWant, before: u8) {
         let world = self.native.game().world();
-        let message = match want {
+        let (took, message) = match want {
             MartWant::Buy(item) => match bag_quantity(world, item.id).saturating_sub(before) {
-                0 => format!("Bought no {}", item.id),
-                n => format!("Bought {} x{n}", item.id),
+                0 => (false, format!("Bought no {}", item.id)),
+                n => (true, format!("Bought {} x{n}", item.id)),
             },
             MartWant::Sell(item) => match before.saturating_sub(bag_quantity(world, item.id)) {
-                0 => format!("Sold no {}", item.id),
-                n => format!("Sold {} x{n}", item.id),
+                0 => (false, format!("Sold no {}", item.id)),
+                n => (true, format!("Sold {} x{n}", item.id)),
             },
         };
-        self.say(&message);
+        self.field_move_report(took, &message);
     }
 
     /// The Bike Shop's menu, asked as a mart whose stock is the Bicycle. The Bicycle is chosen
@@ -1786,7 +1836,7 @@ impl NativeAgent {
             PcJob::Items { op, item, .. } => {
                 let quantity = source(world, op).items.iter().find(|slot| slot.id == item).map_or(0, |slot| slot.quantity);
                 if quantity == 0 {
-                    self.say(&format!("{op:?} {item}: there is none to move"));
+                    self.field_move_report(false, &format!("{op:?} {item}: there is none to move"));
                     return Ok(None);
                 }
                 quantity
@@ -1794,7 +1844,7 @@ impl NativeAgent {
             PcJob::Box(op) => {
                 // The game answers these with a message and the same menu, which asking again loops on.
                 if let Some(why) = op.blocked_by(party, boxed, world.current_box) {
-                    self.say(&format!("PC box: {op:?} not possible: {why}"));
+                    self.field_move_report(false, &format!("PC box: {op:?} not possible: {why}"));
                     return Ok(None);
                 }
                 0
@@ -1894,12 +1944,12 @@ impl NativeAgent {
     fn pc_done(&mut self, pc: PcUse) -> Result<Option<Command>, String> {
         self.task = None;
         let world = self.native.game().world();
-        let message = match pc.job {
+        let (took, message) = match pc.job {
             PcJob::Items { op, item, .. } => {
                 let left = source(world, op).items.iter().find(|slot| slot.id == item).map_or(0, |slot| slot.quantity);
                 match pc.before.quantity.saturating_sub(left) {
-                    0 => format!("{op:?} {item}: the PC moved none"),
-                    moved => format!("{op:?} {item} x{moved} via the PC"),
+                    0 => (false, format!("{op:?} {item}: the PC moved none")),
+                    moved => (true, format!("{op:?} {item} x{moved} via the PC")),
                 }
             }
             PcJob::Box(op) => {
@@ -1912,12 +1962,12 @@ impl NativeAgent {
                     PcBoxOp::ChangeBox { n } => world.current_box == n,
                 };
                 match done {
-                    true => format!("PC box: {op:?} done, party {party}, box {} holds {boxed}", world.current_box + 1),
-                    false => format!("PC box: {op:?} did nothing"),
+                    true => (true, format!("PC box: {op:?} done, party {party}, box {} holds {boxed}", world.current_box + 1)),
+                    false => (false, format!("PC box: {op:?} did nothing")),
                 }
             }
         };
-        self.say(&message);
+        self.field_move_report(took, &message);
         Ok(None)
     }
 
@@ -1925,7 +1975,7 @@ impl NativeAgent {
         let world = self.native.game().world();
         let quantity = world.bag.items.iter().find(|slot| slot.id == item).map_or(0, |slot| slot.quantity);
         if quantity == 0 {
-            self.say(&format!("there is no {item:?} in the bag"));
+            self.field_move_report(false, &format!("there is no {item:?} in the bag"));
             return Ok(None);
         }
         let slot = match how {
@@ -2029,25 +2079,25 @@ impl NativeAgent {
         let quantity = world.bag.items.iter().find(|slot| slot.id == bag.item).map_or(0, |slot| slot.quantity);
         let mon = |slot: u8| world.party.get(slot as usize).map(|named| &named.mon.mon);
         let item = bag.item;
-        let message = match bag.how {
-            BagHow::Toss(_) if quantity == 0 => format!("Tossed {item:?} to free a bag slot"),
-            BagHow::Toss(_) if quantity < bag.before.quantity => format!("Tossed {item:?}, keeping {quantity}"),
-            BagHow::Toss(_) => format!("the game would not toss {item:?}"),
+        let (took, message) = match bag.how {
+            BagHow::Toss(_) if quantity == 0 => (true, format!("Tossed {item:?} to free a bag slot")),
+            BagHow::Toss(_) if quantity < bag.before.quantity => (true, format!("Tossed {item:?}, keeping {quantity}")),
+            BagHow::Toss(_) => (false, format!("the game would not toss {item:?}")),
             BagHow::Teach { slot } if mon(slot).is_some_and(|mon| mon.moves != bag.before.moves) =>
-                format!("Taught {item:?} to party slot {slot}"),
-            BagHow::Teach { slot } => format!("Party slot {slot} did not learn the move from {item:?}"),
+                (true, format!("Taught {item:?} to party slot {slot}")),
+            BagHow::Teach { slot } => (false, format!("Party slot {slot} did not learn the move from {item:?}")),
             BagHow::Evolve { slot } if mon(slot).is_some_and(|mon| Some(mon.species) != bag.before.species) =>
-                format!("Evolved party slot {slot}"),
-            BagHow::Evolve { slot } => format!("Party slot {slot} did not evolve on {item:?}"),
+                (true, format!("Evolved party slot {slot}")),
+            BagHow::Evolve { slot } => (false, format!("Party slot {slot} did not evolve on {item:?}")),
             BagHow::Cast { rod, .. } if bag.back => {
                 self.abort(OverworldActionAbortedReason::Textbox, self.player_at());
-                format!("the game would not let the {} be cast here", rod.name())
+                (false, format!("the game would not let the {} be cast here", rod.name()))
             }
             BagHow::Cast { rod, row } => {
                 if row {
                     self.complete();
                 }
-                format!("You cast the {} in. Not even a nibble.", rod.name())
+                (true, format!("You cast the {} in. Not even a nibble.", rod.name()))
             }
             BagHow::Use(target) => {
                 let took = match crate::pokemon::postgame::items::effect(item) {
@@ -2055,14 +2105,13 @@ impl NativeAgent {
                     Effect::TogglesBicycle => world.location.walk_bike_surf != bag.before.walk_bike_surf,
                     Effect::OneShot => true,
                 };
-                if took {
-                    format!("Used {item:?} ({target:?})")
-                } else {
-                    format!("the game refused to use {item:?} here and put the bag back")
+                match took {
+                    true => (true, format!("Used {item:?} ({target:?})")),
+                    false => (false, format!("the game refused to use {item:?} here and put the bag back")),
                 }
             }
         };
-        self.say(&message);
+        self.field_move_report(took, &message);
         Ok(None)
     }
 
@@ -2185,19 +2234,29 @@ impl NativeAgent {
             },
             Status::Waiting(Decision::StartMenu) if use_.chosen => Some(Command::CloseStartMenu),
             Status::Waiting(Decision::StartMenu) => Some(Command::ChooseStartMenuEntry(StartMenuEntry::Pokemon)),
-            Status::Waiting(Decision::PartyMenu) if use_.chosen => {
-                use_.refused = true;
-                Some(Command::CancelOption)
-            }
+            // Softboiled's target is chosen on the party menu `ItemUseMedicine` pushes; the one after
+            // it is the list `.softboiled` returns to.
+            Status::Waiting(Decision::PartyMenu) if use_.chosen => match use_.heal {
+                Some(mut heal) if !heal.aimed && self.native.game().modes().iter().any(|mode| matches!(mode, Mode::UseItem(_))) => {
+                    heal.aimed = true;
+                    use_.heal = Some(heal);
+                    Some(Command::ChooseOption(heal.target))
+                }
+                heal => {
+                    use_.refused = !heal.is_some_and(|heal| heal.aimed);
+                    Some(Command::CancelOption)
+                }
+            },
             Status::Waiting(Decision::PartyMenu) => Some(Command::ChooseOption(use_.slot)),
             Status::Waiting(Decision::FieldMoveMenu) => {
                 let Some(Mode::FieldMoveMenu(menu)) = self.native.game().modes().last() else {
                     return Err("the field-move menu is waiting but not on top".into());
                 };
-                let row = (0..menu.rows()).find(|&row| menu.choice(row) == FieldMoveChoice::Move(use_.name))
-                    .ok_or_else(|| format!("slot {} has no {} row", use_.slot, use_.name))?;
+                // A mon without the move is backed out of, and the use said to be refused.
+                let row = (0..menu.rows()).find(|&row| menu.choice(row) == FieldMoveChoice::Move(use_.name));
                 use_.chosen = true;
-                Some(Command::ChooseOption(row))
+                use_.refused |= row.is_none();
+                Some(row.map_or(Command::CancelOption, Command::ChooseOption))
             }
             // The fly screen's rows are the visited towns in map order. The town is taken once: the
             // screen coming back means it was not.
@@ -2221,9 +2280,12 @@ impl NativeAgent {
     fn field_move_done(&mut self, use_: FieldMoveUse) -> Result<Option<Command>, String> {
         self.task = None;
         let state = self.game_state()?;
+        let healed = use_.heal.and_then(|heal| state.pokemon.get(heal.target as usize)
+            .filter(|mon| mon.current_hp > heal.before).map(|mon| (heal.target, mon.current_hp, mon.stats.hp)));
         let succeeded = !use_.refused && match use_.name {
             PokemonMoveName::Surf => state.map.surfing,
             PokemonMoveName::Strength => state.strength_active,
+            PokemonMoveName::Softboiled => healed.is_some(),
             _ => true,
         };
         let at = use_.at.map_or_else(String::new, |at| format!(" at {at}"));
@@ -2234,19 +2296,22 @@ impl NativeAgent {
             }
             (Then::Push(push), false) => {
                 self.boulder_goal = None;
-                self.say(&format!("Strength did not arm, so the boulder at {} was not pushed", push.boulder));
+                self.field_move_report(false, &format!("Strength did not arm, so the boulder at {} was not pushed", push.boulder));
                 self.abort(OverworldActionAbortedReason::Unknown, self.player_at());
             }
             (Then::Complete, true) => self.complete(),
             (_, false) => {
-                self.say(&format!("the game refused {}{at}", use_.name));
+                self.field_move_report(false, &format!("the game refused {}{at}", use_.name));
                 self.abort(OverworldActionAbortedReason::Textbox, self.player_at());
             }
             (Then::Report, true) => match use_.name {
-                PokemonMoveName::Surf => self.say(&format!("Surfed onto the water{at}")),
-                PokemonMoveName::Cut => self.say(&format!("Cut down the tree{at}")),
-                PokemonMoveName::Fly => self.say(&format!("Flew to {}", state.map.map)),
-                _ => {}
+                PokemonMoveName::Surf => self.field_move_report(true, &format!("Surfed onto the water{at}")),
+                PokemonMoveName::Cut => self.field_move_report(true, &format!("Cut down the tree{at}")),
+                PokemonMoveName::Fly => self.field_move_report(true, &format!("Flew to {}", state.map.map)),
+                PokemonMoveName::Softboiled => if let Some((target, hp, max)) = healed {
+                    self.field_move_report(true, &format!("Softboiled from party slot {} healed party slot {target} to {hp}/{max} HP", use_.slot));
+                },
+                _ => self.field_move_ended(FieldMoveOutcome::Took),
             },
         }
         Ok(None)
@@ -2379,6 +2444,7 @@ impl NativeAgent {
                 return self.goal_step(state);
             }
             self.complete();
+            self.field_move_ended(FieldMoveOutcome::Took);
             return Ok(None);
         }
         if let Some(refusal) = map.boulder_push_refusal(push.boulder, push.dir) {
@@ -2388,7 +2454,7 @@ impl NativeAgent {
             self.task = None;
             // A refused shove ends the goal rather than re-planning into it.
             self.boulder_goal = None;
-            self.say(&refusal);
+            self.field_move_report(false, &refusal);
             self.abort(OverworldActionAbortedReason::Unknown, self.player_at());
             return Ok(None);
         }
@@ -2398,7 +2464,7 @@ impl NativeAgent {
             let Some((slot, _)) = carrier else {
                 self.task = None;
                 self.boulder_goal = None;
-                self.say("Strength needs a party member that knows it, and the RainbowBadge; not pushing");
+                self.field_move_report(false, "Strength needs a party member that knows it, and the RainbowBadge; not pushing");
                 self.abort(OverworldActionAbortedReason::Unknown, self.player_at());
                 return Ok(None);
             };
@@ -2417,6 +2483,7 @@ impl NativeAgent {
                 self.task = None;
                 self.boulder_goal = None;
                 let row = MetaTile::BoulderPush { boulder: push.boulder, dir: push.dir };
+                self.field_move_ended(FieldMoveOutcome::Stopped(OverworldActionAbortedReason::NoRoute(row)));
                 self.abort(OverworldActionAbortedReason::NoRoute(row), self.player_at());
                 Ok(None)
             }
@@ -2425,6 +2492,23 @@ impl NativeAgent {
 
     fn say(&mut self, message: &str) {
         self.event(AgentEvent::TextBox { message: message.to_string() });
+    }
+
+    /// Tell the policy how the field move it handed over ended. Once: the first word is the ending.
+    fn field_move_ended(&mut self, outcome: FieldMoveOutcome) {
+        if std::mem::take(&mut self.field_move_in_flight) {
+            self.policy.field_move_ended(&outcome);
+        }
+    }
+
+    /// A task's last word, said as the agent's own text box and taken as the field move's ending:
+    /// the game did what was asked, or `message` says why not.
+    fn field_move_report(&mut self, took: bool, message: &str) {
+        self.say(message);
+        self.field_move_ended(match took {
+            true => FieldMoveOutcome::Took,
+            false => FieldMoveOutcome::Refused(message.to_string()),
+        });
     }
 
     // ---- The battle ----
@@ -2490,7 +2574,7 @@ fn source(world: &pokered::world::World, op: PcItemOp) -> &pokered::systems::inv
 
 impl FieldMoveUse {
     fn new(slot: u8, name: PokemonMoveName, then: Then) -> Self {
-        Self { slot, name, to: None, face: None, at: None, opened: false, chosen: false, refused: false, then }
+        Self { slot, name, to: None, face: None, at: None, opened: false, chosen: false, refused: false, then, heal: None }
     }
 
     fn facing(self, direction: Direction) -> Self {
@@ -2576,6 +2660,10 @@ mod tests {
         goals_left: usize,
         /// Each mart stock the readout gave, priced, as it changed.
         stocks: Vec<Vec<(ItemId, Option<u32>)>>,
+        /// How each field move handed over ended, as the agent said.
+        outcomes: Vec<FieldMoveOutcome>,
+        /// The overworld was asked for something with no goals left.
+        asked_with_nothing_left: bool,
     }
 
     /// Takes the goals in order, a row at a time, and fights with the first move that has PP.
@@ -2586,6 +2674,8 @@ mod tests {
         forget: Option<usize>,
         /// What each mart visit buys, in order.
         purchases: Vec<BagItem>,
+        /// What the naming screen is answered with; none keeps the species name.
+        nickname: Option<&'static str>,
     }
 
     impl Policy for Goals {
@@ -2600,7 +2690,7 @@ mod tests {
 
         fn pick_nickname(&mut self, species: PokemonSpecies) -> Option<Option<String>> {
             self.log.borrow_mut().events.push(format!("asked for a nickname for {species:?}"));
-            Some(None)
+            Some(self.nickname.map(str::to_string))
         }
 
         fn pick_mart_purchase(&mut self, _state: &GameState) -> Option<Option<BagItem>> {
@@ -2626,7 +2716,12 @@ mod tests {
             Some(field_move)
         }
 
+        fn field_move_ended(&mut self, outcome: &FieldMoveOutcome) {
+            self.log.borrow_mut().outcomes.push(outcome.clone());
+        }
+
         fn pick_overworld_action(&mut self, state: &GameState, _graph: &WorldGraph) -> Option<OverworldAction> {
+            self.log.borrow_mut().asked_with_nothing_left |= self.goals.is_empty();
             let goal = *self.goals.first()?;
             let row = state.map.actions().into_iter().find(|row| match (goal, row.tile) {
                 (Goal::Enter(map), MetaTile::Warp { to_map, .. } | MetaTile::Connection { to_map, .. }
@@ -3190,7 +3285,7 @@ mod tests {
 
     fn agent_forgetting(game: Game, goals: Vec<Goal>, forget: Option<usize>) -> (NativeAgent, Rc<RefCell<Log>>) {
         let log = Rc::new(RefCell::new(Log { goals_left: goals.len(), ..Log::default() }));
-        let agent = NativeAgent::new(game, Box::new(Goals { goals, log: log.clone(), forget, purchases: Vec::new() })).unwrap();
+        let agent = NativeAgent::new(game, Box::new(Goals { goals, log: log.clone(), forget, purchases: Vec::new(), nickname: None })).unwrap();
         (agent, log)
     }
 
@@ -3237,6 +3332,22 @@ mod tests {
             if done(agent, &log.borrow()) {
                 return;
             }
+        }
+    }
+
+    /// Every `FieldMove` handed over is answered by its task, once, with whether the game took it,
+    /// before the agent asks for anything else: never by the net under a task that ended mute.
+    #[test]
+    fn every_field_move_task_says_whether_the_game_took_it() {
+        use crate::pokemon::policy::FIELD_MOVE_UNREPORTED;
+        for field_move in crate::pokemon::policy::one_of_every_field_move() {
+            let (mut agent, log) = agent(pallet_town(), vec![Goal::Field(field_move)]);
+            run(&mut agent, &log, |_, log| log.asked_with_nothing_left);
+            let outcomes = log.borrow().outcomes.clone();
+            assert_eq!(outcomes.len(), 1, "{field_move:?} ended {outcomes:?}: {:#?}", log.borrow().events);
+            assert_ne!(outcomes[0], FieldMoveOutcome::Refused(FIELD_MOVE_UNREPORTED.to_string()),
+                       "{field_move:?}'s task ended without saying how: {:#?}", log.borrow().events);
+            println!("{field_move:?} -> {:?}", outcomes[0]);
         }
     }
 
@@ -3567,7 +3678,7 @@ mod tests {
     fn talking_to_the_clerk_buys_what_the_policy_asks_one_item_after_another() {
         let log = Rc::new(RefCell::new(Log { goals_left: 1, ..Log::default() }));
         let purchases = vec![BagItem::new(ItemId::PokeBall, 3), BagItem::new(ItemId::Antidote, 2)];
-        let policy = Goals { goals: vec![Goal::Talk("Clerk")], log: log.clone(), forget: None, purchases };
+        let policy = Goals { goals: vec![Goal::Talk("Clerk")], log: log.clone(), forget: None, purchases, nickname: None };
         let mut agent = NativeAgent::new(pewter_mart([0x00, 0x30, 0x00], |_| {}), Box::new(policy)).unwrap();
         run(&mut agent, &log, settled);
         let events = log.borrow().events.clone();
@@ -3581,7 +3692,7 @@ mod tests {
     fn a_purchase_is_trimmed_to_the_wallet() {
         let log = Rc::new(RefCell::new(Log { goals_left: 1, ..Log::default() }));
         let policy = Goals { goals: vec![Goal::Talk("Clerk")], log: log.clone(), forget: None,
-                             purchases: vec![BagItem::new(ItemId::Potion, 10)] };
+                             purchases: vec![BagItem::new(ItemId::Potion, 10)], nickname: None };
         let mut agent = NativeAgent::new(pewter_mart([0x00, 0x07, 0x00], |_| {}), Box::new(policy)).unwrap();
         run(&mut agent, &log, settled);
         assert_eq!(quantity(&agent, ItemId::Potion), 2, "{:#?}", log.borrow().events);
@@ -3595,7 +3706,7 @@ mod tests {
             world.money = [0x00, 0x30, 0x00];
         });
         let log = Rc::new(RefCell::new(Log { goals_left: 1, ..Log::default() }));
-        let policy = Goals { goals: vec![Goal::Talk("Clerk")], log: log.clone(), forget: None, purchases };
+        let policy = Goals { goals: vec![Goal::Talk("Clerk")], log: log.clone(), forget: None, purchases, nickname: None };
         let mut agent = NativeAgent::new(game, Box::new(policy)).unwrap();
         run(&mut agent, &log, settled);
         (agent, log)
@@ -3801,6 +3912,22 @@ mod tests {
         assert_eq!(world.party[1].mon.mon.species, PokemonSpecies::Abra);
         assert_eq!(world.party[1].nick, PokemonSpecies::Abra.name().to_vec(), "no nickname was given");
         assert!(says(&events, "bought Abra for 180 coins"), "{events:#?}");
+    }
+
+    /// A `.` in a nickname is typed on the grid's own dot rather than dropping the whole name.
+    #[test]
+    fn a_nickname_with_a_dot_is_typed_on_the_grid() {
+        let game = game_at(Map::GameCornerPrizeRoom, 4, 6, |world| {
+            world.coins = [0x05, 0x00];
+            world.bag.add(ItemId::CoinCase, 1);
+        });
+        let log = Rc::new(RefCell::new(Log { goals_left: 1, ..Log::default() }));
+        let policy = Goals { goals: vec![Goal::Field(FieldMove::RedeemPrize { prize: Prize::Abra })], log: log.clone(),
+                             forget: None, purchases: Vec::new(), nickname: Some("Mr.Fang") };
+        let mut agent = NativeAgent::new(game, Box::new(policy)).unwrap();
+        run(&mut agent, &log, settled);
+        assert_eq!(agent.game().world().party[1].nick, poke_core::charmap::encode("Mr<DOT>Fang").unwrap(),
+                   "{:#?}", log.borrow().events);
     }
 
     #[test]

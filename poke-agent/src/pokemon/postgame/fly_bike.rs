@@ -2,7 +2,7 @@
 
 use gb::joypad::JoypadButton;
 use gb::mmu::MMU;
-use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent};
+use crate::pokemon::agent::{AgentState, PokemonAgent};
 use crate::pokemon::encoding::{GameMode, PokemonEncoding};
 use crate::pokemon::font::FontAware;
 use crate::pokemon::map::{Map, MapSprite};
@@ -121,13 +121,13 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: FlyState) -> 
 
     let abort = |agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, why: String| {
         api.release_all_buttons();
-        agent.event(AgentEvent::TextBox { message: format!("Fly: {why}") });
+        agent.field_move_report(false, format!("Fly: {why}"));
         agent.set_state(AgentState::Idle);
     };
 
     if s.entered_menu && on_target && !in_flight && game_mode == GameMode::Overworld {
         api.release_all_buttons();
-        agent.event(AgentEvent::TextBox { message: format!("Flew to {}", s.to) });
+        agent.field_move_report(true, format!("Flew to {}", s.to));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }
@@ -154,7 +154,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: FlyState) -> 
 
     if !s.entered_menu {
         if let Some(why) = s.blocked_by(api.mmu()) {
-            abort(agent, api, format!("cannot fly to {} — {why}", s.to));
+            abort(agent, api, format!("cannot fly to {}: {why}", s.to));
             return Ok(());
         }
     }
@@ -173,6 +173,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: FlyState) -> 
     // Back in the overworld on the wrong map: the attempt fizzled.
     if s.entered_menu && game_mode == GameMode::Overworld {
         api.release_all_buttons();
+        agent.field_move_report(false, format!("Fly: the game did not fly to {}", s.to));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }

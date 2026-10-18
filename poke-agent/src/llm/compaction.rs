@@ -43,6 +43,11 @@ const DROPPED: &str = "\
 The earlier conversation was dropped without a summary, because none could be written. `plan.md` \
 survived it.";
 
+/// The same, after an earlier summary that is kept: what went is only what came after it.
+pub const DROPPED_SINCE: &str = "\
+The conversation after that summary was dropped without a new one, because none could be written. \
+`plan.md` survived it.";
+
 /// A summary request's answer to `choose_action`.
 pub const NOT_AN_ACTION: &str = "\
 Not taken: this request asks for the summary, not an action, and nothing happens in the game until \
@@ -101,6 +106,29 @@ pub fn dropped_message() -> Message {
     summary_message(DROPPED)
 }
 
+/// What a compaction that could get no summary opens with: an earlier summary and a note that
+/// what followed it went, or, with none to keep, [`dropped_message`].
+pub fn dropped_opening(messages: &[Message]) -> Vec<Message> {
+    match earlier_summary(messages).filter(|summary| !is_dropped(summary)) {
+        Some(summary) => vec![summary.clone(), Message::user(DROPPED_SINCE)],
+        None => vec![dropped_message()],
+    }
+}
+
+/// An earlier summary as a compaction that asks for none keeps it: with the note after it, if a
+/// failed compaction left one.
+pub fn kept_opening(messages: &[Message]) -> Option<Vec<Message>> {
+    let summary = earlier_summary(messages)?;
+    let system = usize::from(messages.first().is_some_and(|first| first.role == Role::System));
+    let note = messages.get(system + 1).filter(|message| message.text() == Some(DROPPED_SINCE));
+    Some(std::iter::once(summary).chain(note).cloned().collect())
+}
+
+/// [`dropped_message`], which holds a summary's place and says nothing a summary would.
+fn is_dropped(message: &Message) -> bool {
+    message.text().is_some_and(|text| text.contains(DROPPED))
+}
+
 pub fn is_summary(message: &Message) -> bool {
     message.role == Role::User && message.text().is_some_and(|text| text.starts_with(SUMMARY_HEADING))
 }
@@ -131,6 +159,17 @@ fn turn_starts(messages: &[Message]) -> Vec<usize> {
     (head..messages.len()).filter(|&index| opens_turn(&messages[index])).collect()
 }
 
+/// The summary an earlier compaction left, or the note held in its place.
+pub fn earlier_summary(messages: &[Message]) -> Option<&Message> {
+    let system = usize::from(messages.first().is_some_and(|first| first.role == Role::System));
+    messages.get(system).filter(|message| is_summary(message))
+}
+
+/// How many turns there are since the head.
+pub fn turns_after_head(messages: &[Message]) -> usize {
+    turn_starts(messages).len()
+}
+
 /// Whether there is anything past the head to summarise or drop.
 pub fn has_body(messages: &[Message]) -> bool {
     messages.len() > head_len(messages)
@@ -153,7 +192,7 @@ pub fn without_oldest_half(messages: &[Message]) -> (Vec<Message>, bool) {
 
 /// Keep the system prompt, put `opening` after it and then the last `keep` turns, and drop the
 /// rest. Returns how many messages left; `opening` is not counted against them.
-pub fn replace_with(messages: &mut Vec<Message>, opening: Message, keep: usize) -> usize {
+pub fn replace_with(messages: &mut Vec<Message>, opening: &[Message], keep: usize) -> usize {
     let before = messages.len();
     let system = messages.first().filter(|first| first.role == Role::System).cloned();
     let starts = turn_starts(messages);
@@ -163,13 +202,13 @@ pub fn replace_with(messages: &mut Vec<Message>, opening: Message, keep: usize) 
         (_, None) => starts.first().copied().unwrap_or(messages.len()),
     };
 
-    let mut kept = Vec::with_capacity(messages.len() - from + 2);
+    let mut kept = Vec::with_capacity(messages.len() - from + 1 + opening.len());
     kept.extend(system);
-    kept.push(opening);
+    kept.extend_from_slice(opening);
     kept.extend_from_slice(&messages[from..]);
     *messages = kept;
 
-    before.saturating_sub(messages.len().saturating_sub(1))
+    before.saturating_sub(messages.len().saturating_sub(opening.len()))
 }
 
 /// Some endpoints take only a plain string on some roles, so eviction must not leave parts.
@@ -280,7 +319,7 @@ mod tests {
         let tail: Vec<Message> = messages[messages.len() - 2 * turn(0, true).len()..].to_vec();
         let before = messages.len();
 
-        let dropped = replace_with(&mut messages, summary_message("I am in Pallet Town with a Squirtle."), KEEP_TURNS);
+        let dropped = replace_with(&mut messages, &[summary_message("I am in Pallet Town with a Squirtle.")], KEEP_TURNS);
 
         assert_eq!(messages[0].role, Role::System, "the system prompt is never compacted");
         assert!(messages[0].text().unwrap().contains("Pokémon Red"));
@@ -297,12 +336,12 @@ mod tests {
     #[test]
     fn a_compaction_can_keep_one_turn_or_none() {
         let mut one = history(4, false);
-        replace_with(&mut one, dropped_message(), 1);
+        replace_with(&mut one, &[dropped_message()], 1);
         assert!(says(&one, "turn 3") && !says(&one, "turn 2"));
         well_formed(&one);
 
         let mut none = history(4, false);
-        replace_with(&mut none, dropped_message(), 0);
+        replace_with(&mut none, &[dropped_message()], 0);
         assert_eq!(none.len(), 2, "the system prompt and the note");
         assert!(none[1].text().unwrap().contains("dropped without a summary"));
         assert!(is_summary(&none[1]), "the note holds the summary's place");
@@ -310,8 +349,27 @@ mod tests {
         // Fewer turns than asked for keeps them all.
         let mut short = history(1, false);
         let was = short.len();
-        assert_eq!(replace_with(&mut short, dropped_message(), KEEP_TURNS), 0);
+        assert_eq!(replace_with(&mut short, &[dropped_message()], KEEP_TURNS), 0);
         assert_eq!(short.len(), was + 1);
+    }
+
+    /// A failed compaction keeps a summary an earlier one wrote, but not a note held in its place.
+    #[test]
+    fn a_compaction_without_a_summary_keeps_an_earlier_one_and_says_what_went() {
+        let mut messages = history(4, false);
+        replace_with(&mut messages, &[summary_message("an earlier story")], 4);
+        let opening = dropped_opening(&messages);
+        replace_with(&mut messages, &opening, 1);
+        assert!(messages[1].text().unwrap().contains("an earlier story"));
+        assert_eq!(messages[2].text(), Some(DROPPED_SINCE));
+        assert!(says(&messages, "turn 3") && !says(&messages, "turn 2"));
+        well_formed(&messages);
+        assert_eq!(kept_opening(&messages).expect("a summary").len(), 2, "the note travels with it");
+
+        let mut messages = history(4, false);
+        replace_with(&mut messages, &[dropped_message()], 4);
+        assert_eq!(dropped_opening(&messages), vec![dropped_message()], "a note is not a summary to keep");
+        assert_eq!(dropped_opening(&history(4, false)), vec![dropped_message()]);
     }
 
     /// A nudge or a resume note inside the history is not a turn of its own.
@@ -323,14 +381,14 @@ mod tests {
         messages.push(Message::assistant("sorry".into(), vec![]));
         assert_eq!(turn_starts(&messages).len(), 3);
 
-        replace_with(&mut messages, summary_message("story"), KEEP_TURNS);
+        replace_with(&mut messages, &[summary_message("story")], KEEP_TURNS);
         assert!(says(&messages, "turn 1") && says(&messages, "turn 2") && !says(&messages, "turn 0"));
     }
 
     #[test]
     fn halving_removes_the_oldest_turns_and_never_the_head_or_the_last_two() {
         let mut messages = history(6, false);
-        replace_with(&mut messages, summary_message("an earlier story"), 6);
+        replace_with(&mut messages, &[summary_message("an earlier story")], 6);
         assert_eq!(turn_starts(&messages).len(), 6);
 
         let (halved, removed) = without_oldest_half(&messages);
@@ -381,13 +439,13 @@ mod tests {
     fn degenerate_histories_survive_a_compaction() {
         let mut messages: Vec<Message> = Vec::new();
         assert!(!has_body(&messages));
-        assert_eq!(replace_with(&mut messages, summary_message("nothing happened"), KEEP_TURNS), 0);
+        assert_eq!(replace_with(&mut messages, &[summary_message("nothing happened")], KEEP_TURNS), 0);
         assert_eq!(messages.len(), 1, "the summary is all there is");
         assert!(!has_body(&messages), "a lone summary is a head and nothing more");
 
         let mut messages = vec![Message::user("just the one")];
         assert!(has_body(&messages));
-        replace_with(&mut messages, summary_message("story"), KEEP_TURNS);
+        replace_with(&mut messages, &[summary_message("story")], KEEP_TURNS);
         assert!(messages[0].text().unwrap().starts_with(SUMMARY_HEADING));
         assert_eq!(messages.len(), 1, "a message that opens no turn is summarised away");
 

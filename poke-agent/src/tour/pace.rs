@@ -78,6 +78,10 @@ impl<P: Progress> Policy for Paced<P> {
         self.inner.pick_field_move(state)
     }
 
+    fn field_move_ended(&mut self, outcome: &crate::pokemon::policy::FieldMoveOutcome) {
+        self.inner.field_move_ended(outcome)
+    }
+
     fn pick_battle_action(&mut self, state: &GameState) -> Option<BattleAction> {
         self.inner.pick_battle_action(state)
     }

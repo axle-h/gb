@@ -54,14 +54,17 @@ argument lives in the code.
 - A row that acts on something on the map names the thing in its id, as
   `item:PokeFlute@Route12:Snorlax` does (`tools::thing_at`), never a square the model must work out.
 - A field row is generated only where `resolve_field_move` accepts it (`tools::field_rows`), so the
-  game's refusals belong there, and a use no driver can finish (Softboiled's target, a bare Poké
-  Flute) gets no row. `items::blocked` is asked up front, because `ItemUseNotTime` consumes nothing
-  and prints a box that reads like success.
-- A `<slot>`, `<box slot>` or `<item>` row is one row for every value: `classify` takes any value on
-  its syntax (`tools::fills`) and a refused one is refused when the row is taken, in
-  `resolve_field_move`'s own sentence, so the row's prose names the values that work.
-- A field move reports no ending of its own, so handing it over is what lands it in a chain
-  (`LlmPolicy::pick_field_move`); a driver that stops it still says so.
+  game's refusals belong there, and a use no driver can finish (a bare Poké Flute) gets no row.
+  `items::blocked` is asked up front, because `ItemUseNotTime` consumes nothing and prints a box
+  that reads like success.
+- A `<slot>`, `<box slot>`, `<move>` or `<item>` row is one row for every value, an Ether's
+  `<slot>:<move>` one row per item: `classify` takes any value on its syntax (`tools::fills`) and a
+  refused one is refused when the row is taken, in `resolve_field_move`'s own sentence, so the row's
+  prose names the values that work.
+- A field move lands in a chain only when its driver says the game took it
+  (`Policy::field_move_ended`, said once by both agents); a refusal drops the rest as a stopped
+  walk does, and a driver that hands back mute is a refusal (`FIELD_MOVE_UNREPORTED`), never a
+  landing.
 - An action the game would refuse is not offered, on the map so scripted policies are held to it too.
   `prompt`'s `Blocked here:` line names what would clear a cuttable tree and nothing else — naming
   water fired on every coast.
@@ -105,6 +108,10 @@ argument lives in the code.
   around rhai reserved words.
 - Validation is not a proof; the disarm is. One strike disarms for the run and keeps the source. The
   policy disarms through the live cell and never writes the file.
+- On disk the source is history and the rest is state: every version is a line of
+  `battle-script-history.jsonl`, and `battle-script-state.json` names the version it describes, so
+  a replaced script's disarm is not believed (`battle_script::Current`). The plan is the same
+  history alone, and an older run's files are split into them once, on open.
 - A script opens with a comment saying what it is for, and a write leaving none is refused
   (`battle_script::purpose_of`): that line is what the turn quotes back. A write arms it from the
   next battle decision, whatever the turn it was written on.
@@ -138,9 +145,15 @@ argument lives in the code.
 - A dated 429 parks: clamped, release unconditional, the same request re-sent because the world did
   not move. The pause seam sits below the reset seam and skips the emulator and the agent only. An
   undated 429 keeps the ordinary backoff.
-- `anthropic::render` sends signed thinking back for the turn under way and no earlier one,
-  because a block is bound to the tools and the history it was written under and both move between
-  turns.
+- `anthropic::render` sends every reply back as it streamed, signed thinking included, wherever the
+  tools and messages before it are the ones it was written after (`anthropic::Prefix`), so a reply
+  loses its thinking only where the history was rewritten and each request's prefix is the last
+  one's. The blocks ride on their `Message` (`anthropic::Reply`) and `history.json` saves them beside
+  it, so a restart replays them too; `Prefix` is a stable hash because that digest is saved with them.
+  An image `history.json` evicted is a rewrite, and costs the thinking from there on.
+- `anthropic::request_body` puts a breakpoint on the system prompt as well as the automatic one at
+  the end, because a last turn longer than the lookback would otherwise miss the tools and the
+  system prompt too.
 - `GB_COMPACT_ABOVE` headroom is absolute, because a turn grows unchecked to `GB_MAX_TOOL_STEPS`
   between compactions. A local endpoint's limit is its KV cache per slot, not its window.
 
@@ -154,14 +167,19 @@ argument lives in the code.
   (`ToolBatch::turn` is `None`), and only `plan.md` may be written.
 - A summary request's failure is classified before anything is dropped (`Worker::stream_summary`):
   a transient one is retried until it clears, parked as a turn is; a genuine one is asked once more
-  without the oldest half of the turns, and a second leaves a note in the summary's place. Still
-  over the threshold, it keeps one turn, then none, then raises an error notice, because from there
-  on every request may be over the window.
-- A turn's request the endpoint rejects as wrong (`LlmError::is_rejected_request`, a prompt too
-  long among them) forces a compaction and asks the same question again, once (`Worker::decide`).
-- Only an account refusal counts toward `RefusalPark`: a 401, 402 or 403. A timeout, a dropped
-  connection, exhausted 5xx retries or a rejected request must neither count nor park, and any other
-  answer resets the streak, or one bad hour of a flaky endpoint stops the game for thirty minutes.
+  without the oldest half of the turns, if there is one to leave out, and a second keeps an earlier
+  summary with a note after it that what followed went, or the note alone in the summary's place
+  (`compaction::dropped_opening`). Still over the threshold, it keeps one turn, then none, then raises an error
+  notice, because from there on every request may be over the window; with two turns or fewer
+  since the last summary it goes straight there rather than pay for one that says nothing new.
+- A turn's request the endpoint rejects as too long (`LlmError::is_context_overflow`) forces a
+  compaction and asks the same question again, once (`Worker::decide`). Any other rejection fails
+  the turn with the history as it was, since a compaction cures nothing else.
+- An account refusal, a 401, 402 or 403, counts toward `RefusalPark`, and any other answer resets
+  that streak; a timeout, a dropped connection or exhausted 5xx retries must neither count nor park,
+  or one bad hour of a flaky endpoint stops the game for thirty minutes. Turns failed by a rejected
+  request are a streak of their own on the same windows, reset by any completion
+  (`Worker::fail_turn`), so a wrong setting parks rather than being asked about every turn.
 - `Usage::prompt_tokens` counts cached tokens too; the cache reads and writes ride beside it
   (`cache_read_tokens`, `cache_write_tokens`) and reach the transcript on `UiEventBody::Usage`, one
   per completion, from `Worker::account_for` and `ask_for_summary`.

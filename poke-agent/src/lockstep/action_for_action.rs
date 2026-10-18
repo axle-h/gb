@@ -193,6 +193,10 @@ impl Policy for Recording {
         self.inner.on_event(event)
     }
 
+    fn field_move_ended(&mut self, outcome: &crate::pokemon::policy::FieldMoveOutcome) {
+        self.inner.field_move_ended(outcome)
+    }
+
     fn service_tools(&mut self, state: &GameState, readout: &dyn Readout, graph: &WorldGraph) {
         self.inner.service_tools(state, readout, graph)
     }

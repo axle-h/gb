@@ -16,7 +16,7 @@ use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::menu::{is_forget_move_prompt, is_start_menu, BattleMenuState, START_MENU_ORIGIN};
 use crate::pokemon::learnset::teach_refusal;
 use crate::pokemon::pokedex::PokedexReader;
-use crate::pokemon::policy::{Jam, Policy, RandomPolicy};
+use crate::pokemon::policy::{FieldMoveOutcome, Jam, Policy, RandomPolicy};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::text::PokemonTextReader;
 use crate::pokemon::world_graph::WorldGraph;
@@ -523,7 +523,8 @@ fn drives_its_own_menus(state: &AgentState) -> bool {
         | AgentState::UsingItemPc(_) | AgentState::UsingPcBox(_) | AgentState::Flying { .. }
         | AgentState::Fishing(_) | AgentState::SellingToMart(_) | AgentState::UsingPartyScript(_)
         | AgentState::RedeemingPrize(_) | AgentState::CheckingTrashCan { .. } | AgentState::UsingElevator { .. }
-        | AgentState::UsingFieldItem { .. } | AgentState::UsingBagItem(_) | AgentState::PushingBoulder { .. })
+        | AgentState::UsingFieldItem { .. } | AgentState::UsingBagItem(_) | AgentState::Softboiling(_)
+        | AgentState::PushingBoulder { .. })
 }
 
 /// State machine for navigating a Pokémart purchase sequence.
@@ -600,6 +601,9 @@ pub(crate) enum AgentState {
     RedeemingPrize(crate::pokemon::postgame::game_corner::PrizeState),
     /// Using a bag item from the overworld: START→ITEM→bag→USE, then whatever menu the item opens.
     UsingBagItem(crate::pokemon::postgame::items::BagItemState),
+    /// Softboiled from one party member onto another: the giver's field-move box, then the party
+    /// menu again for the target.
+    Softboiling(crate::pokemon::postgame::softboiled::SoftboiledState),
 
     /// Checking a Vermilion Gym trash can: face `target` and press A.
     CheckingTrashCan { target: Point8, checked: bool, press: bool, facing: Option<crate::pokemon::map_metadata::PlayerFacingDirection> },
@@ -679,6 +683,7 @@ impl Display for AgentState {
             AgentState::UsingPartyScript(s)      => write!(f, "{:?}:slot{}", s.script, s.slot),
             AgentState::RedeemingPrize(s)        => write!(f, "prize:{:?}", s.prize),
             AgentState::UsingBagItem(s)          => write!(f, "use:{:?}→{:?}", s.item, s.target),
+            AgentState::Softboiling(s)           => write!(f, "softboiled:slot{}→slot{}", s.giver, s.target),
             AgentState::CheckingTrashCan { target, .. } => write!(f, "trash→{target}"),
             AgentState::UsingElevator { floor, selected, .. } => write!(f, "elevator→floor {floor} (sel={selected})"),
             AgentState::UsingFieldItem { item, .. } => write!(f, "use-item:{item:?}"),
@@ -729,6 +734,8 @@ pub struct PokemonAgent {
     /// The one-shove row being carried out on a map with nothing to aim at. A bare shove has no
     /// goal around it to report, so the row it came from is held here until the boulder moves.
     boulder_push_row: Option<MetaTile>,
+    /// A `FieldMove` was handed over and nothing has yet told the policy how it ended.
+    field_move_in_flight: bool,
     /// Consecutive `OverworldMovement` ticks on which the chosen row was absent from `actions()`.
     route_lost_ticks: u16,
     /// `MetaTileMap::row_blocked_by_people` for this walk's row, asked once when
@@ -840,6 +847,7 @@ impl PokemonAgent {
             boulder_goal_stale: 0,
             boulder_goal_silences: 0,
             boulder_push_row: None,
+            field_move_in_flight: false,
             route_lost_ticks: 0,
             route_lost_to_people: false,
             people_wait_ticks: 0,
@@ -896,6 +904,7 @@ impl PokemonAgent {
         self.cycles_since_driver_answer = MachineCycles::ZERO;
         self.stuck_reported_at = MachineCycles::ZERO;
         self.blackout_ticks = 0;
+        self.field_move_in_flight = false;
         // `None`, not `Some(0)`: the next tick re-seeds from the loaded cartridge.
         self.hall_of_fame_teams = None;
         self.ending = None;
@@ -1077,6 +1086,44 @@ impl PokemonAgent {
         self.event_buffer.push_back(event);
         while self.event_buffer.len() > 100 {
             self.event_buffer.pop_front();
+        }
+    }
+
+    /// Tell the policy how the field move it handed over ended. Once: the first word is the
+    /// ending, so a driver says it the moment the game answers and anything after is ignored.
+    pub(crate) fn field_move_ended(&mut self, outcome: FieldMoveOutcome) {
+        if std::mem::take(&mut self.field_move_in_flight) {
+            self.policy.field_move_ended(&outcome);
+        }
+    }
+
+    /// A driver's last word, said as the agent's own text box and taken as the field move's
+    /// ending: the game did what was asked, or `message` says why not.
+    pub(crate) fn field_move_report(&mut self, took: bool, message: String) {
+        self.event(AgentEvent::TextBox { message: message.clone() });
+        self.field_move_ended(match took {
+            true => FieldMoveOutcome::Took,
+            false => FieldMoveOutcome::Refused(message),
+        });
+    }
+
+    /// A party-menu field move is back in the overworld: judged by what it was for, since a refusal
+    /// comes back to the overworld too. A map left is Dig, Teleport or Fly having worked.
+    fn field_move_used(&mut self, api: &PokemonApi, slot: u8, move_index: u8, map_changed: bool) {
+        use crate::pokemon::move_name::PokemonMoveName as M;
+        let Ok(state) = api.game_state() else { return };
+        let Some(name) = state.pokemon.get(slot as usize)
+            .and_then(|mon| crate::pokemon::policy::field_move_at(mon, move_index)) else { return };
+        let took = map_changed || match name {
+            M::Flash => !state.map_is_dark,
+            M::Strength => state.strength_active,
+            M::Surf => state.map.surfing,
+            M::Dig | M::Teleport | M::Fly => false,
+            _ => true,
+        };
+        match took {
+            true => self.field_move_ended(FieldMoveOutcome::Took),
+            false => self.field_move_report(false, format!("the game refused {name}")),
         }
     }
 
@@ -1365,7 +1412,10 @@ impl PokemonAgent {
     fn end_boulder_push(&mut self, reason: OverworldActionAbortedReason, at: Option<Point8>) {
         match self.boulder_push_row.take() {
             Some(row) => self.abort_overworld(row, reason, at),
-            None => self.set_state(AgentState::Idle),
+            None => {
+                self.field_move_ended(FieldMoveOutcome::Stopped(reason));
+                self.set_state(AgentState::Idle);
+            }
         }
     }
 
@@ -1469,10 +1519,16 @@ impl PokemonAgent {
                 // A bite lands a cast.
                 AgentState::Fishing(state) => {
                     self.event(AgentEvent::OverworldActionCompleted { destination: MetaTile::Fish { rod: state.rod } });
+                    self.field_move_ended(FieldMoveOutcome::Took);
                     self.event(AgentEvent::BattleStarted);
                     self.set_battle_state(BattleState::default());
                 }
                 _ => {
+                    // The Poké Flute's battle is the flute doing what it was used for.
+                    self.field_move_ended(match self.state {
+                        AgentState::UsingFieldItem { .. } => FieldMoveOutcome::Took,
+                        _ => FieldMoveOutcome::Stopped(OverworldActionAbortedReason::Battle),
+                    });
                     self.event(AgentEvent::BattleStarted);
                     self.set_battle_state(BattleState::default());
                 }
@@ -1508,6 +1564,11 @@ impl PokemonAgent {
                     }
                     self.naming_after_battle = true;
                 }
+                // A prize Pokémon is named on the way to having its coins taken.
+                self.field_move_ended(match self.state {
+                    AgentState::RedeemingPrize(_) => FieldMoveOutcome::Took,
+                    _ => FieldMoveOutcome::Stopped(OverworldActionAbortedReason::NamingScreen),
+                });
                 self.set_state(AgentState::NamingPokemon { species, decided: false, ticks: 0 });
             }
         } else if matches!(self.state, AgentState::NamingPokemon { decided: false, .. }) {
@@ -1547,6 +1608,7 @@ impl PokemonAgent {
                     return;
                 }
                 self.backup_state = None;
+                self.field_move_ended(FieldMoveOutcome::Stopped(OverworldActionAbortedReason::Script));
                 // A Strength goal's shove comes back here and goes back to the solver.
                 if let Some((_, boulder, target, hole)) = self.boulder_goal {
                     self.boulder_shove_landed();
@@ -1866,7 +1928,7 @@ impl PokemonAgent {
             self.boulder_push_row = None;
             api.release_all_buttons();
             self.set_state(AgentState::Idle);
-            self.event(AgentEvent::TextBox { message: abandoned });
+            self.field_move_report(false, abandoned);
             return Ok(());
         }
 
@@ -1962,13 +2024,25 @@ impl PokemonAgent {
                         self.event(AgentEvent::TextBox { message: report });
                     }
                     self.slots_open = false;
+                    // Every driver says how it ended before handing back; this is the net under one
+                    // that was taken from the screen without a word.
+                    self.field_move_ended(FieldMoveOutcome::Refused(
+                        crate::pokemon::policy::FIELD_MOVE_UNREPORTED.to_string()));
                     self.poll_policy(&game_state, api);
                     // A non-walking field action takes priority over walking.
-                    match self.policy.pick_field_move(&game_state) {
+                    let field_move = self.policy.pick_field_move(&game_state);
+                    self.field_move_in_flight = field_move.is_some();
+                    // Said here, as the recreation says it: a driver that finds no such item in the
+                    // bag list backs out of it, and an item that is not there reads as used up.
+                    if let Some(item) = field_move.as_ref().and_then(crate::pokemon::policy::FieldMove::bag_item)
+                        && api.bag_item_position(item).is_none() {
+                        self.field_move_report(false, format!("there is no {item:?} in the bag"));
+                    }
+                    match field_move {
                         Some(crate::pokemon::policy::FieldMove::ReorderParty { slot }) => {
                             api.release_all_buttons();
                             api.move_party_member_to_front(slot as usize)?;
-                            self.event(AgentEvent::TextBox { message: format!("Moved party slot {slot} to the front") });
+                            self.field_move_report(true, format!("Moved party slot {slot} to the front"));
                             self.set_state(AgentState::Idle);
                             return Ok(());
                         }
@@ -1978,7 +2052,7 @@ impl PokemonAgent {
                             let incompatible = game_state.pokemon.get(target_slot as usize)
                                 .is_some_and(|mon| !crate::pokemon::learnset::can_learn(mon.species, item));
                             if incompatible {
-                                self.event(AgentEvent::TextBox { message: teach_refusal(&game_state, item, target_slot) });
+                                self.field_move_report(false, teach_refusal(&game_state, item, target_slot));
                                 self.set_state(AgentState::Idle);
                                 return Ok(());
                             }
@@ -1994,10 +2068,8 @@ impl PokemonAgent {
                             api.release_all_buttons();
                             // The driver has no way back, so refuse here.
                             if !game_state.can_use_cut {
-                                self.event(AgentEvent::TextBox {
-                                    message: "Cut needs a party member that knows it, and the \
-CascadeBadge; not cutting".to_string(),
-                                });
+                                self.field_move_report(false, "Cut needs a party member that knows it, and the \
+CascadeBadge; not cutting".to_string());
                                 self.set_state(AgentState::Idle);
                                 return Ok(());
                             }
@@ -2006,8 +2078,7 @@ CascadeBadge; not cutting".to_string(),
                             let Some((slot, move_index)) =
                                 crate::pokemon::policy::field_move_carrier(&game_state, crate::pokemon::move_name::PokemonMoveName::Cut)
                             else {
-                                self.event(AgentEvent::TextBox {
-                                    message: "nobody in the party knows Cut; not cutting".to_string() });
+                                self.field_move_report(false, "nobody in the party knows Cut; not cutting".to_string());
                                 self.set_state(AgentState::Idle);
                                 return Ok(());
                             };
@@ -2022,6 +2093,12 @@ CascadeBadge; not cutting".to_string(),
                         Some(crate::pokemon::policy::FieldMove::UseFieldMove { slot, move_index }) => {
                             api.release_all_buttons();
                             self.set_state(AgentState::UsingFieldMove { press: true, entered_menu: false, slot, move_index, from_map: game_state.map.map, resume: None, settle: 0 });
+                            return Ok(());
+                        }
+                        Some(crate::pokemon::policy::FieldMove::Softboiled { giver, move_index, target }) => {
+                            use crate::pokemon::postgame::softboiled::SoftboiledState;
+                            api.release_all_buttons();
+                            self.set_state(AgentState::Softboiling(SoftboiledState::new(giver, move_index, target, api)));
                             return Ok(());
                         }
                         Some(crate::pokemon::policy::FieldMove::TossItem { item }) => {
@@ -2052,7 +2129,7 @@ CascadeBadge; not cutting".to_string(),
                             // `PushingBoulder`'s to wait on.
                             if let Some(refusal) = game_state.map.boulder_push_refusal(boulder, dir)
                                 && !game_state.map.push_blocked_by_people(boulder, dir) {
-                                self.event(AgentEvent::TextBox { message: refusal });
+                                self.field_move_report(false, refusal);
                                 self.set_state(AgentState::Idle);
                                 return Ok(());
                             }
@@ -2068,7 +2145,7 @@ CascadeBadge; not cutting".to_string(),
                             api.release_all_buttons();
                             // The same last line of defence as `CutTree`.
                             if let Some(refusal) = crate::pokemon::item_use::field_use_refusal(item) {
-                                self.event(AgentEvent::TextBox { message: refusal });
+                                self.field_move_report(false, refusal);
                                 self.set_state(AgentState::Idle);
                                 return Ok(());
                             }
@@ -3192,11 +3269,16 @@ CascadeBadge; not cutting".to_string(),
                         self.set_state(AgentState::TeachingMove { item, target_slot, press, entered_menu, settle: settle + 1, evolve_from, declined });
                         return Ok(());
                     }
-                    let msg = match evolve_from {
-                        Some(_) => format!("Evolved party slot {target_slot}"),
-                        None => format!("Taught the HM to party slot {target_slot}"),
+                    // A machine that was never in the bag reads as used up, so a teach is judged
+                    // by the move.
+                    let taught = evolve_from.is_some() || poke_core::learnset::machine_move(item).is_none_or(|mv|
+                        gs.pokemon.get(target_slot as usize).is_some_and(|p| p.moves.iter().flatten().any(|m| m.name == mv)));
+                    let msg = match (evolve_from, taught) {
+                        (Some(_), _) => format!("Evolved party slot {target_slot}"),
+                        (None, true) => format!("Taught the HM to party slot {target_slot}"),
+                        (None, false) => format!("Party slot {target_slot} did not learn the move from {item:?}"),
                     };
-                    self.event(AgentEvent::TextBox { message: msg });
+                    self.field_move_report(taught, msg);
                     api.release_all_buttons();
                     self.set_state(AgentState::Idle);
                     return Ok(());
@@ -3211,15 +3293,18 @@ CascadeBadge; not cutting".to_string(),
                         self.set_state(AgentState::TeachingMove { item, target_slot, press: !press, entered_menu, settle: 0, evolve_from, declined });
                         return Ok(());
                     }
-                    self.event(AgentEvent::TextBox {
-                        message: format!("Party slot {target_slot} did not learn the move: no move was chosen to forget"),
-                    });
+                    self.field_move_report(false,
+                        format!("Party slot {target_slot} did not learn the move: no move was chosen to forget"));
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
                 // Back in the overworld without learning: start the chain afresh.
                 if entered_menu && game_mode == GameMode::Overworld {
                     api.release_all_buttons();
+                    self.field_move_report(false, match evolve_from {
+                        Some(_) => format!("Party slot {target_slot} did not evolve on {item:?}"),
+                        None => format!("Party slot {target_slot} did not learn the move from {item:?}"),
+                    });
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
@@ -3269,7 +3354,7 @@ CascadeBadge; not cutting".to_string(),
                         self.event(AgentEvent::OverworldActionCompleted {
                             destination: MetaTile::Cut { at: tree_pos } });
                     } else {
-                        self.event(AgentEvent::TextBox { message: format!("Cut down the tree at {tree_pos}") });
+                        self.field_move_report(true, format!("Cut down the tree at {tree_pos}"));
                     }
                     api.release_all_buttons();
                     self.set_state(AgentState::Idle);
@@ -3385,7 +3470,12 @@ CascadeBadge; not cutting".to_string(),
                     match resume.filter(|_| !map_changed) {
                         Some((boulder, dir)) =>
                             self.set_state(AgentState::PushingBoulder { boulder, dir, armed: true }),
-                        None => self.set_state(AgentState::Idle),
+                        None => {
+                            if resume.is_none() {
+                                self.field_move_used(api, slot, move_index, map_changed);
+                            }
+                            self.set_state(AgentState::Idle);
+                        }
                     }
                     return Ok(());
                 }
@@ -3422,13 +3512,14 @@ CascadeBadge; not cutting".to_string(),
                         0 => format!("Tossed {item:?} to free a bag slot"),
                         keep => format!("Tossed {item:?}, keeping {keep}"),
                     };
-                    self.event(AgentEvent::TextBox { message });
+                    self.field_move_report(true, message);
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
                 // Back in the overworld with the item still held: let the policy re-issue it.
                 if entered_menu && game_mode == GameMode::Overworld {
                     api.release_all_buttons();
+                    self.field_move_report(false, format!("the game would not toss {item:?}"));
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
@@ -3596,6 +3687,7 @@ CascadeBadge; not cutting".to_string(),
                             if let Some(row) = self.boulder_push_row.take() {
                                 self.event(AgentEvent::OverworldActionCompleted { destination: row });
                             }
+                            self.field_move_ended(FieldMoveOutcome::Took);
                             self.set_state(AgentState::Idle);
                         }
                     }
@@ -3607,7 +3699,7 @@ CascadeBadge; not cutting".to_string(),
                     if self.wait_on_people(|| map.push_blocked_by_people(boulder, dir)) {
                         return Ok(());
                     }
-                    self.event(AgentEvent::TextBox { message: refusal });
+                    self.field_move_report(false, refusal);
                     // A refused shove ends the goal rather than re-planning into it.
                     let at = map.player_position;
                     if let Some((_, which, target, hole)) = self.boulder_goal.take() {
@@ -3633,13 +3725,13 @@ CascadeBadge; not cutting".to_string(),
                         &game_state, crate::pokemon::move_name::PokemonMoveName::Strength)
                         .filter(|_| game_state.badges.contains(crate::pokemon::badge::Badge::RainbowBadge));
                     let Some((slot, move_index)) = carrier.filter(|_| !armed) else {
-                        self.event(AgentEvent::TextBox { message: match carrier {
+                        self.field_move_report(false, match carrier {
                             // Back from the party menu with the flag still clear.
                             Some(_) => format!(
                                 "Strength did not arm, so the boulder at {boulder} was not pushed"),
                             None => "Strength needs a party member that knows it, and the \
                                      RainbowBadge; not pushing".to_string(),
-                        }});
+                        });
                         self.end_boulder_push(OverworldActionAbortedReason::Unknown, Some(map.player_position));
                         return Ok(());
                     };
@@ -3687,10 +3779,12 @@ CascadeBadge; not cutting".to_string(),
             AgentState::SellingToMart(s) => return crate::pokemon::postgame::game_corner::sell_tick(self, api, s),
             AgentState::RedeemingPrize(s) => return crate::pokemon::postgame::game_corner::prize_tick(self, api, s),
             AgentState::UsingBagItem(s) => return crate::pokemon::postgame::items::tick(self, api, s),
+            AgentState::Softboiling(s) => return crate::pokemon::postgame::softboiled::tick(self, api, s),
             AgentState::CheckingTrashCan { target, checked, press, facing } => {
                 // Checking a can runs `GymTrashScript`, which leaves the overworld.
                 if checked && game_mode == GameMode::Overworld {
                     api.release_all_buttons();
+                    self.field_move_ended(FieldMoveOutcome::Took);
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
@@ -3718,8 +3812,7 @@ CascadeBadge; not cutting".to_string(),
                         let what = gs.map.tile_at_checked(target)
                             .map(|tile| format!("{tile}"))
                             .unwrap_or_else(|| "a square that is not on this map".to_string());
-                        self.event(AgentEvent::TextBox {
-                            message: format!("Could not get next to {what} at {target} to face it") });
+                        self.field_move_report(false, format!("Could not get next to {what} at {target} to face it"));
                         api.release_all_buttons();
                         self.set_state(AgentState::Idle);
                     }
@@ -3730,8 +3823,7 @@ CascadeBadge; not cutting".to_string(),
                 // takes the rest of the run.
                 const ELEVATOR_BUDGET: u16 = 1200;
                 if ticks > ELEVATOR_BUDGET {
-                    self.event(AgentEvent::TextBox {
-                        message: format!("elevator: floor {floor} was not reached in {ELEVATOR_BUDGET} ticks") });
+                    self.field_move_report(false, format!("elevator: floor {floor} was not reached in {ELEVATOR_BUDGET} ticks"));
                     api.release_all_buttons();
                     self.set_state(AgentState::Idle);
                     return Ok(());
@@ -3743,6 +3835,10 @@ CascadeBadge; not cutting".to_string(),
                     Map::RocketHideoutElevator | Map::SilphCoElevator | Map::CeladonMartElevator);
                 if !in_elevator {
                     api.release_all_buttons();
+                    match selected {
+                        true => self.field_move_ended(FieldMoveOutcome::Took),
+                        false => self.field_move_report(false, format!("elevator: there is no lift here to take to floor {floor}")),
+                    }
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
@@ -3786,7 +3882,7 @@ CascadeBadge; not cutting".to_string(),
                             self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true, ticks });
                         }
                         _ => {
-                            self.event(AgentEvent::TextBox { message: format!("Can't reach elevator panel at {panel}") });
+                            self.field_move_report(false, format!("Can't reach elevator panel at {panel}"));
                             api.release_all_buttons();
                             self.set_state(AgentState::Idle);
                         }
@@ -3802,7 +3898,7 @@ CascadeBadge; not cutting".to_string(),
                             self.set_state(AgentState::UsingElevator { panel, floor, selected, press: true, ticks });
                         }
                         None => {
-                            self.event(AgentEvent::TextBox { message: "Can't reach the elevator exit warp".into() });
+                            self.field_move_report(false, "Can't reach the elevator exit warp".into());
                             api.release_all_buttons();
                             self.set_state(AgentState::Idle);
                         }
@@ -3811,9 +3907,10 @@ CascadeBadge; not cutting".to_string(),
             }
             AgentState::UsingFieldItem { item, target, press, entered_menu, backing_out } => {
                 use crate::pokemon::menu::TextBoxId;
-                // Back in the overworld after the bag menus: done.
+                // Back in the overworld after the bag menus: done, unless the game said no on the way.
                 if entered_menu && game_mode == GameMode::Overworld {
                     api.release_all_buttons();
+                    self.field_move_ended(FieldMoveOutcome::Took);
                     self.set_state(AgentState::Idle);
                     return Ok(());
                 }
@@ -3832,7 +3929,7 @@ CascadeBadge; not cutting".to_string(),
                         }
                         Reach::Wait => api.release_all_buttons(),
                         Reach::OutOfReach => {
-                            self.event(AgentEvent::TextBox { message: format!("Can't reach the field-item target at {target}") });
+                            self.field_move_report(false, format!("Can't reach the field-item target at {target}"));
                             api.release_all_buttons();
                             self.set_state(AgentState::Idle);
                         }
@@ -3842,9 +3939,9 @@ CascadeBadge; not cutting".to_string(),
                 // A contextual refusal `item_use::field_use_refusal` could not predict.
                 if entered_menu && backing_out == 0
                     && api.on_screen_text(false).is_some_and(|t| shows_battle_refusal(&t)) {
-                    self.event(AgentEvent::TextBox { message: format!(
+                    self.field_move_report(false, format!(
                         "the game refused to use {item:?} here and put the bag back; it will refuse \
-                         again wherever you are standing, so use the turn on something else") });
+                         again wherever you are standing, so use the turn on something else"));
                     api.release_all_buttons();
                     self.set_state(AgentState::UsingFieldItem {
                         item, target, press: true, entered_menu, backing_out: BACKING_OUT_TICKS });

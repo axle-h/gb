@@ -53,7 +53,7 @@ impl LlmError {
     }
 
     /// 401, 402 or 403: the account was refused, not the request. The only failures
-    /// [`RefusalPark`](crate::llm::worker::RefusalPark) counts.
+    /// [`RefusalPark`](crate::llm::worker::RefusalPark) counts as refusals.
     pub fn is_account_refusal(&self) -> bool {
         matches!(self, Self::Http { status: 401..=403, .. })
     }
@@ -65,7 +65,32 @@ impl LlmError {
             && !self.is_account_refusal()
             && !self.is_retryable()
     }
+
+    /// A rejected request that says the prompt outgrew the window: a 413, or a body naming the
+    /// context or the prompt's length. The one rejection a compaction can cure.
+    pub fn is_context_overflow(&self) -> bool {
+        match self {
+            Self::Http { status: 413, .. } => true,
+            Self::Http { message, .. } if self.is_rejected_request() => {
+                let message = message.to_ascii_lowercase();
+                OVERFLOW_PHRASES.iter().any(|phrase| message.contains(phrase))
+            }
+            _ => false,
+        }
+    }
 }
+
+/// How the providers word a prompt that is over the window: Anthropic, OpenAI, and the local
+/// servers that copy one or the other.
+const OVERFLOW_PHRASES: &[&str] = &[
+    "prompt is too long",
+    "context_length_exceeded",
+    "maximum context",
+    "context length",
+    "context window",
+    "context size",
+    "too many tokens",
+];
 
 impl std::fmt::Display for LlmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -116,6 +141,29 @@ mod tests {
         assert!(LlmError::Http { status: 413, message: String::new() }.is_rejected_request());
         assert!(!LlmError::Http { status: 500, message: String::new() }.is_rejected_request());
         assert!(!LlmError::Protocol(String::new()).is_rejected_request());
+    }
+
+    #[test]
+    fn only_a_rejection_shaped_like_an_overflow_is_one() {
+        let http = |status, message: &str| LlmError::Http { status, message: message.into() };
+        for overflow in [
+            http(413, "request too large"),
+            http(400, "prompt is too long: 200000 tokens > 128000 maximum [invalid_request_error]"),
+            http(400, "This model's maximum context length is 128000 tokens. (context_length_exceeded)"),
+            http(400, "the request exceeds the available context size, try increasing it"),
+        ] {
+            assert!(overflow.is_context_overflow(), "{overflow}");
+        }
+        for other in [
+            http(400, "temperature: unsupported for this model"),
+            http(404, "model: claude-x [not_found_error]"),
+            http(422, "tools.0.name: string too long"),
+            http(500, "maximum context length"),
+            http(402, "prompt is too long"),
+            LlmError::Protocol("prompt is too long".into()),
+        ] {
+            assert!(!other.is_context_overflow(), "{other}");
+        }
     }
 
     #[test]

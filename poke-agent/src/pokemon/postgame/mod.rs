@@ -15,4 +15,5 @@ pub mod gifts;
 pub mod trades;
 pub mod aides;
 pub mod items;
+pub mod softboiled;
 pub mod maps;

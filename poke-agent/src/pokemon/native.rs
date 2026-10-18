@@ -277,6 +277,7 @@ impl NativeGame {
             mode: self.game_mode(),
             map,
             bag,
+            pc_items: Bag::from_slice(&world.pc_items.items),
             battle: battle_state(&self.game),
             ruleset: world.ruleset,
             boxed_pokemon: world.boxes.get(world.current_box as usize)
@@ -400,7 +401,7 @@ impl crate::pokemon::observe::Readout for NativeGame {
     }
 
     fn pc_items(&self) -> Bag {
-        bag(&self.world().pc_items)
+        Bag::from_slice(&self.world().pc_items.items)
     }
 
     fn mart_stock(&self) -> Vec<ItemId> {

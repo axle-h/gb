@@ -31,7 +31,7 @@ Read before touching `poke-agent/src/run/`, `poke-agent-web/src/host.rs`'s new-r
   at the top of the next turn; the endpoint's body says so, and the generation bump that makes that
   turn start now is for promptness rather than correctness.
 - The two reset kinds share one path and differ in two lines, both about files: a new game *re-reads*
-  the plan and the script from the directory it is given, a clear *deletes* the plan from the
+  the plan and the script from the directory it is given, a clear appends an empty plan to the
   directory it is already in and leaves the script alone. Backwards, the run plays on holding notes
   it was told to forget.
 - The fresh history ends on `CLEARED_NOTE`, because a model shown six badges and no memory of

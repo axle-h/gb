@@ -3,6 +3,7 @@
 pub mod hall_of_fame;
 pub mod moments;
 pub mod transcript;
+pub mod versions;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -24,12 +25,19 @@ pub mod files {
     pub const TRANSCRIPT: &str = "transcript.jsonl";
     /// Legacy: nothing writes it, and only the archiver reads it.
     pub const MEMORIES: &str = "memories";
-    /// The model's plan, as it last wrote it: what outlives a compaction. See [`crate::llm::plan`].
-    pub const PLAN: &str = "plan.md";
-    /// The plan as older runs kept it, rendered into [`PLAN`] once on open.
+    /// Every version of the model's plan, the last being the plan: what outlives a compaction.
+    /// See [`crate::llm::plan`].
+    pub const PLAN_HISTORY: &str = "plan-history.jsonl";
+    /// The plan as older runs kept it, made the first version of [`PLAN_HISTORY`] once on open.
+    pub const LEGACY_PLAN: &str = "plan.md";
     pub const LEGACY_TODO: &str = "todo.json";
-    /// The model's battle script and whether it is armed. See [`crate::llm::battle_script`].
-    pub const BATTLE_SCRIPT: &str = "battle-script.json";
+    /// Every version of the model's battle script, the last being the script. See
+    /// [`crate::llm::battle_script`].
+    pub const BATTLE_SCRIPT_HISTORY: &str = "battle-script-history.jsonl";
+    /// Whether that script is armed, why it stopped and what it has decided.
+    pub const BATTLE_SCRIPT_STATE: &str = "battle-script-state.json";
+    /// Both of those as older runs kept them, split into them once on open.
+    pub const LEGACY_BATTLE_SCRIPT: &str = "battle-script.json";
     /// The live conversation, rewritten each turn: what a restart resumes on. See [`crate::llm::history`].
     pub const HISTORY: &str = "history.json";
     /// Every message ever appended, plus a marker line per compaction. Append-only, and read by

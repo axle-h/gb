@@ -1,4 +1,4 @@
-//! The `screenshot` tool's payload: one published LCD frame as a `data:` URL.
+//! What a read of `screen.png` answers with: one published LCD frame as a `data:` URL.
 
 use base64::Engine;
 

@@ -119,11 +119,7 @@ pub fn archive(job: &ArchiveJob) -> Result<String, String> {
         &into.join(format!("{}.gz", files::TRANSCRIPT)),
         job.until_seq,
     )?;
-    // The rotated half, if this run went on long enough to have one.
-    let rotated = job.run_dir.join(files::TRANSCRIPT).with_extension("jsonl.1");
-    if rotated.exists() {
-        follow_lines(&rotated, &into.join("transcript.jsonl.1.gz"), u64::MAX)?;
-    }
+    archive_segments(&job.run_dir.join(files::TRANSCRIPT), &into)?;
 
     copy_tree(&job.run_dir.join(files::MEMORIES), &into.join(files::MEMORIES))?;
     copy_tree(&job.run_dir.join(files::MOMENTS), &into.join(files::MOMENTS))?;
@@ -132,15 +128,11 @@ pub fn archive(job: &ArchiveJob) -> Result<String, String> {
         std::fs::copy(&moments, into.join(files::MOMENTS_LOG))
             .map_err(|e| format!("could not copy {}: {e}", moments.display()))?;
     }
-    let plan = job.run_dir.join(files::PLAN);
-    if plan.exists() {
-        std::fs::copy(&plan, into.join(files::PLAN))
-            .map_err(|e| format!("could not copy {}: {e}", plan.display()))?;
-    }
-    let script = job.run_dir.join(files::BATTLE_SCRIPT);
-    if script.exists() {
-        std::fs::copy(&script, into.join(files::BATTLE_SCRIPT))
-            .map_err(|e| format!("could not copy {}: {e}", script.display()))?;
+    for file in [files::PLAN_HISTORY, files::BATTLE_SCRIPT_HISTORY, files::BATTLE_SCRIPT_STATE] {
+        let from = job.run_dir.join(file);
+        if from.exists() {
+            std::fs::copy(&from, into.join(file)).map_err(|e| format!("could not copy {}: {e}", from.display()))?;
+        }
     }
 
     // The conversation, both halves.
@@ -154,10 +146,7 @@ pub fn archive(job: &ArchiveJob) -> Result<String, String> {
         &into.join(format!("{}.gz", files::CONVERSATION)),
         u64::MAX,
     )?;
-    let rotated_log = job.run_dir.join(format!("{}.1", files::CONVERSATION));
-    if rotated_log.exists() {
-        follow_lines(&rotated_log, &into.join(format!("{}.1.gz", files::CONVERSATION)), u64::MAX)?;
-    }
+    archive_segments(&job.run_dir.join(files::CONVERSATION), &into)?;
 
     let mut completion = job.completion.clone();
     completion.archive = name.clone();
@@ -200,6 +189,15 @@ fn append(path: &Path, completion: &Completion) -> Result<(), String> {
         .map_err(|e| format!("could not open {}: {e}", path.display()))?;
     writeln!(file, "{line}").map_err(|e| format!("could not append to {}: {e}", path.display()))?;
     file.flush().map_err(|e| format!("could not flush {}: {e}", path.display()))
+}
+
+/// Every segment `log` was rotated into, gzipped into `into` under its own name.
+fn archive_segments(log: &Path, into: &Path) -> Result<(), String> {
+    for segment in super::transcript::segments(log) {
+        let Some(name) = segment.file_name().and_then(|name| name.to_str()) else { continue };
+        follow_lines(&segment, &into.join(format!("{name}.gz")), u64::MAX)?;
+    }
+    Ok(())
 }
 
 /// Copy `from` to `to`, gzipped, reading whole lines until one carries `until_seq`.
@@ -329,8 +327,9 @@ mod tests {
         // A run old enough to have a `memories/` directory, which the archive must still carry.
         std::fs::create_dir_all(run.path().join(files::MEMORIES)).expect("memories");
         std::fs::write(run.path().join(files::MEMORIES).join("plan.md"), "beat brock").expect("a memory");
-        std::fs::write(run.path().join(files::PLAN), "beat Brock").expect("a plan");
-        std::fs::write(run.path().join(files::BATTLE_SCRIPT), "{}").expect("a battle script");
+        std::fs::write(run.path().join(files::PLAN_HISTORY), "{}\n").expect("a plan");
+        std::fs::write(run.path().join(files::BATTLE_SCRIPT_HISTORY), "{}\n").expect("a battle script");
+        std::fs::write(run.path().join(files::BATTLE_SCRIPT_STATE), "{}").expect("its state");
         std::fs::create_dir_all(run.path().join(files::MOMENTS)).expect("moments");
         std::fs::write(run.path().join(files::MOMENTS).join("0001-badge.gbst"), "GBSTbadge").expect("a moment");
         std::fs::write(run.path().join(files::MOMENTS_LOG), "{\"n\":1}\n").expect("a moments log");
@@ -341,6 +340,13 @@ mod tests {
             "{\"kind\":\"run\"}\n{\"kind\":\"message\",\"turn\":1}\n",
         )
         .expect("a conversation log");
+        // A run long enough to have rotated both logs twice.
+        for log in [files::TRANSCRIPT, files::CONVERSATION] {
+            for n in 1..=2 {
+                std::fs::write(run.path().join(format!("{log}.{n}")), format!("{{\"segment\":{n}}}\n"))
+                    .expect("a rotated segment");
+            }
+        }
 
         let job = ArchiveJob {
             root: scratch.0.clone(),
@@ -357,8 +363,9 @@ mod tests {
         assert_eq!(std::fs::read(into.join(files::STATE)).unwrap(), b"GBSTwinning");
         assert_eq!(std::fs::read(into.join(files::SRAM)).unwrap(), b"sram");
         assert_eq!(std::fs::read_to_string(into.join(files::MEMORIES).join("plan.md")).unwrap(), "beat brock");
-        assert!(into.join(files::PLAN).is_file(), "the model's plan travels with the run");
-        assert!(into.join(files::BATTLE_SCRIPT).is_file(), "the battle script travels with the run");
+        assert!(into.join(files::PLAN_HISTORY).is_file(), "the model's plan travels with the run");
+        assert!(into.join(files::BATTLE_SCRIPT_HISTORY).is_file(), "the battle script travels with the run");
+        assert!(into.join(files::BATTLE_SCRIPT_STATE).is_file(), "and whether it was armed");
         assert!(into.join(files::MOMENTS_LOG).is_file(), "the moments travel with the run");
         assert_eq!(std::fs::read(into.join(files::MOMENTS).join("0001-badge.gbst")).unwrap(), b"GBSTbadge");
         assert!(into.join(files::META).is_file(), "the archive is self-describing without the ledger");
@@ -379,6 +386,18 @@ mod tests {
             .expect("it inflates");
         assert_eq!(log.lines().count(), 2, "both lines and nothing invented: {log}");
         assert!(log.contains("\"kind\":\"message\""), "what the model was actually sent is in the archive");
+
+        // Every rotated segment of both, not only the first.
+        for log in [files::TRANSCRIPT, files::CONVERSATION] {
+            for n in 1..=2 {
+                let gz = std::fs::read(into.join(format!("{log}.{n}.gz")))
+                    .unwrap_or_else(|_| panic!("segment {n} of {log} is in the archive"));
+                let mut segment = String::new();
+                std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&gz[..]), &mut segment)
+                    .expect("it inflates");
+                assert_eq!(segment, format!("{{\"segment\":{n}}}\n"));
+            }
+        }
 
         let rows = top(&scratch.0, 10);
         assert_eq!(rows.len(), 1);

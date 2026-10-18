@@ -4,7 +4,7 @@
 
 use gb::joypad::JoypadButton;
 use gb::mmu::MMU;
-use crate::pokemon::agent::{start_menu_row, AgentEvent, AgentState, PokemonAgent, StartMenuRow};
+use crate::pokemon::agent::{start_menu_row, AgentState, PokemonAgent, StartMenuRow};
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::Map;
@@ -71,10 +71,15 @@ pub fn move_pp(mv: &crate::pokemon::move_name::PokemonMove) -> u8 { mv.pp & PP_M
 
 pub fn pp_ups(mv: &crate::pokemon::move_name::PokemonMove) -> u8 { mv.pp >> 6 }
 
-/// `mv`'s maximum PP: `AddBonusPP` gives `base / 5` per PP Up.
+/// `mv`'s maximum PP: `AddBonusPP` gives `base / 5` per PP Up, but never more than 7.
 pub fn max_pp(mv: &crate::pokemon::move_name::PokemonMove) -> u8 {
     let base = mv.name.metadata().pp;
-    base + (base / 5) * pp_ups(mv)
+    base + (base / 5).min(7) * pp_ups(mv)
+}
+
+/// The items `ItemUsePPRestore` asks a move of, after the party member.
+pub const fn aims_at_a_move(item: ItemId) -> bool {
+    matches!(item, ItemId::Ether | ItemId::MaxEther | ItemId::PpUp)
 }
 
 pub fn bag_quantity(state: &GameState, item: ItemId) -> u8 {
@@ -143,6 +148,20 @@ pub fn blocked(state: &GameState, item: ItemId, target: UseTarget) -> Option<Str
                 .then_some(())
                 .map_or(Some(format!("every move on slot {:?} is already at full PP", target.slot())), |()| None)
         }
+        // `.vitaminNoEffect`: a vitamin adds 2560 to its stat's experience only below 25600, and
+        // a Rare Candy refuses level 100.
+        ItemId::HpUp | ItemId::Protein | ItemId::Iron | ItemId::Carbos | ItemId::Calcium => match mon {
+            Some(p) if vitamin_stat_experience(item, &p.effort_values) >= 100 << 8 => Some(format!(
+                "slot {} has had all the {item:?} it can take",
+                target.slot().unwrap_or_default())),
+            _ => None,
+        },
+        ItemId::RareCandy => match mon {
+            Some(p) if p.level >= 100 => Some(format!(
+                "slot {} is already level 100",
+                target.slot().unwrap_or_default())),
+            _ => None,
+        },
         // `.usePPUp`: three is the cap, and a fourth keeps the item.
         ItemId::PpUp => {
             let UseTarget::Move { move_index, .. } = target else {
@@ -161,6 +180,17 @@ pub fn blocked(state: &GameState, item: ItemId, target: UseTarget) -> Option<Str
         ItemId::Bicycle if !bike_riding_allowed(state) =>
             Some(format!("cycling is not allowed on {} (tileset {:?})", state.map.map, state.map.tileset)),
         _ => None,
+    }
+}
+
+/// The stat experience a vitamin raises, in `VitaminStats`' order.
+fn vitamin_stat_experience(vitamin: ItemId, stat_experience: &crate::pokemon::pokemon::PokemonStats) -> u16 {
+    match vitamin {
+        ItemId::HpUp => stat_experience.hp,
+        ItemId::Protein => stat_experience.attack,
+        ItemId::Iron => stat_experience.defense,
+        ItemId::Carbos => stat_experience.speed,
+        _ => stat_experience.special,
     }
 }
 
@@ -263,7 +293,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: BagItemState)
             return Ok(());
         }
         api.release_all_buttons();
-        agent.event(AgentEvent::TextBox { message: format!("Used {:?} ({:?})", s.item, s.target) });
+        agent.field_move_report(true, format!("Used {:?} ({:?})", s.item, s.target));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }
@@ -271,13 +301,13 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: BagItemState)
     // Fizzled: back in the overworld with nothing to show.
     if s.entered_menu && game_mode == GameMode::Overworld {
         api.release_all_buttons();
+        agent.field_move_report(false, format!("the game refused to use {:?} here and put the bag back", s.item));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }
     if s.ticks > TICK_BUDGET {
         api.release_all_buttons();
-        agent.event(AgentEvent::TextBox {
-            message: format!("bag-item: {:?} did nothing in {TICK_BUDGET} ticks", s.item) });
+        agent.field_move_report(false, format!("bag-item: {:?} did nothing in {TICK_BUDGET} ticks", s.item));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }
@@ -489,6 +519,15 @@ mod tests {
         }
     }
 
+    /// `AddBonusPP` caps each PP Up's bonus at 7, so a 40-PP move tops out at 61, not 64.
+    #[test]
+    fn a_pp_up_adds_a_fifth_of_the_base_but_never_more_than_seven() {
+        use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
+        let raised = |name: PokemonMoveName, ups: u8| max_pp(&PokemonMove { name, pp: ups << 6 });
+        assert_eq!(raised(PokemonMoveName::Growl, 3), 61);
+        assert_eq!(raised(PokemonMoveName::WaterGun, 3), 25 + 3 * 5);
+    }
+
     #[test]
     fn the_bicycle_is_refused_on_water() {
         let mut state = GameState::default();
@@ -501,6 +540,45 @@ mod tests {
         state.map.surfing = true;
         let refusal = blocked(&state, ItemId::Bicycle, UseTarget::Nothing).expect("refused on water");
         assert!(refusal.contains("surfing"), "{refusal}");
+    }
+
+    /// `.vitaminNoEffect`: a vitamin stops at 25600 of its stat's experience and a Rare Candy at
+    /// level 100, so neither is a row for a Pokémon there.
+    #[test]
+    fn a_vitamin_past_its_cap_or_a_rare_candy_at_level_100_is_refused_and_no_row() {
+        use crate::pokemon::move_name::PokemonMoveName as M;
+        use crate::pokemon::pokemon::{Pokemon, PokemonStats};
+        use crate::pokemon::species::PokemonSpecies;
+        let moves = [M::Tackle, M::TailWhip, M::Bubble, M::WaterGun];
+        let mut state = GameState::default();
+        // Level 100 with every stat's experience at 65535.
+        let capped = Pokemon::maxed(PokemonSpecies::Squirtle, "CAPPED", moves, "AI", 1);
+        let mut fresh = Pokemon::maxed(PokemonSpecies::Squirtle, "FRESH", moves, "AI", 1);
+        fresh.effort_values = PokemonStats { attack: 100 << 8, special: (100 << 8) - 1, ..PokemonStats::ZERO };
+        fresh.experience = PokemonSpecies::Squirtle.metadata().experience_group.experience_for_level(50);
+        fresh.recalculate();
+        state.pokemon.push(capped).expect("room");
+        state.pokemon.push(fresh).expect("room");
+        for item in [ItemId::HpUp, ItemId::Protein, ItemId::Calcium, ItemId::RareCandy] {
+            state.bag.push(crate::pokemon::bag::BagItem::new(item, 1)).expect("room");
+        }
+        let on = |slot| UseTarget::Party { slot, evolve: true };
+
+        for item in [ItemId::HpUp, ItemId::Protein, ItemId::Calcium, ItemId::RareCandy] {
+            assert!(blocked(&state, item, on(0)).is_some(), "{item:?} on slot 0");
+        }
+        assert_eq!(blocked(&state, ItemId::HpUp, on(1)), None, "no HP experience yet");
+        assert!(blocked(&state, ItemId::Protein, on(1)).is_some(), "attack experience is at 25600");
+        assert_eq!(blocked(&state, ItemId::Calcium, on(1)), None, "special experience is one short of it");
+        assert_eq!(blocked(&state, ItemId::RareCandy, on(1)), None, "level 50");
+
+        let rows = crate::llm::tools::field_rows(&state, &[]);
+        let row = |id: &str| rows.iter().find(|row| row.id == id).map(|row| row.description.clone());
+        for id in ["item:HpUp@<slot>", "item:Calcium@<slot>", "item:RareCandy@<slot>"] {
+            let description = row(id).unwrap_or_else(|| panic!("{id} helps slot 1: {rows:?}"));
+            assert!(description.contains("1 FRESH") && !description.contains("0 CAPPED"), "{id}: {description}");
+        }
+        assert_eq!(row("item:Protein@<slot>"), None, "Protein helps nobody");
     }
 
     /// The Poké Doll ends the battle, so it is never in `STAT_ITEMS`.

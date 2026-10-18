@@ -172,6 +172,7 @@ impl Policy for SlowPolicy {
     }
 
     fn on_event(&mut self, event: &AgentEvent) { self.inner.on_event(event) }
+    fn field_move_ended(&mut self, outcome: &crate::pokemon::policy::FieldMoveOutcome) { self.inner.field_move_ended(outcome) }
     fn steps_remaining(&self) -> Option<usize> { self.inner.steps_remaining() }
     fn current_step_is_long_running(&self) -> bool { self.inner.current_step_is_long_running() }
     fn is_exhausted(&self) -> bool { self.inner.is_exhausted() }

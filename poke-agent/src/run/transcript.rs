@@ -85,8 +85,33 @@ pub(crate) fn open_append(path: &Path) -> Result<std::fs::File, String> {
         .map_err(|e| format!("could not open {}: {e}", path.display()))
 }
 
+/// The segments `path` has been rotated into, oldest first: `path.1`, `path.2` and on, numbered
+/// in the order they were rotated so that none is ever renamed again.
+pub(crate) fn segments(path: &Path) -> Vec<std::path::PathBuf> {
+    numbered_segments(path).into_iter().map(|(_, segment)| segment).collect()
+}
+
+fn numbered_segments(path: &Path) -> Vec<(u32, std::path::PathBuf)> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|name| name.to_str())) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut numbered: Vec<(u32, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let n = entry.file_name().to_str()?.strip_prefix(name)?.strip_prefix('.')?.parse::<u32>().ok()?;
+            Some((n, entry.path()))
+        })
+        .collect();
+    numbered.sort();
+    numbered
+}
+
+/// Move `path` aside as its newest segment and start it again, empty.
 pub(crate) fn rotate(path: &Path) -> Result<std::fs::File, String> {
-    let previous = path.with_extension("jsonl.1");
+    let next = numbered_segments(path).last().map_or(1, |(n, _)| n + 1);
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let previous = path.with_file_name(format!("{name}.{next}"));
     std::fs::rename(path, &previous)
         .map_err(|e| format!("could not rotate {} to {}: {e}", path.display(), previous.display()))?;
     std::fs::OpenOptions::new()
@@ -132,7 +157,7 @@ const CHUNK: u64 = 64 * 1024;
 
 /// The lines of a file, last first, read in [`CHUNK`]s from the end so that a file of any size
 /// costs only what is consumed.
-struct RevLines {
+pub(crate) struct RevLines {
     file: std::fs::File,
     /// Everything below this offset is still unread.
     pos: u64,
@@ -144,7 +169,7 @@ struct RevLines {
 }
 
 impl RevLines {
-    fn new(file: std::fs::File) -> Self {
+    pub(crate) fn new(file: std::fs::File) -> Self {
         let pos = file.metadata().map(|m| m.len()).unwrap_or(0);
         Self { file, pos, pending: Vec::new(), ready: Vec::new() }
     }
@@ -344,6 +369,21 @@ mod tests {
         std::fs::write(&path, "only\n").expect("write");
         let got: Vec<String> = RevLines::new(std::fs::File::open(&path).unwrap()).collect();
         assert_eq!(got, vec!["".to_string(), "only".to_string()]);
+    }
+
+    /// Each rotation is a segment of its own, and the oldest keeps `.1`.
+    #[test]
+    fn every_rotated_segment_is_kept() {
+        let scratch = Scratch::new("transcript-rotate");
+        let path = scratch.0.join("transcript.jsonl");
+        for n in 1..=3 {
+            std::fs::write(&path, format!("{n}\n")).expect("write");
+            rotate(&path).expect("rotates");
+        }
+        let kept: Vec<String> = segments(&path).iter().map(|segment| std::fs::read_to_string(segment).unwrap()).collect();
+        assert_eq!(kept, ["1\n", "2\n", "3\n"], "three rotations, three segments, oldest first");
+        assert_eq!(segments(&path)[0], scratch.0.join("transcript.jsonl.1"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "", "and the live file starts again");
     }
 
     /// A transcript far larger than the backlog is served without being read whole.

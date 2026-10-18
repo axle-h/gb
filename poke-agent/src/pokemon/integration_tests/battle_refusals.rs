@@ -156,7 +156,7 @@ in_both_animation_modes!(
     run_is_withheld_from_a_trainer_battle_and_asking_for_it_is_refused_in_the_turn,
     a_ball_thrown_at_a_trainer_is_blocked_and_the_ball_is_spent_saying_so,
     an_item_the_bag_has_run_out_of_leaves_the_menu_and_is_refused_by_name,
-    a_key_item_the_game_refuses_in_a_battle_says_why_rather_than_going_quiet,
+    a_key_item_the_game_refuses_in_a_battle_is_not_offered_and_is_refused_in_the_turn,
     the_last_safari_ball_ends_the_game_around_the_battle_it_was_thrown_in,
     a_ball_that_catches_ends_the_battle_with_the_catch_in_the_party,
     a_potion_in_battle_heals_the_active_pokemon,
@@ -376,33 +376,33 @@ fn an_item_the_bag_has_run_out_of_leaves_the_menu_and_is_refused_by_name(options
     );
 }
 
-/// A key item the game refuses in a battle says so, rather than costing a turn in silence.
-fn a_key_item_the_game_refuses_in_a_battle_says_why_rather_than_going_quiet(options: GameOptions) {
+/// A key item the game refuses in a battle is not on the battle menu, and asking for it anyway is
+/// refused inside the turn rather than costing one.
+fn a_key_item_the_game_refuses_in_a_battle_is_not_offered_and_is_refused_in_the_turn(options: GameOptions) {
     let (mut run, seen) = run_on(WILD, "refusal-key-item", vec![choose("item:SSTicket")], options);
     let before = held(&mut run, ItemId::SSTicket);
     assert_eq!(before, 1, "the committed fixture carries the S.S. Ticket");
 
-    let asked_twice = run.tick_until(PATIENCE, |run| {
+    let refused = run.tick_until(PATIENCE, |run| {
         run.drain_events();
-        seen.lock().expect("not poisoned").battle_turns.len() >= 2
+        seen.lock().expect("not poisoned").told("`item:SSTicket`")
     });
 
     let seen = seen.lock().expect("not poisoned");
+    assert!(refused, "asking for the S.S. Ticket in a battle was never answered.\n  tool results: {:?}", seen.tool_results);
+    let menu = seen.battle_menu(0);
+    assert!(!menu.is_empty(), "the first battle turn carried no menu");
     assert!(
-        asked_twice,
-        "the model was asked {} battle turns after an item the game refused.\n  tool results: {:?}",
-        seen.battle_turns.len(),
+        !menu.contains(&"item:SSTicket".to_string()),
+        "the S.S. Ticket was a battle row, though `ItemUseNotTime` is all the cartridge does with it.\n  menu: {menu:?}",
+    );
+    assert!(
+        seen.told("This isn't the time to use that!"),
+        "the refusal did not say why a held item has no row.\n  tool results: {:?}",
         seen.tool_results,
     );
-    assert!(!seen.was_stuck, "the watchdog fired: the refused key item wedged the bag list");
-    assert_eq!(held(&mut run, ItemId::SSTicket), before, "`ItemUseNotTime` consumes nothing");
-    assert!(
-        seen.battle_said("This isn't the ti"),
-        "the model was never told why the S.S. Ticket did nothing. `ItemUseNotTime` says it out \\
-         loud, and a turn spent on an action with no account of it is the silence this file is \\
-         about.\\n  turn 2 was:\\n{}",
-        seen.battle_turns.get(1).map_or("<never asked>", String::as_str),
-    );
+    assert!(!seen.was_stuck, "the watchdog fired");
+    assert_eq!(held(&mut run, ItemId::SSTicket), before, "nothing was used");
 }
 
 /// Ticks `run` until `seen` holds an overworld turn, the proof that a battle handed the run back.

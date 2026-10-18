@@ -153,7 +153,7 @@ fn party_count(api: &PokemonApi<'_>) -> u8 {
 /// row, YES or the box, and B until the overworld returns. Changing box saves the game.
 pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PcBoxState) -> Result<(), String> {
     use gb::joypad::JoypadButton;
-    use crate::pokemon::agent::{AgentEvent, AgentState};
+    use crate::pokemon::agent::AgentState;
     use crate::pokemon::encoding::GameMode;
     use crate::pokemon::map_metadata::PlayerFacingDirection;
     use crate::pokemon::menu::TextBoxId;
@@ -165,7 +165,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PcBoxState) -
 
     let abort = |agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, why: String| {
         api.release_all_buttons();
-        agent.event(AgentEvent::TextBox { message: format!("PC box: {why}") });
+        agent.field_move_report(false, format!("PC box: {why}"));
         agent.set_state(AgentState::Idle);
     };
 
@@ -184,9 +184,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PcBoxState) -
             return Ok(());
         }
         api.release_all_buttons();
-        agent.event(AgentEvent::TextBox {
-            message: format!("PC box: {:?} done, party {party}, box {} holds {boxed}", s.op, current + 1),
-        });
+        agent.field_move_report(true, format!("PC box: {:?} done, party {party}, box {} holds {boxed}", s.op, current + 1));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }
@@ -206,6 +204,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PcBoxState) -
     // Back in the overworld having achieved nothing: the attempt fizzled.
     if s.entered_menu && game_mode == GameMode::Overworld {
         api.release_all_buttons();
+        agent.field_move_report(false, format!("PC box: {:?} did nothing", s.op));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }

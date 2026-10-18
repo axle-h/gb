@@ -1,6 +1,7 @@
 //! The model's battle script: a sandboxed program that decides battle turns without a request.
 //! ```text
-//! $GB_RUN_DIR/<run-id>/battle-script.json      { source, armed, last_failure }
+//! $GB_RUN_DIR/<run-id>/battle-script-history.jsonl   every version of the source; the script is the last
+//! $GB_RUN_DIR/<run-id>/battle-script-state.json      { version, armed, last_failure, decided }
 //! ```
 
 use std::cell::RefCell;
@@ -15,7 +16,9 @@ use crate::pokemon::battle::{is_ghost_battle, BattleAction, BattleType};
 use crate::pokemon::damage::expected_damage;
 use crate::pokemon::pokemon::PokemonSummary;
 use crate::pokemon::policy::battle_options;
+use crate::pokemon::postgame::items::{max_pp, move_pp};
 use crate::run::files;
+use crate::run::versions::{self, Version, Versions};
 
 /// `battle-script.md`, sent verbatim.
 pub const DOCS: &str = include_str!("battle_script/DOCS.md");
@@ -254,8 +257,8 @@ fn move_map(slot: usize, battle_move: &crate::pokemon::move_name::PokemonMove, m
     // The variant's name, since two variants display as "Confusion".
     map.insert("effect".into(), Dynamic::from(format!("{:?}", metadata.effect)));
     map.insert("accuracy".into(), Dynamic::from(metadata.accuracy as i64));
-    map.insert("pp".into(), Dynamic::from(battle_move.pp as i64));
-    map.insert("max_pp".into(), Dynamic::from(metadata.pp as i64));
+    map.insert("pp".into(), Dynamic::from(move_pp(battle_move) as i64));
+    map.insert("max_pp".into(), Dynamic::from(max_pp(battle_move) as i64));
     map.insert("damage".into(), Dynamic::from(turn.damage(me, battle_move.name) as i64));
     map.insert("effectiveness".into(), Dynamic::from(match turn.ghost {
         true => 0.0,
@@ -315,7 +318,7 @@ fn pokemon_map(slot: usize, name: &str, mon: &PokemonSummary, turn: Turn, fight_
                 Some(slots) => slots.contains(&index),
                 None => !turn.ghost,
             };
-            let usable = offered && battle_move.pp > 0 && mon.disabled_move_slot != Some(index as u8);
+            let usable = offered && move_pp(battle_move) > 0 && mon.disabled_move_slot != Some(index as u8);
             Some(Dynamic::from(move_map(index, battle_move, mon, turn, usable)))
         })
         .collect();
@@ -410,7 +413,7 @@ fn facts(state: &GameState, turn: u32, options: &[BattleAction]) -> Option<Map> 
         .enumerate()
         .filter_map(|(index, battle_move)| {
             let battle_move = battle_move.as_ref()?;
-            if !fight_slots.contains(&index) || battle_move.pp == 0 || me.disabled_move_slot == Some(index as u8) {
+            if !fight_slots.contains(&index) || move_pp(battle_move) == 0 || me.disabled_move_slot == Some(index as u8) {
                 return None;
             }
             let damage = against_foe.damage(me, battle_move.name);
@@ -617,34 +620,68 @@ fn truncated(text: &str, limit: usize) -> String {
     }
 }
 
+/// What the script is doing, as against what it says: current state, rewritten in place.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct Saved {
+struct Current {
+    /// The history version this describes. Any other means the script was replaced after this was
+    /// written, so it is not this script's state.
+    version: u64,
+    /// Whether the policy should consult it.
+    armed: bool,
+    #[serde(default)]
+    last_failure: Option<String>,
+    #[serde(default)]
+    decided: u32,
+}
+
+impl Current {
+    /// A script just written: armed, and nothing decided.
+    fn fresh(version: u64) -> Self {
+        Self { version, armed: true, last_failure: None, decided: 0 }
+    }
+}
+
+/// `battle-script.json`, as older runs kept the source and the state together.
+#[derive(serde::Deserialize)]
+struct Legacy {
     #[serde(default)]
     source: Option<String>,
-    /// Whether the policy should consult it.
     #[serde(default)]
     armed: bool,
     #[serde(default)]
     last_failure: Option<String>,
-    /// Older files kept the script's purpose apart; [`BattleScript::open`] moves it into the
-    /// source's top comment.
-    #[serde(default, skip_serializing)]
+    /// Kept apart from the source by older files still; it becomes the source's top comment.
+    #[serde(default)]
     purpose: Option<String>,
     #[serde(default)]
     decided: u32,
 }
 
-/// A run always has a script, and the one it starts with is [`DEFAULT`].
-impl Default for Saved {
-    fn default() -> Self {
-        Self {
-            source: Some(DEFAULT.to_string()),
-            armed: true,
-            last_failure: None,
-            purpose: None,
-            decided: 0,
+/// An older run's `battle-script.json` becomes the first version and the state, and goes once
+/// both are written. The state is written first, so a crash between the two leaves state that
+/// describes no version and is not believed.
+fn migrate(run_dir: &Path) {
+    let legacy = run_dir.join(files::LEGACY_BATTLE_SCRIPT);
+    let Ok(bytes) = std::fs::read(&legacy) else { return };
+    let history = run_dir.join(files::BATTLE_SCRIPT_HISTORY);
+    // Unreadable, it is the default script, as it always was.
+    let old = serde_json::from_slice::<Legacy>(&bytes).ok().filter(|_| !history.exists());
+    if let Some(Legacy { source: Some(mut source), armed, last_failure, purpose, decided }) = old {
+        if let Some(purpose) = purpose.filter(|_| purpose_of(&source).is_none()) {
+            source = format!("// {}\n{source}", purpose.replace('\n', " "));
+        }
+        let state = Current { version: 1, armed, last_failure, decided };
+        let first = Version { version: 1, at: versions::modified_ms(&legacy), turn: None, text: source };
+        let written = serde_json::to_vec_pretty(&state)
+            .map_err(|e| e.to_string())
+            .and_then(|json| crate::run::write_atomically(&run_dir.join(files::BATTLE_SCRIPT_STATE), &json))
+            .and_then(|()| versions::append(&history, &first));
+        if let Err(failure) = written {
+            eprintln!("battle-script: {failure}");
+            return;
         }
     }
+    versions::remove_legacy(&legacy);
 }
 
 /// The first line of the comment a script opens with, which says what it is for; `None` when it
@@ -674,75 +711,81 @@ fn code_of(source: &str) -> String {
 
 /// The script on disk, written and edited through `battle-script.rhai` on the worker thread.
 pub struct BattleScript {
+    /// Every source written; an empty one is [`DEFAULT`].
+    versions: Versions,
     /// `None` for a run with no directory.
-    path: Option<PathBuf>,
-    saved: Saved,
+    state_path: Option<PathBuf>,
+    current: Current,
 }
 
 impl BattleScript {
-    /// Never fails: an unreadable file starts on [`DEFAULT`].
+    /// Never fails: an unreadable history starts on [`DEFAULT`], and unreadable state on a script
+    /// just written.
     pub fn open(run_dir: Option<&Path>) -> Self {
-        let Some(run_dir) = run_dir else {
-            return Self { path: None, saved: Saved::default() };
-        };
-        let path = run_dir.join(files::BATTLE_SCRIPT);
-        let mut saved: Saved = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
-        if saved.source.is_none() {
-            saved = Saved::default();
+        if let Some(run_dir) = run_dir {
+            migrate(run_dir);
         }
-        let mut script = Self { path: Some(path), saved };
-        if let Some(purpose) = script.saved.purpose.take() {
-            if let Some(source) = script.saved.source.as_mut().filter(|source| purpose_of(source).is_none()) {
-                *source = format!("// {}\n{source}", purpose.replace('\n', " "));
-            }
-            script.persist();
-        }
-        script
+        let versions = Versions::open(run_dir.map(|dir| dir.join(files::BATTLE_SCRIPT_HISTORY)));
+        let state_path = run_dir.map(|dir| dir.join(files::BATTLE_SCRIPT_STATE));
+        let current = state_path
+            .as_deref()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<Current>(&bytes).ok())
+            .filter(|current| current.version == versions.version())
+            .unwrap_or_else(|| Current::fresh(versions.version()));
+        Self { versions, state_path, current }
+    }
+
+    /// A write that changes the script: a new version, and the state of a script just written.
+    fn replace(&mut self, source: &str, turn: Option<u64>) {
+        self.versions.record(source, turn);
+        self.current = Current::fresh(self.versions.version());
+        self.persist();
     }
 
     pub fn source(&self) -> Option<&str> {
-        self.saved.source.as_deref()
+        Some(match self.versions.text() {
+            "" => DEFAULT,
+            source => source,
+        })
     }
 
     /// Whether the script the model wrote is deciding battle turns.
     pub fn armed(&self) -> bool {
-        self.saved.armed && self.saved.source.is_some() && !self.is_default()
+        self.current.armed && !self.is_default()
     }
 
     /// Whether [`DEFAULT`] is installed: its code, not its comment, so an older build's default
     /// with different prose still reads as one.
     pub fn is_default(&self) -> bool {
-        self.saved.source.as_deref().is_some_and(|source| code_of(source) == code_of(DEFAULT))
+        self.source().is_some_and(|source| code_of(source) == code_of(DEFAULT))
     }
 
     pub fn last_failure(&self) -> Option<&str> {
-        self.saved.last_failure.as_deref()
+        self.current.last_failure.as_deref()
     }
 
     /// The purpose, the turns decided, and why it stopped if it has; empty for the default.
     pub fn standing(&self) -> ScriptStanding {
         ScriptStanding {
-            purpose: (!self.is_default()).then(|| self.saved.source.as_deref().and_then(purpose_of)).flatten(),
-            decided: self.saved.decided,
+            purpose: (!self.is_default()).then(|| self.source().and_then(purpose_of)).flatten(),
+            decided: self.current.decided,
             // Only while it is the current state.
-            failure: (!self.armed()).then(|| self.saved.last_failure.as_deref().map(standing_failure)).flatten(),
+            failure: (!self.armed()).then(|| self.current.last_failure.as_deref().map(standing_failure)).flatten(),
         }
     }
 
     /// Persist the count the policy keeps in [`Live`], drained at the top of a turn: one writer
     /// per run directory.
     pub fn record_decided(&mut self, decided: u32) {
-        if self.saved.decided == decided { return }
-        self.saved.decided = decided;
+        if self.current.decided == decided { return }
+        self.current.decided = decided;
         self.persist();
     }
 
     /// What [`Live`] should hold: the source only while armed, since the policy runs what it gets.
     pub fn live_source(&self) -> Option<String> {
-        self.armed().then(|| self.saved.source.clone()).flatten()
+        self.armed().then(|| self.source().map(str::to_string)).flatten()
     }
 
     /// Three states, because "still the default" and "broke" want opposite sentences and neither
@@ -758,11 +801,10 @@ impl BattleScript {
 
     /// A write to `battle-script.rhai`: validated before it is armed, and the answer is the
     /// validation table. Empty goes back to [`DEFAULT`]. `Err` means nothing was changed.
-    pub fn write(&mut self, source: &str) -> Result<String, String> {
+    pub fn write(&mut self, source: &str, turn: Option<u64>) -> Result<String, String> {
         let source = source.trim();
         if source.is_empty() {
-            self.saved = Saved::default();
-            self.persist();
+            self.replace("", turn);
             return Ok("ok, back to the default script, which hands you every battle turn. They cost \
                        you a request each again."
                 .to_string());
@@ -782,17 +824,19 @@ impl BattleScript {
                 .to_string());
         }
 
+        // Kept as written, but `armed` never holds for the default's code, so neither may the answer.
+        if code_of(source) == code_of(DEFAULT) {
+            self.replace(source, turn);
+            return Ok("ok, saved, but not armed: comments aside, that is the default script, which \
+                       decides nothing and hands you every battle turn. They cost you a request each \
+                       until you write one that decides some."
+                .to_string());
+        }
+
         match validate(source) {
             Ok(table) => {
-                self.saved = Saved {
-                    source: Some(source.to_string()),
-                    armed: true,
-                    last_failure: None,
-                    purpose: None,
-                    // Zeroed rather than carried over.
-                    decided: 0,
-                };
-                self.persist();
+                // The tally is zeroed rather than carried over.
+                self.replace(source, turn);
                 Ok(format!(
                     "ok, armed: it decides from your next battle decision. Validated on {} scenarios:\n{table}",
                     SCENARIOS.len(),
@@ -806,7 +850,7 @@ impl BattleScript {
     pub fn status(&self) -> String {
         match (self.armed(), self.is_default(), self.last_failure()) {
             (true, _, _) => {
-                let decided = self.saved.decided;
+                let decided = self.current.decided;
                 format!(
                     "armed, deciding your battle turns; it has decided {decided} battle turn{} since \
                      you wrote it",
@@ -823,17 +867,18 @@ impl BattleScript {
 
     /// Keeps the script for the model to edit, deciding nothing until it is armed again.
     pub fn disarm(&mut self, why: &str) {
-        if !self.saved.armed && self.saved.last_failure.as_deref() == Some(why) {
+        if !self.current.armed && self.current.last_failure.as_deref() == Some(why) {
             return;
         }
-        self.saved.armed = false;
-        self.saved.last_failure = Some(why.to_string());
+        self.current.armed = false;
+        self.current.last_failure = Some(why.to_string());
         self.persist();
     }
 
+    /// The state only: the source is in the history, appended when it changed.
     fn persist(&self) {
-        let Some(path) = self.path.as_ref() else { return };
-        let Ok(json) = serde_json::to_vec_pretty(&self.saved) else { return };
+        let Some(path) = self.state_path.as_ref() else { return };
+        let Ok(json) = serde_json::to_vec_pretty(&self.current) else { return };
         if let Err(failure) = crate::run::write_atomically(path, &json) {
             eprintln!("battle-script: {failure}");
         }
@@ -1134,7 +1179,7 @@ mod tests {
             (Some(source), Some(purpose)) if purpose_of(source).is_none() => format!("// {}\n{source}", purpose.trim()),
             (Some(source), _) => source.to_string(),
         };
-        match script.write(&source) {
+        match script.write(&source, None) {
             Ok(answer) | Err(answer) => answer,
         }
     }
@@ -1603,17 +1648,26 @@ mod tests {
     #[test]
     fn a_corrupt_file_starts_on_the_default_rather_than_failing() {
         let scratch = Scratch::new("battle-script");
-        std::fs::write(scratch.0.join(files::BATTLE_SCRIPT), b"{ not json").unwrap();
+        std::fs::write(scratch.0.join(files::LEGACY_BATTLE_SCRIPT), b"{ not json").unwrap();
         let script = BattleScript::open(Some(&scratch.0));
         assert!(!script.armed());
         assert!(script.is_default());
+        assert!(!scratch.0.join(files::LEGACY_BATTLE_SCRIPT).exists());
+
+        // Unreadable state is a script just written, not a lost one.
+        let mut script = BattleScript::open(Some(&scratch.0));
+        set(&mut script, Some(ALWAYS_DECIDES), None);
+        std::fs::write(scratch.0.join(files::BATTLE_SCRIPT_STATE), b"{ not json").unwrap();
+        let reopened = BattleScript::open(Some(&scratch.0));
+        assert_eq!(reopened.source(), Some(ALWAYS_DECIDES));
+        assert!(reopened.armed());
     }
 
     /// A run written before there was a default is carried across it.
     #[test]
     fn a_run_from_before_the_default_is_brought_onto_it() {
         let scratch = Scratch::new("battle-script");
-        let path = scratch.0.join(files::BATTLE_SCRIPT);
+        let path = scratch.0.join(files::LEGACY_BATTLE_SCRIPT);
         std::fs::write(&path, br#"{"source":null,"armed":false,"last_failure":null}"#).unwrap();
         let script = BattleScript::open(Some(&scratch.0));
         assert!(script.is_default(), "an empty file is the default now");
@@ -1669,12 +1723,24 @@ mod tests {
     /// An older build's default, its prose since reworded, is still the default.
     #[test]
     fn an_older_default_with_other_words_is_still_the_default() {
-        let script = BattleScript { path: None, saved: Saved {
-            source: Some("// This is the default battle script.\n// It decides nothing.\n\nbattle.ask();\n".to_string()),
-            ..Saved::default()
-        } };
+        let mut script = BattleScript::open(None);
+        set(&mut script, Some("// This is the default battle script.\n// It decides nothing.\n\nbattle.ask();\n"), None);
         assert!(script.is_default());
         assert!(!script.armed(), "or the turn would claim battles are free");
+    }
+
+    /// The default's code under a comment of the model's own is still the default, so the answer
+    /// says it is not armed, as `armed()` does.
+    #[test]
+    fn writing_the_defaults_code_does_not_answer_armed() {
+        let mut script = BattleScript::open(None);
+        set(&mut script, Some(ALWAYS_DECIDES), Some("a test"));
+        let answer = set(&mut script, Some("// hand me every turn\nbattle.ask();"), None);
+        assert!(!script.armed(), "the default's code decides nothing");
+        assert_eq!(script.state(), ScriptState::Unedited);
+        assert!(!answer.contains("ok, armed"), "{answer}");
+        assert!(answer.contains("not armed"), "{answer}");
+        assert_eq!(script.source(), Some("// hand me every turn\nbattle.ask();"), "kept as written");
     }
 
     /// A script with no comment saying what it is for is refused, and nothing changes.
@@ -1682,7 +1748,7 @@ mod tests {
     fn a_script_must_open_with_what_it_is_for() {
         let mut script = BattleScript::open(None);
         set(&mut script, Some(ALWAYS_DECIDES), None);
-        let refusal = script.write("if battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);")
+        let refusal = script.write("if battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);", None)
             .expect_err("no top comment");
         assert!(refusal.contains("nothing was changed"), "{refusal}");
         assert_eq!(script.source(), Some(ALWAYS_DECIDES));
@@ -1696,19 +1762,75 @@ mod tests {
         let scratch = Scratch::new("battle-script-legacy");
         let source = "if battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);";
         let old = serde_json::json!({ "source": source, "armed": true, "purpose": "Misty's Staryu", "decided": 4 });
-        std::fs::write(scratch.0.join(files::BATTLE_SCRIPT), old.to_string()).expect("an old file");
+        std::fs::write(scratch.0.join(files::LEGACY_BATTLE_SCRIPT), old.to_string()).expect("an old file");
 
         let script = BattleScript::open(Some(&scratch.0));
         assert_eq!(script.source(), Some(format!("// Misty's Staryu\n{source}").as_str()));
         assert_eq!(script.standing().purpose.as_deref(), Some("Misty's Staryu"));
         assert!(script.armed());
-        let written = std::fs::read_to_string(scratch.0.join(files::BATTLE_SCRIPT)).expect("rewritten");
-        assert!(!written.contains("\"purpose\""), "the field is gone from the file: {written}");
+        let history = versions::page(&scratch.0.join(files::BATTLE_SCRIPT_HISTORY), 10, None);
+        assert_eq!(history.len(), 1);
+        assert!(history[0].text.starts_with("// Misty's Staryu\n"), "the history has the comment: {history:?}");
 
         // A source that already opens with a comment keeps its own.
+        let scratch = Scratch::new("battle-script-legacy");
         let old = serde_json::json!({ "source": ALWAYS_DECIDES, "armed": true, "purpose": "something else" });
-        std::fs::write(scratch.0.join(files::BATTLE_SCRIPT), old.to_string()).expect("an old file");
+        std::fs::write(scratch.0.join(files::LEGACY_BATTLE_SCRIPT), old.to_string()).expect("an old file");
         assert_eq!(BattleScript::open(Some(&scratch.0)).source(), Some(ALWAYS_DECIDES));
+    }
+
+    /// An older run's one file splits into a version and the state, once, and goes.
+    #[test]
+    fn an_older_runs_script_file_splits_into_the_history_and_the_state() {
+        let scratch = Scratch::new("battle-script-split");
+        let legacy = scratch.0.join(files::LEGACY_BATTLE_SCRIPT);
+        let old = serde_json::json!({
+            "source": ALWAYS_DECIDES, "armed": false, "last_failure": "it fled from a trainer", "decided": 17,
+        });
+        std::fs::write(&legacy, old.to_string()).expect("an old file");
+        let written = versions::modified_ms(&legacy);
+
+        let script = BattleScript::open(Some(&scratch.0));
+        assert!(!legacy.exists(), "split once, so it goes");
+        assert_eq!(script.source(), Some(ALWAYS_DECIDES));
+        assert_eq!(script.state(), ScriptState::Disarmed);
+        assert_eq!(script.last_failure(), Some("it fled from a trainer"));
+        assert_eq!(script.standing().decided, 17);
+        let history = versions::page(&scratch.0.join(files::BATTLE_SCRIPT_HISTORY), 10, None);
+        assert_eq!(history, [Version { version: 1, at: written, turn: None, text: ALWAYS_DECIDES.into() }]);
+        let state = std::fs::read_to_string(scratch.0.join(files::BATTLE_SCRIPT_STATE)).expect("the state");
+        assert!(!state.contains("source") && state.contains("it fled"), "the state holds no source: {state}");
+
+        // Reopened, nothing is migrated again and the state is still this script's.
+        let reopened = BattleScript::open(Some(&scratch.0));
+        assert_eq!(reopened.last_failure(), Some("it fled from a trainer"));
+        assert_eq!(versions::page(&scratch.0.join(files::BATTLE_SCRIPT_HISTORY), 10, None).len(), 1);
+    }
+
+    /// The source is never written beside the state, so every write is a line and the state is
+    /// only ever the latest script's.
+    #[test]
+    fn every_write_is_a_version_and_the_state_follows_the_latest() {
+        let scratch = Scratch::new("battle-script-versions");
+        let mut script = BattleScript::open(Some(&scratch.0));
+        script.write(ALWAYS_DECIDES, Some(3)).expect("arms");
+        script.disarm("it named a move the Pokémon does not know");
+        script.write("", Some(5)).expect("back to the default");
+        let history = versions::page(&scratch.0.join(files::BATTLE_SCRIPT_HISTORY), 10, None);
+        let lines: Vec<(u64, Option<u64>, &str)> = history.iter().map(|v| (v.version, v.turn, v.text.as_str())).collect();
+        assert_eq!(lines, [(1, Some(3), ALWAYS_DECIDES), (2, Some(5), "")], "the default is an empty version");
+
+        let reopened = BattleScript::open(Some(&scratch.0));
+        assert!(reopened.is_default());
+        assert_eq!(reopened.last_failure(), None, "the failure was the replaced script's");
+
+        // State left by an earlier version describes nothing now.
+        std::fs::write(
+            scratch.0.join(files::BATTLE_SCRIPT_STATE),
+            r#"{"version":1,"armed":false,"last_failure":"stale","decided":9}"#,
+        ).unwrap();
+        let reopened = BattleScript::open(Some(&scratch.0));
+        assert_eq!((reopened.last_failure(), reopened.standing().decided), (None, 0));
     }
 
     /// The deterministic policy's strategy, the one script known to finish the game, must arm.
@@ -1798,7 +1920,7 @@ mod tests {
     /// A new script's tally starts at zero.
     #[test]
     fn a_new_script_is_for_something_and_has_decided_nothing_yet() {
-        let mut script = BattleScript { path: None, saved: Saved::default() };
+        let mut script = BattleScript::open(None);
         let answer = set(&mut script, Some("if battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);"), Some("  Misty's Staryu  "));
         assert!(answer.starts_with("ok, armed"), "{answer}");
 
@@ -1824,7 +1946,7 @@ mod tests {
     /// Capped: it is re-sent on every overworld turn while the script is armed.
     #[test]
     fn a_purpose_that_runs_long_is_cut_rather_than_refused() {
-        let mut script = BattleScript { path: None, saved: Saved::default() };
+        let mut script = BattleScript::open(None);
         // Multi-byte on purpose: the prose is full of `é` and a byte slice would panic here.
         let long = "é".repeat(MAX_PURPOSE * 2);
         let answer = set(&mut script, Some("if battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);"), Some(&long));

@@ -747,6 +747,9 @@ impl crate::pokemon::policy::Policy for RecordingPolicy {
     fn pick_field_move(&mut self, state: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
         self.inner.pick_field_move(state)
     }
+    fn field_move_ended(&mut self, outcome: &crate::pokemon::policy::FieldMoveOutcome) {
+        self.inner.field_move_ended(outcome)
+    }
     fn is_exhausted(&self) -> bool { self.inner.is_exhausted() }
     fn steps_remaining(&self) -> Option<usize> { self.inner.steps_remaining() }
     fn current_step_is_long_running(&self) -> bool { self.inner.current_step_is_long_running() }
@@ -1963,6 +1966,9 @@ impl crate::pokemon::policy::Policy for CountingForget {
     fn pick_field_move(&mut self, state: &GameState) -> Option<crate::pokemon::policy::FieldMove> {
         self.inner.pick_field_move(state)
     }
+    fn field_move_ended(&mut self, outcome: &crate::pokemon::policy::FieldMoveOutcome) {
+        self.inner.field_move_ended(outcome)
+    }
     fn pick_move_to_forget(&mut self, slot: usize, moves: &[crate::pokemon::move_name::PokemonMove],
                            new_move: crate::pokemon::move_name::PokemonMoveName) -> Option<Option<usize>> {
         *self.calls.borrow_mut() += 1;
@@ -3106,5 +3112,59 @@ fn the_cartridge_s_ether_restores_the_move_its_row_names() {
             .map(|mv| mv.expect("a move").pp).collect();
         let want = if aim == 0 { [15, 0] } else { [5, 10] };
         assert_eq!(pp, want, "the Ether on move {aim}");
+    }
+}
+
+/// Every `FieldMove` handed over is answered by its driver, once, with whether the game took it,
+/// before the agent asks for anything else: never by the net under a driver that handed back mute.
+#[test]
+fn every_field_move_driver_says_whether_the_game_took_it() {
+    use crate::pokemon::policy::{FieldMove, FieldMoveOutcome, FIELD_MOVE_UNREPORTED};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct HandOver {
+        outcomes: Vec<FieldMoveOutcome>,
+        handed: bool,
+        asked_after: bool,
+    }
+    /// Hands over one field move, then records its ending and the next question.
+    struct HandsOver {
+        field_move: Option<FieldMove>,
+        log: Arc<Mutex<HandOver>>,
+    }
+    impl crate::pokemon::policy::Policy for HandsOver {
+        fn name(&self) -> &'static str { "hands-over" }
+        fn pick_overworld_action(&mut self, _state: &GameState, _graph: &crate::pokemon::world_graph::WorldGraph)
+            -> Option<crate::pokemon::actions::OverworldAction> {
+            let mut log = self.log.lock().unwrap();
+            log.asked_after |= log.handed;
+            None
+        }
+        fn pick_battle_action(&mut self, _state: &GameState) -> Option<crate::pokemon::battle::BattleAction> {
+            Some(crate::pokemon::battle::BattleAction::Run)
+        }
+        fn pick_field_move(&mut self, _state: &GameState) -> Option<FieldMove> {
+            let field_move = self.field_move.take();
+            self.log.lock().unwrap().handed |= field_move.is_some();
+            field_move
+        }
+        fn field_move_ended(&mut self, outcome: &FieldMoveOutcome) {
+            self.log.lock().unwrap().outcomes.push(outcome.clone());
+        }
+    }
+
+    for field_move in crate::pokemon::policy::one_of_every_field_move() {
+        let log = Arc::new(Mutex::new(HandOver::default()));
+        let policy = HandsOver { field_move: Some(field_move), log: Arc::clone(&log) };
+        let mut fixture = TestFixture::with_policy(PALLET_TOWN_STATE, Duration::from_secs(5 * 60), Box::new(policy));
+        while !log.lock().unwrap().asked_after {
+            fixture.step();
+        }
+        let outcomes = std::mem::take(&mut log.lock().unwrap().outcomes);
+        assert_eq!(outcomes.len(), 1, "{field_move:?} ended {outcomes:?}");
+        assert_ne!(outcomes[0], FieldMoveOutcome::Refused(FIELD_MOVE_UNREPORTED.to_string()),
+                   "{field_move:?}'s driver handed back without saying how it ended");
+        println!("{field_move:?} -> {:?}", outcomes[0]);
     }
 }

@@ -463,7 +463,8 @@ pub(crate) fn party_text(state: &GameState) -> String {
     }
     party
         .iter()
-        .map(|mon| {
+        .zip(state.pokemon.iter())
+        .map(|(mon, stored)| {
             let name = match &mon.nickname {
                 Some(nickname) => format!("{nickname} ({})", mon.species),
                 None => mon.species.clone(),
@@ -471,8 +472,9 @@ pub(crate) fn party_text(state: &GameState) -> String {
             let moves: Vec<String> = mon
                 .moves
                 .iter()
-                .map(|m| {
-                    let power = m.power.map_or("no damage".to_string(), |power| format!("{power} power"));
+                .zip(stored.moves.iter().flatten())
+                .map(|(m, known)| {
+                    let power = crate::llm::tools::power_phrase(known.name);
                     format!("{} {}/{} PP ({}, {power}, {}% accuracy)", m.name, m.pp, m.max_pp, m.move_type, m.accuracy)
                 })
                 .collect();

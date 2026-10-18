@@ -36,6 +36,27 @@ pub fn battle_only(item: ItemId) -> bool {
     ].contains(&effect)
 }
 
+/// Whether choosing `item` from a battle's ITEM menu does anything, by the routine
+/// `ItemUsePtrTable` sends it to: every other one answers "This isn't the time to use that!". A
+/// Poké Doll ends wild battles only. Whether it would help the Pokémon it is used on is
+/// [`helps_in_battle`]'s and [`restores_pp`]'s to say.
+pub fn accepted_in_battle(item: ItemId, battle_type: crate::pokemon::battle::BattleType) -> bool {
+    let Some(effect) = use_effect(item) else { return false };
+    if effect == pokered_symbols::ItemUsePokeDoll.address {
+        return battle_type == crate::pokemon::battle::BattleType::Wild;
+    }
+    [
+        pokered_symbols::ItemUseBall.address,
+        pokered_symbols::ItemUseMedicine.address,
+        pokered_symbols::ItemUsePPRestore.address,
+        pokered_symbols::ItemUsePokeFlute.address,
+        pokered_symbols::ItemUseXAccuracy.address,
+        pokered_symbols::ItemUseGuardSpec.address,
+        pokered_symbols::ItemUseDireHit.address,
+        pokered_symbols::ItemUseXStat.address,
+    ].contains(&effect)
+}
+
 /// `ItemUseBall` refuses outside a battle with the same `ItemUseNotTime` as an unusable item, and
 /// wedges the driver the same way.
 pub fn is_ball(item: ItemId) -> bool {
@@ -49,7 +70,8 @@ pub fn helps_in_battle(item: ItemId, hp: u16, max_hp: u16, status: crate::pokemo
     use crate::pokemon::status::PokemonStatus as S;
     let alive = hp > 0;
     Some(match item {
-        ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion | ItemId::MaxPotion => alive && hp < max_hp,
+        ItemId::Potion | ItemId::SuperPotion | ItemId::HyperPotion | ItemId::MaxPotion
+        | ItemId::FreshWater | ItemId::SodaPop | ItemId::Lemonade => alive && hp < max_hp,
         ItemId::FullRestore => alive && (hp < max_hp || status != S::None),
         ItemId::Revive | ItemId::MaxRevive => !alive,
         ItemId::FullHeal => alive && status != S::None,

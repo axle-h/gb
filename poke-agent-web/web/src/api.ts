@@ -68,24 +68,44 @@ export interface Status {
   run: RunStatus;
 }
 
-/** An item of the plan as older transcripts carried it, before the plan was a file. */
-export interface TodoView {
-  id: number;
-  text: string;
-  done: boolean;
-}
-
-/** One version of `plan.md`, from the event that published it. */
+/** One version of `plan.md`: a line of `/api/plan-history`, or the `plan` event that published it. */
 export interface PlanVersion {
-  seq: number;
+  /** 1 for the first and one more for each after it; 0 before the first. */
+  version: number;
   at?: number;
+  /** The turn that wrote it; absent for a clear. */
+  turn?: number;
   text: string;
 }
 
-/** A `plan` event's text, rendering an older transcript's item list as lines. */
-export function planText(event: { text?: string; items?: TodoView[] }): string {
-  if (typeof event.text === 'string') return event.text;
-  return (event.items ?? []).map((item, index) => `${index + 1}. ${item.done ? '(done) ' : ''}${item.text}`).join('\n');
+/** Versions from both lists, one per version number, oldest first; the second list wins a tie. */
+export function mergePlanVersions(a: PlanVersion[], b: PlanVersion[]): PlanVersion[] {
+  const byVersion = new Map<number, PlanVersion>();
+  for (const version of [...a, ...b]) if (version.version > 0) byVersion.set(version.version, version);
+  return [...byVersion.values()].sort((x, y) => x.version - y.version);
+}
+
+/**
+ * The list with a live version added, or `null` when it cannot be the same run's next version, as
+ * after a new run in place, which starts its history over.
+ */
+export function withLivePlan(versions: PlanVersion[], live: PlanVersion): PlanVersion[] | null {
+  const newest = versions[versions.length - 1];
+  if (live.version === 0) return newest ? null : versions;
+  if (versions.some((version) => version.version === live.version && version.text === live.text)) return versions;
+  if (!newest || live.version > newest.version) return [...versions, live];
+  return null;
+}
+
+/**
+ * Which of `versions` to show for the version a reader stepped to, `null` following the newest.
+ * The first at or after it, so a page of older versions still loading shows the oldest loaded.
+ */
+export function shownPlanIndex(versions: PlanVersion[], viewing: number | null): number {
+  const newest = versions.length - 1;
+  if (viewing === null) return newest;
+  const at = versions.findIndex((version) => version.version >= viewing);
+  return at < 0 ? newest : at;
 }
 
 /** The battle script. A failed one keeps its source but is disarmed, so show `armed` and `source` apart. */
@@ -165,8 +185,8 @@ export type UiEvent = At &
     }
   | { seq: number; type: 'turn_cancelled'; turn: number; reason: string }
   | { seq: number; type: 'run_status'; status: RunStatus }
-  /** `text` since the plan became a file; older transcripts carry `items`. */
-  | { seq: number; type: 'plan'; text?: string; items?: TodoView[] }
+  /** Older transcripts carry no `version`, and the page reads versions from `/api/plan-history`. */
+  | { seq: number; type: 'plan'; text?: string; version?: number }
   /** For whatever tells the run's story afterwards; the page draws none of it. */
   | { seq: number; type: 'timeline' }
   /** A turning point, with a save state in the run directory. */

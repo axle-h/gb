@@ -2,7 +2,7 @@
 
 use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
-use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent, Reach};
+use crate::pokemon::agent::{AgentState, PokemonAgent, Reach};
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::{Map, MapSprite};
@@ -387,7 +387,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PartyScriptSt
 
     let abort = |agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, why: String| {
         api.release_all_buttons();
-        agent.event(AgentEvent::TextBox { message: format!("party-script: {why}") });
+        agent.field_move_report(false, format!("party-script: {why}"));
         agent.set_state(AgentState::Idle);
     };
 
@@ -399,7 +399,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: PartyScriptSt
             return Ok(());
         }
         api.release_all_buttons();
-        agent.event(AgentEvent::TextBox { message: format!("{:?}: {}", s.script, s.describe(api)) });
+        agent.field_move_report(true, format!("{:?}: {}", s.script, s.describe(api)));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }

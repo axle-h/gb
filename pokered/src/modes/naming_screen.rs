@@ -133,6 +133,41 @@ impl NamingScreen {
         None
     }
 
+    /// The bytes the grid types `text` as, or the first character it has no key for. A `.` is the
+    /// grid's `<DOT>`, which English draws the same.
+    pub fn typed(text: &str) -> Result<Vec<u8>, char> {
+        text.chars()
+            .map(|c| {
+                let key = if c == '.' { "<DOT>".to_string() } else { c.to_string() };
+                match poke_core::charmap::encode(&key).as_deref() {
+                    Ok(&[byte]) if Self::position_of(byte).is_some() => Ok(byte),
+                    _ => Err(c),
+                }
+            })
+            .collect()
+    }
+
+    /// The grid's keys other than its letters and its space, in the order it lays them out. `<PK>`
+    /// and `<MN>` are one key each but no one character, so no text can ask for them.
+    pub fn symbols() -> String {
+        let mut keys: Vec<_> = (0..=u8::MAX)
+            .filter_map(|byte| Some((Self::position_of(byte)?, poke_core::charmap::TEXT_OF[byte as usize]?)))
+            .collect();
+        keys.sort();
+        keys.into_iter()
+            .filter_map(|(_, text)| match text {
+                "<DOT>" => Some('.'),
+                text => {
+                    let mut chars = text.chars();
+                    match (chars.next(), chars.next()) {
+                        (Some(c), None) if !c.is_alphabetic() && c != ' ' => Some(c),
+                        _ => None,
+                    }
+                }
+            })
+            .collect()
+    }
+
     /// The next button that takes a driver towards having `target` typed and handed back.
     pub fn press_toward(&self, target: &[u8]) -> Joypad {
         if !target.starts_with(&self.name) {
@@ -433,6 +468,17 @@ mod tests {
         assert_eq!(game.ui().get(18, 13), 0xF0, "ED, on the tile the yen sign draws from");
         assert_eq!(game.ui().row(15)[2..12], encode("lower case").unwrap()[..]);
         assert_eq!(cursor(&game), Some((1, 5)), "one tile left of the first letter");
+    }
+
+    /// Text is typed key by key, a `.` on the grid's own dot, and nothing off the grid is.
+    #[test]
+    fn text_types_only_what_the_grid_has_keys_for() {
+        assert_eq!(NamingScreen::symbols(), "×():;[]-?!♂♀/.,");
+        assert_eq!(NamingScreen::typed("Mr.Fang"), Ok(encode("Mr<DOT>Fang").unwrap()));
+        assert_eq!(NamingScreen::typed("Bo b(♀)"), Ok(encode("Bo b(♀)").unwrap()));
+        for (text, bad) in [("Rex2", '2'), ("Don't", '\''), ("Ash@", '@'), ("é", 'é'), ("<PK>", '<')] {
+            assert_eq!(NamingScreen::typed(text), Err(bad), "{text}");
+        }
     }
 
     /// `.pressedA` reads the letter out of the tilemap, so what is typed is whatever is on screen.

@@ -109,6 +109,9 @@ pub trait Policy {
         None
     }
 
+    /// How the field move last handed over ended, said once for every one by both agents.
+    fn field_move_ended(&mut self, _outcome: &FieldMoveOutcome) {}
+
     /// Called for every event the agent emits, as it is emitted and before it is buffered.
     fn on_event(&mut self, _event: &crate::pokemon::agent::AgentEvent) {}
 
@@ -593,14 +596,26 @@ pub(crate) fn battle_options(state: &GameState) -> Option<Vec<BattleAction>> {
 
     // One row per Pokémon an item would help, the one out first, and none for an item that would
     // help nobody: the cartridge answers that with "It won't have any effect." and the same menu.
-    // An Ether has one per move it would help, since it asks which move as well.
+    // An Ether has one per move it would help, since it asks which move as well. An item the
+    // cartridge has no battle use for is no row at all, and the Poké Flute is one only while one
+    // of ours sleeps, since the turn it costs does nothing else.
     let active = battle_state.active_party_slot;
     let party_order = std::iter::once(active as usize)
         .chain((0..state.pokemon.len()).filter(|&i| i != active as usize));
     let party_order: Vec<usize> = party_order.collect();
+    let asleep = |status| matches!(status, crate::pokemon::status::PokemonStatus::Asleep { .. });
+    let one_of_ours_asleep = asleep(battle_state.player.status) || state.pokemon.iter().any(|mon| asleep(mon.status));
+    // The tower's script reads an escape from its Marowak as a win and lets the player past, so a
+    // Poké Doll there would skip the fight rather than leave it.
+    let ghost_marowak = state.map.map == Map::PokemonTower6F
+        && battle_state.enemy.species == PokemonSpecies::Marowak;
     for (i, item) in state.bag.iter().enumerate() {
         let slot = i as u8;
-        if no_room && crate::pokemon::item_use::is_ball(item.id) {
+        if !crate::pokemon::item_use::accepted_in_battle(item.id, battle_state.battle_type)
+            || (no_room && crate::pokemon::item_use::is_ball(item.id))
+            || (item.id == ItemId::PokeFlute && !one_of_ours_asleep)
+            || (item.id == ItemId::PokeDoll && ghost_marowak)
+        {
             continue;
         }
         let pp_rows = |member: usize| state.pokemon.get(member)
@@ -778,6 +793,20 @@ pub enum PolicyStep {
     UseVendingMachine { at: Point8, drink: ItemId },
 }
 
+/// How a [`FieldMove`] ended, as its driver saw it: whether the game did what was asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldMoveOutcome {
+    Took,
+    /// The game, or the driver, did not; the sentence is the driver's own report.
+    Refused(String),
+    /// Something took the screen before the game had answered, as it stops a walk.
+    Stopped(OverworldActionAbortedReason),
+}
+
+/// What both agents tell the policy of a field move whose driver handed back without saying how
+/// it ended: never a driver's own words, so a test can tell the net from a report.
+pub(crate) const FIELD_MOVE_UNREPORTED: &str = "the agent lost track of it before the game answered";
+
 /// A non-walking action the agent performs itself (menus, field moves) for the front step.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum FieldMove {
@@ -804,6 +833,9 @@ pub enum FieldMove {
     },
     /// A field move from the party menu: the mon at `slot`, the entry at `move_index`.
     UseFieldMove { slot: u8, move_index: u8 },
+    /// Softboiled from `giver`, the entry at `move_index` of its field-move box, onto `target`,
+    /// which is chosen on the party menu `.softboiled` brings back.
+    Softboiled { giver: u8, move_index: u8, target: u8 },
     /// Toss `item` from the bag (START → ITEM → the item → TOSS → quantity → YES) to free a slot.
     TossItem { item: ItemId },
     /// Toss `count` of `item`, fewer than the bag holds, so its slot stays taken.
@@ -824,6 +856,84 @@ pub enum FieldMove {
     UseBagItem { item: ItemId, target: crate::pokemon::postgame::items::UseTarget },
     /// Shove the boulder at `boulder` one tile in `dir`; Strength must be armed.
     PushBoulder { boulder: poke_core::geometry::Point8, dir: gb::joypad::JoypadButton },
+}
+
+/// One of every [`FieldMove`], aimed at Pallet Town, where most of them can only be refused: each
+/// driver must say how it ended whichever way it goes.
+#[cfg(test)]
+pub(crate) fn one_of_every_field_move() -> Vec<FieldMove> {
+    use crate::pokemon::map_metadata::PlayerFacingDirection;
+    use crate::pokemon::postgame::{fishing::Rod, game_corner::Prize, gifts::PartyScript, items::UseTarget,
+                                   item_storage::PcItemOp, pc_box::PcBoxOp};
+    /// Where each variant sits in the list, so a variant added without a sample fails the count.
+    fn ordinal(field_move: &FieldMove) -> usize {
+        match field_move {
+            FieldMove::ReorderParty { .. } => 0,
+            FieldMove::TeachMove { .. } => 1,
+            FieldMove::EvolveWithStone { .. } => 2,
+            FieldMove::CutTree => 3,
+            FieldMove::CheckTrashCan { .. } => 4,
+            FieldMove::UseElevator { .. } => 5,
+            FieldMove::UseFieldItem { .. } => 6,
+            FieldMove::UsePartyScript { .. } => 7,
+            FieldMove::UseFieldMove { .. } => 8,
+            FieldMove::Softboiled { .. } => 9,
+            FieldMove::TossItem { .. } => 10,
+            FieldMove::TossSome { .. } => 11,
+            FieldMove::UseItemPc { .. } => 12,
+            FieldMove::UsePcBox { .. } => 13,
+            FieldMove::Fly { .. } => 14,
+            FieldMove::Fish { .. } => 15,
+            FieldMove::SellToMart { .. } => 16,
+            FieldMove::RedeemPrize { .. } => 17,
+            FieldMove::UseBagItem { .. } => 18,
+            FieldMove::PushBoulder { .. } => 19,
+        }
+    }
+    const VARIANTS: usize = 20;
+    let away = Point8 { x: 2, y: 2 };
+    let every = vec![
+        FieldMove::ReorderParty { slot: 0 },
+        FieldMove::TeachMove { item: ItemId::Hm01Cut, target_slot: 0 },
+        FieldMove::EvolveWithStone { stone: ItemId::FireStone, target_slot: 0, evolve_from: PokemonSpecies::Squirtle },
+        FieldMove::CutTree,
+        FieldMove::CheckTrashCan { target: away, facing: None },
+        FieldMove::UseElevator { panel: away, floor: 1 },
+        FieldMove::UseFieldItem { item: ItemId::PokeFlute, target: away },
+        FieldMove::UsePartyScript { script: PartyScript::Daycare, slot: 0, npc: (away, PlayerFacingDirection::Up) },
+        FieldMove::UseFieldMove { slot: 0, move_index: 0 },
+        FieldMove::Softboiled { giver: 0, move_index: 0, target: 0 },
+        FieldMove::TossItem { item: ItemId::Antidote },
+        FieldMove::TossSome { item: ItemId::Antidote, count: 1 },
+        FieldMove::UseItemPc { op: PcItemOp::Deposit, item: ItemId::Potion, qty: 1, pc: away },
+        FieldMove::UsePcBox { op: PcBoxOp::ChangeBox { n: 1 }, pc: away },
+        FieldMove::Fly { to: Map::ViridianCity },
+        FieldMove::Fish { rod: Rod::Old, at: away },
+        FieldMove::SellToMart { item: BagItem::new(ItemId::Potion, 1), clerk: (away, PlayerFacingDirection::Up) },
+        FieldMove::RedeemPrize { prize: Prize::Abra },
+        FieldMove::UseBagItem { item: ItemId::Potion, target: UseTarget::Nothing },
+        FieldMove::PushBoulder { boulder: away, dir: gb::joypad::JoypadButton::Up },
+    ];
+    let mut seen: Vec<usize> = every.iter().map(ordinal).collect();
+    seen.sort_unstable();
+    assert_eq!(seen, (0..VARIANTS).collect::<Vec<_>>(), "one sample of every FieldMove, each once");
+    every
+}
+
+impl FieldMove {
+    /// The bag item this works through from the START menu's ITEM list, if it does.
+    pub fn bag_item(&self) -> Option<ItemId> {
+        match *self {
+            Self::TeachMove { item, .. } | Self::TossItem { item } | Self::TossSome { item, .. }
+            | Self::UseBagItem { item, .. } | Self::UseFieldItem { item, .. } => Some(item),
+            Self::EvolveWithStone { stone, .. } => Some(stone),
+            Self::Fish { rod, .. } => Some(rod.item()),
+            Self::ReorderParty { .. } | Self::CutTree | Self::CheckTrashCan { .. } | Self::UseElevator { .. }
+            | Self::UsePartyScript { .. } | Self::UseFieldMove { .. } | Self::Softboiled { .. }
+            | Self::UseItemPc { .. } | Self::UsePcBox { .. } | Self::Fly { .. } | Self::SellToMart { .. }
+            | Self::RedeemPrize { .. } | Self::PushBoulder { .. } => None,
+        }
+    }
 }
 
 /// The Pokémon Mansion floors, whose statue switches trigger only when faced from below.
@@ -4012,6 +4122,55 @@ mod policy_helper_tests {
         shelly.moves[1] = shelly.moves[1].map(|known| PokemonMove::with_max_pp(known.name));
         assert_eq!(rows(&state, ItemId::Ether), [(Some(0), Some(1))], "SHELLY is full again");
         assert_eq!(rows(&state, ItemId::Elixer), [(Some(0), None)], "SHELLY is full again");
+    }
+
+    /// Only an item the cartridge does something with in a battle is a battle row: the rest answer
+    /// "This isn't the time to use that!" and hand the same menu back.
+    #[test]
+    fn an_item_with_no_battle_use_is_no_battle_row() {
+        use crate::pokemon::bag::{Bag, BagItem};
+        let refused = [ItemId::PpUp, ItemId::Bicycle, ItemId::Repel, ItemId::EscapeRope, ItemId::Tm34Bide,
+                       ItemId::MoonStone, ItemId::SSTicket, ItemId::RareCandy, ItemId::HpUp, ItemId::TownMap,
+                       ItemId::Itemfinder, ItemId::OldRod];
+        let accepted = [ItemId::PokeBall, ItemId::XAttack, ItemId::XAccuracy, ItemId::GuardSpec, ItemId::DireHit,
+                        ItemId::PokeDoll];
+        let mut state = crate::llm::battle_script::scenarios::hurt_wild();
+        state.bag = Bag::new(refused.iter().chain(&accepted).chain(&[ItemId::FreshWater, ItemId::PokeFlute])
+            .map(|&item| BagItem::new(item, 1)).collect());
+        assert_eq!(state.bag.len(), refused.len() + accepted.len() + 2, "the bag holds twenty");
+        let offered = |state: &GameState| battle_options(state).expect("a battle").into_iter()
+            .filter_map(|row| match row {
+                BattleAction::UseItem { item, target, .. } => Some((item.id, target)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let wild = offered(&state);
+        for item in refused {
+            assert!(wild.iter().all(|(offered, _)| *offered != item), "{item:?} is refused in a battle: {wild:?}");
+        }
+        for item in accepted {
+            assert!(wild.contains(&(item, None)), "{item:?} works in a wild battle: {wild:?}");
+        }
+        assert!(wild.contains(&(ItemId::FreshWater, Some(0))), "a drink heals whoever it is given to: {wild:?}");
+        assert!(!wild.iter().any(|(item, _)| *item == ItemId::PokeFlute), "nobody of ours is asleep: {wild:?}");
+
+        state.pokemon.get_mut(1).expect("a bench").status = crate::pokemon::status::PokemonStatus::Asleep { counter: 2 };
+        assert!(offered(&state).contains(&(ItemId::PokeFlute, None)), "it wakes the bench");
+
+        let mut marowak = state.clone();
+        marowak.map.map = Map::PokemonTower6F;
+        marowak.battle.as_mut().expect("a battle").enemy.species = PokemonSpecies::Marowak;
+        // Without the Scope it is a ghost battle, which offers only `Run` anyway.
+        marowak.bag = Bag::new(marowak.bag.iter().skip(1).cloned()
+            .chain([BagItem::new(ItemId::SilphScope, 1)]).collect());
+        assert!(offered(&marowak).contains(&(ItemId::XAttack, None)), "the Scope makes it a battle: {:?}", offered(&marowak));
+        assert!(!offered(&marowak).iter().any(|(item, _)| *item == ItemId::PokeDoll),
+                "a Poké Doll would skip the tower's Marowak");
+
+        state.battle.as_mut().expect("a battle").battle_type = BattleType::Trainer;
+        assert!(!offered(&state).iter().any(|(item, _)| *item == ItemId::PokeDoll),
+                "`ItemUsePokeDoll` ends wild battles only");
     }
 }
 

@@ -97,24 +97,23 @@ else is built around.
 whose id comes from the menu that kind of decision carries. Everything else is a small virtual
 filesystem behind `read_file`, `write_file` and `edit_file` — the party, the bag, the map picture,
 the walkthrough, the way to any map walked, the plan, the battle script — so the four tools are the
-same on every request and a prompt cache keyed on them never breaks. The turn is built to make reading unnecessary: location,
-party, money, badges, what is on screen and the menu of what can be done are all in the request. An
-action the game would refuse is not in that menu, because the cartridge refuses a missing badge by
-dropping back to the menu it came from and the agent has no exit condition for that — but the turn
-says once that the trees and boulders are there and what would move them, since a model shown no way
-forward invents reasons why.
+same on every request and a prompt cache keyed on them never breaks. The turn is built to make
+reading unnecessary: location, party, money, badges, what is on screen and the menu of what can be
+done are all in the request. An action the game would refuse is not in that menu, because the
+cartridge refuses a missing badge by dropping back to the menu it came from and the agent has no
+exit condition for that — but the turn says once that the trees and boulders are there and what
+would move them, since a model shown no way forward invents reasons why.
 
-Three things cut what a run spends. One reply may carry up to four `choose_action` calls from the
-same menu, each re-resolved against the live game when its turn comes, so anything that stops one
-stops the rest. A walk an interrupting battle stopped is taken up again once it is over, unless a
-party member fainted in it.
-And `battle-script.rhai` lets the model write the mechanical part of a battle down once, as a short
-[Rhai](https://rhai.rs) program evaluated on the emulator thread inside `pick_battle_action` — no
-request, no round trip, no latency — which can hand any one turn back with `battle.ask()`. The
-sandbox has no file, process or network API, the engine caps operations, time, sizes and depth, a new
-script is put through seven made-up battles before it is armed, and one failure disarms it for the
-run. After every scripted battle the model gets a report, because a scripted battle is otherwise
-invisible.
+Three things cut what a run spends. On an overworld or mart turn one reply may carry up to four
+`choose_action` calls from the same menu, each re-resolved against the live game when its turn
+comes, so anything that stops one stops the rest. A walk an interrupting battle stopped is taken up
+again once it is over, unless a party member fainted in it. And `battle-script.rhai` lets the model
+write the mechanical part of a battle down once, as a short [Rhai](https://rhai.rs) program
+evaluated on the emulator thread inside `pick_battle_action` — no request, no round trip, no
+latency — which can hand any one turn back with `battle.ask()`. The sandbox has no file, process or
+network API, the engine caps operations, time, sizes and depth, a new script is put through seven
+made-up battles before it is armed, and one failure disarms it for the run. After every scripted
+battle the model gets a report, because a scripted battle is otherwise invisible.
 
 Where a decision is genuinely one decision it costs one: `cut down the tree at (5, 8)` walks up and
 cuts, and a boulder row is the whole goal — `the boulder at (5, 15), to push it onto the switch at
@@ -124,15 +123,17 @@ well as the target, because a floor with two holes has exactly one boulder that 
 The model keeps a **plan**, `plan.md`, free text it writes and edits itself, drawn on the page with
 every earlier version a step back. It is the only thing it writes that survives a compaction, and it
 is not sent with the turn: each turn ends on a one-line reminder that it is there, louder on the
-turn after a compaction, a restart or a clear. The conversation survives a restart too: `history.json` is rewritten each turn, and `conversation.jsonl`
-is appended to and never rewritten, so it keeps every message a compaction replaced.
+turn after a compaction, a restart or a clear. The conversation survives a restart too:
+`history.json` is rewritten each turn, and `conversation.jsonl` is appended to and never rewritten,
+so it keeps every message a compaction replaced.
 
-Every tool that ends a turn takes a required `summary` in the model's own words, because nothing else
-it says about a turn survives the turn. A file written under `issues/` is where a wrong menu goes and
-deliberately does **not** end the turn: the earlier escape hatch was over-used precisely because it
-was the one way to finish a turn without choosing. `map.png` answers with a **picture** — the whole map from the
-cartridge's own tile graphics, NPCs where they stand and facing where they face, warps and edges
-labelled, unreachable ground dimmed, a coordinate ruler — rendered on the worker thread.
+Every tool that ends a turn takes a required `summary` in the model's own words, because nothing
+else it says about a turn survives the turn. A file written under `issues/` is where a wrong menu
+goes and deliberately does **not** end the turn: the earlier escape hatch was over-used precisely
+because it was the one way to finish a turn without choosing. `map.png` answers with a **picture** —
+the whole map from the cartridge's own tile graphics, NPCs where they stand and facing where they
+face, warps and edges labelled, unreachable ground dimmed, a coordinate ruler — rendered on the
+worker thread.
 
 Anything the model does not decide, the agent handles: dialogue advanced, menus navigated, paths
 computed from a graph of all 248 maps built out of the ROM's own headers. A **watchdog** covers the
@@ -159,10 +160,11 @@ Everything a run needs is one directory, `$GB_RUN_DIR/<run-id>/`:
 | `state.gbst` | the save state — the emulator, exactly as it was |
 | `sram.bin` | the cartridge's battery-backed save |
 | `transcript.jsonl` | every event, appended; what `/api/history` replays into a page that just loaded |
-| `plan.md` | the model's own plan, as it last wrote it — what outlives a compaction |
-| `battle-script.json` | the program deciding its battle turns, and whether it is still armed |
+| `plan-history.jsonl` | every version of the model's own plan, the last being the plan — what outlives a compaction |
+| `battle-script-history.jsonl` | every version of the program deciding its battle turns, the last being the one in use |
+| `battle-script-state.json` | whether that program is still armed, why it stopped, and how many turns it decided |
 | `scripted-progress.json` | how far along the scripted route this run is — `--policy deterministic` only |
-| `history.json` | the live conversation, rewritten each turn — what a restart resumes on |
+| `history.json` | the live conversation, signed thinking and all, rewritten each turn — what a restart resumes on |
 | `conversation.jsonl` | every message ever sent, appended; what a compaction replaced |
 | `moments.jsonl` | the run's turning points — badges, bosses, new species, evolutions, black-outs, the Hall of Fame — each naming its save state |
 | `moments/` | those save states, each carrying the screen it was taken on |
@@ -181,7 +183,7 @@ time**, the one figure that survives a resume without bookkeeping.
 ## The web UI
 
 `poke-agent-web/web/` is a Vite + React + TypeScript SPA, embedded into the binary by `rust-embed`
-and served by the same process that runs the emulator. Eleven read-only endpoints and three that are
+and served by the same process that runs the emulator. Thirteen read-only endpoints and three that are
 not:
 
 | | |
@@ -190,6 +192,8 @@ not:
 | `/api/video` | binary: a keyframe, then 8×8 block deltas, deflated per connection — about 21 kbit/s |
 | `/api/audio` | binary: a header, then raw Opus packets — 24 kbit/s, and nothing until a viewer asks |
 | `/api/history?since=` | the transcript backlog, so a page that just loaded is not empty |
+| `/api/plan-history?limit=&before=` | the plan's versions, a page at a time back from the newest, for the plan panel |
+| `/api/battle-script-history?limit=&before=` | the same for the battle script |
 | `/api/leaderboard?limit=` | the runs that have finished the game, fastest first |
 | `/api/badges.png` | the eight gym badges, decoded from the cartridge's trainer-card graphics |
 | `/api/pokemon/{dex}/front.png` | one Pokémon's battle sprite, from the disassembly's picture |

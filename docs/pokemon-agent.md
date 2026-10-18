@@ -59,6 +59,8 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
   mart open while the policy thinks — is a frame-timing change only `full_playthrough` can price.
 - An Ether's move menu leaves the party's HP slashes on screen, so `UsingItem` tells it by its
   geometry before it asks whether the party menu is up, and keeps both off its last message.
+- Softboiled brings the party menu back for its target and an A there on the giver asks again, so
+  it has drivers of its own (`postgame::softboiled`, the native `Heal`), never `UseFieldMove`.
 - Mimic's menu has no B and an A copies whatever the cursor is on, so both agents ask
   `pick_move_to_mimic` (`drive_mimic_menu`, `NativeAgent::mimic_answer`). The emulated one finds it
   by its WHICH TECHNIQUE? line: `wMoveMenuType` and the geometry outlive it.
@@ -202,7 +204,9 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
 - An abort's `Textbox` reason reads "the game stopped you to say something": "it was interrupted"
   made a deployed run file a bug about a locked gym. Nothing counts repeated aborts.
 - Every driver exit reports, and a `TextBox` the agent made up is the cartridge's voice used for the
-  agent's own account. A boulder push is the one action still invisible — the shove runs as a script
+  agent's own account. A field move's first word is its ending (`field_move_report` on both
+  agents), so a driver says it the moment the game answers, and a press it could not foresee
+  counts: the Poké Flute's battle and a prize Pokémon's naming screen are the item taken. A boulder push is the one action still invisible — the shove runs as a script
   that takes the state away, so the goal around it is what completes.
 
 ## The text reader
@@ -277,5 +281,7 @@ Almost every jam is a menu the agent's own A press re-enters with the cursor unt
 - The heartbeat is sent on change with a 2 s keepalive, and `says_the_same_as` excludes the clocks —
   anything added to `StatusSnapshot` must be compared there. `/api/events` opens with the latest
   heartbeat, plan and battle script.
+- Plan versions come from `/api/plan-history`, not the transcript, keyed by version number with
+  the live `plan` event; one that cannot be the next is a new run in place (`api.ts` `withLivePlan`).
 - `STALE_MS` is the reconnect signal on both streams, because a dead network produces no error, and
   speed is derived from consecutive heartbeats rather than the lifetime average.

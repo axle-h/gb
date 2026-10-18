@@ -646,7 +646,7 @@ header .run.error {
   color: var(--warn);
 }
 
-/* `report_issue` is written for a person, so it is the one tool row not in the calm blue. */
+/* A write under `issues/` is meant for a person, so it is the one tool row not in the calm blue. */
 .entry.tool.issue .chip,
 .entry.tool.issue .body {
   color: var(--warn);

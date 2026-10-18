@@ -813,3 +813,145 @@ fn a_slots_row_is_chosen_by_its_id_and_the_next_turn_says_what_it_won() {
     assert!(told.as_deref().is_some_and(|line| line.contains("played 10 spins at the slot machine: 200 coins became")),
             "the model was told {told:?}");
 }
+
+/// Pallet Town, standing outside, with the starter.
+const PALLET: &[u8] = include_bytes!("../data/pallet-town-state.bin");
+
+/// An Ether's overworld row restores the one move its id names.
+#[test]
+fn an_ether_row_restores_the_move_it_names() {
+    use crate::pokemon::item::ItemId;
+    use crate::pokemon::postgame::items::{bag_quantity, move_pp};
+    use crate::pokemon::integration_tests::llm_harness::takes_once_offered;
+    let situations = Arc::new(Mutex::new(Vec::new()));
+    let brain = takes_once_offered("item:Ether@<slot>:<move>", &["item:Ether@0:1"], Arc::clone(&situations));
+    let mut run = LlmRun::builder(PALLET).named("ether-row").game_time(Duration::from_secs(10 * 60)).start(Box::new(brain));
+    // Debug tier: a spent move, and an Ether to restore it with.
+    let mut party = run.fixture().game_state().pokemon.clone();
+    let untouched = party[0].moves[0];
+    party[0].moves[1].as_mut().expect("the starter knows two moves").pp = 0;
+    run.fixture().api().debug_set_party(&party).expect("a party can be installed");
+    run.fixture().api().debug_give_item(ItemId::Ether, 1).expect("room for an Ether");
+
+    let restored = run.tick_until(PATIENCE, |run| run.fixture().try_game_state().is_ok_and(|state|
+        bag_quantity(&state, ItemId::Ether) == 0 && state.mode == crate::pokemon::encoding::GameMode::Overworld));
+    let situations = situations.lock().expect("not poisoned").clone();
+    let offer = situations.iter().flat_map(|turn| turn.lines()).find(|line| line.starts_with("- `item:Ether@<slot>:<move>`"))
+        .unwrap_or_else(|| panic!("no Ether row: {situations:#?}"));
+    assert!(offer.ends_with(&format!("restores 10 PP to one move: 0:1 {}'s {} 0/{}",
+        crate::llm::prompt::named(&party[0]), party[0].moves[1].unwrap().name, party[0].moves[1].unwrap().name.metadata().pp)), "{offer}");
+    assert!(restored, "the Ether was never used: {situations:#?}");
+    let state = run.fixture().game_state();
+    assert_eq!(move_pp(&state.pokemon[0].moves[1].unwrap()), 10, "the move the id names gets 10 PP");
+    assert_eq!(state.pokemon[0].moves[0], untouched, "and no other");
+}
+
+/// Softboiled: not offered while nobody else is hurt or the giver has a fifth of its max HP or
+/// less; a fainted target refused in the game's words; a hurt one healed, and the menus left.
+#[test]
+fn a_softboiled_row_heals_a_hurt_member_and_only_when_the_game_would() {
+    use crate::pokemon::integration_tests::llm_harness::takes_once_offered;
+    use crate::pokemon::move_name::PokemonMoveName as M;
+    use crate::pokemon::pokemon::Pokemon;
+    use crate::pokemon::species::PokemonSpecies;
+    let situations = Arc::new(Mutex::new(Vec::<String>::new()));
+    let brain = takes_once_offered("softboiled@<slot>", &["softboiled@2", "softboiled@0"], Arc::clone(&situations));
+    let mut run = LlmRun::builder(PALLET).named("softboiled-row").game_time(Duration::from_secs(10 * 60)).start(Box::new(brain));
+    // Debug tier: the starter, a Chansey that knows Softboiled, and a fainted Pidgey.
+    let state = run.fixture().game_state();
+    let mut party = crate::pokemon::party::PokemonParty::default();
+    party.push(state.pokemon[0].clone()).expect("room");
+    let chansey = Pokemon::maxed(PokemonSpecies::Chansey, "CHANSEY", [M::Pound, M::Softboiled, M::Growl, M::Minimize],
+                                 state.name.clone(), state.player_id);
+    let pidgey = Pokemon::maxed(PokemonSpecies::Pidgey, "PIDGEY", [M::Gust, M::SandAttack, M::QuickAttack, M::Tackle],
+                                state.name.clone(), state.player_id);
+    let (max, share, starter_max) = (chansey.stats.hp, chansey.stats.hp / 5, party[0].stats.hp);
+    party.push(chansey).expect("room");
+    party.push(pidgey).expect("room");
+    run.fixture().api().debug_set_party(&party).expect("a party can be installed");
+    run.fixture().api().debug_set_hp(2, 0);
+
+    let turn_showing = |run: &mut LlmRun, needles: &[String]| -> String {
+        let from = situations.lock().expect("not poisoned").len();
+        let shown = |turns: &[String]| turns[from..].iter().find(|turn| needles.iter().all(|n| turn.contains(n.as_str()))).cloned();
+        run.tick_until(PATIENCE, |_| shown(&situations.lock().expect("not poisoned")).is_some());
+        shown(&situations.lock().expect("not poisoned")).unwrap_or_else(|| panic!("no turn showed {needles:?}"))
+    };
+    let nobody_hurt = turn_showing(&mut run, &[format!("CHANSEY Lv100 (Normal) — {max}/{max} HP")]);
+    assert!(!nobody_hurt.contains("`softboiled@"), "{nobody_hurt}");
+
+    run.fixture().api().debug_set_hp(0, 1);
+    run.fixture().api().debug_set_hp(1, share);
+    let weak = turn_showing(&mut run, &[format!("— 1/{starter_max} HP"), format!("— {share}/{max} HP")]);
+    assert!(!weak.contains("`softboiled@"), "a fifth of the max HP is not enough to give: {weak}");
+
+    run.fixture().api().debug_set_hp(1, max);
+    let healed = (1 + share).min(starter_max);
+    turn_showing(&mut run, &[format!("— {healed}/{starter_max} HP")]);
+    let situations = situations.lock().expect("not poisoned").clone();
+    let offer = situations.iter().flat_map(|turn| turn.lines()).find(|line| line.starts_with("- `softboiled@<slot>`"))
+        .unwrap_or_else(|| panic!("no Softboiled row: {situations:#?}"));
+    assert!(offer.ends_with(&format!("CHANSEY ({max}/{max} HP) gives {share} of its HP to another party member with \
+        Softboiled: 0 {} 1/{starter_max} HP", crate::llm::prompt::named(&party[0]))), "only the hurt starter: {offer}");
+    assert!(situations.iter().any(|turn| turn.contains("cannot revive")), "the fainted Pidgey was not refused");
+    let state = run.fixture().game_state();
+    assert_eq!(state.pokemon[1].current_hp, max - share, "the giver pays a fifth of its max HP");
+    assert_eq!(state.pokemon[2].current_hp, 0, "the fainted Pidgey stays fainted");
+}
+
+/// Softboiled with a walk through a door chained behind it in one reply: the walk is taken once the
+/// heal lands, and dropped, and named in the next turn's note, when the game refuses the heal. The
+/// refusal is made live, after the row was resolved: the target faints under the driver, and the
+/// cartridge will not heal a fainted Pokémon.
+fn softboiled_then_a_door(refuse: bool, name: &'static str) -> (LlmRun, Vec<String>, String) {
+    use crate::pokemon::integration_tests::llm_harness::chains_a_door_behind;
+    use crate::pokemon::move_name::PokemonMoveName as M;
+    use crate::pokemon::pokemon::Pokemon;
+    use crate::pokemon::species::PokemonSpecies;
+    let situations = Arc::new(Mutex::new(Vec::<String>::new()));
+    let door = Arc::new(Mutex::new(None));
+    let brain = chains_a_door_behind("softboiled@<slot>", "softboiled@0", Arc::clone(&situations), Arc::clone(&door));
+    let mut run = LlmRun::builder(PALLET).named(name).game_time(Duration::from_secs(10 * 60)).start(Box::new(brain));
+    // Debug tier: the starter at 1 HP, and a Chansey that knows Softboiled.
+    let state = run.fixture().game_state();
+    let mut party = crate::pokemon::party::PokemonParty::default();
+    party.push(state.pokemon[0].clone()).expect("room");
+    party.push(Pokemon::maxed(PokemonSpecies::Chansey, "CHANSEY", [M::Pound, M::Softboiled, M::Growl, M::Minimize],
+                              state.name.clone(), state.player_id)).expect("room");
+    run.fixture().api().debug_set_party(&party).expect("a party can be installed");
+    run.fixture().api().debug_set_hp(0, 1);
+
+    let mut fainted = false;
+    let settled = run.tick_until(PATIENCE, |run| {
+        if refuse && !fainted && run.fixture().agent.state_debug().starts_with("softboiled") {
+            run.fixture().api().debug_set_hp(0, 0);
+            fainted = true;
+        }
+        let asked_again = situations.lock().expect("not poisoned").len() > 1;
+        let state = run.fixture().try_game_state();
+        asked_again || state.is_ok_and(|state| state.map.map != crate::pokemon::map::Map::PalletTown && state.map.position_settled)
+    });
+    assert!(settled, "neither the door nor a second turn came of the chain");
+    assert_eq!(fainted, refuse, "the driver was never seen running");
+    let situations = situations.lock().expect("not poisoned").clone();
+    let door = door.lock().expect("not poisoned").clone().unwrap_or_else(|| panic!("no chain was sent: {situations:#?}"));
+    (run, situations, door)
+}
+
+#[test]
+fn a_chain_stops_at_a_field_move_the_game_refuses() {
+    let (mut run, situations, door) = softboiled_then_a_door(true, "chain-refused");
+    assert_eq!(run.fixture().game_state().map.map, crate::pokemon::map::Map::PalletTown, "the door was walked through");
+    let next = situations.get(1).unwrap_or_else(|| panic!("no turn after the refusal: {situations:#?}"));
+    assert!(next.contains("`softboiled@0` was not done: Softboiled from party slot 1 healed nobody"), "{next}");
+    assert!(next.contains(&format!("So `{door}`, which you had chained behind it, was not taken.")), "{next}");
+}
+
+#[test]
+fn a_chain_goes_on_past_a_field_move_the_game_takes() {
+    let (mut run, situations, _) = softboiled_then_a_door(false, "chain-taken");
+    let state = run.fixture().game_state();
+    assert_ne!(state.map.map, crate::pokemon::map::Map::PalletTown, "the door behind the heal was not walked: {situations:#?}");
+    assert!(state.pokemon[0].current_hp > 1, "the heal never landed");
+    assert_eq!(situations.len(), 1, "the chain asked again before reaching the door: {situations:#?}");
+}

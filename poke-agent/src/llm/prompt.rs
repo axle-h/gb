@@ -97,7 +97,8 @@ How the interface works:
   Reading a directory lists it; `routes/` is the same list as `routes.md`.
 - Not everything is walking: teaching a move, using an item, flying, the lead, the PC, a lift and \
   the rest are overworld rows too, each offered only where the game would allow it. A row whose id \
-  holds `<slot>` is one row for every party slot, and its description names the slots that work.
+  holds `<slot>` is one row for every party slot, `<slot>:<move>` for every move of every party \
+  member, and its description names the ones that work.
 - **The agent can be wrong, and a file under `issues/` is how you say so.** If the action menu \
   does not describe what is in front of you, or an action keeps failing for a reason you cannot \
   see, write one, as `issues/missing-ladder.md`: what you were trying to do, what you expected, \
@@ -463,8 +464,7 @@ pub fn situation(
         // Three things this turn did not say, each of which decides it.
         TurnContext::ForgetMove { slot, new, current } => {
             let learner = state.pokemon.iter().nth(slot);
-            let (summary, foe) = crate::llm::tools::forget_sides(state, slot);
-            let foe = foe.filter(|foe| foe.current_hp > 0);
+            let summary = crate::llm::tools::forget_learner(state, slot);
             out.push_str(&format!(
                 "{} is trying to learn **{new}** but already knows four moves. Pick one to replace, \
                  or decline and keep all four.\n\n- new: {}\n\n",
@@ -473,7 +473,7 @@ pub fn situation(
                     None => "A Pokémon".to_string(),
                 },
                 crate::llm::tools::forget_move_line(
-                    new, new.metadata().pp, summary.as_ref(), foe.as_ref(), state.ruleset),
+                    &crate::pokemon::move_name::PokemonMove::with_max_pp(new), summary.as_ref(), state.ruleset),
             ));
             if current.iter().any(|m| crate::llm::tools::hm_move(m.name).is_some()) {
                 out.push_str(
@@ -726,7 +726,7 @@ pub fn situation(
             .moves
             .iter()
             .flatten()
-            .map(|m| format!("{} {}pp", m.name, m.pp))
+            .map(|m| format!("{} {}pp", m.name, crate::pokemon::postgame::items::move_pp(m)))
             .collect();
         out.push_str(&format!(
             "{slot}. {} Lv{} ({}) — {}/{} HP{} — {}\n",
@@ -761,8 +761,9 @@ pub fn situation(
         }
         if crate::pokemon::policy::no_room_for_a_catch(state) {
             out.push_str(&format!("⚠️ Your party and PC box {} are both full, so the game refuses to \
-                                   throw any ball and none is offered. To catch again, `change_box` \
-                                   at a PC or deposit or release a Pokémon there.\n",
+                                   throw any ball and none is offered. To catch again, open a box \
+                                   with room at a PC with `pc:box*N`, or deposit or release a \
+                                   Pokémon there.\n",
                                   state.current_box + 1));
         }
         if stood_on_the_map(state, battle.enemy.species) {
@@ -820,14 +821,12 @@ pub fn situation(
                     .to_string()
             }
             DecisionKind::Nickname => format!(
-                "(no rows: the id you send is the nickname, at most {} letters, digits, spaces and \
-                 `.,:;'-?!()[]/`. `NONE`, or the species name, keeps the species name, and is the \
-                 answer only if nothing comes to mind.)\n",
+                "(no rows: the id you send is the nickname, at most {} characters. {} `NONE`, or the \
+                 species name, keeps the species name, and is the answer only if nothing comes to \
+                 mind.)\n",
                 crate::llm::tools::MAX_NICKNAME,
+                crate::llm::tools::nickname_keys(),
             ),
-            DecisionKind::MimicMove => {
-                "(the enemy's moves could not be read. Choose `mimic:0`.)\n".to_string()
-            }
             DecisionKind::MartPurchase => {
                 "(the shop's stock could not be read. Send `buy:` and the item, or `leave`.)\n".to_string()
             }
@@ -842,8 +841,9 @@ pub fn situation(
     if kind == DecisionKind::Stuck {
         out.push_str(&format!(
             "- `press:<buttons>` — press these in order, then hand control back to the agent: \
-             comma-separated, from up, down, left, right, a, b, start and select, at most {}, as \
-             `press:b,a`. B backs out of most menus and closes most boxes; A advances text\n",
+             comma-separated, from up, down, left, right, a, b, start and select, as `press:b,a`. \
+             Only the first {} are pressed and any after them are dropped. B backs out of most \
+             menus and closes most boxes; A advances text\n",
             crate::pokemon::agent::MANUAL_INPUT_CAPACITY,
         ));
     }
@@ -1108,8 +1108,7 @@ mod tests {
                 DecisionKind::Battle => tools::battle_menu(&state),
                 DecisionKind::MartPurchase => tools::mart_menu(&snapshot, &state),
                 DecisionKind::ForgetMove => {
-                    let (learner, foe) = tools::forget_sides(&state, 0);
-                    tools::forget_menu(&party_moves, state.ruleset, learner.as_ref(), foe.as_ref())
+                    tools::forget_menu(&party_moves, state.ruleset, tools::forget_learner(&state, 0).as_ref())
                 }
                 DecisionKind::MimicMove => tools::mimic_menu(&state, &enemy_moves),
                 DecisionKind::Nickname | DecisionKind::Stuck => Vec::new(),
@@ -1212,7 +1211,7 @@ mod tests {
     fn the_system_message_never_changes_and_the_plan_is_not_in_it() {
         let mut plan = crate::llm::plan::Plan::open(None);
         let before = system_message();
-        plan.write("1. beat Brock").expect("fits");
+        plan.write("1. beat Brock", None).expect("fits");
         assert_eq!(system_message(), before, "writing the plan must not touch the cacheable prefix");
         assert_eq!(before.text().expect("prose"), SYSTEM_PROMPT);
         assert!(!SYSTEM_PROMPT.contains("beat Brock"));
@@ -1290,6 +1289,25 @@ mod tests {
                   TurnContext::None, &[])
     }
 
+    /// The PP byte's top two bits count PP Ups: the party block, `party.md` and the forget rows say
+    /// the PP left, out of the maximum the Ups give, and never the byte.
+    #[test]
+    fn pp_ups_are_not_read_as_pp() {
+        let mut state = state_from(include_bytes!("../pokemon/data/pallet-town-state.bin"));
+        let known = state.pokemon[0].moves[0].as_mut().expect("the starter knows a move");
+        let (name, base) = (known.name, known.name.metadata().pp);
+        known.pp = (3 << 6) | 5;
+        let max = base + (base / 5).min(7) * 3;
+        let party = overworld_turn(&state, &[]);
+        let block = party.split("### Party\n").nth(1).expect("a party block");
+        assert!(block.lines().next().is_some_and(|line| line.contains(&format!("{name} 5pp"))), "{block}");
+        let file = crate::llm::files::party_text(&state);
+        assert!(file.contains(&format!("{name} 5/{max} PP")), "{file}");
+        let current: Vec<_> = state.pokemon[0].moves.iter().flatten().copied().collect();
+        let forget = crate::llm::tools::forget_menu(&current, state.ruleset, None);
+        assert!(forget[0].description.contains(&format!(", 5/{max} pp")), "{}", forget[0].description);
+    }
+
     #[test]
     fn a_ball_the_box_has_no_room_for_is_not_offered_and_the_turn_says_why() {
         use crate::pokemon::battle::BattleAction;
@@ -1316,6 +1334,9 @@ mod tests {
         state.current_box = 2;
         assert_eq!(balls(&state), 0, "the game refuses every throw with the box full too");
         assert!(battle_turn(&state).contains("PC box 3 are both full"), "{}", battle_turn(&state));
+        // The way out it names is the PC's own row.
+        assert!(battle_turn(&state).contains("`pc:box*N`") && !battle_turn(&state).contains("change_box"),
+                "{}", battle_turn(&state));
 
         state.boxed_pokemon.pop();
         assert_eq!(balls(&state), 1);
@@ -1681,7 +1702,7 @@ mod tests {
         let current = [PokemonMove { name: PokemonMoveName::Tackle, pp: 35 }; 4];
         let turn = |state: &GameState, new| situation(
             DecisionKind::ForgetMove, state, &ApiSnapshot::default(), &[],
-            &crate::llm::tools::forget_menu(&current, state.ruleset, None, None),
+            &crate::llm::tools::forget_menu(&current, state.ruleset, None),
             TurnContext::ForgetMove { slot: 0, current: &current, new }, &[],
         );
 
@@ -1692,6 +1713,43 @@ mod tests {
         assert!(modern.contains("30/30 pp — Doubles the user's critical-hit rate.\n"), "{modern}");
         let tackle = turn(&state, PokemonMoveName::Tackle);
         assert!(tackle.contains("\n- new: Tackle — Normal, 35 power, 95% accuracy, 35/35 pp\n"), "a plain attack says nothing more: {tackle}");
+    }
+
+    /// A `press:` list past the agent's queue is cut, not refused, so the turn says so.
+    #[test]
+    fn the_stuck_turn_says_a_long_press_list_is_cut() {
+        let state = crate::llm::battle_script::scenarios::healthy_wild();
+        let turn = situation(DecisionKind::Stuck, &state, &ApiSnapshot::default(), &[], &[],
+                             TurnContext::Stuck { agent_state: "text", stuck_for: std::time::Duration::from_secs(300) }, &[]);
+        let cut = format!("Only the first {} are pressed and any after them are dropped",
+                          crate::pokemon::agent::MANUAL_INPUT_CAPACITY);
+        assert!(turn.contains(&cut), "{turn}");
+    }
+
+    /// The naming turn states the keyboard's own set, so the model is never told it may send what
+    /// the recreation cannot type.
+    #[test]
+    fn the_naming_turn_states_what_the_keyboard_can_type() {
+        let state = crate::llm::battle_script::scenarios::healthy_wild();
+        let turn = situation(DecisionKind::Nickname, &state, &ApiSnapshot::default(), &[], &[],
+                             TurnContext::Nickname(crate::pokemon::species::PokemonSpecies::Eevee), &[]);
+        let keys = pokered::modes::naming_screen::NamingScreen::symbols();
+        assert!(turn.contains(&format!("letters, spaces and `{keys}`, and nothing else")), "{turn}");
+        assert!(!turn.contains("digits"), "the grid has none: {turn}");
+    }
+
+    /// The move on offer mid-battle is weighed for the rest of the game, not priced against the foe.
+    #[test]
+    fn a_move_being_learnt_mid_battle_carries_no_damage_estimate() {
+        use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
+        let state = crate::llm::battle_script::scenarios::healthy_wild();
+        let current = [PokemonMove { name: PokemonMoveName::Tackle, pp: 35 }; 4];
+        let turn = situation(
+            DecisionKind::ForgetMove, &state, &ApiSnapshot::default(), &[], &[],
+            TurnContext::ForgetMove { slot: 0, current: &current, new: PokemonMoveName::Ember }, &[],
+        );
+        let new = turn.lines().find(|line| line.starts_with("- new: ")).expect("the new move's line");
+        assert!(new.starts_with("- new: Ember — Fire, 40 power") && !new.contains('~') && !new.contains("of its HP"), "{new}");
     }
 
     /// A party line that names only the nickname stops naming the Pokémon at all.

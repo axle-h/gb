@@ -3,7 +3,7 @@
 
 use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
-use crate::pokemon::agent::{AgentEvent, AgentState, PokemonAgent, Reach};
+use crate::pokemon::agent::{AgentState, PokemonAgent, Reach};
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map_metadata::PlayerFacingDirection;
@@ -60,6 +60,15 @@ impl ItemPcState {
     pub fn new(op: PcItemOp, item: ItemId, qty: u8, pc: Point8, start_qty: u8) -> Self {
         Self { op, item, qty: qty.min(start_qty), pc, start_qty, press: true, entered_menu: false }
     }
+
+    /// What moved, as the native agent words it: a source that held none moves none, which must
+    /// not read as a transfer.
+    fn report(&self, moved: u8) -> String {
+        match moved {
+            0 => format!("{:?} {}: the PC moved none", self.op, self.item),
+            moved => format!("{:?} {} x{moved} via the PC", self.op, self.item),
+        }
+    }
 }
 
 pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: ItemPcState) -> Result<(), String> {
@@ -76,16 +85,15 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: ItemPcState) 
             return Ok(());
         }
         api.release_all_buttons();
-        agent.event(AgentEvent::TextBox {
-            message: format!("{:?} {} x{} via the PC", s.op, s.item, s.qty),
-        });
+        agent.field_move_report(moved > 0, s.report(moved));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }
 
-    // Back in the overworld with nothing moved: the attempt fizzled.
+    // Back in the overworld short of the quantity: the attempt fizzled.
     if s.entered_menu && game_mode == GameMode::Overworld {
         api.release_all_buttons();
+        agent.field_move_report(moved > 0, s.report(moved));
         agent.set_state(AgentState::Idle);
         return Ok(());
     }
@@ -105,7 +113,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: ItemPcState) 
             }
             Reach::Wait => api.release_all_buttons(),
             Reach::OutOfReach => {
-                agent.event(AgentEvent::TextBox { message: format!("Can't reach the PC at {}", s.pc) });
+                agent.field_move_report(false, format!("Can't reach the PC at {}", s.pc));
                 api.release_all_buttons();
                 agent.set_state(AgentState::Idle);
             }
@@ -154,4 +162,20 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: ItemPcState) 
     api.press_button(button);
     agent.set_state(AgentState::UsingItemPc(ItemPcState { press: false, ..s }));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The quantity clamps to what the source held, so a withdraw of nothing reaches "done" at once
+    /// and must say nothing moved.
+    #[test]
+    fn a_withdraw_of_nothing_reports_that_nothing_moved() {
+        let s = ItemPcState::new(PcItemOp::Withdraw, ItemId::Potion, 5, Point8 { x: 13, y: 3 }, 0);
+        assert_eq!(s.qty, 0);
+        let report = s.report(0);
+        assert_eq!(report, "Withdraw Potion: the PC moved none");
+        assert!(!report.contains("x0"), "{report}");
+    }
 }

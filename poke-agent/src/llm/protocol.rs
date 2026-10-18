@@ -5,6 +5,7 @@ use std::io::BufRead;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::LlmError;
+use crate::llm::anthropic::Reply;
 
 // ── Messages ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -87,6 +88,10 @@ pub struct Message {
     /// Tool messages only: which call this is the result of.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Assistant messages only: the reply as the Messages API streamed it, for that endpoint to be
+    /// sent back. On no wire and in no log; `history.json` writes it beside the message.
+    #[serde(skip)]
+    pub replay: Option<Reply>,
 }
 
 impl Message {
@@ -105,6 +110,7 @@ impl Message {
             content: (!content.is_empty()).then_some(Content::Text(content)),
             tool_calls: history_safe(tool_calls),
             tool_call_id: None,
+            replay: None,
         }
     }
 
@@ -115,6 +121,7 @@ impl Message {
             content: Some(Content::Text(content.into())),
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
+            replay: None,
         }
     }
 
@@ -137,6 +144,7 @@ impl Message {
             ])),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            replay: None,
         }
     }
 
@@ -146,6 +154,7 @@ impl Message {
             content: Some(Content::Text(content.into())),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            replay: None,
         }
     }
 
@@ -348,6 +357,15 @@ pub struct Completion {
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
     pub finish_reason: Option<String>,
+    /// The Messages API's own record of the reply; `None` from every other endpoint.
+    pub replay: Option<Reply>,
+}
+
+impl Completion {
+    /// The reply as the history keeps it.
+    pub fn message(&self) -> Message {
+        Message { replay: self.replay.clone(), ..Message::assistant(self.content.clone(), self.tool_calls.clone()) }
+    }
 }
 
 // ── The streaming parser ─────────────────────────────────────────────────────────────────────────
@@ -520,18 +538,20 @@ impl StreamAccumulator {
                 .collect(),
             usage: self.usage,
             finish_reason: self.finish_reason,
+            replay: None,
         }
     }
 }
 
-/// The usage frame as OpenAI-compatible endpoints spell it, cache figures nested.
+/// The usage frame as OpenAI-compatible endpoints spell it, cache figures nested. Any count may
+/// be `null`, which some endpoints send for a figure they do not keep.
 #[derive(Debug, Deserialize)]
 struct WireUsage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "count")]
     prompt_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "count")]
     completion_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "count")]
     total_tokens: u64,
     #[serde(default)]
     prompt_tokens_details: Option<PromptDetails>,
@@ -539,11 +559,16 @@ struct WireUsage {
 
 #[derive(Debug, Deserialize)]
 struct PromptDetails {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "count")]
     cached_tokens: u64,
     /// OpenRouter only.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "count")]
     cache_write_tokens: u64,
+}
+
+/// A token count, with `null` read as none.
+fn count<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or(0))
 }
 
 impl From<WireUsage> for Usage {
@@ -825,6 +850,24 @@ mod tests {
         ]);
         let usage = completion.usage.unwrap();
         assert_eq!((usage.prompt_tokens, usage.cache_read_tokens, usage.cache_write_tokens), (900, 640, 100));
+    }
+
+    /// A count sent as `null` is none, not an unparseable chunk that loses the whole frame.
+    #[test]
+    fn a_usage_count_sent_as_null_reads_as_none() {
+        let completion = drain(&[
+            r#"data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":31,"total_tokens":null,"prompt_tokens_details":{"cached_tokens":null,"cache_write_tokens":null}}}"#,
+            "data: [DONE]",
+        ]);
+        let usage = completion.usage.expect("the frame was read");
+        assert_eq!((usage.prompt_tokens, usage.completion_tokens, usage.total_tokens), (900, 31, 0));
+        assert_eq!((usage.cache_read_tokens, usage.cache_write_tokens), (0, 0));
+
+        let completion = drain(&[
+            r#"data: {"choices":[],"usage":{"prompt_tokens":null,"completion_tokens":null,"prompt_tokens_details":null}}"#,
+            "data: [DONE]",
+        ]);
+        assert_eq!(completion.usage.map(|usage| usage.prompt_tokens), Some(0));
     }
 
     #[test]

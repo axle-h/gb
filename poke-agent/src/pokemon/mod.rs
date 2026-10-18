@@ -487,6 +487,7 @@ impl<'a> PokemonApiTrait for PokemonApi<'a> {
             battle: mmu.read_battle_state(),
             ruleset: poke_core::ruleset::Ruleset::Gen1,
             bag,
+            pc_items: mmu.read_pc_items(),
             boxed_pokemon: postgame::pc_box::read_current_box(mmu),
             current_box: postgame::pc_box::current_box_num(mmu),
             has_pokedex: mmu.read_has_pokedex(),
@@ -726,6 +727,8 @@ pub struct GameState {
     pub mode: GameMode,
     pub map: MetaTileMap,
     pub bag: Bag,
+    /// PC item storage, every slot of it: up to fifty, where the bag holds twenty.
+    pub pc_items: Bag,
     /// Populated whenever `mode` is `WildBattle` or `TrainerBattle`.
     pub battle: Option<BattleState>,
     /// The rules the run plays by, in or out of a battle.

@@ -4,6 +4,7 @@ use std::io::Write;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 
+use crate::llm::anthropic::Reply;
 use crate::llm::compaction;
 use crate::llm::prompt;
 use crate::llm::protocol::{Message, Role};
@@ -65,7 +66,17 @@ struct Saved {
     system_prompt: String,
     /// Messages `1..n`: index 0 is rebuilt on open, never stored.
     #[serde(default)]
-    messages: Vec<Message>,
+    messages: Vec<Entry>,
+}
+
+/// One message of `history.json`, and what it alone keeps of a reply: the blocks it streamed as, so
+/// a restart sends it back as the last process would have.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Entry {
+    #[serde(flatten)]
+    message: Message,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replay: Option<Reply>,
 }
 
 fn one() -> f64 {
@@ -239,6 +250,7 @@ impl History {
         let mut messages = self.messages[1.min(self.messages.len())..].to_vec();
         // A restored image would be priced at the default 85 tokens, and compaction never fire.
         compaction::evict_images(&mut messages, 0);
+        let messages = messages.into_iter().map(|message| Entry { replay: message.replay.clone(), message }).collect();
         let saved = Saved {
             version: VERSION,
             // The prompt in force now, not the one that was restored.
@@ -298,7 +310,8 @@ fn read_saved(dir: &Path) -> Option<(Saved, Vec<Message>)> {
         );
         return None;
     }
-    let messages = sanitise(saved.messages.clone());
+    let messages = saved.messages.iter().map(|entry| Message { replay: entry.replay.clone(), ..entry.message.clone() });
+    let messages = sanitise(messages.collect());
     match messages.is_empty() {
         true => None,
         false => Some((saved, messages)),
@@ -499,7 +512,7 @@ mod tests {
         std::fs::write(scratch.0.join(files::HISTORY), saved.to_string()).expect("write");
         let stored: Saved =
             serde_json::from_slice(&std::fs::read(scratch.0.join(files::HISTORY)).unwrap()).unwrap();
-        assert!(!stored.messages.last().unwrap().tool_calls.is_empty());
+        assert!(!stored.messages.last().unwrap().message.tool_calls.is_empty());
 
         let history = History::open(Some(&scratch.0));
         for message in history.iter() {
@@ -538,7 +551,7 @@ mod tests {
         }
         history.checkpoint(1, 1.0);
 
-        let dropped = compaction::replace_with(&mut history, compaction::summary_message("the story so far"), 2);
+        let dropped = compaction::replace_with(&mut history, &[compaction::summary_message("the story so far")], 2);
         history.note_compaction(8, &CompactionNote {
             before: 900,
             after: 100,
@@ -621,7 +634,7 @@ mod tests {
         assert!(cleared.restored().is_none(), "a clear restores nothing, whatever the file holds");
         assert_eq!(cleared.len(), 2, "the system prompt and the note, and nothing else");
         assert_eq!(cleared.last().expect("a tail").text(), Some(prompt::CLEARED_NOTE));
-        assert!(compaction::is_turn_start(cleared.last().unwrap()), "a legal cut point, like the resume note");
+        assert!(compaction::is_turn_start(cleared.last().unwrap()), "where a provider's turn begins, as the resume note is");
         assert!(
             !std::fs::read_to_string(scratch.0.join(files::HISTORY)).unwrap().contains("rather forget"),
             "and the file a restart would resume on was replaced too",
@@ -649,7 +662,7 @@ mod tests {
 
         let second = History::open(Some(&scratch.0));
         assert_eq!(second.last().expect("a tail").text(), Some(prompt::RESUMED_NOTE), "and it is at the tail");
-        assert!(compaction::is_turn_start(second.last().unwrap()), "a legal cut point, so it can be compacted away");
+        assert!(compaction::is_turn_start(second.last().unwrap()), "where a provider's turn begins");
     }
 
     #[test]

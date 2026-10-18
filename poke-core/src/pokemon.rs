@@ -123,7 +123,8 @@ impl PokemonSummary {
         self.moves.iter().enumerate()
             .filter(|(i, _)| self.disabled_move_slot != Some(*i as u8))
             .filter_map(|(i, m)|
-                m.filter(|m| m.pp > 0)
+                // The top two bits of a PP byte count PP Ups, not PP.
+                m.filter(|m| m.pp & 0b0011_1111 > 0)
                     .map(|m| BattleAction::Fight {
                         slot: i as u8,
                         battle_move: m
@@ -353,6 +354,27 @@ impl PokemonType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A move out of PP is out of PP however many PP Ups it has had.
+    #[test]
+    fn a_move_with_pp_ups_and_no_pp_left_is_not_available() {
+        let mut mon = PokemonSummary {
+            species: crate::species::PokemonSpecies::Squirtle,
+            current_hp: 20,
+            status: PokemonStatus::None,
+            types: [PokemonType::Water, PokemonType::Water],
+            level: 10,
+            moves: [None; 4],
+            stats: PokemonStats::ZERO,
+            disabled_move_slot: None,
+        };
+        mon.moves[0] = Some(PokemonMove { name: crate::move_name::PokemonMoveName::Tackle, pp: 0b1100_0000 });
+        mon.moves[1] = Some(PokemonMove { name: crate::move_name::PokemonMoveName::Bubble, pp: 0b0100_0011 });
+        let slots: Vec<u8> = mon.available_battle_moves().iter()
+            .map(|action| match action { BattleAction::Fight { slot, .. } => *slot, _ => unreachable!() })
+            .collect();
+        assert_eq!(slots, [1]);
+    }
 
     /// `CalcStat`'s square root of the stat experience stops at 255, so a full 65535 adds 63 to a
     /// stat rather than the 64 its true root would.

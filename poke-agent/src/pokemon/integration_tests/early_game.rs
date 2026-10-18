@@ -172,6 +172,10 @@ fn the_action_menu_alone_gets_the_ss_ticket_from_bill() {
             self.inner.pick_field_move(state)
         }
 
+        fn field_move_ended(&mut self, outcome: &crate::pokemon::policy::FieldMoveOutcome) {
+            self.inner.field_move_ended(outcome)
+        }
+
         fn is_exhausted(&self) -> bool { self.pressed && self.inner.is_exhausted() }
     }
 

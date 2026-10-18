@@ -31,14 +31,15 @@ impl BagReader for MMU {
     fn read_pc_items(&self) -> Bag {
         let count = self.read_pointer(&pokered_symbols::wNumBoxItems) as usize;
         let base  = pokered_symbols::wBoxItems.address;
-        Bag::new(
+        // Not `Bag::new`, which stops at the bag's twenty.
+        Bag::from_slice(&
             (0..count)
                 .filter_map(|i| {
                     let item_base = base + i as u16 * 2;
                     ItemId::from_repr(self.read(item_base))
                         .map(|id| BagItem { id, quantity: self.read(item_base + 1) })
                 })
-                .collect(),
+                .collect::<Vec<_>>(),
         )
     }
 }

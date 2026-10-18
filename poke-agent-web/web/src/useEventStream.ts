@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { STALE_MS, planText } from './api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { STALE_MS, mergePlanVersions, withLivePlan } from './api';
 import type {
   BattleScriptView,
   Connection,
@@ -14,6 +14,9 @@ import type {
 
 /** How many rows the log keeps; the transcript is the record. */
 const MAX_ENTRIES = 500;
+
+/** How many plan versions one fetch of `/api/plan-history` asks for. */
+const PLAN_PAGE = 50;
 
 /** Retry cadence once the browser has given up on its own reconnect. */
 const RETRY_MS = 1000;
@@ -88,8 +91,10 @@ export interface EventStream {
   speed: number | null;
   /** From the transition event; the heartbeat's copy is the late-joiner path. */
   run: RunStatus;
-  /** State, not a log row: every version of `plan.md`, oldest first. */
+  /** State, not a log row: the newest versions of `plan.md` fetched so far, oldest first. */
   plan: PlanVersion[];
+  /** Fetch the page of plan versions before the oldest in `plan`. */
+  loadOlderPlans: () => void;
   /** State, not a log row, like `plan`; `null` until a script is set. */
   battleScript: BattleScriptView | null;
 }
@@ -237,6 +242,38 @@ export function useEventStream(): EventStream {
   const [usage, setUsage] = useState<UsageView | null>(null);
   const [run, setRun] = useState<RunStatus>({ state: 'booting' });
   const [plan, setPlan] = useState<PlanVersion[]>([]);
+  // Mirrored, so a live version and a fetched page are merged against what is current.
+  const planRef = useRef<PlanVersion[]>([]);
+  // Bumped when the run's plan history starts over, so a fetch for the old one is discarded.
+  const planEpoch = useRef(0);
+  const loadingOlder = useRef(false);
+  const commitPlan = useCallback((next: PlanVersion[]) => {
+    planRef.current = next;
+    setPlan(next);
+  }, []);
+  const fetchPlans = useCallback(
+    (before?: number) => {
+      const epoch = planEpoch.current;
+      const query = before === undefined ? `limit=${PLAN_PAGE}` : `limit=${PLAN_PAGE}&before=${before}`;
+      return fetch(`/api/plan-history?${query}`)
+        .then((response) => (response.ok ? response.json() : []))
+        .then((fetched: PlanVersion[]) => {
+          if (epoch === planEpoch.current) commitPlan(mergePlanVersions(fetched, planRef.current));
+        })
+        .catch(() => {
+          // No history: the live plan is the whole panel.
+        });
+    },
+    [commitPlan],
+  );
+  const loadOlderPlans = useCallback(() => {
+    const oldest = planRef.current[0];
+    if (!oldest || oldest.version <= 1 || loadingOlder.current) return;
+    loadingOlder.current = true;
+    void fetchPlans(oldest.version).finally(() => {
+      loadingOlder.current = false;
+    });
+  }, [fetchPlans]);
   const [battleScript, setBattleScript] = useState<BattleScriptView | null>(null);
   const [speed, setSpeed] = useState<number | null>(null);
   const anchor = useRef<{ wall: number; emulated: number } | null>(null);
@@ -261,11 +298,7 @@ export function useEventStream(): EventStream {
             setUsage((current) => current ?? usage);
             break;
           }
-          // The last plan and script in the backlog, unless the stream has delivered newer ones.
-          const planned: PlanVersion[] = backlog.flatMap((event) =>
-            event.type === 'plan' ? [{ seq: event.seq, at: event.at, text: planText(event) }] : [],
-          );
-          setPlan((live) => mergeVersions(planned, live));
+          // The last script in the backlog, unless the stream has delivered a newer one.
           const scripts = backlog.filter((event) => event.type === 'battle_script');
           const script = scripts[scripts.length - 1];
           if (script?.type === 'battle_script') {
@@ -304,7 +337,9 @@ export function useEventStream(): EventStream {
       if (frame.current !== undefined) cancelAnimationFrame(frame.current);
       frame.current = undefined;
       setEntries([]);
-      setPlan([]);
+      planEpoch.current += 1;
+      commitPlan([]);
+      void fetchPlans();
       setBattleScript(null);
       setUsage(null);
       // A speed window must not span the gap.
@@ -329,8 +364,16 @@ export function useEventStream(): EventStream {
           return;
         }
         if (event.type === 'plan') {
-          const version: PlanVersion = { seq: event.seq, at: event.at, text: planText(event) };
-          setPlan((live) => mergeVersions(live, [version]));
+          const version: PlanVersion = { version: event.version ?? 0, at: event.at, text: event.text ?? '' };
+          const next = withLivePlan(planRef.current, version);
+          if (next) {
+            commitPlan(next);
+            return;
+          }
+          // Not this history's next version, so a new run: its history is fetched afresh.
+          planEpoch.current += 1;
+          commitPlan(version.version > 0 ? [version] : []);
+          void fetchPlans();
           return;
         }
         if (event.type === 'battle_script') {
@@ -377,11 +420,11 @@ export function useEventStream(): EventStream {
       window.removeEventListener('pageshow', onPageShow);
       stream.close();
     };
-  }, []);
+  }, [commitPlan, fetchPlans]);
 
   useEffect(() => () => cancelAnimationFrame(frame.current ?? 0), []);
 
-  return { status, entries, connection, usage, run, plan, battleScript, speed };
+  return { status, entries, connection, usage, run, plan, loadOlderPlans, battleScript, speed };
 }
 
 /** The shortest heartbeat span measured; shorter is dominated by the host's own cadence. */
@@ -415,12 +458,4 @@ function sampleSpeed(
   setSpeed((current) =>
     current === null ? sample : current + (sample - current) * SPEED_SMOOTHING,
   );
-}
-
-/** Versions from both sources, one per `seq`, oldest first, a repeat of the one before dropped. */
-function mergeVersions(a: PlanVersion[], b: PlanVersion[]): PlanVersion[] {
-  const bySeq = new Map<number, PlanVersion>();
-  for (const version of [...a, ...b]) bySeq.set(version.seq, version);
-  const sorted = [...bySeq.values()].sort((x, y) => x.seq - y.seq);
-  return sorted.filter((version, index) => index === 0 || version.text !== sorted[index - 1].text);
 }

@@ -14,7 +14,7 @@ import { useWakeLock } from './useWakeLock';
 type PaneTab = 'log' | 'status' | 'plan' | 'script';
 
 export function App() {
-  const { status, entries, connection, usage, run, plan, battleScript, speed } = useEventStream();
+  const { status, entries, connection, usage, run, plan, loadOlderPlans, battleScript, speed } = useEventStream();
   // Holds the screen on while the page is visible, so a phone watching does not lock; see the hook.
   useWakeLock();
   // Which pane a phone shows; inert from 640px up, where the stylesheet ignores it.
@@ -110,7 +110,7 @@ export function App() {
             <span className="spacer" />
             <Links />
           </div>
-          <PlanPanel plan={plan} />
+          <PlanPanel plan={plan} onOlder={loadOlderPlans} />
           <BattleScriptPanel script={battleScript} alwaysOpen={pane === 'script'} />
         </section>
         <section className="right">

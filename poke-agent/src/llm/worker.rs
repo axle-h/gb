@@ -138,7 +138,8 @@ const MAX_PARK: Duration = Duration::from_secs(25 * 60 * 60);
 const PARK_SLICE: Duration = Duration::from_millis(200);
 
 /// Parking a run the endpoint keeps refusing. Only [`LlmError::is_account_refusal`] is a refusal; a
-/// timeout, spent 5xx retries or a request rejected as malformed is not.
+/// timeout, spent 5xx retries or a request rejected as malformed is not. Turns whose request was
+/// rejected are a streak of their own, parked with the same windows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefusalPark {
     /// Refusals in a row that only fail the turn, since a changed conversation may cure one.
@@ -174,6 +175,8 @@ enum Watch {
 /// What [`Worker::summarise`] came back with.
 enum Summarised {
     Prose(String),
+    /// The summary already in the history, kept rather than asked for again.
+    Kept(Vec<Message>),
     /// Two genuine failures: the history is compacted without a summary.
     Failed,
     /// A reset is waiting.
@@ -192,6 +195,8 @@ enum Park {
     /// A dated 429.
     Quota,
     Refused { in_a_row: u32 },
+    /// Turns whose request the endpoint rejected, which is a setting wrong until someone fixes it.
+    Rejected { in_a_row: u32 },
 }
 
 impl Park {
@@ -199,13 +204,14 @@ impl Park {
         match self {
             Park::Quota => "the endpoint's quota is spent".to_string(),
             Park::Refused { in_a_row } => format!("the endpoint refused {in_a_row} requests in a row"),
+            Park::Rejected { in_a_row } => format!("the endpoint rejected the requests of {in_a_row} turns in a row"),
         }
     }
 
     fn resumed(&self) -> &'static str {
         match self {
             Park::Quota => "the quota window reopened; the run is resuming where it stopped",
-            Park::Refused { .. } => "the pause is over; the run is asking the endpoint again",
+            Park::Refused { .. } | Park::Rejected { .. } => "the pause is over; the run is asking the endpoint again",
         }
     }
 }
@@ -229,6 +235,8 @@ const MAX_TOOL_RESULT: usize = 2_000;
 struct TurnOpen {
     /// `history.len()` before the situation was appended.
     at: usize,
+    /// Which turn, for the version a write in it appends.
+    id: u64,
     /// Restored too, or the one turn told everything else was lost is the turn that failed.
     reminder: prompt::PlanReminder,
 }
@@ -241,6 +249,8 @@ pub struct Worker {
     refusal_park: RefusalPark,
     /// Consecutive refusals, reset by any other answer — see [`RefusalPark`].
     refused_in_a_row: u32,
+    /// Consecutive turns failed by a rejected request, reset by any completion.
+    rejected_in_a_row: u32,
 
     generation: Arc<AtomicU64>,
     turns: Receiver<TurnRequest>,
@@ -290,13 +300,20 @@ pub fn channels(
     let live_script = Arc::new(battle_script::Live::default());
     live_script.arm(battle_script.live_source(), battle_script.state(), battle_script.standing());
 
-    // The calibration comes back with the conversation, and nothing else does.
+    // The calibration comes back with the conversation, and nothing else does. A plan with no
+    // conversation behind it is all the model has left, so it is told so just as loudly.
     let (accounting, reminder) = match history.restored() {
         Some(restored) => (
             Accounting::resumed(config.context_limit, restored.calibration),
             prompt::PlanReminder::Resumed,
         ),
-        None => (Accounting::new(config.context_limit), prompt::PlanReminder::Ordinary),
+        None => (
+            Accounting::new(config.context_limit),
+            match plan.text().trim().is_empty() {
+                true => prompt::PlanReminder::Ordinary,
+                false => prompt::PlanReminder::Resumed,
+            },
+        ),
     };
     let worker = Worker {
         endpoint,
@@ -305,6 +322,7 @@ pub fn channels(
         retry: RetryPolicy::default(),
         refusal_park: RefusalPark::default(),
         refused_in_a_row: 0,
+        rejected_in_a_row: 0,
         generation: Arc::clone(&generation),
         turns: turn_rx,
         outcomes: outcome_tx,
@@ -471,7 +489,7 @@ impl Worker {
 
         self.publish_plan();
         self.publish_battle_script();
-        self.open_turn(&situation);
+        self.open_turn(id, &situation);
         let outcome = self.decide(id, kind, &situation, &menu);
         // Before the outcome is sent: a winning action has the archiver copy the run next tick.
         self.history.checkpoint(id, self.accounting.calibration());
@@ -502,8 +520,8 @@ impl Worker {
     }
 
     /// Append the situation, closed by what it says about `plan.md`.
-    fn open_turn(&mut self, situation: &str) {
-        self.turn_open = TurnOpen { at: self.history.len(), reminder: self.reminder };
+    fn open_turn(&mut self, id: u64, situation: &str) {
+        self.turn_open = TurnOpen { at: self.history.len(), id, reminder: self.reminder };
         self.history.push(Message::user(format!("{situation}\n{}\n", self.reminder.line())));
         self.reminder = prompt::PlanReminder::Ordinary;
     }
@@ -539,7 +557,7 @@ impl Worker {
     }
 
     fn write_plan(&mut self, text: &str) -> (String, bool) {
-        match self.plan.write(text) {
+        match self.plan.write(text, Some(self.turn_open.id)) {
             Ok(()) => {
                 self.publish_plan();
                 (format!("plan.md written: {} lines, {} bytes.", text.lines().count(), text.len()), true)
@@ -550,7 +568,7 @@ impl Worker {
 
     /// A write or an edit of the script: validated, and armed from the next battle decision.
     fn write_script(&mut self, source: &str) -> (String, bool) {
-        let written = self.battle_script.write(source);
+        let written = self.battle_script.write(source, Some(self.turn_open.id));
         if written.is_ok() {
             self.live_script.arm(self.battle_script.live_source(), self.battle_script.state(), self.battle_script.standing());
         }
@@ -611,7 +629,7 @@ impl Worker {
         }
         let text = self.plan.text().to_string();
         self.published_plan = Some(text.clone());
-        self.published.publish_event(UiEventBody::Plan { text });
+        self.published.publish_event(UiEventBody::Plan { text, version: self.plan.version() });
     }
 
     /// Tell the page what is deciding the battles, if that has changed.
@@ -678,8 +696,8 @@ impl Worker {
         !cancelled
     }
 
-    /// `None` means the turn was cancelled and abandoned. A request the endpoint rejects as wrong, a
-    /// prompt too long among them, forces a compaction and is asked once more.
+    /// `None` means the turn was cancelled and abandoned. A request the endpoint rejects as too long
+    /// forces a compaction and is asked once more; any other rejection fails the turn.
     fn decide(
         &mut self,
         id: u64,
@@ -689,8 +707,8 @@ impl Worker {
     ) -> Option<(Terminal, Option<String>)> {
         let rejected = match self.ask(id, kind, menu) {
             Ok(outcome) => return outcome,
-            Err(failure) if failure.is_rejected_request() => failure,
-            Err(failure) => return Some(self.fail_turn(&failure)),
+            Err(failure) if failure.is_context_overflow() => failure,
+            Err(failure) => return self.fail_turn(id, &failure),
         };
         self.published.publish_event(UiEventBody::Notice {
             level: "warn",
@@ -701,15 +719,17 @@ impl Worker {
         });
         self.roll_back_failed_turn();
         self.compact(id, true);
-        self.open_turn(situation);
+        self.open_turn(id, situation);
         match self.ask(id, kind, menu) {
             Ok(outcome) => outcome,
-            Err(failure) => Some(self.fail_turn(&failure)),
+            Err(failure) => self.fail_turn(id, &failure),
         }
     }
 
     /// A turn the endpoint could not answer resolves to a wait, and leaves no trace in the history.
-    fn fail_turn(&mut self, failure: &LlmError) -> (Terminal, Option<String>) {
+    /// A streak of rejected turns parks first, so a wrong setting is not asked about every turn;
+    /// `None` if the turn went stale while parked.
+    fn fail_turn(&mut self, id: u64, failure: &LlmError) -> Option<(Terminal, Option<String>)> {
         self.published.set_status(RunStatus::Error { message: failure.to_string() });
         self.published.publish_event(UiEventBody::Notice {
             level: "error",
@@ -717,7 +737,19 @@ impl Worker {
         });
         // Nothing this turn appended was answered, so all of it goes.
         self.roll_back_failed_turn();
-        (Terminal::Wait { ticks: FAILURE_WAIT_TICKS }, None)
+        if failure.is_rejected_request() {
+            self.rejected_in_a_row += 1;
+            if let Some(window) = self.refusal_park.window(self.rejected_in_a_row) {
+                let until_ms = now_ms().saturating_add(window.as_millis() as u64);
+                let park = Park::Rejected { in_a_row: self.rejected_in_a_row };
+                if !self.park_until(Watch::Turn(id), until_ms, park, &failure.to_string()) {
+                    return None;
+                }
+                // The error stays on the board once the pause is over.
+                self.published.set_status(RunStatus::Error { message: failure.to_string() });
+            }
+        }
+        Some((Terminal::Wait { ticks: FAILURE_WAIT_TICKS }, None))
     }
 
     /// The turn's requests, up to `GB_MAX_TOOL_STEPS`. `Err` is a failure the turn cannot survive.
@@ -801,14 +833,17 @@ impl Worker {
                     }
                 };
                 match result {
-                    Ok(completion) => completion,
+                    Ok(completion) => {
+                        self.rejected_in_a_row = 0;
+                        completion
+                    }
                     Err(LlmError::Cancelled) => return Ok(None),
                     Err(failure) => return Err(failure),
                 }
             };
 
             self.account_for(id, kind, &completion);
-            self.history.push(Message::assistant(completion.content.clone(), completion.tool_calls.clone()));
+            self.history.push(completion.message());
 
             if completion.tool_calls.is_empty() {
                 let truncated = completion.finish_reason.as_deref() == Some("length");
@@ -843,31 +878,19 @@ impl Worker {
             if let Some(position) = classified.iter().position(|c| matches!(c, CallKind::Terminal(_))) {
                 let CallKind::Terminal(decision) = &classified[position] else { unreachable!() };
                 let decision = decision.clone();
-                let ended_with = completion.tool_calls[position].function.name.clone();
-                let chained = ended_with == tools::CHOOSE_ACTION;
                 // Read off the calls: the emulator has no use for the summary.
-                let summary = match chained {
-                    true => tools::reply_summary(&completion.tool_calls, &classified),
-                    false => tools::call_summary(&completion.tool_calls[position]),
-                };
+                let summary = tools::reply_summary(&completion.tool_calls, &classified);
                 for (index, call) in completion.tool_calls.iter().enumerate() {
                     let (content, ok) = match &classified[index] {
-                        _ if index == position => (
-                            "Accepted. The agent is carrying it out now; the next turn will tell you \
-                             what happened."
-                                .to_string(),
-                            true,
-                        ),
-                        CallKind::Chained if chained => {
-                            ("Accepted, to be taken after the one before it if that one lands.".to_string(), true)
-                        }
+                        _ if index == position => (tools::accepted(&decision, call, true), true),
+                        CallKind::Chained => (tools::accepted(&decision, call, false), true),
                         // A write is kept, not dropped; a read beside the action answers nothing.
                         CallKind::File(file) if !matches!(file, FileCall::Read(_)) => self.apply_file(file),
                         CallKind::Issue { name, message } => {
                             (self.file_issue(id, kind, name, message, summary.as_deref()), true)
                         }
                         CallKind::Rejected(complaint) => (complaint.clone(), false),
-                        _ => (format!("Not run — the turn ended with `{ended_with}` in the same message."), true),
+                        _ => (format!("Not run — the turn ended with `{}` in the same message.", tools::CHOOSE_ACTION), true),
                     };
                     self.publish_tool_result(id, call, ok, &content, None);
                     self.history.push(Message::tool_result(&call.id, content));
@@ -930,7 +953,7 @@ impl Worker {
                         "The agent returned no answer for this read."));
                     let content = match answer.map {
                         None => files::window(&read.node.path(), &answer.json, read.offset, read.limit),
-                        // As `screenshot` below: the result says a picture follows.
+                        // As `screen.png` below: the result says a picture follows.
                         Some(map) => match map_image::render(&map) {
                             // The ASCII grid is the safety net, not dead code.
                             None => format!(
@@ -1095,14 +1118,18 @@ impl Worker {
 
         let mut dropped = 0;
         let mut summary = None;
+        // Too few turns since the last summary for another to say anything new.
+        let earlier = compaction::kept_opening(&self.history)
+            .filter(|_| compaction::turns_after_head(&self.history) <= compaction::KEEP_TURNS && self.over_threshold());
         if compaction::has_body(&self.history) {
-            let opening = match self.summarise() {
+            let opening = match earlier.map_or_else(|| self.summarise(), Summarised::Kept) {
+                Summarised::Kept(messages) => messages,
                 Summarised::Prose(prose) => {
                     let message = compaction::summary_message(&prose);
                     summary = Some(prose);
-                    message
+                    vec![message]
                 }
-                Summarised::Failed => compaction::dropped_message(),
+                Summarised::Failed => compaction::dropped_opening(&self.history),
                 Summarised::Abandoned => {
                     self.published.set_status(resume);
                     return None;
@@ -1111,7 +1138,7 @@ impl Worker {
             let whole = self.history.to_vec();
             for keep in (0..=compaction::KEEP_TURNS).rev() {
                 let mut kept = whole.clone();
-                dropped = compaction::replace_with(&mut kept, opening.clone(), keep);
+                dropped = compaction::replace_with(&mut kept, &opening, keep);
                 *self.history = kept;
                 if !self.over_threshold() {
                     break;
@@ -1144,11 +1171,21 @@ impl Worker {
             Err(Stop::Abandoned) => return Summarised::Abandoned,
             Err(Stop::Genuine(failure)) => failure,
         };
+        let (halved, start_missing) = compaction::without_oldest_half(&whole);
+        if !start_missing {
+            self.published.publish_event(UiEventBody::Notice {
+                level: "error",
+                message: format!(
+                    "could not summarise the history ({failure}), and it has no older turns to leave \
+                     out; dropping the earlier conversation without a summary"
+                ),
+            });
+            return Summarised::Failed;
+        }
         self.published.publish_event(UiEventBody::Notice {
             level: "error",
             message: format!("could not summarise the history ({failure}); asking again without its oldest turns"),
         });
-        let (halved, start_missing) = compaction::without_oldest_half(&whole);
         match self.ask_for_summary(halved, start_missing) {
             Ok(prose) => Summarised::Prose(prose),
             Err(Stop::Abandoned) => Summarised::Abandoned,
@@ -1170,7 +1207,6 @@ impl Worker {
     fn ask_for_summary(&mut self, mut messages: Vec<Message>, start_missing: bool) -> Result<String, Stop> {
         messages.push(compaction::instruction(start_missing));
         for step in 0..self.config.max_tool_steps {
-            self.published.set_status(RunStatus::Compacting);
             let request = chat_request(&self.config, messages);
             let completion = self.stream_summary(&request)?;
             let usage = completion.usage.unwrap_or_else(|| Usage::estimate(&request.messages, &completion));
@@ -1185,7 +1221,7 @@ impl Worker {
                 };
             }
             let classified: Vec<CallKind> = completion.tool_calls.iter().map(summary_call).collect();
-            messages.push(Message::assistant(completion.content.clone(), completion.tool_calls.clone()));
+            messages.push(completion.message());
             let answers = self.answer_calls(None, &completion.tool_calls, &classified).ok_or(Stop::Abandoned)?;
             messages.extend(answers);
             if step + 2 >= self.config.max_tool_steps {
@@ -1204,6 +1240,8 @@ impl Worker {
             if reset_waiting(&self.reset) {
                 return Err(Stop::Abandoned);
             }
+            // Every attempt, since a park leaves the status `Throttled`.
+            self.published.set_status(RunStatus::Compacting);
             let published = Arc::clone(&self.published);
             let reset = Arc::clone(&self.reset);
             let result = stream_with_retries(
@@ -1399,7 +1437,19 @@ mod tests {
     }
 
     fn worker(context_limit: u64, compact_above: f64) -> Worker {
-        let config = LlmConfig {
+        let (worker, _) = channels(
+            Box::new(Summarises),
+            config(context_limit, compact_above),
+            Published::new(),
+            Plan::open(None),
+            BattleScript::open(None),
+            History::open(None),
+        );
+        worker
+    }
+
+    fn config(context_limit: u64, compact_above: f64) -> LlmConfig {
+        LlmConfig {
             provider: crate::llm::config::Provider::OpenAi,
             base_url: "http://x".into(),
             api_key: "k".into(),
@@ -1413,16 +1463,7 @@ mod tests {
             reasoning_effort: None,
             reasoning_budget: None,
             stuck_timeout: None,
-        };
-        let (worker, _) = channels(
-            Box::new(Summarises),
-            config,
-            Published::new(),
-            Plan::open(None),
-            BattleScript::open(None),
-            History::open(None),
-        );
-        worker
+        }
     }
 
     /// A history of `turns` turns of `bulk` prose each, behind the system prompt.
@@ -1510,5 +1551,272 @@ mod tests {
         });
         let notice = said.iter().find(|m| m.starts_with("compaction could not bring the history under")).expect("the notice");
         assert!(!notice.contains("  "), "a `\\` was eaten out of a continued literal: {notice}");
+    }
+
+    type Answer = Result<Completion, LlmError>;
+
+    /// An endpoint that answers from a script, writing down every request with the status the run
+    /// showed when it arrived.
+    #[derive(Clone)]
+    struct Script {
+        replies: Arc<Mutex<std::collections::VecDeque<Answer>>>,
+        asked: Arc<Mutex<Vec<(ChatRequest, RunStatus)>>>,
+        published: Arc<Published>,
+    }
+
+    impl Script {
+        fn asked(&self) -> Vec<(ChatRequest, RunStatus)> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    impl ChatEndpoint for Script {
+        fn stream_completion(
+            &self,
+            request: &ChatRequest,
+            _: &mut dyn FnMut(Fragment<'_>),
+            _: &dyn Fn() -> bool,
+        ) -> Result<Completion, LlmError> {
+            self.asked.lock().unwrap().push((request.clone(), self.published.run_status()));
+            self.replies.lock().unwrap().pop_front().unwrap_or(Err(LlmError::Cancelled))
+        }
+    }
+
+    /// A worker on `script`, with a short park and a window no test fills by accident.
+    fn scripted(script: Vec<Answer>, dir: Option<&std::path::Path>) -> (Worker, TurnHandles, Script) {
+        let published = Published::new();
+        let endpoint = Script {
+            replies: Arc::new(Mutex::new(script.into())),
+            asked: Arc::default(),
+            published: Arc::clone(&published),
+        };
+        let (worker, handles) = channels(
+            Box::new(endpoint.clone()),
+            config(1_000_000, 0.85),
+            published,
+            Plan::open(dir),
+            BattleScript::open(dir),
+            History::open(dir),
+        );
+        let park = RefusalPark { after: 3, first: Duration::from_millis(50), max: Duration::from_millis(100) };
+        (worker.with_refusal_park(park), handles, endpoint)
+    }
+
+    fn waits() -> Answer {
+        let call = ToolCall {
+            id: "call_0".into(),
+            kind: "function".into(),
+            function: crate::llm::protocol::FunctionCall {
+                name: tools::CHOOSE_ACTION.into(),
+                arguments: r#"{"id":"wait*5","summary":"waiting to see"}"#.into(),
+            },
+        };
+        Ok(Completion { tool_calls: vec![call], ..Completion::default() })
+    }
+
+    fn prose(text: &str) -> Answer {
+        Ok(Completion { content: text.into(), ..Completion::default() })
+    }
+
+    fn rejected(status: u16, message: &str) -> Answer {
+        Err(LlmError::Http { status, message: message.into() })
+    }
+
+    fn take_turn(worker: &mut Worker, n: usize) {
+        worker.run_one(TurnRequest {
+            id: 0,
+            kind: DecisionKind::Overworld,
+            situation: format!("{}what to do next\n\nturn {n}", prompt::DECISION),
+            headline: format!("turn {n}"),
+            menu: Vec::new(),
+        });
+    }
+
+    fn last_user_text(request: &ChatRequest) -> String {
+        request.messages.iter().rev().find(|m| m.role == protocol::Role::User)
+            .and_then(Message::text).unwrap_or_default().to_string()
+    }
+
+    /// A 404 or a bad parameter is not cured by a compaction: the turn fails with nothing spent.
+    #[test]
+    fn a_rejection_not_shaped_like_an_overflow_fails_the_turn_without_compacting() {
+        let (mut worker, _handles, endpoint) = scripted(
+            vec![waits(), waits(), rejected(404, "model: claude-x [not_found_error]")],
+            None,
+        );
+        take_turn(&mut worker, 1);
+        take_turn(&mut worker, 2);
+        let before = worker.history.to_vec();
+        let published = Arc::clone(&worker.published);
+        let said = notices(&published, || take_turn(&mut worker, 3));
+
+        assert_eq!(endpoint.asked().len(), 3, "no summary was asked for: {said:?}");
+        assert_eq!(worker.history.to_vec(), before, "the history is as the turn found it");
+        assert!(said.iter().any(|n| n.contains("could not be completed") && n.contains("404")), "{said:?}");
+        assert!(!said.iter().any(|n| n.contains("compacting")), "{said:?}");
+    }
+
+    /// Turns rejected in a row park with a refusal's windows, an overflow that a compaction did not
+    /// cure among them, and an answer ends the streak.
+    #[test]
+    fn rejected_turns_in_a_row_park_and_an_answer_ends_the_streak() {
+        let (mut worker, _handles, endpoint) = scripted(
+            vec![
+                waits(),
+                rejected(404, "model: claude-x"),
+                rejected(413, "request too large"),
+                prose("I am in Pallet Town."),
+                rejected(413, "request too large"),
+                rejected(400, "temperature: not supported"),
+                waits(),
+                rejected(400, "temperature: not supported"),
+                rejected(400, "temperature: not supported"),
+            ],
+            None,
+        );
+        let published = Arc::clone(&worker.published);
+        let parked = |said: &[String]| said.iter().any(|n| n.contains("rejected the requests of"));
+
+        let first_two = notices(&published, || {
+            take_turn(&mut worker, 0);
+            take_turn(&mut worker, 1);
+            take_turn(&mut worker, 2);
+        });
+        assert!(!parked(&first_two), "{first_two:?}");
+        let asked = endpoint.asked();
+        assert_eq!(asked.len(), 5, "the overflow was compacted and asked again");
+        assert!(last_user_text(&asked[3].0).starts_with(compaction::SUMMARY_INSTRUCTION.lines().next().unwrap()));
+
+        let third = notices(&published, || take_turn(&mut worker, 3));
+        assert!(
+            third.iter().any(|n| n.contains("rejected the requests of 3 turns in a row") && n.contains("temperature")),
+            "{third:?}",
+        );
+        assert!(matches!(published.run_status(), RunStatus::Error { .. }), "the error is still on the board");
+
+        let after_an_answer = notices(&published, || {
+            take_turn(&mut worker, 4);
+            take_turn(&mut worker, 5);
+            take_turn(&mut worker, 6);
+        });
+        assert!(!parked(&after_an_answer), "{after_an_answer:?}");
+        assert_eq!(endpoint.asked().len(), 9);
+    }
+
+    /// The first turn of a run that opens on a plan and no conversation is told the plan is all it has.
+    #[test]
+    fn a_run_that_opens_on_a_plan_and_no_conversation_is_reminded_loudly() {
+        let loud = prompt::PlanReminder::Resumed.line();
+
+        let lost = crate::run::Scratch::new("worker-plan-only");
+        Plan::open(Some(&lost.0)).write("Get the parcel from Viridian.", None).unwrap();
+        let (mut worker, _handles, endpoint) = scripted(vec![waits(), waits()], Some(&lost.0));
+        take_turn(&mut worker, 1);
+        take_turn(&mut worker, 2);
+        let asked = endpoint.asked();
+        assert!(last_user_text(&asked[0].0).contains(loud), "{}", last_user_text(&asked[0].0));
+        assert!(!last_user_text(&asked[1].0).contains(loud), "once");
+
+        // The same after a restart that did restore the conversation.
+        drop(worker);
+        let (mut worker, _handles, endpoint) = scripted(vec![waits()], Some(&lost.0));
+        assert!(worker.history.restored().is_some());
+        take_turn(&mut worker, 3);
+        assert!(last_user_text(&endpoint.asked()[0].0).contains(loud));
+
+        // A new run has neither, and nothing to read.
+        let new = crate::run::Scratch::new("worker-new-run");
+        let (mut worker, _handles, endpoint) = scripted(vec![waits()], Some(&new.0));
+        take_turn(&mut worker, 1);
+        assert!(last_user_text(&endpoint.asked()[0].0).contains(prompt::PlanReminder::Ordinary.line()));
+    }
+
+    /// A summary already in the history and too few turns after it for another to say anything:
+    /// fewer turns are kept, and nothing is asked.
+    #[test]
+    fn a_compaction_with_too_few_turns_since_the_last_summary_asks_for_no_summary() {
+        let bulk = "a long turn. ".repeat(600);
+        let mut probe = worker(1, 1.0);
+        let system = probe.accounting.tokens_in(&probe.history);
+        turns(&mut probe, 1, &bulk);
+        let turn = probe.accounting.tokens_in(&probe.history) - system;
+
+        let (mut worker, _handles, endpoint) = scripted(Vec::new(), None);
+        worker.accounting = Accounting::new(2 * system + 3 * turn);
+        worker.config.compact_above = 0.5;
+        worker.history.push(compaction::summary_message("I am in Pallet Town."));
+        turns(&mut worker, compaction::KEEP_TURNS, &bulk);
+        assert!(worker.over_threshold());
+
+        let note = worker.compact_if_needed(false).expect("compacts");
+        assert!(endpoint.asked().is_empty(), "no summary was paid for");
+        assert!(note.summary.is_none() && note.dropped > 0);
+        assert!(worker.history[1].text().unwrap().contains("I am in Pallet Town."), "the summary stays");
+        assert_eq!(worker.history.len(), 2 + 2, "one turn kept");
+    }
+
+    /// With no older turns to leave out, the halved request would be the same request again.
+    #[test]
+    fn a_summary_that_fails_with_nothing_to_leave_out_is_not_asked_again() {
+        let (mut worker, _handles, endpoint) = scripted(vec![rejected(400, "prompt is too long")], None);
+        turns(&mut worker, compaction::KEEP_TURNS, "short");
+        let published = Arc::clone(&worker.published);
+        let said = notices(&published, || {
+            let note = worker.compact_if_needed(true).expect("forced");
+            assert!(note.summary.is_none());
+        });
+        assert_eq!(endpoint.asked().len(), 1, "{said:?}");
+        assert!(said.iter().any(|n| n.contains("no older turns to leave out")), "{said:?}");
+        assert!(worker.history[1].text().unwrap().contains("dropped without a summary"));
+    }
+
+    /// A compaction that gets no summary keeps the one an earlier compaction wrote, and says only
+    /// what came after it went.
+    #[test]
+    fn a_failed_compaction_keeps_the_earlier_summary() {
+        let too_long = || rejected(400, "prompt is too long");
+        let (mut worker, _handles, endpoint) = scripted(vec![too_long(), too_long(), too_long(), too_long()], None);
+        worker.history.push(compaction::summary_message("I am in Pallet Town."));
+        turns(&mut worker, 6, "short");
+
+        let note = worker.compact_if_needed(true).expect("forced");
+        assert!(note.summary.is_none());
+        assert_eq!(endpoint.asked().len(), 2, "asked whole, then without the oldest half");
+        assert!(worker.history[1].text().unwrap().contains("I am in Pallet Town."), "the earlier summary stays");
+        assert_eq!(worker.history[2].text(), Some(compaction::DROPPED_SINCE), "and the note follows it");
+        assert!(worker.history[3].text().unwrap().ends_with("turn 5\nshort"), "then the kept turns");
+        assert_eq!(worker.history.len(), 3 + 2 * compaction::KEEP_TURNS);
+
+        // Failing again keeps the same summary and one note, not a note per failure.
+        turns(&mut worker, 4, "short");
+        worker.compact_if_needed(true).expect("forced");
+        assert_eq!(endpoint.asked().len(), 4);
+        assert!(worker.history[1].text().unwrap().contains("I am in Pallet Town."));
+        let notes = worker.history.iter().filter(|m| m.text() == Some(compaction::DROPPED_SINCE)).count();
+        assert_eq!(notes, 1);
+        assert_eq!(worker.history.len(), 3 + 2 * compaction::KEEP_TURNS);
+    }
+
+    /// A summary request parked on the quota says `Compacting` again when it is asked again.
+    #[test]
+    fn a_summary_request_asked_again_after_a_park_is_compacting_again() {
+        let (mut worker, _handles, endpoint) = scripted(
+            vec![
+                Err(LlmError::RateLimited { resets_at_ms: Some(now_ms() + 300), message: "spent".into() }),
+                prose("I am in Pallet Town."),
+            ],
+            None,
+        );
+        // A reset beyond the backoff's reach, so the worker parks rather than the retry loop waiting.
+        worker = worker.with_retry(RetryPolicy { attempts: 2, base: Duration::from_millis(1), max: Duration::from_millis(1) });
+        turns(&mut worker, 3, "short");
+        let published = Arc::clone(&worker.published);
+        let said = notices(&published, || {
+            let note = worker.compact_if_needed(true).expect("forced");
+            assert!(note.summary.is_some());
+        });
+        assert!(said.iter().any(|n| n.contains("quota")), "it parked: {said:?}");
+        let statuses: Vec<RunStatus> = endpoint.asked().into_iter().map(|(_, status)| status).collect();
+        assert_eq!(statuses, [RunStatus::Compacting, RunStatus::Compacting]);
     }
 }

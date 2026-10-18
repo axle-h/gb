@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::llm::map_image;
 use crate::llm::screenshot::SCALE;
 use crate::pokemon::integration_tests::llm_harness::{
-    Always, Brain, Call, Fault, FaultThen, LlmRun, Reply, TurnRequest,
+    takes_once_offered, Always, Brain, Call, Fault, FaultThen, LlmRun, Reply, TurnRequest,
 };
 use crate::pokemon::map::Map;
 use crate::pokemon::integration_tests::TestFixture;
@@ -242,22 +242,11 @@ fn an_undated_hard_failure_does_not_ratchet_the_history() {
 
     // A 402 is not retryable, so each request is one failed turn.
     let sizes: Vec<usize> = run.endpoint.requests().iter().map(|r| r.messages.len()).collect();
-    let plans: Vec<usize> = run
-        .endpoint
-        .requests()
-        .iter()
-        .map(|r| r.messages.iter().filter(|m| m.text.starts_with("## Your plan")).count())
-        .collect();
 
     // A failed turn leaves the history the size it found it.
     assert_eq!(
         sizes.iter().max(), sizes.iter().min(),
         "the history grew across {FAILURES} consecutive failures: {sizes:?}",
-    );
-    // And leaves at most one plan message.
-    assert!(
-        plans.iter().all(|count| *count <= 1),
-        "a failed turn left its plan message behind: {plans:?}",
     );
 
     // The failures resolve to waits, the operator is told, and the next turn decides.
@@ -722,4 +711,178 @@ fn the_native_bike_shop_is_asked_as_a_mart_selling_the_bicycle() {
     assert!(for_sale.contains("`buy:Bicycle`") && for_sale.contains("¥1000000"), "{}", marts[0]);
     assert!(refused, "the clerk's refusal never reached a turn: {situations:#?}");
     assert_eq!(run.agent().game().world().bag.quantity_of(poke_core::item::ItemId::Bicycle), 0);
+}
+
+/// The player in Pallet Town on the recreation with a level-30 party knowing `moves`, PP full,
+/// and `edit` applied to the world after.
+fn native_party_in_pallet(
+    party: &[(poke_core::species::PokemonSpecies, [Option<poke_core::move_name::PokemonMoveName>; 4])],
+    edit: impl FnOnce(&mut pokered::world::World),
+) -> pokered::Game {
+    use pokered::rng::GameRng;
+    use pokered::systems::add_mon::{new_party_mon, Origin};
+    let mut world = pokered::world::World::default();
+    world.player_name = poke_core::charmap::encode("RED").unwrap();
+    world.party = party.iter().map(|&(species, moves)| {
+        let mut mon = new_party_mon(species, 30, 1, &Origin::Trainer, &mut GameRng::tape(vec![]));
+        mon.mon.moves = moves;
+        mon.mon.pp = moves.map(|mv| mv.map_or(0, |mv| mv.metadata().pp));
+        pokered::party::Named { mon, ot: world.player_name.clone(), nick: species.name().to_vec() }
+    }).collect();
+    world.location = pokered::systems::overworld::location::Location {
+        map: Map::PalletTown, x: 5, y: 6, last_map: Map::PalletTown, facing: poke_core::sprite::SpriteFacing::Down,
+        ..Default::default()
+    };
+    edit(&mut world);
+    let mut game = pokered::Game::new(world, GameRng::seeded(11), pokered::Pacing::Instant);
+    game.push(pokered::mode::Mode::Overworld(pokered::modes::overworld::Overworld::new()));
+    game
+}
+
+/// An Ether's overworld row on the recreation restores the one move its id names.
+#[test]
+fn a_native_ether_row_restores_the_move_it_names() {
+    use poke_core::move_name::PokemonMoveName as M;
+    use poke_core::species::PokemonSpecies;
+    let game = native_party_in_pallet(&[(PokemonSpecies::Squirtle, [Some(M::Tackle), Some(M::TailWhip), None, None])], |world| {
+        world.party[0].mon.mon.pp = [35, 0, 0, 0];
+        world.bag.add(poke_core::item::ItemId::Ether, 1);
+    });
+    let situations = Arc::new(Mutex::new(Vec::new()));
+    let brain = takes_once_offered("item:Ether@<slot>:<move>", &["item:Ether@0:1"], Arc::clone(&situations));
+    let mut run = LlmRun::builder(FIXTURE).named("native-ether").start_native(game, Box::new(brain));
+    let restored = run.tick_until(PATIENCE, |run| {
+        let world = run.agent().game().world();
+        world.party[0].mon.mon.pp[1] > 0 && world.bag.quantity_of(poke_core::item::ItemId::Ether) == 0
+    }).unwrap();
+    let situations = situations.lock().unwrap().clone();
+    assert!(situations[0].contains("- `item:Ether@<slot>:<move>` — Ether ×1, restores 10 PP to one move: 0:1 SQUIRTLE's Tail Whip 0/30\n"),
+            "{}", situations[0]);
+    assert!(restored, "the Ether never landed: {situations:#?}");
+    let world = run.agent().game().world();
+    assert_eq!(world.party[0].mon.mon.pp, [35, 10, 0, 0], "Tail Whip, and only Tail Whip, gets 10 PP");
+    assert_eq!(world.bag.quantity_of(poke_core::item::ItemId::Ether), 0);
+}
+
+/// Softboiled on the recreation: a fainted target is refused in the game's words, a hurt one is
+/// healed by a fifth of the giver's max HP, and the menus are left behind.
+#[test]
+fn a_native_softboiled_row_heals_a_hurt_member_and_refuses_a_fainted_one() {
+    use poke_core::move_name::PokemonMoveName as M;
+    use poke_core::species::PokemonSpecies;
+    let party = [
+        (PokemonSpecies::Chansey, [Some(M::Pound), Some(M::Softboiled), None, None]),
+        (PokemonSpecies::Squirtle, [Some(M::Tackle), Some(M::TailWhip), None, None]),
+        (PokemonSpecies::Pidgey, [Some(M::Gust), None, None, None]),
+    ];
+    let game = native_party_in_pallet(&party, |world| {
+        world.party[1].mon.mon.hp = 1;
+        world.party[2].mon.mon.hp = 0;
+    });
+    let (max, share, squirtle_max) = {
+        let world = game.world();
+        (world.party[0].mon.stats[0], world.party[0].mon.stats[0] / 5, world.party[1].mon.stats[0])
+    };
+    let situations = Arc::new(Mutex::new(Vec::new()));
+    let brain = takes_once_offered("softboiled@<slot>", &["softboiled@2", "softboiled@1"], Arc::clone(&situations));
+    let mut run = LlmRun::builder(FIXTURE).named("native-softboiled").start_native(game, Box::new(brain));
+    // Healed, and asked again in the overworld: the party menu Softboiled returns to was left.
+    let healed = run.tick_until(PATIENCE, |run| {
+        run.agent().game().world().party[1].mon.mon.hp > 1
+            && situations.lock().unwrap().last().is_some_and(|turn| turn.contains(&format!("{}/{squirtle_max} HP", (1 + share).min(squirtle_max))))
+    }).unwrap();
+    let situations = situations.lock().unwrap().clone();
+    assert!(situations[0].contains(&format!(
+        "- `softboiled@<slot>` — CHANSEY ({max}/{max} HP) gives {share} of its HP to another party member with \
+         Softboiled: 1 SQUIRTLE 1/{squirtle_max} HP\n")), "{}", situations[0]);
+    assert!(situations.iter().any(|turn| turn.contains("cannot revive")), "the fainted Pidgey was not refused: {situations:#?}");
+    assert!(healed, "Softboiled never healed the Squirtle: {situations:#?}");
+    let world = run.agent().game().world();
+    assert_eq!(world.party[0].mon.mon.hp, max - share, "the giver pays a fifth of its max HP");
+    assert_eq!(world.party[1].mon.mon.hp, (1 + share).min(squirtle_max));
+    assert_eq!(world.party[2].mon.mon.hp, 0, "the fainted Pidgey stays fainted");
+}
+
+/// The recreation's Softboiled row is not offered from a giver with a fifth of its max HP or less,
+/// nor when nobody else is hurt.
+#[test]
+fn a_native_softboiled_row_needs_a_healthy_giver_and_someone_hurt() {
+    use poke_core::move_name::PokemonMoveName as M;
+    use poke_core::species::PokemonSpecies;
+    let party = [
+        (PokemonSpecies::Chansey, [Some(M::Pound), Some(M::Softboiled), None, None]),
+        (PokemonSpecies::Squirtle, [Some(M::Tackle), Some(M::TailWhip), None, None]),
+    ];
+    let first_turn = |edit: fn(&mut pokered::world::World)| {
+        let situations = Arc::new(Mutex::new(Vec::new()));
+        let brain = takes_once_offered("softboiled@<slot>", &[], Arc::clone(&situations));
+        let mut run = LlmRun::builder(FIXTURE).named("native-softboiled-withheld")
+            .start_native(native_party_in_pallet(&party, edit), Box::new(brain));
+        assert!(run.tick_until(PATIENCE, |_| !situations.lock().unwrap().is_empty()).unwrap(), "never asked");
+        situations.lock().unwrap()[0].clone()
+    };
+    let weak = first_turn(|world| {
+        world.party[0].mon.mon.hp = world.party[0].mon.stats[0] / 5;
+        world.party[1].mon.mon.hp = 1;
+    });
+    assert!(weak.contains("SQUIRTLE Lv30 (Water) — 1/") && !weak.contains("`softboiled@"), "{weak}");
+    let nobody_hurt = first_turn(|_| {});
+    assert!(nobody_hurt.contains("### Party") && !nobody_hurt.contains("`softboiled@"), "{nobody_hurt}");
+}
+
+/// The recreation's half of the emulated chain tests: Softboiled with a walk through a door chained
+/// behind it, the target fainting under the driver when `refuse` says so.
+fn native_softboiled_then_a_door(refuse: bool, name: &'static str) -> (NativeLlmRunState, Vec<String>, String) {
+    use crate::pokemon::integration_tests::llm_harness::chains_a_door_behind;
+    use poke_core::move_name::PokemonMoveName as M;
+    use poke_core::species::PokemonSpecies;
+    let party = [
+        (PokemonSpecies::Squirtle, [Some(M::Tackle), Some(M::TailWhip), None, None]),
+        (PokemonSpecies::Chansey, [Some(M::Pound), Some(M::Softboiled), None, None]),
+    ];
+    let game = native_party_in_pallet(&party, |world| world.party[0].mon.mon.hp = 1);
+    let situations = Arc::new(Mutex::new(Vec::<String>::new()));
+    let door = Arc::new(Mutex::new(None));
+    let brain = chains_a_door_behind("softboiled@<slot>", "softboiled@0", Arc::clone(&situations), Arc::clone(&door));
+    let mut run = LlmRun::builder(FIXTURE).named(name).start_native(game, Box::new(brain));
+    let mut fainted = false;
+    let settled = run.tick_until(PATIENCE, |run| {
+        // The heal is handed over once a chain has been sent, and the agent leaves the overworld.
+        if refuse && !fainted && door.lock().unwrap().is_some() && !run.agent().is_free() {
+            run.agent().game_mut().world_mut().party[0].mon.mon.hp = 0;
+            fainted = true;
+        }
+        let world = run.agent().game().world();
+        situations.lock().unwrap().len() > 1 || world.location.map != Map::PalletTown && run.agent().is_free()
+    }).unwrap();
+    assert!(settled, "neither the door nor a second turn came of the chain");
+    assert_eq!(fainted, refuse, "the driver was never seen running");
+    let world = run.agent().game().world();
+    let state = NativeLlmRunState { map: world.location.map, hp: world.party[0].mon.mon.hp };
+    let situations = situations.lock().unwrap().clone();
+    let door = door.lock().unwrap().clone().unwrap_or_else(|| panic!("no chain was sent: {situations:#?}"));
+    (state, situations, door)
+}
+
+/// Where a native chain test's run ended up.
+struct NativeLlmRunState {
+    map: Map,
+    hp: u16,
+}
+
+#[test]
+fn a_native_chain_stops_at_a_field_move_the_game_refuses() {
+    let (state, situations, door) = native_softboiled_then_a_door(true, "native-chain-refused");
+    assert_eq!(state.map, Map::PalletTown, "the door was walked through");
+    let next = situations.get(1).unwrap_or_else(|| panic!("no turn after the refusal: {situations:#?}"));
+    assert!(next.contains("`softboiled@0` was not done: the game refused Softboiled"), "{next}");
+    assert!(next.contains(&format!("So `{door}`, which you had chained behind it, was not taken.")), "{next}");
+}
+
+#[test]
+fn a_native_chain_goes_on_past_a_field_move_the_game_takes() {
+    let (state, situations, _) = native_softboiled_then_a_door(false, "native-chain-taken");
+    assert_ne!(state.map, Map::PalletTown, "the door behind the heal was not walked: {situations:#?}");
+    assert!(state.hp > 1, "the heal never landed");
+    assert_eq!(situations.len(), 1, "the chain asked again before reaching the door: {situations:#?}");
 }

@@ -65,6 +65,10 @@ export const Conversation = memo(function Conversation({
       return next;
     });
 
+  // Each turn's kind as of the row being drawn, filled in as the rows are: a restarted worker
+  // numbers its turns again, so the nearest `turn` row above is the one a call belongs to.
+  const turnKinds = new Map<number, string>();
+
   return (
     <div className="conversation">
       <div className="conversation-bar">
@@ -79,10 +83,12 @@ export const Conversation = memo(function Conversation({
       <div className="conversation-list" ref={list} onScroll={onScroll}>
         {entries.length === 0 && <p className="dim">waiting for the agent…</p>}
         {entries.map((entry, index) => {
+          if (entry.type === 'turn') turnKinds.set(entry.turn, entry.kind);
           // A thought is live exactly while it is the last row the model wrote, the same rule as `fold`.
           const live = entry.type === 'reasoning' && index === openBlock;
           const unfolded = live || thoughts.has(entry.seq);
-          const { gutter, body, title, modifier } = render(entry, unfolded);
+          const kind = entry.type === 'tool' ? turnKinds.get(entry.turn) : undefined;
+          const { gutter, body, title, modifier } = render(entry, unfolded, kind);
           const open = showAllRaw || expanded.has(entry.seq);
           const thinking = entry.type === 'reasoning';
           return (
@@ -149,8 +155,11 @@ interface Rendered {
   modifier: string;
 }
 
-/** `unfolded` is only consulted for a `reasoning` row: every other kind renders the same either way. */
-function render(entry: Entry, unfolded: boolean): Rendered {
+/**
+ * `unfolded` is only consulted for a `reasoning` row: every other kind renders the same either way.
+ * `turnKind` is the kind of decision the row's turn was asked, where the page has seen it.
+ */
+function render(entry: Entry, unfolded: boolean, turnKind: string | undefined): Rendered {
   switch (entry.type) {
     case 'agent':
       return { gutter: category(entry.kind), body: entry.text, title: entry.kind, modifier: entry.kind };
@@ -172,7 +181,7 @@ function render(entry: Entry, unfolded: boolean): Rendered {
       // A sentence, not the wire call; the arguments are one click away.
       return {
         gutter: 'tool',
-        body: describeTool(entry),
+        body: describeTool(entry, turnKind),
         title: `turn ${entry.turn}: ${entry.name}`,
         // A rejected call reads as refused before its result arrives.
         modifier: entry.ok === false || entry.kind === 'rejected' ? 'refused' : entry.kind,
@@ -200,7 +209,7 @@ function render(entry: Entry, unfolded: boolean): Rendered {
 }
 
 /** One tool call as a sentence; an unlisted tool falls back to its name and compact arguments. */
-function describeTool(entry: Extract<Entry, { type: 'tool' }>): string {
+function describeTool(entry: Extract<Entry, { type: 'tool' }>, turnKind: string | undefined): string {
   const args = parseArguments(entry.arguments);
   const text = (key: string): string | undefined => {
     const value = args[key];
@@ -228,7 +237,7 @@ function describeTool(entry: Extract<Entry, { type: 'tool' }>): string {
       return path ? `Edited ${path}` : 'Edited a file';
     }
     case 'choose_action':
-      return describeAction(text('id'));
+      return describeAction(text('id'), turnKind);
     // The tools below are an older conversation's, which `/api/history` still replays.
     case 'read_map':
       return 'Read the map';
@@ -329,9 +338,13 @@ function describeRead(path: string | undefined): string {
   return `Read ${path}`;
 }
 
-/** A `choose_action` id as a sentence: its prefix says what kind of action it is. */
-function describeAction(id: string | undefined): string {
+/** A `choose_action` id as a sentence: its prefix says what kind of action it is, except on a naming turn. */
+function describeAction(id: string | undefined, turnKind: string | undefined): string {
   if (!id) return 'Chose an action';
+  // The naming turn's id is the name itself, and `NONE` declines.
+  if (turnKind === 'nickname' && !/^wait(\*|$)/i.test(id)) {
+    return id.trim().toUpperCase() === 'NONE' ? 'Kept the species name' : `Named it ${id.trim()}`;
+  }
   const [base, count] = id.split('*');
   if (base === 'wait') return count ? `Waited ${count} ticks` : 'Waited';
   if (base === 'leave') return 'Bought nothing';

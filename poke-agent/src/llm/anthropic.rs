@@ -1,18 +1,18 @@
 //! The Anthropic Messages API: its own wire format, streaming parser and client. The request is
 //! rendered straight from the conversation the turn loop keeps, never through chat completions.
 
-use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
-use std::sync::Mutex;
+use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::llm::LlmError;
 use crate::llm::client::{ChatEndpoint, http_agent, post_event_stream};
-use crate::llm::compaction::is_turn_start;
 use crate::llm::config::LlmConfig;
 use crate::llm::protocol::{
-    ChatRequest, Completion, Content, ContentPart, Fragment, FunctionCall, Message, Role, ToolCall, Usage, is_timeout,
+    ChatRequest, Completion, Content, ContentPart, Fragment, FunctionCall, Message, Role, ToolCall, ToolSpec, Usage,
+    is_timeout,
 };
 
 const VERSION: &str = "2023-06-01";
@@ -24,44 +24,46 @@ const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 const FALLBACK_MODELS: &[&str] = &["claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"];
 /// `max_tokens` is required here, so `GB_MAX_TOKENS=0` sends this instead.
 const UNCAPPED_MAX_TOKENS: u32 = 64_000;
-/// Far more than one turn's `GB_MAX_TOOL_STEPS`, which is all that is ever replayed.
-const REMEMBERED_REPLIES: usize = 64;
 
 pub struct AnthropicClient {
     agent: ureq::Agent,
     url: String,
     api_key: String,
-    /// Each reply's content blocks exactly as they streamed, signed thinking included, keyed by its
-    /// first tool call's id: the history keeps only the prose and the calls.
-    replies: Mutex<VecDeque<(String, Vec<Value>)>>,
+}
+
+/// One reply's content blocks exactly as they streamed, signed thinking included, and the
+/// [`Prefix`] of the request that produced it. It rides on the reply's [`Message`], so it lives as
+/// long as the history keeps that message, and `history.json` saves it beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reply(Arc<Streamed>);
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Streamed {
+    prefix: u64,
+    blocks: Vec<Value>,
+}
+
+impl Reply {
+    fn new(request: &ChatRequest, blocks: Vec<Value>) -> Self {
+        Self(Arc::new(Streamed { prefix: Prefix::of(request), blocks }))
+    }
+}
+
+impl Serialize for Reply {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Reply {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Streamed::deserialize(deserializer).map(|streamed| Self(Arc::new(streamed)))
+    }
 }
 
 impl AnthropicClient {
     pub fn new(config: &LlmConfig) -> Self {
-        Self {
-            agent: http_agent(config),
-            url: config.messages_url(),
-            api_key: config.api_key.clone(),
-            replies: Mutex::new(VecDeque::new()),
-        }
-    }
-
-    /// The reply that made exactly these calls, if it is still held.
-    fn reply_for(&self, calls: &[ToolCall]) -> Option<Vec<Value>> {
-        let first = calls.first()?;
-        let replies = self.replies.lock().unwrap_or_else(|e| e.into_inner());
-        let (_, blocks) = replies.iter().find(|(id, _)| *id == first.id)?;
-        let ids = blocks.iter().filter(|block| block["type"] == "tool_use").map(|block| block["id"].as_str());
-        ids.eq(calls.iter().map(|call| Some(call.id.as_str()))).then(|| blocks.clone())
-    }
-
-    fn remember(&self, completion: &Completion, blocks: Vec<Value>) {
-        let Some(first) = completion.tool_calls.first() else { return };
-        let mut replies = self.replies.lock().unwrap_or_else(|e| e.into_inner());
-        replies.push_back((first.id.clone(), blocks));
-        while replies.len() > REMEMBERED_REPLIES {
-            replies.pop_front();
-        }
+        Self { agent: http_agent(config), url: config.messages_url(), api_key: config.api_key.clone() }
     }
 }
 
@@ -72,7 +74,7 @@ impl ChatEndpoint for AnthropicClient {
         on_delta: &mut dyn FnMut(Fragment<'_>),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Completion, LlmError> {
-        let body = serde_json::to_string(&request_body(request, &|calls| self.reply_for(calls)))
+        let body = serde_json::to_string(&request_body(request))
             .map_err(|e| LlmError::Protocol(format!("could not encode the request: {e}")))?;
         let betas = betas(request);
         let mut headers = vec![("x-api-key", self.api_key.as_str()), ("anthropic-version", VERSION)];
@@ -80,23 +82,61 @@ impl ChatEndpoint for AnthropicClient {
             headers.push(("anthropic-beta", betas.as_str()));
         }
         let response = post_event_stream(&self.agent, &self.url, &headers, body, describe_error_body)?;
-        let (completion, blocks) = read_stream(BufReader::new(response.into_reader()), on_delta, cancelled)?;
-        self.remember(&completion, blocks);
+        let (mut completion, blocks) = read_stream(BufReader::new(response.into_reader()), on_delta, cancelled)?;
+        completion.replay = (!blocks.is_empty()).then(|| Reply::new(request, blocks));
         Ok(completion)
+    }
+}
+
+/// A fingerprint of the tools and the messages so far, which is what a thinking block is bound to.
+/// FNV-1a rather than `DefaultHasher`, whose output may change between Rust releases: a digest
+/// saved in `history.json` has to be one the next build computes too.
+#[derive(Clone)]
+struct Prefix(u64);
+
+impl Prefix {
+    fn new(tools: &[ToolSpec]) -> Self {
+        let mut prefix = Self(0xcbf2_9ce4_8422_2325);
+        tools.iter().for_each(|tool| prefix.feed(tool));
+        prefix
+    }
+
+    /// The whole of what `request` sends, which is what its reply was written after.
+    fn of(request: &ChatRequest) -> u64 {
+        let mut prefix = Self::new(&request.tools);
+        request.messages.iter().for_each(|message| prefix.feed(message));
+        prefix.digest()
+    }
+
+    fn feed(&mut self, value: &impl Serialize) {
+        let bytes = serde_json::to_vec(value).unwrap_or_default();
+        self.write(&(bytes.len() as u64).to_le_bytes());
+        self.write(&bytes);
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    fn digest(&self) -> u64 {
+        self.0
     }
 }
 
 // ── Requests ─────────────────────────────────────────────────────────────────────────────────────
 
-/// The whole `POST /v1/messages` body. `replay` answers an assistant message's calls with the
-/// reply that made them, as it streamed.
-pub fn request_body(request: &ChatRequest, replay: &dyn Fn(&[ToolCall]) -> Option<Vec<Value>>) -> Value {
-    let (system, messages) = render(&request.messages, replay);
+/// The whole `POST /v1/messages` body.
+pub fn request_body(request: &ChatRequest) -> Value {
+    let (system, messages) = render(&request.messages, Prefix::new(&request.tools));
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
     body.insert("max_tokens".into(), json!(request.max_tokens.unwrap_or(UNCAPPED_MAX_TOKENS)));
+    // Its own breakpoint, so the tools and the system prompt are read back even on a request whose
+    // last turn ran past the automatic breakpoint's lookback.
     if !system.is_empty() {
-        body.insert("system".into(), json!(system));
+        body.insert("system".into(), json!([{ "type": "text", "text": system, "cache_control": { "type": "ephemeral" } }]));
     }
     body.insert("messages".into(), Value::Array(messages));
     if !request.tools.is_empty() {
@@ -122,7 +162,8 @@ pub fn request_body(request: &ChatRequest, replay: &dyn Fn(&[ToolCall]) -> Optio
     if offers_fallback(request) {
         body.insert("fallbacks".into(), json!("default"));
     }
-    // The breakpoint follows the end of the conversation as it grows.
+    // The second of the four breakpoints a request may carry, following the end of the
+    // conversation as it grows.
     body.insert("cache_control".into(), json!({ "type": "ephemeral" }));
     body.insert("stream".into(), json!(true));
     Value::Object(body)
@@ -162,23 +203,23 @@ fn betas(request: &ChatRequest) -> String {
 }
 
 /// The top-level `system` and the `messages`, with consecutive turns of one role merged.
-fn render(messages: &[Message], replay: &dyn Fn(&[ToolCall]) -> Option<Vec<Value>>) -> (String, Vec<Value>) {
+fn render(messages: &[Message], mut prefix: Prefix) -> (String, Vec<Value>) {
     let leading = messages.iter().take_while(|message| message.role == Role::System).count();
     let system: Vec<&str> = messages[..leading].iter().filter_map(Message::text).collect();
-
-    // Thinking goes back signed for the turn under way and for no earlier one: each block is bound
-    // to the tools and the history it was written under, and a new kind of decision or a
-    // compaction changes both.
-    let turn_start = messages.iter().rposition(is_turn_start).unwrap_or(0);
+    messages[..leading].iter().for_each(|message| prefix.feed(message));
 
     let mut turns: Vec<(&'static str, Vec<Value>)> = Vec::new();
-    for (index, message) in messages.iter().enumerate().skip(leading) {
+    for message in &messages[leading..] {
         let (role, mut blocks) = blocks_of(message);
-        if index > turn_start && message.role == Role::Assistant {
-            if let Some(reply) = replay(&message.tool_calls) {
-                blocks = reply;
+        // A reply goes back as it streamed, signed thinking and all, wherever the history before it
+        // is still the one it was written after: so a reply loses its thinking only where the
+        // history was rewritten, a restart included, and each request's prefix is the last one's.
+        if message.role == Role::Assistant && !blocks.is_empty() {
+            if let Some(reply) = message.replay.as_ref().filter(|reply| reply.0.prefix == prefix.digest()) {
+                blocks = reply.0.blocks.clone();
             }
         }
+        prefix.feed(message);
         if blocks.is_empty() {
             continue;
         }
@@ -283,7 +324,7 @@ pub struct StreamAccumulator {
     inputs: Vec<String>,
     content: String,
     reasoning: String,
-    /// Everything the prompt cost, cached or not, which is how full the context is.
+    /// The uncached part of the prompt; `None` until an event reports it.
     input_tokens: Option<u64>,
     cache_read_tokens: u64,
     cache_write_tokens: u64,
@@ -333,18 +374,17 @@ impl StreamAccumulator {
         Ok(false)
     }
 
+    /// Each figure is replaced only by an event that carries it, and the prompt is summed in
+    /// [`Self::finish`]: `message_delta` may repeat `input_tokens` without the cache fields.
     fn read_usage(&mut self, usage: &Value) {
-        if usage.get("input_tokens").is_some() {
-            let fields = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
-            self.input_tokens = Some(fields.iter().map(|field| usage[*field].as_u64().unwrap_or(0)).sum());
-            // `message_delta` may repeat `input_tokens` without the cache fields: keep what
-            // `message_start` set.
-            if let Some(read) = usage["cache_read_input_tokens"].as_u64() {
-                self.cache_read_tokens = read;
-            }
-            if let Some(write) = usage["cache_creation_input_tokens"].as_u64() {
-                self.cache_write_tokens = write;
-            }
+        if let Some(input) = usage["input_tokens"].as_u64() {
+            self.input_tokens = Some(input);
+        }
+        if let Some(read) = usage["cache_read_input_tokens"].as_u64() {
+            self.cache_read_tokens = read;
+        }
+        if let Some(write) = usage["cache_creation_input_tokens"].as_u64() {
+            self.cache_write_tokens = write;
         }
         if let Some(output) = usage["output_tokens"].as_u64() {
             self.output_tokens = output;
@@ -425,7 +465,9 @@ impl StreamAccumulator {
             }
             blocks.push(block);
         }
-        let usage = self.input_tokens.map(|prompt| Usage {
+        // Everything the prompt cost, cached or not, which is how full the context is.
+        let prompt = self.input_tokens.map(|input| input + self.cache_read_tokens + self.cache_write_tokens);
+        let usage = prompt.map(|prompt| Usage {
             prompt_tokens: prompt,
             completion_tokens: self.output_tokens,
             total_tokens: prompt + self.output_tokens,
@@ -443,6 +485,7 @@ impl StreamAccumulator {
                 "max_tokens" => "length".to_string(),
                 _ => reason,
             }),
+            replay: None,
         };
         (completion, blocks)
     }
@@ -539,10 +582,6 @@ mod tests {
         }
     }
 
-    fn never(_: &[ToolCall]) -> Option<Vec<Value>> {
-        None
-    }
-
     /// A finished turn and the start of the next, the shape every request after the first takes.
     fn two_turns() -> Vec<Message> {
         vec![
@@ -561,8 +600,8 @@ mod tests {
 
     #[test]
     fn the_conversation_is_rendered_as_alternating_turns_of_blocks() {
-        let body = request_body(&request(two_turns()), &never);
-        assert_eq!(body["system"], "the rules", "the system prompt is top-level, not a message");
+        let body = request_body(&request(two_turns()));
+        assert_eq!(body["system"][0]["text"], "the rules", "the system prompt is top-level, not a message");
 
         let messages = body["messages"].as_array().expect("messages");
         let roles: Vec<&str> = messages.iter().map(|m| m["role"].as_str().unwrap()).collect();
@@ -591,67 +630,217 @@ mod tests {
             Message::assistant("  \n".into(), vec![]),
             Message::user("still there?"),
         ];
-        let body = request_body(&request(messages), &never);
+        let body = request_body(&request(messages));
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1, "the two user messages either side merge: {messages:?}");
         assert_eq!(messages[0]["content"].as_array().unwrap().len(), 2);
     }
 
-    #[test]
-    fn only_the_turn_under_way_is_sent_back_with_its_thinking() {
-        let thought = |id: &str| {
-            vec![
-                json!({ "type": "thinking", "thinking": "", "signature": format!("sig-{id}") }),
-                json!({ "type": "tool_use", "id": id, "name": "read_map", "input": {} }),
-            ]
-        };
-        let replay = |calls: &[ToolCall]| Some(thought(&calls.first()?.id));
-        let body = request_body(&request(two_turns()), &replay);
-        let messages = body["messages"].as_array().unwrap();
+    /// The reply the endpoint would stream after `request`: a signed thought, then one call.
+    fn answer(request: &ChatRequest, id: &str) -> Message {
+        let blocks = vec![
+            json!({ "type": "thinking", "thinking": format!("why {id}"), "signature": format!("sig-{id}") }),
+            json!({ "type": "tool_use", "id": id, "name": "read_map", "input": {} }),
+        ];
+        let tool_calls = vec![call(id, "read_map", "{}")];
+        Completion { tool_calls, replay: Some(Reply::new(request, blocks)), ..Completion::default() }.message()
+    }
 
-        assert_eq!(messages[5]["content"][0]["signature"], "sig-toolu_c", "this turn's reply goes back verbatim");
-        for earlier in [&messages[1], &messages[3]] {
-            assert!(
-                earlier["content"].as_array().unwrap().iter().all(|block| block["type"] != "thinking"),
-                "an earlier turn's thinking is bound to tools and a history that may have moved: {earlier}",
-            );
+    /// Ask, answer, and append, `steps` times a turn: the bodies in the order they were sent.
+    fn play(history: &mut Vec<Message>, turns: usize, steps: usize) -> Vec<Value> {
+        let mut bodies = Vec::new();
+        for _ in 0..turns {
+            history.push(Message::user(format!("### Turn {}", history.len())));
+            for _ in 0..steps {
+                let request = request(history.clone());
+                bodies.push(request_body(&request));
+                let id = format!("toolu_{}", history.len());
+                history.push(answer(&request, &id));
+                history.push(Message::tool_result(&id, "a room"));
+            }
+        }
+        bodies
+    }
+
+    fn signatures(body: &Value) -> Vec<String> {
+        let blocks = body["messages"].as_array().unwrap().iter().flat_map(|m| m["content"].as_array().unwrap());
+        blocks.filter_map(|block| block["signature"].as_str().map(str::to_string)).collect()
+    }
+
+    /// Byte for byte, as the cache compares them.
+    fn assert_each_extends_the_last(bodies: &[Value]) {
+        for (n, pair) in bodies.windows(2).enumerate() {
+            let (earlier, later) = (pair[0]["messages"].as_array().unwrap(), pair[1]["messages"].as_array().unwrap());
+            assert!(later.len() > earlier.len(), "request {} grew", n + 1);
+            let (earlier, later) = (json!(earlier).to_string(), json!(later[..earlier.len()]).to_string());
+            assert_eq!(later, earlier, "request {} rewrote request {n}'s prefix", n + 1);
         }
     }
 
     #[test]
-    fn a_held_reply_stands_in_only_for_the_calls_it_made() {
-        let client = AnthropicClient::new(&LlmConfig::from_lookup(&|name| match name {
-            "GB_PROVIDER" => Some("anthropic".into()),
-            "ANTHROPIC_API_KEY" | "GB_MODEL" => Some("x".into()),
-            _ => None,
-        }).expect("valid"));
-        let reply = vec![
-            json!({ "type": "thinking", "thinking": "", "signature": "s" }),
-            json!({ "type": "tool_use", "id": "toolu_a", "name": "read_map", "input": {} }),
-            json!({ "type": "tool_use", "id": "toolu_b", "name": "read_party", "input": {} }),
-        ];
-        let completion = Completion {
-            tool_calls: vec![call("toolu_a", "read_map", "{}"), call("toolu_b", "read_party", "{}")],
-            ..Completion::default()
+    fn every_earlier_reply_goes_back_with_its_thinking_so_each_request_extends_the_last() {
+        let mut history = vec![Message::system("the rules")];
+        // Far more replies than one turn's tool steps, across far more turns than one.
+        let bodies = play(&mut history, 40, 2);
+
+        assert_each_extends_the_last(&bodies);
+        let last = bodies.last().unwrap();
+        let replies = history.iter().filter(|m| m.role == Role::Assistant).count();
+        assert_eq!(signatures(last).len(), replies - 1, "every reply before the last request's own: {last}");
+        let messages = last["messages"].as_array().unwrap();
+        assert_eq!(messages[1]["content"][0]["signature"], "sig-toolu_2", "the very first reply is still sent with it");
+    }
+
+    #[test]
+    fn a_reply_is_sent_without_its_thinking_from_where_the_history_was_rewritten_and_stays_so() {
+        let mut history = vec![Message::system("the rules")];
+        play(&mut history, 3, 2);
+
+        // A compaction: the system prompt, a summary and the last turn, whose replies were written
+        // after a history that is gone.
+        let last_turn = history.iter().rposition(|m| m.role == Role::User && m.tool_call_id.is_none()).unwrap();
+        let mut compacted = vec![history[0].clone(), Message::user("The story so far.")];
+        compacted.extend_from_slice(&history[last_turn..]);
+        let bodies = play(&mut compacted, 2, 2);
+        assert_eq!(signatures(&bodies[0]), Vec::<String>::new(), "{}", bodies[0]);
+        assert_each_extends_the_last(&bodies);
+        assert_eq!(signatures(bodies.last().unwrap()).len(), 3, "the replies since are sent with theirs");
+    }
+
+    #[test]
+    fn a_reply_goes_back_as_it_streamed_only_after_the_tools_and_system_prompt_it_was_written_after() {
+        let mut history = vec![Message::system("the rules")];
+        play(&mut history, 2, 2);
+        assert_eq!(signatures(&request_body(&request(history.clone()))).len(), 4);
+
+        let mut prompt_changed = history.clone();
+        prompt_changed[0] = Message::system("other rules");
+        assert_eq!(signatures(&request_body(&request(prompt_changed))), Vec::<String>::new());
+
+        let mut tools_changed = request(history.clone());
+        tools_changed.tools.push(ToolSpec::new("read_bag", "Read the bag.", json!({ "type": "object" })));
+        assert_eq!(signatures(&request_body(&tools_changed)), Vec::<String>::new());
+
+        // Two looks streamed as two text blocks; without its own record a reply is its prose.
+        let mut bare = history.clone();
+        bare.iter_mut().for_each(|message| message.replay = None);
+        let body = request_body(&request(bare));
+        assert_eq!(signatures(&body), Vec::<String>::new());
+        assert_eq!(body["messages"][1]["content"], json!([{ "type": "tool_use", "id": "toolu_2", "name": "read_map", "input": {} }]));
+    }
+
+    /// `history.json` as a restart finds it: what the last process would have sent next, and what
+    /// the next one sends, the resume note aside.
+    fn restarted(scratch: &crate::run::Scratch, edit: impl FnOnce(&mut Value)) -> (Value, Value) {
+        use crate::llm::history::History;
+        let mut first = History::open(Some(&scratch.0));
+        play(&mut first, 3, 2);
+        first.checkpoint(3, 1.0);
+        let next = |history: &[Message]| {
+            let mut messages = history.to_vec();
+            messages.push(Message::user("### Turn 4"));
+            request_body(&request(messages))
         };
-        client.remember(&completion, reply.clone());
+        let before = next(&first);
+        drop(first);
 
-        assert_eq!(client.reply_for(&completion.tool_calls), Some(reply));
-        assert_eq!(client.reply_for(&completion.tool_calls[..1]), None, "a history that lost a call is not that reply");
-        assert_eq!(client.reply_for(&[]), None);
+        let path = scratch.0.join(crate::run::files::HISTORY);
+        let mut saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        edit(&mut saved);
+        std::fs::write(&path, saved.to_string()).unwrap();
+        (before, next(&History::open(Some(&scratch.0))))
+    }
 
-        for n in 0..REMEMBERED_REPLIES {
-            client.remember(&Completion { tool_calls: vec![call(&format!("t{n}"), "wait", "{}")], ..Completion::default() }, vec![]);
-        }
-        assert_eq!(client.reply_for(&completion.tool_calls), None, "the oldest go first");
+    /// Everything but the turn the resume note joins, and that turn up to the note.
+    fn assert_resumed_as_it_was(before: &Value, after: &Value) {
+        let (before, after) = (before["messages"].as_array().unwrap(), after["messages"].as_array().unwrap());
+        assert_eq!(before.len(), after.len(), "the note joins the last turn rather than starting one");
+        let restored = before.len() - 1;
+        assert_eq!(json!(after[..restored]).to_string(), json!(before[..restored]).to_string());
+        let (was, now) = (before[restored]["content"].as_array().unwrap(), after[restored]["content"].as_array().unwrap());
+        assert_eq!(json!(now[..was.len() - 1]).to_string(), json!(was[..was.len() - 1]).to_string());
+        assert_eq!(now[was.len() - 1]["text"], crate::llm::prompt::RESUMED_NOTE);
+    }
+
+    #[test]
+    fn a_restart_sends_every_reply_back_as_the_last_process_would_have() {
+        let scratch = crate::run::Scratch::new("anthropic-restart");
+        let (before, after) = restarted(&scratch, |_| {});
+        assert_eq!(signatures(&before).len(), 6);
+        assert_resumed_as_it_was(&before, &after);
+        assert_eq!(after["system"], before["system"]);
+        assert_eq!(after["tools"], before["tools"]);
+
+        // Only `history.json` keeps them: not the log, and not what any other endpoint is sent.
+        let log = std::fs::read_to_string(scratch.0.join(crate::run::files::CONVERSATION)).unwrap();
+        assert!(!log.contains("sig-"), "{log}");
+        let history = crate::llm::history::History::open(Some(&scratch.0));
+        assert!(history.iter().any(|message| message.replay.is_some()));
+        let chat_completions = serde_json::to_string(&request(history.to_vec())).unwrap();
+        assert!(!chat_completions.contains("sig-") && !chat_completions.contains("\"replay\""), "{chat_completions}");
+    }
+
+    #[test]
+    fn a_history_saved_without_thinking_resumes_without_it_and_thinks_again_from_there() {
+        let scratch = crate::run::Scratch::new("anthropic-restart-old");
+        let (before, after) = restarted(&scratch, |saved| {
+            for message in saved["messages"].as_array_mut().unwrap() {
+                message.as_object_mut().unwrap().remove("replay");
+            }
+        });
+        assert_eq!(signatures(&after), Vec::<String>::new(), "{after}");
+        assert_eq!(after["messages"].as_array().unwrap().len(), before["messages"].as_array().unwrap().len());
+
+        let mut history = crate::llm::history::History::open(Some(&scratch.0));
+        let bodies = play(&mut history, 2, 2);
+        assert_each_extends_the_last(&bodies);
+        assert_eq!(signatures(bodies.last().unwrap()).len(), 3, "the replies since are sent with theirs");
+    }
+
+    #[test]
+    fn a_restart_under_another_system_prompt_sends_the_restored_replies_without_their_thinking() {
+        let scratch = crate::run::Scratch::new("anthropic-restart-prompt");
+        restarted(&scratch, |_| {});
+        let mut history = crate::llm::history::History::open(Some(&scratch.0));
+        history[0] = Message::system("a prompt edited between builds");
+        let restored: Vec<String> = history.iter().flat_map(|m| &m.tool_calls).map(|c| format!("sig-{}", c.id)).collect();
+        assert_eq!(restored.len(), 6);
+        let bodies = play(&mut history, 2, 2);
+        assert_eq!(signatures(&bodies[0]), Vec::<String>::new(), "{}", bodies[0]);
+        assert_each_extends_the_last(&bodies);
+        let since = signatures(bodies.last().unwrap());
+        assert_eq!(since.len(), 3, "the replies since are sent with theirs");
+        assert!(since.iter().all(|signature| !restored.contains(signature)), "and only those: {since:?}");
+    }
+
+    #[test]
+    fn a_picture_history_json_evicted_costs_the_thinking_after_it_and_no_more() {
+        let scratch = crate::run::Scratch::new("anthropic-restart-picture");
+        let mut first = crate::llm::history::History::open(Some(&scratch.0));
+        play(&mut first, 1, 2);
+        first.push(Message::user_with_image("the map", "data:image/png;base64,AAAA".into()));
+        play(&mut first, 1, 2);
+        first.checkpoint(2, 1.0);
+        drop(first);
+
+        let history = crate::llm::history::History::open(Some(&scratch.0));
+        let body = request_body(&request(history.to_vec()));
+        assert_eq!(signatures(&body), ["sig-toolu_2", "sig-toolu_4"], "{body}");
     }
 
     #[test]
     fn the_defaults_think_adaptively_cache_and_show_the_thinking() {
-        let body = request_body(&request(two_turns()), &never);
+        let body = request_body(&request(two_turns()));
         assert_eq!(body["max_tokens"], 8192);
         assert_eq!(body["stream"], true);
         assert_eq!(body["cache_control"], json!({ "type": "ephemeral" }));
+        assert_eq!(
+            body["system"],
+            json!([{ "type": "text", "text": "the rules", "cache_control": { "type": "ephemeral" } }]),
+            "the tools and the system prompt have a breakpoint of their own",
+        );
+        let markers = body.to_string().matches("\"cache_control\"").count();
+        assert_eq!(markers, 2, "the system prompt's and the automatic one, of the four allowed: {body}");
         assert_eq!(body["thinking"], json!({
             "type": "adaptive",
             "display": "summarized",
@@ -672,18 +861,18 @@ mod tests {
     fn the_reasoning_settings_say_the_same_things_in_this_dialect() {
         let effort = |value: &str| ChatRequest { reasoning_effort: Some(value.into()), ..request(Vec::new()) };
 
-        let body = request_body(&effort("xhigh"), &never);
+        let body = request_body(&effort("xhigh"));
         assert_eq!(body["output_config"], json!({ "effort": "xhigh" }));
         assert_eq!(body["thinking"]["type"], "adaptive");
 
         let off = effort("none");
-        let body = request_body(&off, &never);
+        let body = request_body(&off);
         assert_eq!(body["thinking"], json!({ "type": "disabled" }), "`none` is no thinking, not an effort");
         assert!(body.get("output_config").is_none(), "{body}");
         assert_eq!(betas(&off), "", "no binding to control without thinking");
 
         let budget = ChatRequest { reasoning: Some(ReasoningBudget { max_tokens: 2048 }), ..request(Vec::new()) };
-        let body = request_body(&budget, &never);
+        let body = request_body(&budget);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 2048);
 
@@ -693,7 +882,7 @@ mod tests {
             parallel_tool_calls: Some(false),
             ..request(Vec::new())
         };
-        let body = request_body(&other, &never);
+        let body = request_body(&other);
         assert_eq!(body["max_tokens"], UNCAPPED_MAX_TOKENS, "the field is required here");
         assert_eq!(body["temperature"], 0.5);
         assert_eq!(body["tool_choice"], json!({ "type": "auto", "disable_parallel_tool_use": true }));
@@ -702,9 +891,9 @@ mod tests {
     #[test]
     fn only_a_model_that_offers_a_fallback_is_asked_for_one() {
         let opus = ChatRequest { model: "claude-opus-5-5".into(), ..request(Vec::new()) };
-        assert_eq!(request_body(&opus, &never)["fallbacks"], "default");
+        assert_eq!(request_body(&opus)["fallbacks"], "default");
         assert_eq!(betas(&opus), format!("{THINKING_BINDING_BETA},{FALLBACK_BETA}"));
-        assert!(request_body(&request(Vec::new()), &never).get("fallbacks").is_none());
+        assert!(request_body(&request(Vec::new())).get("fallbacks").is_none());
     }
 
     fn drain(lines: &[&str]) -> (Completion, Vec<Value>) {
@@ -769,6 +958,32 @@ mod tests {
             json!({ "type": "text", "text": "Heading south." }),
             json!({ "type": "tool_use", "id": "toolu_1", "name": "choose_action", "input": { "id": "Room:5,7:Warp" } }),
         ]);
+    }
+
+    /// The final `message_delta` may repeat `input_tokens` alone, or with the cache figures null.
+    #[test]
+    fn a_later_input_count_without_the_cache_fields_keeps_the_cached_part() {
+        let start = r#"data: {"type":"message_start","message":{"usage":{"input_tokens":12,"cache_creation_input_tokens":300,"cache_read_input_tokens":5000,"output_tokens":1}}}"#;
+        for delta in [
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":12,"output_tokens":87}}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":12,"cache_creation_input_tokens":null,"cache_read_input_tokens":null,"output_tokens":87}}"#,
+        ] {
+            let (completion, _) = drain(&[start, delta, r#"data: {"type":"message_stop"}"#]);
+            let usage = completion.usage.expect("usage");
+            assert_eq!(
+                (usage.prompt_tokens, usage.cache_read_tokens, usage.cache_write_tokens, usage.completion_tokens),
+                (5312, 5000, 300, 87),
+                "{delta}",
+            );
+        }
+
+        // The cache figures arriving only on the delta count as well.
+        let (completion, _) = drain(&[
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":1}}}"#,
+            r#"data: {"type":"message_delta","delta":{},"usage":{"cache_read_input_tokens":5000,"output_tokens":87}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ]);
+        assert_eq!(completion.usage.map(|usage| usage.prompt_tokens), Some(5012));
     }
 
     #[test]
@@ -926,9 +1141,9 @@ mod tests {
         assert!(!asked.contains("authorization:"), "the key goes in its own header: {asked}");
 
         // The next step of the same turn carries the signed thinking that led to the call.
-        messages.push(Message::assistant(completion.content.clone(), completion.tool_calls.clone()));
+        messages.push(completion.message());
         messages.push(Message::tool_result("toolu_1", "walked"));
-        let body = request_body(&request(messages), &|calls| client.reply_for(calls));
+        let body = request_body(&request(messages));
         assert_eq!(body["messages"][1]["content"][0]["signature"], "EqQB");
     }
 

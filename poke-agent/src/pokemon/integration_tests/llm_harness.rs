@@ -22,6 +22,57 @@ use crate::published::{Published, UiEvent, UiEventBody};
 use crate::tour::endpoint::{error_body, sse_body};
 pub use crate::tour::turn::{Brain, Call, Fault, Reply, SeenMessage, TurnRequest};
 
+/// A brain that takes each of `ids` in turn once the overworld menu offers `row`, keeping every
+/// overworld situation it was shown.
+pub fn takes_once_offered(row: &'static str, ids: &'static [&'static str], seen: Arc<Mutex<Vec<String>>>)
+    -> impl FnMut(&TurnRequest) -> Reply + Send {
+    let mut next = 0;
+    move |request: &TurnRequest| {
+        if request.is_summary() {
+            return Reply::Content("Using what the menu offers.".to_string());
+        }
+        if !request.is_overworld() {
+            return Reply::Calls(vec![Call::wait(10)]);
+        }
+        seen.lock().unwrap().push(request.situation().to_string());
+        match ids.get(next).filter(|_| request.menu_ids().iter().any(|id| id == row)) {
+            Some(id) => {
+                next += 1;
+                Reply::call("choose_action", serde_json::json!({ "id": id, "summary": "Using it." }))
+            }
+            None => Reply::Calls(vec![Call::wait(10)]),
+        }
+    }
+}
+
+/// A brain that, on the first overworld turn offering `row`, takes `first` with the first walk
+/// through a door chained behind it in the same reply, and waits from then on. It keeps every
+/// overworld situation, and the walk's id once it has chosen one.
+pub fn chains_a_door_behind(row: &'static str, first: &'static str, seen: Arc<Mutex<Vec<String>>>,
+                            door: Arc<Mutex<Option<String>>>) -> impl FnMut(&TurnRequest) -> Reply + Send {
+    move |request: &TurnRequest| {
+        if request.is_summary() {
+            return Reply::Content("Healing, then going in.".to_string());
+        }
+        if !request.is_overworld() {
+            return Reply::Calls(vec![Call::wait(10)]);
+        }
+        seen.lock().unwrap().push(request.situation().to_string());
+        let mut chosen = door.lock().unwrap();
+        let walk = request.walk_rows().into_iter().map(|(id, _)| id).find(|id| id.ends_with(":Warp"));
+        match walk.filter(|_| chosen.is_none() && request.menu_ids().iter().any(|id| id == row)) {
+            Some(walk) => {
+                *chosen = Some(walk.clone());
+                Reply::Calls(vec![
+                    Call::new("choose_action", serde_json::json!({ "id": first, "summary": "Healing, then going in." })),
+                    Call::new("choose_action", serde_json::json!({ "id": walk })),
+                ])
+            }
+            None => Reply::Calls(vec![Call::wait(10)]),
+        }
+    }
+}
+
 /// A brain that answers with the same thing every time.
 pub struct Always(pub Reply);
 
@@ -202,7 +253,7 @@ pub const SHORT_REFUSAL_PARK: RefusalPark =
 pub struct LlmRun {
     pub endpoint: MockEndpoint,
     pub published: Arc<Published>,
-    /// Where `history.json`, `conversation.jsonl`, `todo.json` and `battle-script.json` live, as
+    /// Where `history.json`, `conversation.jsonl` and the plan and battle-script histories live, as
     /// deployed.
     pub run_dir: std::path::PathBuf,
     /// `None` only between a restart's teardown and its bring-up.

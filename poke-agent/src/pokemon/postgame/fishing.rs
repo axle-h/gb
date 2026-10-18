@@ -9,7 +9,7 @@ use crate::pokemon::battle::{BattleAction, BattleType};
 use crate::pokemon::encoding::GameMode;
 use crate::pokemon::item::ItemId;
 use crate::pokemon::map::Map;
-use crate::pokemon::policy::{FieldMove, PolicyStep};
+use crate::pokemon::policy::{FieldMove, FieldMoveOutcome, PolicyStep};
 use crate::pokemon::species::PokemonSpecies;
 use crate::pokemon::symbols::{pokered_symbols, DmgPointerRead};
 use crate::pokemon::tile::MetaTile;
@@ -217,6 +217,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: FishState) ->
                    reason: OverworldActionAbortedReason| {
         api.release_all_buttons();
         let at = agent.player_at(api);
+        agent.field_move_ended(FieldMoveOutcome::Stopped(reason));
         agent.abort_overworld(MetaTile::Fish { rod: s.rod }, reason, at);
     };
 
@@ -234,6 +235,7 @@ pub fn tick(agent: &mut PokemonAgent, api: &mut PokemonApi<'_>, s: FishState) ->
         // A cast that caught nothing is a completed action.
         agent.event(AgentEvent::OverworldActionCompleted {
             destination: crate::pokemon::tile::MetaTile::Fish { rod: s.rod } });
+        agent.field_move_ended(FieldMoveOutcome::Took);
         finish(agent, api);
         return Ok(());
     }

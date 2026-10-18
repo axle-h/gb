@@ -89,8 +89,9 @@ pub enum UiEventBody {
 
     #[serde(rename = "run_status")]
     Run { status: RunStatus },
-    /// The model's `plan.md`, in full, whenever it changes: the transcript keeps every version.
-    Plan { text: String },
+    /// The model's `plan.md`, in full, whenever it changes. `version` is its line in the run's
+    /// `plan-history.jsonl`, 0 before the first, which is what `/api/plan-history` pages by.
+    Plan { text: String, version: u64 },
     /// The model's battle script, whenever it changes.
     BattleScript { source: Option<String>, armed: bool, is_default: bool, last_failure: Option<String> },
     /// Where the player is and what they have, whenever that changes. See [`crate::run::moments`].
@@ -652,7 +653,7 @@ mod tests {
     #[test]
     fn a_joiner_is_handed_the_plan_as_well_as_the_heartbeat() {
         let published = Published::new();
-        let plan = |text: &str| UiEventBody::Plan { text: text.to_string() };
+        let plan = |text: &str| UiEventBody::Plan { text: text.to_string(), version: 1 };
 
         published.publish_event(plan("1. get the Boulder Badge"));
         for _ in 0..50 {
@@ -662,14 +663,14 @@ mod tests {
 
         let (_receiver, opening) = published.join_events();
         assert_eq!(opening.len(), 2, "the plan and the heartbeat: {opening:#?}");
-        let UiEventBody::Plan { text } = &opening[0].body else { panic!("the plan first") };
+        let UiEventBody::Plan { text, .. } = &opening[0].body else { panic!("the plan first") };
         assert_eq!(text, "1. get the Boulder Badge");
         assert!(matches!(opening[1].body, UiEventBody::Status(_)), "then the heartbeat");
 
         published.publish_event(plan("1. Cerulean"));
         let (_receiver, opening) = published.join_events();
         let latest = opening.iter().find_map(|event| match &event.body {
-            UiEventBody::Plan { text } => Some(text.as_str()),
+            UiEventBody::Plan { text, .. } => Some(text.as_str()),
             _ => None,
         });
         assert_eq!(latest, Some("1. Cerulean"), "the latest plan, not an accumulation of every one");
@@ -692,7 +693,7 @@ mod tests {
         for _ in 0..50 {
             published.publish_event(UiEventBody::AssistantReasoning { turn: 1, text: "…".into() });
         }
-        published.publish_event(UiEventBody::Plan { text: "1. get the Boulder Badge".to_string() });
+        published.publish_event(UiEventBody::Plan { text: "1. get the Boulder Badge".to_string(), version: 1 });
         published.publish_status(snapshot("wait", 100));
 
         let (_receiver, opening) = published.join_events();
