@@ -1836,33 +1836,69 @@ pub fn mart_menu(snapshot: &ApiSnapshot, state: &GameState) -> Vec<MenuItem> {
     menu
 }
 
+/// One move as the forget prompt weighs it, the new move and the four it competes with alike: type,
+/// power, accuracy, the same-type bonus the learner would get, pp, and what it does. Against a foe
+/// still standing it carries the same damage estimate as a `fight:` row.
+pub(crate) fn forget_move_line(
+    name: crate::pokemon::move_name::PokemonMoveName,
+    pp: u8,
+    learner: Option<&crate::pokemon::pokemon::PokemonSummary>,
+    foe: Option<&crate::pokemon::pokemon::PokemonSummary>,
+    ruleset: poke_core::ruleset::Ruleset,
+) -> String {
+    use crate::pokemon::move_name::PokemonMoveEffect;
+    let metadata = name.metadata();
+    let power = match metadata.power {
+        Some(power) => format!("{power} power"),
+        None => "no damage".to_string(),
+    };
+    let accuracy = match metadata.effect {
+        PokemonMoveEffect::Swift => "never misses".to_string(),
+        _ => format!("{}% accuracy", metadata.accuracy),
+    };
+    let bonus = match learner {
+        Some(mon) if metadata.power.is_some() && mon.types.contains(&metadata.move_type) => ", same-type bonus",
+        _ => "",
+    };
+    let notes = match (learner, foe) {
+        (Some(me), Some(foe)) => fight_row_notes(name, me, foe, ruleset),
+        _ => move_effect(name, ruleset).map_or(String::new(), |effect| format!(" — {effect}")),
+    };
+    format!("{name} — {}, {power}, {accuracy}{bonus}, {pp}/{} pp{notes}", metadata.move_type, metadata.pp)
+}
+
+/// The learner and the foe a forget turn weighs its moves against: party slot `slot`, and the enemy
+/// when the level-up came in a battle.
+pub(crate) fn forget_sides(
+    state: &GameState,
+    slot: usize,
+) -> (Option<crate::pokemon::pokemon::PokemonSummary>, Option<crate::pokemon::pokemon::PokemonSummary>) {
+    (state.pokemon.iter().nth(slot).map(|mon| mon.summary()), state.battle.as_ref().map(|battle| battle.enemy))
+}
+
 /// The four moves the forget prompt chooses between, keyed on slot, each saying what it does by
-/// the run's rules, and the row that declines.
-pub fn forget_menu(current: &[PokemonMove], ruleset: poke_core::ruleset::Ruleset) -> Vec<MenuItem> {
+/// the run's rules, and the row that declines. `foe` is the enemy mid-battle, and a foe already
+/// down is none.
+pub fn forget_menu(
+    current: &[PokemonMove],
+    ruleset: poke_core::ruleset::Ruleset,
+    learner: Option<&crate::pokemon::pokemon::PokemonSummary>,
+    foe: Option<&crate::pokemon::pokemon::PokemonSummary>,
+) -> Vec<MenuItem> {
+    let foe = foe.filter(|foe| foe.current_hp > 0);
     let mut menu: Vec<MenuItem> = current
         .iter()
         .enumerate()
-        .map(|(slot, known)| {
-            let metadata = known.name.metadata();
-            MenuItem {
-                id: format!("forget:{slot}"),
-                description: format!(
-                    "{} — {}, {}, {}/{} pp{}{}",
-                    known.name,
-                    metadata.move_type,
-                    match metadata.power {
-                        Some(power) => format!("{power} power"),
-                        None => "no damage".to_string(),
-                    },
-                    known.pp,
-                    metadata.pp,
-                    move_effect(known.name, ruleset).map_or(String::new(), |effect| format!(". {effect}")),
-                    match hm_move(known.name) {
-                        Some(_) => " — ⚠️ an HM move, and it cannot be re-learnt",
-                        None => "",
-                    },
-                ),
-            }
+        .map(|(slot, known)| MenuItem {
+            id: format!("forget:{slot}"),
+            description: format!(
+                "{}{}",
+                forget_move_line(known.name, known.pp, learner, foe, ruleset),
+                match hm_move(known.name) {
+                    Some(_) => " — ⚠️ an HM move, and it cannot be re-learnt",
+                    None => "",
+                },
+            ),
         })
         .collect();
     menu.push(MenuItem {
@@ -2503,7 +2539,7 @@ mod tests {
             PokemonMove { name: PokemonMoveName::Cut, pp: 30 },
             PokemonMove { name: PokemonMoveName::Growl, pp: 40 },
         ];
-        let rows = forget_menu(&moves, Gen1);
+        let rows = forget_menu(&moves, Gen1, None, None);
         assert!(rows[0].description.contains("Normal") && rows[0].description.contains("power"),
                 "type and power: {}", rows[0].description);
         assert!(rows[1].description.contains("HM move"), "the HM is marked: {}", rows[1].description);
@@ -2520,18 +2556,54 @@ mod tests {
             PokemonMove { name: PokemonMoveName::Growl, pp: 40 },
             PokemonMove { name: PokemonMoveName::FocusEnergy, pp: 30 },
         ];
-        let gen1 = forget_menu(&moves, Gen1);
-        assert_eq!(gen1[0].description, "Tackle — Normal, 35 power, 35/35 pp", "a plain attack says nothing more");
+        let gen1 = forget_menu(&moves, Gen1, None, None);
+        assert_eq!(gen1[0].description, "Tackle — Normal, 35 power, 95% accuracy, 35/35 pp", "a plain attack says nothing more");
         assert!(gen1[1].description.ends_with("30/30 pp — ⚠️ an HM move, and it cannot be re-learnt"),
                 "the HM flag stays last: {}", gen1[1].description);
         assert!(gen1[2].description.ends_with(
-            "no damage, 40/40 pp. Lowers the opponent's Attack by 1 stage. The enemy's copy misses an extra 25% of the time."),
+            "no damage, 100% accuracy, 40/40 pp — Lowers the opponent's Attack by 1 stage. The enemy's copy misses an extra 25% of the time."),
             "{}", gen1[2].description);
         assert!(gen1[3].description.contains("quarters the critical-hit rate"), "{}", gen1[3].description);
 
-        let modern = forget_menu(&moves, Modern);
-        assert!(modern[2].description.ends_with("40/40 pp. Lowers the opponent's Attack by 1 stage."), "{}", modern[2].description);
-        assert!(modern[3].description.ends_with("Doubles the user's critical-hit rate."), "{}", modern[3].description);
+        let modern = forget_menu(&moves, Modern, None, None);
+        assert!(modern[2].description.ends_with("40/40 pp — Lowers the opponent's Attack by 1 stage."), "{}", modern[2].description);
+        assert!(modern[3].description.ends_with("— Doubles the user's critical-hit rate."), "{}", modern[3].description);
+    }
+
+    /// The new move and the four it competes with read alike: accuracy and the learner's bonus.
+    #[test]
+    fn a_forget_move_shows_accuracy_and_the_same_type_bonus_new_or_known() {
+        use crate::pokemon::pokemon::PokemonType::*;
+        use crate::pokemon::species::PokemonSpecies;
+        let me = summary(PokemonSpecies::Charmander, [Fire, Fire], &[]);
+        let moves = [PokemonMove { name: PokemonMoveName::Ember, pp: 20 }, PokemonMove { name: PokemonMoveName::Scratch, pp: 35 }];
+        let rows = forget_menu(&moves, Gen1, Some(&me), None);
+        assert!(rows[0].description.starts_with("Ember — Fire, 40 power, 100% accuracy, same-type bonus, 20/25 pp"),
+                "{}", rows[0].description);
+        assert!(!rows[1].description.contains("same-type"), "{}", rows[1].description);
+        let new = forget_move_line(PokemonMoveName::FireSpin, 15, Some(&me), None, Gen1);
+        assert!(new.starts_with("Fire Spin — Fire, 15 power, 70% accuracy, same-type bonus, 15/15 pp"), "{new}");
+        let growl = forget_move_line(PokemonMoveName::Growl, 40, Some(&me), None, Gen1);
+        assert!(!growl.contains("same-type"), "a status move earns none: {growl}");
+        let swift = forget_move_line(PokemonMoveName::Swift, 20, Some(&me), None, Gen1);
+        assert!(swift.contains("never misses") && !swift.contains("% accuracy"), "{swift}");
+    }
+
+    #[test]
+    fn a_forget_row_is_costed_against_the_foe_only_mid_battle() {
+        use crate::pokemon::pokemon::PokemonType::*;
+        use crate::pokemon::species::PokemonSpecies;
+        let me = summary(PokemonSpecies::Charmander, [Fire, Fire], &[]);
+        let foe = summary(PokemonSpecies::Bulbasaur, [Grass, Poison], &[]);
+        let moves = [PokemonMove { name: PokemonMoveName::Ember, pp: 25 }, PokemonMove { name: PokemonMoveName::Growl, pp: 40 }];
+        let away = forget_menu(&moves, Gen1, Some(&me), None);
+        assert!(!away[0].description.contains("damage"), "{}", away[0].description);
+        let battle = forget_menu(&moves, Gen1, Some(&me), Some(&foe));
+        assert!(battle[0].description.contains("~") && battle[0].description.contains("damage")
+                && battle[0].description.contains("super effective"), "{}", battle[0].description);
+        assert!(!battle[1].description.contains("~"), "a status move is not priced: {}", battle[1].description);
+        let fainted = forget_menu(&moves, Gen1, Some(&me), Some(&crate::pokemon::pokemon::PokemonSummary { current_hp: 0, ..foe }));
+        assert!(!fainted[0].description.contains("damage"), "{}", fainted[0].description);
     }
 
     /// A PP item's row names the mon and, for an Ether, the move it restores, with the PP it has.

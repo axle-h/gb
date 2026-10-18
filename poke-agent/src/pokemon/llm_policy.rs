@@ -271,7 +271,10 @@ impl LlmPolicy {
                     }
                     DecisionKind::MartPurchase => tools::mart_menu(&self.snapshot, state),
                     DecisionKind::ForgetMove => match context {
-                        TurnContext::ForgetMove { current, .. } => tools::forget_menu(current, state.ruleset),
+                        TurnContext::ForgetMove { slot, current, .. } => {
+                            let (learner, foe) = tools::forget_sides(state, slot);
+                            tools::forget_menu(current, state.ruleset, learner.as_ref(), foe.as_ref())
+                        }
                         _ => Vec::new(),
                     },
                     DecisionKind::MimicMove => match context {

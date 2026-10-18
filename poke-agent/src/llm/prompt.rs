@@ -462,25 +462,19 @@ pub fn situation(
         )),
         // Three things this turn did not say, each of which decides it.
         TurnContext::ForgetMove { slot, new, current } => {
-            let metadata = new.metadata();
             let learner = state.pokemon.iter().nth(slot);
+            let (summary, foe) = crate::llm::tools::forget_sides(state, slot);
+            let foe = foe.filter(|foe| foe.current_hp > 0);
             out.push_str(&format!(
-                "{} is trying to learn **{new}** ({}, {}, {} pp) but already knows four moves. Pick \
-                 one to replace, or decline and keep all four.\n\n",
+                "{} is trying to learn **{new}** but already knows four moves. Pick one to replace, \
+                 or decline and keep all four.\n\n- new: {}\n\n",
                 match learner {
                     Some(mon) => format!("{} (slot {slot}, {})", named(mon), types_of(mon)),
                     None => "A Pokémon".to_string(),
                 },
-                metadata.move_type,
-                match metadata.power {
-                    Some(power) => format!("{power} power"),
-                    None => "no damage".to_string(),
-                },
-                metadata.pp,
+                crate::llm::tools::forget_move_line(
+                    new, new.metadata().pp, summary.as_ref(), foe.as_ref(), state.ruleset),
             ));
-            if let Some(effect) = crate::llm::tools::move_effect(new, state.ruleset) {
-                out.push_str(&format!("{new}: {effect}\n\n"));
-            }
             if current.iter().any(|m| crate::llm::tools::hm_move(m.name).is_some()) {
                 out.push_str(
                     "⚠️ One of the four is an HM move. An HM cannot be un-taught and cannot be \
@@ -1113,7 +1107,10 @@ mod tests {
                 DecisionKind::Overworld => tools::overworld_menu(&state, snapshot.arrival),
                 DecisionKind::Battle => tools::battle_menu(&state),
                 DecisionKind::MartPurchase => tools::mart_menu(&snapshot, &state),
-                DecisionKind::ForgetMove => tools::forget_menu(&party_moves, state.ruleset),
+                DecisionKind::ForgetMove => {
+                    let (learner, foe) = tools::forget_sides(&state, 0);
+                    tools::forget_menu(&party_moves, state.ruleset, learner.as_ref(), foe.as_ref())
+                }
                 DecisionKind::MimicMove => tools::mimic_menu(&state, &enemy_moves),
                 DecisionKind::Nickname | DecisionKind::Stuck => Vec::new(),
             };
@@ -1684,17 +1681,17 @@ mod tests {
         let current = [PokemonMove { name: PokemonMoveName::Tackle, pp: 35 }; 4];
         let turn = |state: &GameState, new| situation(
             DecisionKind::ForgetMove, state, &ApiSnapshot::default(), &[],
-            &crate::llm::tools::forget_menu(&current, state.ruleset),
+            &crate::llm::tools::forget_menu(&current, state.ruleset, None, None),
             TurnContext::ForgetMove { slot: 0, current: &current, new }, &[],
         );
 
         let gen1 = turn(&state, PokemonMoveName::FocusEnergy);
-        assert!(gen1.contains("\nFocus Energy: Bug: quarters the critical-hit rate"), "{gen1}");
+        assert!(gen1.contains("\n- new: Focus Energy — Normal, no damage, 100% accuracy, 30/30 pp — Bug: quarters the critical-hit rate"), "{gen1}");
         state.ruleset = poke_core::ruleset::Ruleset::Modern;
         let modern = turn(&state, PokemonMoveName::FocusEnergy);
-        assert!(modern.contains("\nFocus Energy: Doubles the user's critical-hit rate.\n"), "{modern}");
+        assert!(modern.contains("30/30 pp — Doubles the user's critical-hit rate.\n"), "{modern}");
         let tackle = turn(&state, PokemonMoveName::Tackle);
-        assert!(!tackle.contains("Tackle:") && !tackle.contains("additional"), "a plain attack says nothing more: {tackle}");
+        assert!(tackle.contains("\n- new: Tackle — Normal, 35 power, 95% accuracy, 35/35 pp\n"), "a plain attack says nothing more: {tackle}");
     }
 
     /// A party line that names only the nickname stops naming the Pokémon at all.
