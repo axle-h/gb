@@ -1,6 +1,6 @@
 //! What the model says, and does, when it believes the agent is wrong.
 //! ```text
-//! $GB_RUN_DIR/<run-id>/issues/turn-<id>/          a `report_issue` call
+//! $GB_RUN_DIR/<run-id>/issues/turn-<id>/          a write under `issues/`
 //! $GB_RUN_DIR/<run-id>/press-buttons/turn-<id>/   a press at the watchdog's turn
 //!   ├── incident.json   the report, the decision, the run's whole state, and the conversation
 //!   ├── screen.png      what was actually on the screen
@@ -27,8 +27,9 @@ const SAVE_STATE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// What is being filed: the directory and two JSON fields differ, and the rest is the same.
 #[derive(Debug, Clone, Copy)]
 pub enum Report<'a> {
-    /// A `report_issue` call: the model's own account of what the agent will not let it do.
-    Issue { message: &'a str },
+    /// A write under `issues/`: the model's own account of what the agent will not let it do, and
+    /// the file name it chose.
+    Issue { file: &'a str, message: &'a str },
     /// A press at the watchdog's turn.
     Press { buttons: &'a [JoypadButton], why: &'a str },
 }
@@ -60,7 +61,10 @@ struct Incident<'a> {
     report: &'static str,
     /// The decision kind that asked.
     kind: &'static str,
-    /// A `report_issue` call's message: what the model tried, expected and got.
+    /// The name the model wrote the issue under, as `menu-missing-door.md`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<&'a str>,
+    /// An issue's message: what the model tried, expected and got.
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<&'a str>,
     /// What was pressed, and why.
@@ -106,8 +110,12 @@ pub fn record(
         turn,
         report: report.label(),
         kind: kind.label(),
+        file: match report {
+            Report::Issue { file, .. } => Some(file),
+            Report::Press { .. } => None,
+        },
         message: match report {
-            Report::Issue { message } => Some(message),
+            Report::Issue { message, .. } => Some(message),
             Report::Press { .. } => None,
         },
         // Lower-cased, as the schema's enum spells them, so a grep for what was sent finds it.
@@ -134,6 +142,43 @@ pub fn record(
     let frame = published.latest_frame();
     run::write_atomically(&dir.join("screen.png"), &screenshot::encode(&frame.pixels))?;
     Ok(dir)
+}
+
+/// One issue this run has filed, as `issues/` reads it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Filed {
+    /// The model's file name; a record from before it had one is named by its directory.
+    pub file: String,
+    pub message: String,
+    pub turn: u64,
+}
+
+/// Every issue filed in the run's directory, oldest first.
+pub fn filed(run: &CurrentRun) -> Vec<Filed> {
+    #[derive(serde::Deserialize)]
+    struct Record {
+        #[serde(default)]
+        file: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        turn: u64,
+        #[serde(default)]
+        at: u64,
+    }
+    let parent = run.get().path().join(files::ISSUES);
+    let Ok(entries) = std::fs::read_dir(&parent) else { return Vec::new() };
+    let mut found: Vec<(u64, String, Filed)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let record: Record = serde_json::from_slice(&std::fs::read(entry.path().join("incident.json")).ok()?).ok()?;
+            let file = record.file.unwrap_or_else(|| format!("{}.md", entry.file_name().to_string_lossy()));
+            let directory = entry.file_name().to_string_lossy().into_owned();
+            Some((record.at, directory, Filed { file, message: record.message.unwrap_or_default(), turn: record.turn }))
+        })
+        .collect();
+    found.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    found.into_iter().map(|(_, _, filed)| filed).collect()
 }
 
 /// The tail of the history, cut at a turn boundary and stripped of pictures.
@@ -226,7 +271,7 @@ mod tests {
             &published,
             9,
             DecisionKind::Overworld,
-            Report::Issue { message: "the menu will not offer the ladder I am standing on" },
+            Report::Issue { file: "missing-ladder.md", message: "the menu will not offer the ladder I am standing on" },
             Some("trying the other ladder instead"),
             &history(),
         )
@@ -240,7 +285,15 @@ mod tests {
         assert!(json.contains("trying the other ladder instead"), "and what it did anyway");
         assert!(!json.contains("\"buttons\""), "nothing was pressed");
         assert!(!json.contains("\"why\""), "a press's field has no business on an issue");
+        assert!(json.contains("\"file\": \"missing-ladder.md\""), "the name the model chose");
         assert!(dir.join("screen.png").exists());
+
+        // Read back as `issues/` lists it, a second write to one name being a second issue.
+        let again = Report::Issue { file: "missing-ladder.md", message: "still no ladder" };
+        record(&run, &published, 9, DecisionKind::Overworld, again, None, &history()).expect("the record writes");
+        let filed = filed(&run);
+        assert_eq!(filed.iter().map(|issue| issue.file.as_str()).collect::<Vec<_>>(), ["missing-ladder.md", "missing-ladder.md"]);
+        assert_eq!(filed[1].message, "still no ladder");
     }
 
     #[test]

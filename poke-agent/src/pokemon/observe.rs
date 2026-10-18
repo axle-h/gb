@@ -2,7 +2,6 @@ use crate::pokemon::GameState;
 use crate::pokemon::PokemonApi;
 use crate::pokemon::PokemonApiTrait;
 use crate::pokemon::badge::Badge;
-use crate::pokemon::battle::BattleType;
 use crate::pokemon::map::Map;
 use crate::pokemon::status::PokemonStatus;
 use crate::pokemon::symbols::pokered_symbols;
@@ -415,70 +414,6 @@ pub fn route_from(graph: &WorldGraph, map: &crate::pokemon::tile_map::MetaTileMa
             _ => None,
         },
     }).collect())
-}
-
-// ── Battle
-
-view! {
-    pub struct BattleSideView {
-        pub species: String,
-        pub level: u8,
-        pub hp: u16,
-        pub max_hp: u16,
-        pub status: String,
-        /// The defending half of every matchup; `read_party` carries types for your own side only.
-        pub types: Vec<String>,
-        /// A Disabled move's slot: choosing it bounces back to the move menu, so ignoring it loops.
-        pub disabled_move_slot: Option<u8>,
-        pub moves: Vec<MoveView>,
-    }
-}
-
-view! {
-    /// Carries no actions, for the same reason as [`MapView`].
-    pub struct BattleView {
-        /// `"Wild"`, `"Trainer"` or `"Safari"`.
-        pub battle_type: String,
-        pub player: BattleSideView,
-        pub enemy: BattleSideView,
-        pub active_party_slot: u8,
-        /// Set while trapped by Wrap, Fire Spin, Clamp or Bind: items, switching and running work,
-        /// but any move chosen becomes "cannot move".
-        pub enemy_trapping: bool,
-        /// The live catch rate `ItemUseBall` compares against, after any Safari rock or bait.
-        pub enemy_catch_rate: u8,
-    }
-}
-
-/// `None` when no battle is in progress.
-pub fn battle(state: &GameState) -> Option<BattleView> {
-    let battle = state.battle.as_ref()?;
-    let side = |summary: &crate::pokemon::pokemon::PokemonSummary| BattleSideView {
-        species: format!("{:?}", summary.species),
-        level: summary.level,
-        hp: summary.current_hp,
-        max_hp: summary.stats.hp,
-        status: format!("{}", summary.status),
-        types: {
-            let mut types: Vec<String> = summary.types.iter().map(|t| format!("{t:?}")).collect();
-            types.dedup(); // a single-type mon stores its one type in both slots
-            types
-        },
-        disabled_move_slot: summary.disabled_move_slot,
-        moves: summary.moves.iter().flatten().map(move_view).collect(),
-    };
-    Some(BattleView {
-        battle_type: match battle.battle_type {
-            BattleType::Wild => "Wild",
-            BattleType::Trainer => "Trainer",
-            BattleType::Safari => "Safari",
-        }.to_string(),
-        player: side(&battle.player),
-        enemy: side(&battle.enemy),
-        active_party_slot: battle.active_party_slot,
-        enemy_trapping: battle.enemy_trapping,
-        enemy_catch_rate: battle.enemy_catch_rate,
-    })
 }
 
 // ── Status

@@ -3,11 +3,8 @@ use serde_json::{Value, json};
 use poke_core::geometry::Point8;
 use gb::joypad::JoypadButton;
 use crate::llm::prompt::ApiSnapshot;
-use crate::llm::battle_script::MAX_SOURCE as MAX_BATTLE_SCRIPT;
-
-use crate::llm::todo::{MAX_ITEMS as MAX_TODO_ITEMS, MAX_TEXT as MAX_TODO_TEXT, TodoCall};
+use crate::llm::files::{self, FileCall, FileRead, Node};
 use crate::llm::protocol::{ToolCall, ToolSpec};
-use crate::llm::worker::ToolAnswer;
 use crate::pokemon::GameState;
 use crate::pokemon::actions::OverworldAction;
 use crate::pokemon::agent::MANUAL_INPUT_CAPACITY;
@@ -18,8 +15,8 @@ use crate::pokemon::map::Map;
 #[cfg(test)]
 use crate::pokemon::map_metadata::PlayerFacingDirection;
 use crate::pokemon::move_name::{PokemonMove, PokemonMoveName};
-use crate::pokemon::observe;
 use crate::pokemon::policy::{FieldMove, battle_options, field_move_index};
+#[cfg(test)]
 use crate::pokemon::world_graph::WorldGraph;
 
 /// Which question the agent is asking.
@@ -104,16 +101,14 @@ pub const MAX_NICKNAME: usize = 10;
 
 /// What one call in an assistant message turned out to be.
 pub enum CallKind {
-    /// A read tool.
-    Read,
-    /// `screenshot`.
+    /// A read the policy answers from the game at its next poll.
+    Read(FileRead),
+    /// `screen.png`, answered by the worker from the latest frame.
     Screenshot,
-    /// A TODO operation.
-    Todo(TodoCall),
-    /// `report_issue`: the model believes the agent is wrong.
-    Issue(String),
-    /// A battle-script operation.
-    BattleScript(BattleScriptCall),
+    /// A read the worker answers, or a write or an edit.
+    File(FileCall),
+    /// A write under `issues/`: the model believes the agent is wrong.
+    Issue { name: String, message: String },
     /// The turn is over.
     Terminal(Terminal),
     /// A `choose_action` folded into the [`CallKind::Terminal`] earlier in the same reply.
@@ -126,11 +121,10 @@ impl CallKind {
     /// The discriminant, for the page: these words are a wire contract with `api.ts`.
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Read | Self::Screenshot => "read",
-            Self::Todo(_) => "todo",
-            Self::Issue(_) => "issue",
+            Self::Read(_) | Self::Screenshot | Self::File(FileCall::Read(_)) => "read",
             // Not a fifth word: `api.ts` matches on these.
-            Self::BattleScript(_) => "todo",
+            Self::File(_) => "todo",
+            Self::Issue { .. } => "issue",
             Self::Terminal(_) | Self::Chained => "terminal",
             Self::Rejected(_) => "rejected",
         }
@@ -244,7 +238,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
     let held = |item: ItemId| -> Result<ItemId, String> {
         match state.bag.iter().any(|entry| entry.id == item) {
             true => Ok(item),
-            false => Err(format!("There is no {item} in the bag. `read_bag` lists what is there.")),
+            false => Err(format!("There is no {item} in the bag. `bag.md` lists what is there.")),
         }
     };
 
@@ -360,7 +354,7 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
             }
             let at = *target;
             let nothing_there = |noun: &str| -> String {
-                // Whatever is beside the square it aimed at, saving a `read_map`.
+                // Whatever is beside the square it aimed at, saving a read of `map.png`.
                 let beside = [
                     at.y.checked_sub(1).map(|y| Point8 { x: at.x, y }),
                     at.y.checked_add(1).map(|y| Point8 { x: at.x, y }),
@@ -377,9 +371,9 @@ pub fn resolve_field_move(state: &GameState, request: &FieldMoveRequest) -> Resu
                     at.x, at.y,
                     match beside {
                         Some((name, next)) => format!(
-                            " What is next to it is {name}, at ({}, {}). `read_map` gives the exact \
+                            " What is next to it is {name}, at ({}, {}). `map.png` gives the exact \
                                 position of everything on this map.", next.x, next.y),
-                        None => " `read_map` gives the exact position of everything on this map."
+                        None => " `map.png` gives the exact position of everything on this map."
                             .to_string(),
                     },
                 )
@@ -590,7 +584,7 @@ pub fn field_request(state: &GameState, id: &str, actions: Option<&[OverworldAct
     let slot = |text: &str| text.parse::<u8>()
         .map_err(|_| format!("`{id}`: `{text}` is not a slot number."));
     let item = |name: &str| item_by_name(name)
-        .ok_or_else(|| format!("`{name}` is not an item this game has. `read_bag` spells them."));
+        .ok_or_else(|| format!("`{name}` is not an item this game has. `bag.md` spells them."));
     let map = |name: &str| map_by_name(name).ok_or_else(|| format!("`{name}` is not a map."));
     let (head, rest) = match base.split_once(':') {
         Some((head, rest)) => (head, Some(rest)),
@@ -780,7 +774,7 @@ pub fn field_rows(state: &GameState, actions: &[OverworldAction]) -> Vec<MenuIte
     }
     if state.bag.iter().any(|entry| accepted(&format!("toss:{:?}", entry.id))) {
         row("toss:<item>*N".to_string(), "throw away N of a bag item, as `toss:Antidote*3` does (default 1); all of \
-             it frees its bag slot, and a key item or an HM cannot be thrown away. `read_bag` lists what you carry".to_string());
+             it frees its bag slot, and a key item or an HM cannot be thrown away. `bag.md` lists what you carry".to_string());
     }
 
     if let Some((_, pokemon)) = usable_pc(state.map.map) {
@@ -809,10 +803,10 @@ pub fn field_rows(state: &GameState, actions: &[OverworldAction]) -> Vec<MenuIte
         }
         if state.bag.iter().any(|entry| accepted(&format!("pc:store:{:?}", entry.id))) {
             row("pc:store:<item>*N".to_string(), "put N of a bag item into PC item storage, as `pc:store:Potion*5` \
-                 does (default 1); `read_bag` lists what you carry".to_string());
+                 does (default 1); `bag.md` lists what you carry".to_string());
         }
         row("pc:take:<item>*N".to_string(), "take N of an item out of PC item storage into the bag, as \
-             `pc:take:Potion*5` does (default 1); `read_pc` lists what is stored".to_string());
+             `pc:take:Potion*5` does (default 1); `pc.md` lists what is stored".to_string());
     }
 
     if let Some((_, floors)) = crate::pokemon::tile_map::elevator_for(state.map.map) {
@@ -870,124 +864,6 @@ fn levels_into_evolution(state: &GameState, slot: u8) -> bool {
 
 // ── The catalogue ────────────────────────────────────────────────────────────────────────────────
 
-pub struct ReadTool {
-    pub name: &'static str,
-    pub description: &'static str,
-    /// Which turns this read is offered in.
-    pub kinds: &'static [DecisionKind],
-    /// `None` for the reads that take no arguments, which is all of them but [`READ_ROUTE`].
-    pub parameters: Option<fn() -> Value>,
-}
-
-/// Non-terminal, callable any number of times within a turn.
-pub const READ_TOOLS: &[ReadTool] = &[
-    ReadTool {
-        name: "read_map",
-        description: "A picture of the whole map, drawn from the game's own graphics: everyone \
-                      where they stand and face, warps and map edges labelled with where they lead, \
-                      unreachable ground dimmed, and a coordinate ruler along the top and left. It \
-                      arrives as an image after the result, with everyone on the map and the warps \
-                      as data. The actions you can take are in the turn's action menu, not here.",
-        // Not in a battle: there is no map on screen and nothing on it can be acted on.
-        kinds: &[DecisionKind::Overworld, DecisionKind::Stuck],
-        parameters: None,
-    },
-    ReadTool {
-        name: "read_party",
-        description: "Every party member: species, nickname, level, HP, status, types, stats and \
-                      all four moves with their remaining PP.",
-        kinds: &[
-            DecisionKind::Overworld,
-            DecisionKind::Battle,
-            DecisionKind::Nickname,
-            DecisionKind::MartPurchase,
-            DecisionKind::ForgetMove,
-            DecisionKind::MimicMove,
-        ],
-        parameters: None,
-    },
-    ReadTool {
-        name: "read_pc",
-        description: "What is in the PC: the Pokémon in the open box with the slot numbers the \
-                      `pc:` rows want, what is in PC item storage, and which of the twelve boxes is \
-                      open. Only the open box can be read.",
-        kinds: &[DecisionKind::Overworld],
-        parameters: None,
-    },
-    ReadTool {
-        name: "read_bag",
-        description: "Every item in the bag with its quantity and shop price, plus money and how \
-                      many of the bag's 20 slots are used.",
-        // The bag is nowhere in a turn request, and the `toss:` and `pc:store:` rows need its names.
-        kinds: &[DecisionKind::Overworld, DecisionKind::Battle, DecisionKind::MartPurchase],
-        parameters: None,
-    },
-    ReadTool {
-        name: "read_battle",
-        description: "The live battle: both sides' species, level, HP, status, types and moves, the \
-                      enemy's catch rate, and which of your moves Disable has locked out. The \
-                      turn's battle menu already costs your moves against it; this is the detail.",
-        // `ForgetMove` legitimately fires mid-fight, and which move to drop is a battle question.
-        kinds: &[DecisionKind::Battle, DecisionKind::ForgetMove, DecisionKind::MimicMove],
-        parameters: None,
-    },
-    ReadTool {
-        name: READ_ROUTE,
-        description: "How to get somewhere you have already been. With `to`, the sequence of maps \
-                      from here to that one, each saying which warp or edge of the map before it \
-                      to leave by; without it, every map you have set foot on. It knows \
-                      only what has been walked, so a map missing from it means 'not visited yet', \
-                      never 'does not exist'.",
-        kinds: &[DecisionKind::Overworld],
-        parameters: Some(read_route_arguments),
-    },
-    ReadTool {
-        name: READ_GUIDE,
-        description: "The walkthrough for the stretch of the game you are in now: where to go, in \
-                      order, what is blocking the way and what the next Gym Leader has. It is chosen \
-                      from your badges and it does not change until you win the next one, so there \
-                      is no reason to ask twice. Place names in it are spelled exactly as the \
-                      action menu and `read_route` spell them.",
-        // It answers "where am I going", which no battle, name, mart or forgotten move raises.
-        kinds: &[DecisionKind::Overworld, DecisionKind::Stuck],
-        parameters: None,
-    },
-    ReadTool {
-        name: SCREENSHOT,
-        description: "A picture of the Game Boy screen as it is right now. Everything the agent can \
-                      read for you — the map, the party, the text on screen — is cheaper and more \
-                      precise as one of the other reads; ask for this when you want to see \
-                      something they do not model, such as an unfamiliar menu or an animation you \
-                      are not sure has finished.",
-        // Every kind: only the screen explains an unfamiliar menu or a wedged agent.
-        kinds: &ALL_KINDS,
-        parameters: None,
-    },
-];
-
-/// Answered by the worker, since PNG encoding does not belong on the emulator thread.
-pub const SCREENSHOT: &str = "screenshot";
-
-/// The world graph, asked the question a model has, and never serialised whole.
-pub const READ_ROUTE: &str = "read_route";
-
-/// The [`crate::llm::guide`] chapter the badges pick, so the tool takes no arguments.
-pub const READ_GUIDE: &str = "read_guide";
-
-fn read_route_arguments() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "to": {
-                "type": "string",
-                "description": "A map to route to, e.g. `CeruleanCity`. Omit to list the maps you \
-                                have visited.",
-            }
-        },
-        "additionalProperties": false,
-    })
-}
-
 /// Every [`DecisionKind`], so a loop over all of them keeps meaning it when one is added.
 pub const ALL_KINDS: [DecisionKind; 7] = [
     DecisionKind::Overworld,
@@ -999,170 +875,10 @@ pub const ALL_KINDS: [DecisionKind; 7] = [
     DecisionKind::Stuck,
 ];
 
-fn read_tool(name: &str) -> Option<&'static ReadTool> {
-    READ_TOOLS.iter().find(|tool| tool.name == name)
-}
-
-fn reads_for(kind: DecisionKind) -> impl Iterator<Item = &'static ReadTool> {
-    READ_TOOLS.iter().filter(move |tool| tool.kinds.contains(&kind))
-}
-
-/// Named in the turn contract as non-terminal: a model that thinks `todo_set` ended its turn stops.
-pub const TODO_TOOL_NAMES: &[&str] = &["todo_set", "todo_complete", "todo_delete"];
-
-/// Their specs; a JSON Schema is not a `const` expression.
-pub fn todo_tools() -> Vec<ToolSpec> {
-    vec![
-        ToolSpec::new(
-            "todo_set",
-            format!(
-                "Add or rewrite one item on your plan: no `id` adds one on the end, an `id` \
-                 rewrites that one where it is. The order is kept. Room for {MAX_TODO_ITEMS}, \
-                 finished ones included. This is the only thing you write that outlives the \
-                 conversation, so give the reason with the intent: `come back to Route 12 with the \
-                 Poké Flute, the Snorlax blocks the path south`. At most {MAX_TODO_TEXT} characters."
-            ),
-            json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "integer", "minimum": 1,
-                            "description": "An item's number, as shown in your plan. Omit to add a new one." },
-                    // Not `required`, though the description reads as though it were.
-                    "text": { "type": "string", "maxLength": MAX_TODO_TEXT,
-                              "description": "What to do, and why." },
-                },
-                "additionalProperties": false,
-            }),
-        ),
-        ToolSpec::new(
-            "todo_complete",
-            "Mark one item on your plan done, by the number shown beside it.",
-            json!({
-                "type": "object",
-                "properties": { "id": { "type": "integer", "minimum": 1,
-                                        "description": "The item's number, as shown in your plan." } },
-                "required": ["id"],
-                "additionalProperties": false,
-            }),
-        ),
-        ToolSpec::new(
-            "todo_delete",
-            "Drop one item off your plan for good, by its number — something you no longer mean to \
-             do. `todo_complete` is for one you have done.",
-            json!({
-                "type": "object",
-                "properties": { "id": { "type": "integer", "minimum": 1,
-                                        "description": "The item's number, as shown in your plan." } },
-                "required": ["id"],
-                "additionalProperties": false,
-            }),
-        ),
-    ]
-}
-
-// ── The battle script ────────────────────────────────────────────────────────────────────────────
-
-/// One tool call against the model's battle script, parsed and answered on the worker thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BattleScriptCall {
-    /// `get_battle_script_docs`: the API reference, verbatim.
-    Docs,
-    /// `read_battle_script`: what is installed, and whether it is armed.
-    Read,
-    /// `set_battle_script`: a `script` of `None` goes back to the default.
-    Set { script: Option<String>, purpose: Option<String> },
-}
-
-/// The three, by name. Non-terminal, so they are named in the turn contract beside the reads.
-pub const BATTLE_SCRIPT_TOOL_NAMES: &[&str] =
-    &["get_battle_script_docs", "read_battle_script", "set_battle_script"];
-
-/// Offered on `Overworld` and nowhere else.
-fn offers_battle_script(kind: DecisionKind) -> bool {
-    kind == DecisionKind::Overworld
-}
-
-/// Their specs, a function for the reason [`todo_tools`] is one.
-pub fn battle_script_tools() -> Vec<ToolSpec> {
-    vec![
-        ToolSpec::new(
-            "get_battle_script_docs",
-            "How to write a battle script: the language, everything a script can read about the battle, and a worked example. Read this before `set_battle_script`.",
-            no_arguments(),
-        ),
-        ToolSpec::new(
-            "read_battle_script",
-            "The battle script you have installed, and whether it is still deciding your battle turns. Every run starts on a default one that decides nothing, so this always has something to show you.",
-            no_arguments(),
-        ),
-        ToolSpec::new(
-            "set_battle_script",
-            format!(
-                "Install a script that decides your battle turns for you, in Rhai. A turn it answers costs no request at all, so a routine wild encounter becomes free. It is run against seven example battles before it is installed and you are told what it chose in each; if it later fails it is disarmed and that turn comes back to you with the reason. Omit `script` to go back to the default, which hands you every turn. At most {MAX_BATTLE_SCRIPT} characters. Call `get_battle_script_docs` first."
-            ),
-            json!({
-                "type": "object",
-                "properties": {
-                    "script": { "type": "string",
-                                "description": "The script. Omit to go back to the default one." },
-                    "purpose": { "type": "string",
-                                 "description": "What it is for. Required." },
-                },
-                "additionalProperties": false,
-            }),
-        ),
-    ]
-}
-
-fn classify_battle_script(name: &str, arguments: &Value) -> Option<CallKind> {
-    let call = match name {
-        "get_battle_script_docs" => BattleScriptCall::Docs,
-        "read_battle_script" => BattleScriptCall::Read,
-        // `null` and an absent `script` mean the same thing and both have to work.
-        "set_battle_script" => BattleScriptCall::Set {
-            script: arguments.get("script").and_then(Value::as_str).map(str::to_string),
-            purpose: arguments.get("purpose").and_then(Value::as_str)
-                .map(str::trim).filter(|purpose| !purpose.is_empty()).map(str::to_string),
-        },
-        _ => return None,
-    };
-    Some(CallKind::BattleScript(call))
-}
-
-fn classify_todo(name: &str, arguments: &Value) -> Option<CallKind> {
-    let call = match name {
-        "todo_set" | "todo_add" => TodoCall::Set {
-            id: arguments.get("id").and_then(Value::as_u64).map(|id| id.min(u64::from(u32::MAX)) as u32),
-            text: arguments.get("text").and_then(Value::as_str).map(str::to_string),
-        },
-        "todo_complete" => match arguments.get("id").and_then(Value::as_u64) {
-            Some(id) => TodoCall::Complete { id: id.min(u64::from(u32::MAX)) as u32 },
-            None => return Some(CallKind::Rejected("`todo_complete` needs the item's `id`.".to_string())),
-        },
-        // The named delete.
-        "todo_delete" => match arguments.get("id").and_then(Value::as_u64) {
-            Some(id) => TodoCall::Set { id: Some(id.min(u64::from(u32::MAX)) as u32), text: None },
-            None => return Some(CallKind::Rejected("`todo_delete` needs the item's `id`.".to_string())),
-        },
-        _ => return None,
-    };
-    Some(CallKind::Todo(call))
-}
-
-pub fn for_kind(kind: DecisionKind) -> Vec<ToolSpec> {
-    let mut tools: Vec<ToolSpec> = reads_for(kind)
-        .map(|tool| {
-            ToolSpec::new(tool.name, tool.description, tool.parameters.map_or_else(no_arguments, |f| f()))
-        })
-        .collect();
-    tools.extend(todo_tools());
-    if offers_battle_script(kind) {
-        tools.extend(battle_script_tools());
-    }
-    tools.push(choose_action_spec());
-    if offers_issue_report(kind) {
-        tools.push(report_issue_spec());
-    }
+/// The four tools, the same on every kind of turn: what varies is the menu the turn carries.
+pub fn for_kind(_kind: DecisionKind) -> Vec<ToolSpec> {
+    let mut tools = vec![choose_action_spec()];
+    tools.extend(files::specs());
     tools
 }
 
@@ -1248,62 +964,12 @@ fn call_string(call: &ToolCall, field: &str, cap: usize) -> Option<String> {
     })
 }
 
-/// A zero-parameter tool still needs a schema, and every endpoint accepts an empty object.
-fn no_arguments() -> Value {
-    json!({ "type": "object", "properties": {}, "additionalProperties": false })
-}
-
-pub const REPORT_ISSUE: &str = "report_issue";
-
 /// Longer than a summary: an issue is written to disk once and read by a person.
 pub const MAX_ISSUE: usize = 1_000;
 
-/// `report_issue`: the model believes the agent is wrong. It does not end the turn, and its
-/// answer must not read like a fix.
-fn report_issue_spec() -> ToolSpec {
-    ToolSpec::new(
-        REPORT_ISSUE,
-        format!(
-            "Report a problem with the agent itself: something it will not let you do, an action \
-             menu that does not describe what is on the screen, a choice that keeps failing for a \
-             reason you cannot see. **A developer reads these.** Write it as a bug report: what you \
-             were trying to do, what you expected, and what happened instead. The game's state, the \
-             screen and a save state are filed alongside it automatically, so describe rather than \
-             transcribe. This does NOT end your turn and does NOT fix anything now: after filing \
-             it, carry on and try a different way. At most {MAX_ISSUE} characters."
-        ),
-        json!({
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "maxLength": MAX_ISSUE,
-                    "description": "The report: what you tried, what you expected, what happened.",
-                },
-            },
-            "required": ["message"],
-            "additionalProperties": false,
-        }),
-    )
-}
-
-/// A `report_issue` call's message, trimmed and capped; [`classify`] rejects a call without one.
-pub fn issue_message(call: &ToolCall) -> Option<String> {
-    call_string(call, "message", MAX_ISSUE)
-}
-
-pub fn non_terminal_names(kind: DecisionKind) -> Vec<&'static str> {
-    reads_for(kind)
-        .map(|tool| tool.name)
-        .chain(TODO_TOOL_NAMES.iter().copied())
-        .chain(offers_battle_script(kind).then(|| BATTLE_SCRIPT_TOOL_NAMES.iter().copied()).into_iter().flatten())
-        .chain(offers_issue_report(kind).then_some(REPORT_ISSUE))
-        .collect()
-}
-
-/// Which kinds can report that the agent itself is wrong.
-pub fn offers_issue_report(kind: DecisionKind) -> bool {
-    matches!(kind, DecisionKind::Overworld | DecisionKind::Battle | DecisionKind::Stuck)
+/// The tools that do not end the turn.
+pub fn non_terminal_names(_kind: DecisionKind) -> Vec<&'static str> {
+    vec![files::READ_FILE, files::WRITE_FILE, files::EDIT_FILE]
 }
 
 pub fn terminal_names(_kind: DecisionKind) -> &'static [&'static str] {
@@ -1382,10 +1048,10 @@ fn battle_rule_behind(id: &str, menu: &[String]) -> &'static str {
                     cartridge would only say \"It won't have any effect.\" An item that asks which \
                     Pokémon has a row for each one it would help: a Revive for one that has fainted, a \
                     potion for one that is hurt, a cure for one with that status, an Ether for each \
-                    move short of PP. `read_bag` says what is left.";
+                    move short of PP. `bag.md` says what is left.";
         }
         return " That item is not in the bag. A bag row goes the moment the last one is used, so an \
-                id you read on an earlier turn stops resolving; `read_bag` says what is left.";
+                id you read on an earlier turn stops resolving; `bag.md` says what is left.";
     }
     ""
 }
@@ -1604,8 +1270,8 @@ fn pick(kind: DecisionKind, call: &ToolCall, menu: &[String]) -> Result<Pick, St
         return Err(format!(
             "`{PRESS}` is offered only on a turn where the agent has stopped asking anything, and this \
              turn has a menu: the agent presses the buttons. Take one of the ids in the list. If what \
-             you want genuinely is not in it, call `{REPORT_ISSUE}` to say so and then take the \
-             closest action there is."
+             you want genuinely is not in it, write a file under `issues/` to say so and then take \
+             the closest action there is."
         ));
     }
 
@@ -1717,81 +1383,77 @@ fn press(list: &str) -> Result<Vec<JoypadButton>, String> {
 }
 
 /// Every call but `choose_action`.
-fn classify_call(kind: DecisionKind, call: &ToolCall) -> CallKind {
+fn classify_call(_kind: DecisionKind, call: &ToolCall) -> CallKind {
+    if let Some(parsed) = files::parse(call) {
+        return match parsed {
+            Err(complaint) => CallKind::Rejected(complaint),
+            Ok(FileCall::Read(read)) => match read.node {
+                Node::ScreenPng => CallKind::Screenshot,
+                ref node if node.on_the_emulator_thread() => CallKind::Read(read),
+                _ => CallKind::File(FileCall::Read(read)),
+            },
+            Ok(FileCall::Write { node: Node::Issue(name), content }) => match capped(&content, MAX_ISSUE) {
+                Some(message) => CallKind::Issue { name, message },
+                None => CallKind::Rejected(
+                    "An issue needs something in it: what you tried, what you expected and what \
+                     happened. Writing it does not end your turn: file it, then take an action."
+                        .to_string(),
+                ),
+            },
+            Ok(other) => CallKind::File(other),
+        };
+    }
     let name = call.function.name.as_str();
-    // A read not offered in this kind is answered like a terminal tool from the wrong kind.
-    if let Some(tool) = read_tool(name) {
-        if !tool.kinds.contains(&kind) {
-            return CallKind::Rejected(format!(
-                "`{name}` is not available in a {} turn. The reads you have here are {}.",
-                kind.label(),
-                non_terminal_names(kind).join(", "),
-            ));
-        }
-        return match name == SCREENSHOT {
-            true => CallKind::Screenshot,
-            false => CallKind::Read,
-        };
+    match replaced_by(name) {
+        Some(instead) => CallKind::Rejected(format!("There is no `{name}` any more: {instead}")),
+        None => CallKind::Rejected(format!(
+            "There is no tool called `{name}`. The tools that do not end the turn are {}; end the \
+             turn with {}.",
+            non_terminal_names(DecisionKind::Overworld).iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", "),
+            terminal_names(DecisionKind::Overworld).iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(" or "),
+        )),
     }
+}
 
-    let arguments = match call.arguments() {
-        Ok(arguments) => arguments,
-        Err(failure) => {
-            return CallKind::Rejected(format!(
-                "{failure}. Send the arguments as a JSON object and try again."
-            ));
-        }
-    };
-
-    if let Some(todo) = classify_todo(name, &arguments) {
-        return todo;
-    }
-
-    if BATTLE_SCRIPT_TOOL_NAMES.contains(&name) {
-        // Named with the reason, like a read from the wrong kind above.
-        if !offers_battle_script(kind) {
-            return CallKind::Rejected(format!(
-                "`{name}` is only offered on an overworld turn: mid-battle is not the moment to be \
-                 writing one. Decide this turn, and set the script when you are back outside.",
-            ));
-        }
-        if let Some(call) = classify_battle_script(name, &arguments) {
-            return call;
-        }
-    }
-
-    if name == REPORT_ISSUE {
-        if !offers_issue_report(kind) {
-            return CallKind::Rejected(format!(
-                "`{REPORT_ISSUE}` is not available in a {} turn. The tools that do not end the turn \
-                 are {}.",
-                kind.label(),
-                non_terminal_names(kind).join(", "),
-            ));
-        }
-        return match issue_message(call) {
-            Some(message) => CallKind::Issue(message),
-            None => CallKind::Rejected(format!(
-                "`{REPORT_ISSUE}` needs a `message` saying what you tried, what you expected and \
-                 what happened. It does not end your turn: file it, then take an action."
-            )),
-        };
-    }
-
-    match name {
-        // An older conversation's tools, which a resumed history still shows the model calling.
+/// What an older conversation's tool became, for a resumed history that still shows the model
+/// calling it.
+fn replaced_by(name: &str) -> Option<&'static str> {
+    Some(match name {
         "choose_battle_action" | "set_nickname" | "buy_item" | "forget_move" | "mimic_move"
-        | "press_buttons" | "wait" | "use_field_move" => CallKind::Rejected(format!(
-            "There is no `{name}` any more: every turn ends with `{CHOOSE_ACTION}`, and the id says \
-             what. Take an id from this turn's menu."
-        )),
-        other => CallKind::Rejected(format!(
-            "There is no tool called `{other}`. The tools that do not end the turn are {}; end the \
-             turn with one of: {}.",
-            non_terminal_names(kind).join(", "),
-            terminal_names(kind).join(", "),
-        )),
+        | "press_buttons" | "wait" | "use_field_move" => {
+            "every turn ends with `choose_action`, and the id says what. Take an id from this turn's menu."
+        }
+        "read_map" => "`read_file` with `map.png` answers the map picture.",
+        "screenshot" => "`read_file` with `screen.png` answers the screen.",
+        "read_party" => "`read_file` with `party.md` answers the party.",
+        "read_bag" => "`read_file` with `bag.md` answers the bag.",
+        "read_pc" => "`read_file` with `pc.md` answers the PC.",
+        "read_guide" => "`read_file` with `guide/current.md` answers the walkthrough chapter for your badges.",
+        "read_route" => "`read_file` with `routes.md` lists the maps you have walked, and `routes/<Map>.md` is the way to one.",
+        "read_battle" => "the battle turn itself shows both sides and costs your moves against the enemy.",
+        "todo_set" | "todo_add" | "todo_complete" | "todo_delete" => {
+            "your plan is the file `plan.md`: `read_file` it, and change it with `write_file` or `edit_file`."
+        }
+        "set_battle_script" | "read_battle_script" => {
+            "your battle script is the file `battle-script.rhai`: `read_file` it, and change it with \
+             `write_file` or `edit_file`."
+        }
+        "get_battle_script_docs" => "`read_file` with `battle-script.md` answers the script API.",
+        "report_issue" => "`write_file` a new file under `issues/`, as `issues/missing-door.md`, to report a problem.",
+        _ => return None,
+    })
+}
+
+/// Trimmed and capped on a character boundary; `None` when nothing is left.
+fn capped(text: &str, cap: usize) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
     }
+    Some(match text.char_indices().nth(cap) {
+        Some((cut, _)) => text[..cut].to_string(),
+        None => text.to_string(),
+    })
 }
 
 fn string_argument(arguments: &Value, key: &str) -> Result<String, String> {
@@ -1834,103 +1496,6 @@ pub fn map_by_name(name: &str) -> Option<Map> {
 fn button_by_name(name: &str) -> Option<JoypadButton> {
     use strum::IntoEnumIterator;
     JoypadButton::iter().find(|button| same_name(name, &button.to_string()))
-}
-
-// ── Servicing a read ─────────────────────────────────────────────────────────────────────────────
-
-/// Answer one read tool from the triple the policy holds at a poll.
-pub fn service_read(
-    call: &ToolCall,
-    state: &GameState,
-    readout: &dyn crate::pokemon::observe::Readout,
-    graph: &WorldGraph,
-) -> ToolAnswer {
-    // A `MetaTileMap`, never pixels: the picture is drawn on the worker thread.
-    let map = match call.function.name.as_str() {
-        "read_map" => Some(Box::new(state.map.clone())),
-        _ => None,
-    };
-    // Answered before the JSON arms below and returned as raw text: see [`READ_GUIDE`].
-    if call.function.name == READ_GUIDE {
-        return ToolAnswer::text(crate::llm::guide::chapter(state.badges));
-    }
-    let value = match call.function.name.as_str() {
-        "read_map" => serde_json::to_value(observe::map_view(state)),
-        "read_party" => serde_json::to_value(observe::party(state)),
-        "read_bag" => serde_json::to_value(observe::bag(state, readout)),
-        "read_pc" => serde_json::to_value(observe::pc(state, readout)),
-        "read_battle" => serde_json::to_value(observe::battle(state)),
-        READ_ROUTE => serde_json::to_value(route_answer(call, state, graph)),
-        other => Ok(json!({ "error": format!("`{other}` is not a read tool") })),
-    };
-    match value.and_then(|value| serde_json::to_string(&value)) {
-        Ok(json) => ToolAnswer { json, map, is_dark: state.map_is_dark },
-        // Cannot fail in practice, and this is on the worker's critical path.
-        Err(failure) => ToolAnswer::text(
-            format!("{{\"error\": \"could not encode the result: {failure}\"}}")),
-    }
-}
-
-/// [`READ_ROUTE`], answered from the map-header graph: `None` means not walked yet, never
-/// unreachable.
-fn route_answer(call: &ToolCall, state: &GameState, graph: &WorldGraph) -> Value {
-    let requested = call
-        .arguments()
-        .ok()
-        .and_then(|arguments| arguments.get("to").and_then(Value::as_str).map(str::to_string))
-        .filter(|name| !name.trim().is_empty());
-
-    let visited = || -> Vec<String> {
-        observe::known_maps(graph).into_iter().map(|map| format!("{map}")).collect()
-    };
-
-    let Some(requested) = requested else {
-        return json!({ "from": format!("{}", state.map.map), "visited": visited() });
-    };
-    let Some(to) = map_by_name(&requested) else {
-        return json!({
-            "to": requested,
-            "error": format!("`{requested}` is not a map in this game. `{READ_ROUTE}` with no `to` \
-                              lists the ones you have visited."),
-        });
-    };
-
-    match observe::route_from(graph, &state.map, to) {
-        Some(hops) => {
-            let mut answer = json!({
-                "from": format!("{}", state.map.map), "to": format!("{to}"), "route": hops });
-            // The graph knows which maps touch, not which parts of a map do, so say so.
-            if let Some(unreachable) = hops.get(1).filter(|hop| hop.reachable_from_here == Some(false)) {
-                let blockers = state.map.boundary_blockers();
-                answer["warning"] = json!(format!(
-                    "This route is correct and you cannot start it from where you are standing. It \
-                     leaves {} by `{}`, and that square is not reachable on foot from here{}. The \
-                     route graph is built from the game's own map headers, which say which maps \
-                     touch each other, not which parts of a map touch each other; {} is split, and \
-                     you are on the wrong part of it. What joins two parts of one map is usually a \
-                     door: take a warp you can reach and look for a back exit, or leave by an edge \
-                     you can reach and come back onto {} by a different one. The action menu is the \
-                     list of what you can actually get to.",
-                    state.map.map,
-                    unreachable.via.as_deref().unwrap_or("that connection"),
-                    match blockers.split_first() {
-                        Some((first, _)) => format!(" — what your side of it ends on is {first}"),
-                        None => String::new(),
-                    },
-                    state.map.map,
-                    state.map.map,
-                ));
-            }
-            answer
-        }
-        None => json!({
-            "to": format!("{to}"),
-            "reachable": false,
-            "note": format!("You have not been to {to} — or no route to it crosses ground you have \
-                             already walked. You will have to explore towards it. `{READ_ROUTE}` \
-                             with no `to` lists where you have been."),
-        }),
-    }
 }
 
 // ── Menus and ids ────────────────────────────────────────────────────────────────────────────────
@@ -2395,21 +1960,16 @@ mod tests {
         // …and where the run is standing now.
         graph.observe(Map::CeruleanCity, state.map.player_position, &state.map);
 
-        let answer = route_answer(&call(READ_ROUTE, r#"{"to":"Route5"}"#), &state, &graph);
-        let hops = answer["route"].as_array().expect("a route, because one exists");
-        assert!(hops.len() >= 2, "Cerulean then Route 5: {answer}");
-
-        // The route is still answered.
-        assert_eq!(hops[1]["reachable_from_here"], json!(false), "{answer}");
-        let warning = answer["warning"].as_str().expect("a warning beside it");
-        assert!(warning.contains("cannot start it from where you are standing"), "{warning}");
+        let answer = files::route_text(&state, &graph, Map::Route5);
+        assert!(answer.starts_with("From CeruleanCity to Route5, as walked so far:"), "{answer}");
+        assert!(answer.contains("cannot start it from where you are standing"), "{answer}");
         // The way between two parts of one map is a door.
-        assert!(warning.contains("door"), "it has to name the way round: {warning}");
-        assert!(warning.contains("map headers"), "and why the route disagrees with the menu: {warning}");
+        assert!(answer.contains("door"), "it has to name the way round: {answer}");
+        assert!(answer.contains("map headers"), "and why the route disagrees with the menu: {answer}");
 
         // The reachable crossing is not flagged, or the flag says nothing.
-        let route4 = route_answer(&call(READ_ROUTE, r#"{"to":"Route4"}"#), &state, &graph);
-        assert!(route4.get("warning").is_none(), "Route 4 is walkable from here: {route4}");
+        let route4 = files::route_text(&state, &graph, Map::Route4);
+        assert!(!route4.contains("cannot start it"), "Route 4 is walkable from here: {route4}");
     }
 
     /// A destination with no reachable crossing has no row in the action menu.
@@ -2533,11 +2093,20 @@ mod tests {
     }
 
     #[test]
-    fn read_pc_is_offered_on_the_only_turn_that_can_use_it() {
-        assert!(names(DecisionKind::Overworld).contains(&"read_pc"));
-        for elsewhere in [DecisionKind::Battle, DecisionKind::Nickname, DecisionKind::MartPurchase,
-                          DecisionKind::ForgetMove, DecisionKind::MimicMove, DecisionKind::Stuck] {
-            assert!(!names(elsewhere).contains(&"read_pc"), "{elsewhere:?} must not offer read_pc");
+    fn every_file_is_readable_on_every_turn() {
+        for kind in KINDS {
+            for path in ["map.png", "party.md", "bag.md", "pc.md", "guide/current.md", "routes.md", "routes/PewterCity.md"] {
+                assert!(matches!(classify(kind, &call(files::READ_FILE, &json!({ "path": path }).to_string()), &[]),
+                                 CallKind::Read(_)), "{kind:?} cannot read {path}");
+            }
+            for path in ["plan.md", "battle-script.rhai", "battle-script.md", "issues/", "guide/", "nowhere.md"] {
+                assert!(matches!(classify(kind, &call(files::READ_FILE, &json!({ "path": path }).to_string()), &[]),
+                                 CallKind::File(FileCall::Read(_))), "{kind:?} cannot read {path}");
+            }
+            assert!(matches!(classify(kind, &call(files::READ_FILE, r#"{"path":"screen.png"}"#), &[]), CallKind::Screenshot));
+            // And the writable ones are writable everywhere, a battle script mid-battle included.
+            assert!(matches!(classify(kind, &call(files::WRITE_FILE, r#"{"path":"battle-script.rhai","content":"// x"}"#), &[]),
+                             CallKind::File(FileCall::Write { .. })));
         }
     }
 
@@ -2670,9 +2239,9 @@ mod tests {
         assert_eq!(find(":Hiker"), "talk to Hiker");
     }
 
-    /// `read_bag` has to agree with the bag the game is holding, row for row.
+    /// `bag.md` has to agree with the bag the game is holding, row for row.
     #[test]
-    fn read_bag_counts_every_slot_the_game_counts() {
+    fn the_bag_file_counts_every_slot_the_game_counts() {
         use crate::pokemon::PokemonApiTrait;
         use crate::pokemon::symbols::DmgPointerRead;
         let mut gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
@@ -2682,10 +2251,15 @@ mod tests {
         let view = crate::pokemon::observe::bag(&state, &api);
 
         let raw = api.mmu().read_pointer(&crate::pokemon::symbols::pokered_symbols::wNumBagItems) as usize;
-        assert_eq!(view.slots_used, raw, "read_bag says {} of the bag's slots are used, the game says {raw}", view.slots_used);
+        assert_eq!(view.slots_used, raw, "bag.md says {} of the bag's slots are used, the game says {raw}", view.slots_used);
         assert_eq!(view.items.len(), raw, "and every one of them has to be listed: {:?}", view.items);
 
-        // A machine's name is one the model can quote back into `toss_item` or `teach`.
+        // What the file says, a line per item after the money and the slots.
+        let text = files::bag_text(&state, &api);
+        assert!(text.contains(&format!("Slots: {raw} of 20 used")), "{text}");
+        assert_eq!(text.lines().filter(|line| line.contains(" ×")).count(), raw, "{text}");
+
+        // A machine's name is one the model can quote back into `toss:` or `teach:`.
         let named: Vec<&str> = view.items.iter().map(|i| i.item.as_str()).collect();
         assert!(named.contains(&"Tm34Bide"), "{named:?}");
         assert!(named.contains(&"Hm01Cut"), "{named:?}");
@@ -2696,7 +2270,7 @@ mod tests {
         // Every machine id, which this fixture alone cannot cover.
         for id in 0xC4..=0xFAu8 {
             let item = ItemId::from_repr(id)
-                .unwrap_or_else(|| panic!("${id:02X} is a machine and `read_bag` would drop it"));
+                .unwrap_or_else(|| panic!("${id:02X} is a machine and `bag.md` would drop it"));
             let name = item.to_string();
             assert_eq!(item_by_name(&name), Some(item), "{name} does not resolve back to ${id:02X}");
         }
@@ -2791,35 +2365,29 @@ mod tests {
         }
     }
 
-    /// [`READ_ROUTE`]'s four answers, each a different next step for the model.
+    /// `routes.md` and `routes/<Map>.md`, each a different next step for the model.
     #[test]
     fn a_route_answers_the_four_questions_and_never_bluffs() {
         let state = fixture_state();
         let graph = WorldGraph::new();
-        let ask = |arguments: &str| -> Value {
-            route_answer(&call(READ_ROUTE, arguments), &state, &graph)
-        };
 
-        // No `to`: what has been walked.
-        assert_eq!(ask("{}")["visited"], json!([]));
-        assert_eq!(ask("{}")["from"], json!(format!("{}", state.map.map)));
-        assert_eq!(ask(r#"{"to":""}"#)["visited"], json!([]), "a blank name is no name");
+        // What has been walked.
+        let walked = files::routes_text(&state, &graph);
+        assert!(walked.starts_with(&format!("You are on {}.", state.map.map)), "{walked}");
+        assert_eq!(files::resolve("routes/"), files::Node::Routes, "the directory is the same list");
 
         // A name that is not a map at all: correctable, and it says how.
-        let nonsense = ask(r#"{"to":"Kanto Safari Wildlife Park"}"#);
-        assert!(nonsense["error"].as_str().expect("a sentence").contains("not a map"), "{nonsense}");
+        let nonsense = files::no_such_map("routes/Kanto Safari Wildlife Park.md");
+        assert!(nonsense.contains("no map called"), "{nonsense}");
+        assert!(nonsense.contains("routes.md"), "{nonsense}");
 
-        // A real map nobody has walked to.
-        let unwalked = ask(r#"{"to":"CeruleanCity"}"#);
-        assert_eq!(unwalked["reachable"], json!(false));
-        assert_eq!(unwalked["to"], json!(format!("{}", Map::CeruleanCity)));
-        assert!(unwalked["note"].as_str().expect("a sentence").contains("not been to"), "{unwalked}");
+        // A real map nobody has walked to: not been there, never unreachable.
+        let unwalked = files::route_text(&state, &graph, Map::CeruleanCity);
+        assert!(unwalked.contains("not been to CeruleanCity"), "{unwalked}");
+        assert!(!unwalked.contains("unreachable"), "{unwalked}");
 
         // `map_by_name` normalises the way a model spells a map.
-        assert_eq!(ask(r#"{"to":"cerulean city"}"#), unwalked);
-
-        // The whole graph is never serialised, whatever is asked.
-        assert!(!ask("{}").to_string().contains("edges"));
+        assert_eq!(files::resolve("routes/cerulean city"), files::Node::Route(Map::CeruleanCity));
     }
 
     /// A battle menu row is prose, and `BattleAction`'s `Display` is what makes it so.
@@ -3155,115 +2723,57 @@ mod tests {
         assert!(classified.iter().all(|kind| matches!(kind, CallKind::Rejected(_))), "one action a battle turn");
     }
 
-    /// `report_issue`, on every turn that has a menu.
+    /// A write under `issues/`, on every turn.
     #[test]
     fn an_issue_report_does_not_end_the_turn_and_must_carry_a_message() {
-        for kind in [DecisionKind::Overworld, DecisionKind::Battle, DecisionKind::Stuck] {
-            assert!(offers_issue_report(kind));
-            assert!(names(kind).contains(&REPORT_ISSUE), "{kind:?} offers it");
-            assert!(
-                !terminal_names(kind).contains(&REPORT_ISSUE),
-                "{kind:?} must not let a turn end on it",
-            );
-            assert!(non_terminal_names(kind).contains(&REPORT_ISSUE), "the contract names it");
-
-            let good = bare(REPORT_ISSUE, r#"{"message":"  the ladder is not in the menu  "}"#);
-            let CallKind::Issue(message) = classify(kind, &good, &[]) else {
+        for kind in KINDS {
+            let good = bare(files::WRITE_FILE, r#"{"path":"issues/Missing Ladder","content":"  the ladder is not in the menu  "}"#);
+            let CallKind::Issue { name, message } = classify(kind, &good, &[]) else {
                 panic!("{kind:?} should file it");
             };
+            assert_eq!(name, "Missing Ladder.md", "the model's name, ending in `.md`");
             assert_eq!(message, "the ladder is not in the menu", "trimmed, like every other string");
 
-            for arguments in ["{}", r#"{"message":"   "}"#] {
-                let CallKind::Rejected(complaint) = classify(kind, &bare(REPORT_ISSUE, arguments), &[])
-                else {
+            for arguments in [r#"{"path":"issues/x.md"}"#, r#"{"path":"issues/x.md","content":"   "}"#] {
+                let CallKind::Rejected(_) = classify(kind, &bare(files::WRITE_FILE, arguments), &[]) else {
                     panic!("an empty report is not a report: {arguments}");
                 };
-                assert!(complaint.contains("message"), "{complaint}");
             }
-        }
-
-        // Single-question prompts do not carry it, and a call there is explained.
-        for kind in [DecisionKind::Nickname, DecisionKind::MartPurchase, DecisionKind::ForgetMove, DecisionKind::MimicMove] {
-            assert!(!offers_issue_report(kind));
-            assert!(!names(kind).contains(&REPORT_ISSUE), "{kind:?} does not offer it");
-            let call = bare(REPORT_ISSUE, r#"{"message":"x"}"#);
-            let CallKind::Rejected(complaint) = classify(kind, &call, &[]) else {
-                panic!("{kind:?} does not offer it and must say so");
-            };
-            assert!(complaint.contains(REPORT_ISSUE), "{complaint}");
+            // Capped, not refused.
+            let long = json!({ "path": "issues/long.md", "content": "é".repeat(MAX_ISSUE * 2) }).to_string();
+            let CallKind::Issue { message, .. } = classify(kind, &bare(files::WRITE_FILE, &long), &[]) else { panic!() };
+            assert_eq!(message.chars().count(), MAX_ISSUE);
         }
     }
 
+    /// Four tools, byte-identical on every kind of turn.
     #[test]
     fn every_kind_ends_with_the_same_action_tool() {
-        let spec = |kind| for_kind(kind).into_iter().find(|tool| tool.function.name == CHOOSE_ACTION)
-            .map(|tool| serde_json::to_string(&tool).expect("serialises"));
-        let overworld = spec(DecisionKind::Overworld).expect("the overworld turn offers it");
+        let overworld = serde_json::to_string(&for_kind(DecisionKind::Overworld)).expect("serialises");
         for kind in KINDS {
-            assert_eq!(spec(kind).as_deref(), Some(overworld.as_str()), "{kind:?} sends a different `{CHOOSE_ACTION}`");
-            let offered = names(kind);
-            for gone in ["choose_battle_action", "set_nickname", "buy_item", "forget_move", "mimic_move",
-                         "press_buttons", "wait", "resume_after_battle", "use_field_move"] {
-                assert!(!offered.contains(&gone), "{kind:?} still offers {gone}");
-            }
-        }
-
-        // The reads are all there on a stuck turn, to work out why it is stuck before pressing anything.
-        let stuck = names(DecisionKind::Stuck);
-        assert!(stuck.contains(&"read_map") && stuck.contains(&SCREENSHOT));
-
-        // The battle-script tools are on the overworld turn only, not even the battle turn.
-        for name in BATTLE_SCRIPT_TOOL_NAMES {
-            assert!(names(DecisionKind::Overworld).contains(name), "the overworld turn writes the script");
-            for elsewhere in [DecisionKind::Battle, DecisionKind::Nickname, DecisionKind::MartPurchase,
-                              DecisionKind::ForgetMove, DecisionKind::MimicMove, DecisionKind::Stuck] {
-                assert!(!names(elsewhere).contains(name), "{elsewhere:?} must not offer {name}");
-            }
-        }
-
-        for kind in KINDS {
-            let offered = names(kind);
+            assert_eq!(serde_json::to_string(&for_kind(kind)).expect("serialises"), overworld, "{kind:?}");
+            assert_eq!(names(kind), [CHOOSE_ACTION, files::READ_FILE, files::WRITE_FILE, files::EDIT_FILE]);
             // The contract in the prompt matches the array actually sent.
-            for terminal in terminal_names(kind) {
-                assert!(offered.contains(terminal), "{kind:?} promises {terminal} but does not offer it");
+            for name in terminal_names(kind).iter().chain(&non_terminal_names(kind)) {
+                assert!(names(kind).contains(name), "{kind:?} promises {name} but does not offer it");
             }
-            assert_eq!(
-                offered.len(),
-                reads_for(kind).count()
-                    + TODO_TOOL_NAMES.len()
-                    + match offers_battle_script(kind) { true => BATTLE_SCRIPT_TOOL_NAMES.len(), false => 0 }
-                    + usize::from(offers_issue_report(kind))
-                    + terminal_names(kind).len(),
-                "a turn is offered its own reads, the TODO tools, the battle-script tools where \
-                 they apply, `report_issue` where it applies, and its own terminal tools",
-            );
         }
     }
 
+    /// A file call with a broken path or missing argument is refused with what to send.
     #[test]
-    fn reads_are_scoped_per_kind_too() {
-        assert!(!names(DecisionKind::Battle).contains(&"read_map"), "there is no map in a battle");
-        assert!(!names(DecisionKind::Battle).contains(&READ_ROUTE));
-        assert!(!names(DecisionKind::Overworld).contains(&"read_battle"), "it can only answer null");
-
-        // The forget-move prompt fires mid-fight, so the battle is its business.
-        assert!(names(DecisionKind::ForgetMove).contains(&"read_battle"));
-
-        // The screen is the one read every kind keeps.
-        for kind in KINDS {
-            assert!(names(kind).contains(&SCREENSHOT), "{kind:?} cannot look at the screen");
-        }
-
-        // A single-question turn carries almost nothing.
-        assert_eq!(names(DecisionKind::Nickname), ["read_party", SCREENSHOT, "todo_set", "todo_complete",
-                                                   "todo_delete", CHOOSE_ACTION]);
-
-        // A read that exists but is not offered here is told which turn it belongs to.
-        let rejected = classify(DecisionKind::Battle, &call("read_map", "{}"), &[]);
-        let CallKind::Rejected(complaint) = rejected else { panic!("read_map is not a battle read") };
-        assert!(complaint.contains("not available in a battle turn"), "{complaint}");
-        assert!(complaint.contains("read_battle"), "it has to name what *is* here: {complaint}");
-        assert!(matches!(classify(DecisionKind::Overworld, &call("read_map", "{}"), &[]), CallKind::Read));
+    fn a_file_call_is_parsed_or_complained_about() {
+        let refused = |name: &str, arguments: &str| match classify(DecisionKind::Battle, &call(name, arguments), &[]) {
+            CallKind::Rejected(complaint) => complaint,
+            _ => panic!("`{name}` {arguments} should be refused"),
+        };
+        assert!(refused(files::READ_FILE, "{}").contains("map.png"), "a missing path answers the tree");
+        assert!(refused(files::WRITE_FILE, r#"{"path":"plan.md"}"#).contains("content"));
+        assert!(refused(files::EDIT_FILE, r#"{"path":"plan.md","old_string":"","new_string":"x"}"#).contains("empty"));
+        assert!(refused(files::EDIT_FILE, r#"{"path":"plan.md","old_string":"x","new_string":"x"}"#).contains("same"));
+        let CallKind::Read(read) = classify(DecisionKind::Battle, &call(files::READ_FILE, r#"{"path":"party.md","offset":3,"limit":2}"#), &[])
+        else { panic!("a party read") };
+        assert_eq!((read.offset, read.limit), (Some(3), Some(2)));
     }
 
     /// A malformed schema is a 400 on the first turn of a run.
@@ -3346,7 +2856,20 @@ mod tests {
         let CallKind::Rejected(complaint) = classify(DecisionKind::Overworld, &call("teleport", "{}"), &[]) else {
             panic!("an invented tool is rejected");
         };
-        assert!(complaint.contains("teleport") && complaint.contains("read_map"), "{complaint}");
+        assert!(complaint.contains("teleport") && complaint.contains(files::READ_FILE), "{complaint}");
+
+        // Every read, plan and script tool of an older conversation names the file that replaced it.
+        for (old, file) in [("read_map", "map.png"), ("screenshot", "screen.png"), ("read_party", "party.md"),
+                            ("read_bag", "bag.md"), ("read_pc", "pc.md"), ("read_guide", "guide/current.md"),
+                            ("read_route", "routes"), ("todo_set", "plan.md"), ("todo_complete", "plan.md"),
+                            ("todo_delete", "plan.md"), ("set_battle_script", "battle-script.rhai"),
+                            ("read_battle_script", "battle-script.rhai"), ("get_battle_script_docs", "battle-script.md"),
+                            ("report_issue", "issues/")] {
+            let CallKind::Rejected(complaint) = classify(DecisionKind::Overworld, &call(old, "{}"), &[]) else {
+                panic!("{old} is gone");
+            };
+            assert!(complaint.contains(file), "{old}: {complaint}");
+        }
     }
 
     #[test]
@@ -3377,8 +2900,11 @@ mod tests {
             classify(DecisionKind::Overworld, &call(CHOOSE_ACTION, "not json at all"), &[]),
             CallKind::Rejected(_),
         ));
-        // A zero-parameter read tool is routinely called with empty arguments rather than `{}`.
-        assert!(matches!(classify(DecisionKind::Overworld, &call("read_map", ""), &[]), CallKind::Read));
+        // A read with no arguments at all asks for nothing, and is told what there is.
+        let CallKind::Rejected(complaint) = classify(DecisionKind::Overworld, &call(files::READ_FILE, ""), &[]) else {
+            panic!("no path")
+        };
+        assert!(complaint.contains("party.md"), "{complaint}");
     }
 
     /// A battle id survives its PP changing, which `BattleAction`'s `Display` includes.
@@ -3396,7 +2922,7 @@ mod tests {
         assert_eq!(battle_id(&BattleAction::Run), "run");
     }
 
-    /// A model writes `"HM01 Cut"`, the code writes `Hm01Cut`, and `read_bag` writes `Hm01Cut`.
+    /// A model writes `"HM01 Cut"`, the code writes `Hm01Cut`, and `bag.md` writes `Hm01Cut`.
     #[test]
     fn names_are_matched_the_way_a_model_spells_them() {
         for spelling in ["Hm01Cut", "hm01_cut", "HM01 Cut", "hm01cut"] {
@@ -3481,12 +3007,11 @@ mod tests {
         }
     }
 
-    /// `screenshot` is a read to the turn contract, but the worker answers it.
+    /// `screen.png` is a read to the model, but the worker answers it.
     #[test]
     fn a_screenshot_is_classified_apart_from_the_other_reads() {
-        assert!(matches!(classify(DecisionKind::Battle, &call(SCREENSHOT, "{}"), &[]), CallKind::Screenshot));
-        assert!(matches!(classify(DecisionKind::Battle, &call("read_party", "{}"), &[]), CallKind::Read));
-        assert!(READ_TOOLS.iter().any(|tool| tool.name == SCREENSHOT), "it is still offered as a read");
+        assert!(matches!(classify(DecisionKind::Battle, &call(files::READ_FILE, r#"{"path":"screen.png"}"#), &[]), CallKind::Screenshot));
+        assert!(matches!(classify(DecisionKind::Battle, &call(files::READ_FILE, r#"{"path":"party.md"}"#), &[]), CallKind::Read(_)));
     }
 
     /// Every id shape a field row takes, and the ids a template refuses.

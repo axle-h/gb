@@ -17,7 +17,8 @@ use crate::llm::compaction;
 use crate::llm::config::LlmConfig;
 use crate::llm::history::{CompactionNote, History};
 use crate::llm::incident;
-use crate::llm::todo::TodoList;
+use crate::llm::files::{self, FileCall, FileRead, Node};
+use crate::llm::plan::Plan;
 use crate::llm::prompt;
 use crate::llm::map_image;
 use crate::llm::screenshot;
@@ -26,7 +27,7 @@ use crate::pokemon::tile_map::MetaTileMap;
 use crate::run::CurrentRun;
 use crate::llm::tools::{self, CallKind, DecisionKind, Terminal};
 use crate::llm::LlmError;
-use crate::published::{Published, RunStatus, TodoView, UiEventBody, now_ms};
+use crate::published::{Published, RunStatus, UiEventBody, now_ms};
 
 /// One question, from the policy to the worker.
 #[derive(Debug, Clone)]
@@ -198,17 +199,14 @@ const MAX_TOOL_RESULT: usize = 2_000;
 /// Where [`Worker::trim_history`] drops back to, as a fraction of the window.
 const TRIM_TO: f64 = 0.50;
 
-/// How many overworld turns an unchanged plan may sit at before a fresh copy is appended.
-pub const PLAN_REFRESH_TURNS: u32 = 10;
-
 /// Where a turn started, so a failed turn is rolled back to a length rather than by one `pop`: it
 /// can fail on its second tool step, with an assistant message and results already appended.
 #[derive(Debug, Clone, Copy, Default)]
 struct TurnOpen {
-    /// `history.len()` before the plan or the situation was appended.
+    /// `history.len()` before the situation was appended.
     at: usize,
-    /// Restored too, or a run whose every request fails appends a plan every tenth attempt.
-    turns_since_plan: u32,
+    /// Restored too, or the one turn told everything else was lost is the turn that failed.
+    reminder: prompt::PlanReminder,
 }
 
 pub struct Worker {
@@ -228,18 +226,18 @@ pub struct Worker {
 
     /// The conversation, and the two files it is kept in — see [`crate::llm::history`].
     history: History,
-    todo: TodoList,
+    plan: Plan,
+    /// What the turn about to be asked says about `plan.md`.
+    reminder: prompt::PlanReminder,
+    /// The issues filed by a worker with no run directory to file them in.
+    issues: Vec<incident::Filed>,
     /// The model's battle script, and the cell the policy reads it through.
     battle_script: BattleScript,
     live_script: Arc<battle_script::Live>,
-    /// What the page was last told the plan is, so [`Self::publish_todo`] never repeats itself.
-    published_plan: Option<Vec<TodoView>>,
-    /// Plan calls the list refused this turn, so an identical one is answered without running.
-    refused_todo: Vec<crate::llm::todo::TodoCall>,
+    /// What the page was last told the plan is, so [`Self::publish_plan`] never repeats itself.
+    published_plan: Option<String>,
     /// The same, for the battle script: `(source, armed, last_failure)` as the page last saw it.
     published_script: Option<(Option<String>, bool, Option<String>)>,
-    /// Turns since the plan was last placed at the tail; see [`Self::sync_plan`].
-    turns_since_plan: u32,
     turn_open: TurnOpen,
     /// Tokens reported, tokens spent, and how far our own estimate is from the endpoint's.
     accounting: Accounting,
@@ -254,7 +252,7 @@ pub fn channels(
     endpoint: Box<dyn ChatEndpoint>,
     config: LlmConfig,
     published: Arc<Published>,
-    todo: TodoList,
+    plan: Plan,
     battle_script: BattleScript,
     history: History,
 ) -> (Worker, TurnHandles) {
@@ -264,17 +262,17 @@ pub fn channels(
     let (result_tx, result_rx) = mpsc::channel();
     let generation = Arc::new(AtomicU64::new(0));
     let reset: Resets = Arc::new(Mutex::new(None));
-    // Armed from the file at construction, not on the first `set_battle_script`.
+    // Armed from the file at construction, not on the first write.
     let live_script = Arc::new(battle_script::Live::default());
     live_script.arm(battle_script.live_source(), battle_script.state(), battle_script.standing());
 
     // The calibration comes back with the conversation, and nothing else does.
-    let (accounting, turns_since_plan) = match history.restored() {
+    let (accounting, reminder) = match history.restored() {
         Some(restored) => (
             Accounting::resumed(config.context_limit, restored.calibration),
-            restored.turns_since_plan,
+            prompt::PlanReminder::Resumed,
         ),
-        None => (Accounting::new(config.context_limit), 0),
+        None => (Accounting::new(config.context_limit), prompt::PlanReminder::Ordinary),
     };
     let worker = Worker {
         endpoint,
@@ -289,13 +287,13 @@ pub fn channels(
         tool_calls: call_tx,
         tool_results: result_rx,
         history,
-        todo,
+        plan,
+        reminder,
+        issues: Vec::new(),
         battle_script,
         live_script: Arc::clone(&live_script),
         published_plan: None,
-        refused_todo: Vec::new(),
         published_script: None,
-        turns_since_plan,
         turn_open: TurnOpen::default(),
         accounting,
         reset: Arc::clone(&reset),
@@ -340,7 +338,7 @@ impl Worker {
     ) {
         let Some(run) = &self.run else { return };
         let what = match report {
-            incident::Report::Issue { .. } => "report_issue",
+            incident::Report::Issue { .. } => "issue",
             incident::Report::Press { .. } => "press",
         };
         match incident::record(run, &self.published, turn, kind, report, summary, &self.history) {
@@ -349,19 +347,32 @@ impl Worker {
         }
     }
 
-    /// Write a `report_issue` call to disk and answer it.
+    /// Write an issue to disk and answer it.
     fn file_issue(
-        &self,
+        &mut self,
         turn: u64,
         kind: DecisionKind,
+        file: &str,
         message: &str,
         summary: Option<&str>,
     ) -> String {
-        self.record_report(turn, kind, incident::Report::Issue { message }, summary);
-        "Filed, with the screen and a save state. A developer will read it; nothing changes now, \
-         and this did not end your turn. Carry on and try a different way of getting what you \
-         wanted."
-            .to_string()
+        self.record_report(turn, kind, incident::Report::Issue { file, message }, summary);
+        if self.run.is_none() {
+            self.issues.push(incident::Filed { file: file.to_string(), message: message.to_string(), turn });
+        }
+        format!(
+            "Filed as issues/{file}, with the screen and a save state. A developer will read it; \
+             nothing changes now, and this did not end your turn. Carry on and try a different way \
+             of getting what you wanted."
+        )
+    }
+
+    /// Every issue this run has filed, oldest first.
+    fn filed_issues(&self) -> Vec<incident::Filed> {
+        match &self.run {
+            Some(run) => incident::filed(run),
+            None => self.issues.clone(),
+        }
     }
 
     /// Run the loop on a new thread, until the policy drops its end of the channel.
@@ -381,11 +392,18 @@ impl Worker {
     /// Start the conversation again, for a new game or for a model made to forget this one.
     fn apply_reset(&mut self, reset: Reset) {
         let dir = reset.run_dir.as_deref();
-        self.todo = match reset.kind {
-            ResetKind::NewGame => TodoList::open(dir),
-            ResetKind::Cleared => TodoList::cleared(dir),
+        self.plan = match reset.kind {
+            ResetKind::NewGame => Plan::open(dir),
+            ResetKind::Cleared => Plan::cleared(dir),
         };
-        self.publish_todo();
+        self.publish_plan();
+        self.reminder = match reset.kind {
+            ResetKind::NewGame => prompt::PlanReminder::Ordinary,
+            ResetKind::Cleared => prompt::PlanReminder::Cleared,
+        };
+        if reset.kind == ResetKind::NewGame {
+            self.issues.clear();
+        }
         if reset.kind == ResetKind::NewGame {
             // Reopened against the new directory, and the cell re-armed from what it finds.
             self.battle_script = BattleScript::open(dir);
@@ -397,8 +415,6 @@ impl Worker {
             ResetKind::NewGame => History::fresh(dir),
             ResetKind::Cleared => History::cleared(dir),
         };
-        // `sync_plan` finds no plan in the fresh history and appends one, so the count restarts.
-        self.turns_since_plan = 0;
         self.accounting = Accounting::new(self.config.context_limit);
         self.published.publish_event(UiEventBody::Notice {
             level: "info",
@@ -429,19 +445,14 @@ impl Worker {
         let TurnRequest { id, kind, situation, headline, menu } = request;
         self.published.publish_event(UiEventBody::TurnStarted { turn: id, kind: kind.label(), headline });
 
-        // Before `sync_plan`, so a rollback takes the plan message too.
-        self.turn_open = TurnOpen { at: self.history.len(), turns_since_plan: self.turns_since_plan };
-        let carried = self.sync_plan(kind);
-        self.publish_todo();
+        self.turn_open = TurnOpen { at: self.history.len(), reminder: self.reminder };
+        self.publish_plan();
         self.publish_battle_script();
-        // The turn that does not carry the plan has to say so.
-        self.history.push(Message::user(match carried {
-            true => situation,
-            false => format!("{situation}\n{}\n", prompt::PLAN_UNCHANGED),
-        }));
+        self.history.push(Message::user(format!("{situation}\n{}\n", self.reminder.line())));
+        self.reminder = prompt::PlanReminder::Ordinary;
         let outcome = self.decide(id, kind, &menu);
         // Before the outcome is sent: a winning action has the archiver copy the run next tick.
-        self.history.checkpoint(id, self.accounting.calibration(), self.turns_since_plan);
+        self.history.checkpoint(id, self.accounting.calibration());
         match outcome {
             Some((decision, narration)) => {
                 self.published.publish_event(UiEventBody::Decision {
@@ -466,80 +477,118 @@ impl Worker {
         }
         // The log was flushed above, so everything a compaction destroys is already written down.
         if let Some(note) = self.compact_if_needed() {
+            if note.summary.is_some() || note.dropped > 0 {
+                self.reminder = prompt::PlanReminder::Compacted;
+            }
             self.history.note_compaction(id, &note);
-            self.history.checkpoint(id, self.accounting.calibration(), self.turns_since_plan);
+            self.history.checkpoint(id, self.accounting.calibration());
         }
     }
 
-    /// Put the model's plan in front of it, in exactly one place, at the cheapest moment.
-    fn sync_plan(&mut self, kind: DecisionKind) -> bool {
-        let plan = prompt::plan_message(&self.todo);
-        // The periodic refresh is an overworld thing; the edit-driven one is not.
-        let due = self.turns_since_plan >= PLAN_REFRESH_TURNS && kind == DecisionKind::Overworld;
-        let newest = self.history.iter().rposition(|message| prompt::is_plan(message));
-        if newest.is_some_and(|at| self.history[at] == plan) && !due {
-            self.turns_since_plan += 1;
-            return false;
-        }
-        self.turns_since_plan = 0;
-        self.history.push(plan);
-        true
-    }
-
-    /// Put the conversation back exactly as this turn found it, and un-count the turn.
+    /// Put the conversation back exactly as this turn found it.
     fn roll_back_failed_turn(&mut self) {
         self.history.rollback_to(self.turn_open.at);
-        self.turns_since_plan = self.turn_open.turns_since_plan;
+        self.reminder = self.turn_open.reminder;
     }
 
-    /// Service one battle-script call, returning the sentence the model is shown.
-    fn apply_battle_script(&mut self, call: tools::BattleScriptCall) -> String {
+    /// Answer one file call the worker owns: a read of a file it keeps, a write or an edit. The
+    /// flag is whether it did what was asked.
+    fn apply_file(&mut self, call: &FileCall) -> (String, bool) {
         match call {
-            tools::BattleScriptCall::Docs => battle_script::DOCS.to_string(),
-            tools::BattleScriptCall::Read => self.battle_script.read(),
-            // Refused here rather than armed without one.
-            tools::BattleScriptCall::Set { script: Some(script), purpose: None } => {
-                let _ = script;
-                "Not armed, and nothing was changed: `set_battle_script` needs a `purpose` as well \
-                 as a `script`. One line on what you are writing it for — it stays armed and decides \
-                 every battle until you replace it, and you are shown that line back on every \
-                 overworld turn, so it is what will tell you later whether it still fits."
-                    .to_string()
+            FileCall::Read(read) => (self.read_here(read), true),
+            FileCall::Write { node: Node::Plan, content } => self.write_plan(content),
+            FileCall::Write { node: Node::BattleScript, content } => self.write_script(content),
+            FileCall::Edit { node: Node::Plan, old, new } => {
+                match files::apply_edit(files::PLAN, self.plan.text(), old, new) {
+                    Ok(text) => self.write_plan(&text),
+                    Err(why) => (why, false),
+                }
             }
-            tools::BattleScriptCall::Set { script: source, purpose } => {
-                let answer = self.battle_script.set(source.as_deref(), purpose.as_deref());
-                self.live_script.arm(self.battle_script.live_source(), self.battle_script.state(), self.battle_script.standing());
-                self.publish_battle_script();
-                answer
+            FileCall::Edit { node: Node::BattleScript, old, new } => {
+                let source = self.battle_script.source().unwrap_or_default().to_string();
+                match files::apply_edit(files::BATTLE_SCRIPT, &source, old, new) {
+                    Ok(text) => self.write_script(&text),
+                    Err(why) => (why, false),
+                }
             }
+            FileCall::Write { node, .. } | FileCall::Edit { node, .. } => (files::not_writable(node), false),
         }
     }
 
-    /// One TODO call, applied and published.
-    fn apply_todo(&mut self, call: crate::llm::todo::TodoCall) -> String {
-        if self.refused_todo.contains(&call) {
-            return "You already made that exact call this turn and it was refused; nothing has \
-                    changed since. Your plan is the `## Your plan` message nearest the end of this \
-                    conversation — use a number it actually lists, or leave the plan alone and \
-                    finish the turn."
-                .to_string();
+    fn write_plan(&mut self, text: &str) -> (String, bool) {
+        match self.plan.write(text) {
+            Ok(()) => {
+                self.publish_plan();
+                (format!("plan.md written: {} lines, {} bytes.", text.lines().count(), text.len()), true)
+            }
+            Err(why) => (why, false),
         }
-        let answer = self.todo.apply_reporting(call.clone());
-        if answer.refused {
-            self.refused_todo.push(call);
-        }
-        self.publish_todo();
-        answer.text
     }
 
-    /// Tell the page, if there is anything new to tell it.
-    fn publish_todo(&mut self) {
-        let items: Vec<TodoView> = self.todo.items().iter().map(TodoView::from).collect();
-        if self.published_plan.as_ref() == Some(&items) {
+    /// A write or an edit of the script: validated, and armed from the next battle decision.
+    fn write_script(&mut self, source: &str) -> (String, bool) {
+        let written = self.battle_script.write(source);
+        if written.is_ok() {
+            self.live_script.arm(self.battle_script.live_source(), self.battle_script.state(), self.battle_script.standing());
+        }
+        self.publish_battle_script();
+        match written {
+            Ok(answer) => (answer, true),
+            Err(why) => (why, false),
+        }
+    }
+
+    /// A read of a file the worker keeps rather than the game.
+    fn read_here(&self, read: &FileRead) -> String {
+        let FileRead { node, offset, limit } = read;
+        let path = node.path();
+        let text = match node {
+            Node::Root => files::TREE.to_string(),
+            Node::GuideDir => files::guide_listing(),
+            Node::Plan => self.plan.text().to_string(),
+            Node::BattleScript => {
+                let source = self.battle_script.source().unwrap_or_default();
+                let answer = files::window(&path, source, *offset, *limit);
+                // The state rides on the header line, so the lines below it are the file.
+                return match answer.split_once('\n') {
+                    Some((header, rest)) => format!("{header}; {}\n{rest}", self.battle_script.status()),
+                    None => format!("{answer}; {}", self.battle_script.status()),
+                };
+            }
+            Node::BattleScriptDocs => battle_script::DOCS.to_string(),
+            Node::IssuesDir => {
+                let filed = self.filed_issues();
+                if filed.is_empty() {
+                    return "issues/, empty: no issue has been filed in this run. Writing a new file \
+                            under it files one."
+                        .to_string();
+                }
+                filed.iter().map(|issue| format!("issues/{}, filed on turn {}\n", issue.file, issue.turn)).collect()
+            }
+            Node::Issue(name) => {
+                let messages: Vec<String> = self.filed_issues().into_iter()
+                    .filter(|issue| issue.file.eq_ignore_ascii_case(name))
+                    .map(|issue| issue.message)
+                    .collect();
+                if messages.is_empty() {
+                    return format!("There is no issue `{path}` yet. Writing it files one.");
+                }
+                messages.join("\n\n")
+            }
+            Node::NoSuchMap(name) => return files::no_such_map(name),
+            other => return files::no_such_file(&other.path()),
+        };
+        files::window(&path, &text, *offset, *limit)
+    }
+
+    /// Tell the page the plan, if it has changed: every version goes into the transcript.
+    fn publish_plan(&mut self) {
+        if self.published_plan.as_deref() == Some(self.plan.text()) {
             return;
         }
-        self.published_plan = Some(items.clone());
-        self.published.publish_event(UiEventBody::Plan { items });
+        let text = self.plan.text().to_string();
+        self.published_plan = Some(text.clone());
+        self.published.publish_event(UiEventBody::Plan { text });
     }
 
     /// Tell the page what is deciding the battles, if that has changed.
@@ -603,8 +652,6 @@ impl Worker {
     fn decide(&mut self, id: u64, kind: DecisionKind, menu: &[String]) -> Option<(Terminal, Option<String>)> {
         let specs = tools::for_kind(kind);
         let mut nudged = false;
-        // Per turn: see `apply_todo`.
-        self.refused_todo.clear();
 
         for step in 0..self.config.max_tool_steps {
             if self.is_stale(id) {
@@ -753,26 +800,25 @@ impl Worker {
                     false => tools::call_summary(&completion.tool_calls[position]),
                 };
                 for (index, call) in completion.tool_calls.iter().enumerate() {
-                    let content = match &classified[index] {
-                        _ if index == position => {
+                    let (content, ok) = match &classified[index] {
+                        _ if index == position => (
                             "Accepted. The agent is carrying it out now; the next turn will tell you \
                              what happened."
-                                .to_string()
-                        }
+                                .to_string(),
+                            true,
+                        ),
                         CallKind::Chained if chained => {
-                            "Accepted, to be taken after the one before it if that one lands.".to_string()
+                            ("Accepted, to be taken after the one before it if that one lands.".to_string(), true)
                         }
-                        CallKind::Todo(call) => self.apply_todo(call.clone()),
-                        // Filed, not dropped, like a TODO call.
-                        CallKind::Issue(message) => {
-                            self.file_issue(id, kind, message, summary.as_deref())
+                        // A write is kept, not dropped; a read beside the action answers nothing.
+                        CallKind::File(file) if !matches!(file, FileCall::Read(_)) => self.apply_file(file),
+                        CallKind::Issue { name, message } => {
+                            (self.file_issue(id, kind, name, message, summary.as_deref()), true)
                         }
-                        // Likewise.
-                        CallKind::BattleScript(call) => self.apply_battle_script(call.clone()),
-                        CallKind::Rejected(complaint) => complaint.clone(),
-                        _ => format!("Not run — the turn ended with `{ended_with}` in the same message."),
+                        CallKind::Rejected(complaint) => (complaint.clone(), false),
+                        _ => (format!("Not run — the turn ended with `{ended_with}` in the same message."), true),
                     };
-                    self.publish_tool_result(id, call, &classified[index], &content, None);
+                    self.publish_tool_result(id, call, ok, &content, None);
                     self.history.push(Message::tool_result(&call.id, content));
                 }
                 // After the tool results are appended, not before.
@@ -791,7 +837,7 @@ impl Worker {
                 .tool_calls
                 .iter()
                 .zip(&classified)
-                .filter(|(_, kind)| matches!(kind, CallKind::Read))
+                .filter(|(_, kind)| matches!(kind, CallKind::Read(_)))
                 .map(|(call, _)| call.clone())
                 .collect();
 
@@ -812,19 +858,19 @@ impl Worker {
             for (call, classification) in completion.tool_calls.iter().zip(&classified) {
                 // The picture this call answered with, for the page too.
                 let mut png: Option<Vec<u8>> = None;
-                let content = match classification {
-                    CallKind::Read => {
+                let (content, ok) = match classification {
+                    CallKind::Read(read) => {
                         let answer = answers.next().unwrap_or_else(|| ToolAnswer::text(
-                            "{\"error\": \"the agent returned no result for this call\"}"));
-                        match answer.map {
-                            None => answer.json,
+                            "The agent returned no answer for this read."));
+                        let content = match answer.map {
+                            None => files::window(&read.node.path(), &answer.json, read.offset, read.limit),
                             // As `screenshot` below: the result says a picture follows.
                             Some(map) => match map_image::render(&map) {
                                 // The ASCII grid is the safety net, not dead code.
                                 None => format!(
-                                    "{}\n\nThis map could not be drawn, so here it is as characters \
+                                    "{}\n{}\nThis map could not be drawn, so here it is as characters \
                                      instead — one per square, {} wide, and you are the `P`:\n{map}",
-                                    answer.json, map.width),
+                                    files::MAP_PNG, answer.json, map.width),
                                 Some(mut canvas) => {
                                     if answer.is_dark {
                                         map_image::darken(&mut canvas);
@@ -842,29 +888,29 @@ impl Worker {
                                         ImageDetail::High,
                                         protocol::image_tokens(ImageDetail::High, width, height),
                                     ));
-                                    format!("{}\n\n{caption} It is attached to the message after \
-                                             this one.", answer.json)
+                                    format!("{}\n{}\n{caption} It is attached to the message after \
+                                             this one.", files::MAP_PNG, answer.json)
                                 }
                             },
-                        }
+                        };
+                        (content, true)
                     }
                     CallKind::Screenshot => {
-                        self.published.set_status(RunStatus::RunningTool { name: "screenshot".into() });
+                        self.published.set_status(RunStatus::RunningTool { name: files::READ_FILE.into() });
                         let frame = self.published.latest_frame();
                         let caption = screenshot::caption(frame.seq);
                         let encoded = screenshot::encode(&frame.pixels);
                         let url = screenshot::png_data_url(&encoded);
                         png = Some(encoded);
                         pictures.push(Message::user_with_image(caption.clone(), url));
-                        format!("{caption} It is attached to the message after this one.")
+                        (format!("{}\n{caption} It is attached to the message after this one.", files::SCREEN_PNG), true)
                     }
-                    CallKind::Todo(call) => self.apply_todo(call.clone()),
-                    CallKind::Issue(message) => self.file_issue(id, kind, message, None),
-                    CallKind::BattleScript(call) => self.apply_battle_script(call.clone()),
-                    CallKind::Rejected(complaint) => complaint.clone(),
+                    CallKind::File(file) => self.apply_file(file),
+                    CallKind::Issue { name, message } => (self.file_issue(id, kind, name, message, None), true),
+                    CallKind::Rejected(complaint) => (complaint.clone(), false),
                     CallKind::Terminal(_) | CallKind::Chained => unreachable!("handled above"),
                 };
-                self.publish_tool_result(id, call, classification, &content, png);
+                self.publish_tool_result(id, call, ok, &content, png);
                 self.history.push(Message::tool_result(&call.id, content));
             }
             self.history.extend(pictures);
@@ -881,7 +927,7 @@ impl Worker {
         &self,
         turn: u64,
         call: &ToolCall,
-        classification: &CallKind,
+        ok: bool,
         content: &str,
         png: Option<Vec<u8>>,
     ) {
@@ -897,7 +943,7 @@ impl Worker {
             turn,
             id: call.id.clone(),
             name: call.function.name.clone(),
-            ok: !matches!(classification, CallKind::Rejected(_)),
+            ok,
             content,
             image: png.is_some(),
         });
@@ -1206,7 +1252,7 @@ mod tests {
             Box::new(Summarises),
             config,
             Published::new(),
-            TodoList::open(None),
+            Plan::open(None),
             BattleScript::open(None),
             History::open(None),
         );

@@ -17,7 +17,7 @@ use crate::pokemon::pokemon::PokemonSummary;
 use crate::pokemon::policy::battle_options;
 use crate::run::files;
 
-/// The docs `get_battle_script_docs` answers with, sent verbatim.
+/// `battle-script.md`, sent verbatim.
 pub const DOCS: &str = include_str!("battle_script/DOCS.md");
 
 /// The deterministic policy's battle strategy, written as a battle script.
@@ -26,10 +26,10 @@ pub const DETERMINISTIC: &str = include_str!("battle_script/DETERMINISTIC.rhai")
 /// The script every run starts with and an unset returns to: it only calls `battle.ask()`.
 pub const DEFAULT: &str = include_str!("battle_script/DEFAULT.rhai");
 
-/// Bounded because `read_battle_script` and every validation failure quote the source whole.
+/// Bounded because a read and every validation failure quote the source whole.
 pub const MAX_SOURCE: usize = 6_000;
 
-/// How long a script's stated purpose may be.
+/// How much of a script's top comment the turn shows back.
 pub const MAX_PURPOSE: usize = 200;
 
 /// How much of a disarm reason rides on the overworld turn.
@@ -626,8 +626,9 @@ struct Saved {
     armed: bool,
     #[serde(default)]
     last_failure: Option<String>,
-    /// The model's one line on what it wrote this for, said back on every overworld turn.
-    #[serde(default)]
+    /// Older files kept the script's purpose apart; [`BattleScript::open`] moves it into the
+    /// source's top comment.
+    #[serde(default, skip_serializing)]
     purpose: Option<String>,
     #[serde(default)]
     decided: u32,
@@ -646,7 +647,32 @@ impl Default for Saved {
     }
 }
 
-/// The script on disk and the tool calls against it, answered on the worker thread.
+/// The first line of the comment a script opens with, which says what it is for; `None` when it
+/// opens with code.
+pub fn purpose_of(source: &str) -> Option<String> {
+    let first = source.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let text = first.strip_prefix("//").or_else(|| first.strip_prefix("/*"))?;
+    let text = text.trim_start_matches(['/', '*', '!']).trim_end_matches("*/").trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(match text.char_indices().nth(MAX_PURPOSE) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_string(),
+    })
+}
+
+/// A script with its line comments and whitespace taken out.
+fn code_of(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+        .flat_map(str::chars)
+        .filter(|c| !c.is_whitespace())
+        .collect()
+}
+
+/// The script on disk, written and edited through `battle-script.rhai` on the worker thread.
 pub struct BattleScript {
     /// `None` for a run with no directory.
     path: Option<PathBuf>,
@@ -667,7 +693,14 @@ impl BattleScript {
         if saved.source.is_none() {
             saved = Saved::default();
         }
-        Self { path: Some(path), saved }
+        let mut script = Self { path: Some(path), saved };
+        if let Some(purpose) = script.saved.purpose.take() {
+            if let Some(source) = script.saved.source.as_mut().filter(|source| purpose_of(source).is_none()) {
+                *source = format!("// {}\n{source}", purpose.replace('\n', " "));
+            }
+            script.persist();
+        }
+        script
     }
 
     pub fn source(&self) -> Option<&str> {
@@ -679,9 +712,10 @@ impl BattleScript {
         self.saved.armed && self.saved.source.is_some() && !self.is_default()
     }
 
-    /// Whether [`DEFAULT`] is installed, compared trimmed as [`Self::set`] stores it.
+    /// Whether [`DEFAULT`] is installed: its code, not its comment, so an older build's default
+    /// with different prose still reads as one.
     pub fn is_default(&self) -> bool {
-        self.saved.source.as_deref().map(str::trim) == Some(DEFAULT.trim())
+        self.saved.source.as_deref().is_some_and(|source| code_of(source) == code_of(DEFAULT))
     }
 
     pub fn last_failure(&self) -> Option<&str> {
@@ -691,7 +725,7 @@ impl BattleScript {
     /// The purpose, the turns decided, and why it stopped if it has; empty for the default.
     pub fn standing(&self) -> ScriptStanding {
         ScriptStanding {
-            purpose: self.saved.purpose.clone(),
+            purpose: (!self.is_default()).then(|| self.saved.source.as_deref().and_then(purpose_of)).flatten(),
             decided: self.saved.decided,
             // Only while it is the current state.
             failure: (!self.armed()).then(|| self.saved.last_failure.as_deref().map(standing_failure)).flatten(),
@@ -722,20 +756,30 @@ impl BattleScript {
         }
     }
 
-    /// `set_battle_script`. Validates before arming, and the answer is the validation table.
-    pub fn set(&mut self, source: Option<&str>, purpose: Option<&str>) -> String {
-        let Some(source) = source.map(str::trim).filter(|source| !source.is_empty()) else {
+    /// A write to `battle-script.rhai`: validated before it is armed, and the answer is the
+    /// validation table. Empty goes back to [`DEFAULT`]. `Err` means nothing was changed.
+    pub fn write(&mut self, source: &str) -> Result<String, String> {
+        let source = source.trim();
+        if source.is_empty() {
             self.saved = Saved::default();
             self.persist();
-            return "ok, back to the default script, which hands you every battle turn. They cost \
-                    you a request each again."
-                .to_string();
-        };
+            return Ok("ok, back to the default script, which hands you every battle turn. They cost \
+                       you a request each again."
+                .to_string());
+        }
         if source.len() > MAX_SOURCE {
-            return format!(
+            return Err(format!(
                 "That script is {} bytes and the limit is {MAX_SOURCE}. Nothing was changed.",
                 source.len(),
-            );
+            ));
+        }
+        if purpose_of(source).is_none() {
+            return Err("Not armed, and nothing was changed: a battle script opens with a comment \
+                        saying what it is for, as `// fight trainers, hand back wild battles`. It \
+                        stays armed and decides every battle until you replace it, and that first \
+                        line is shown back to you on every overworld turn, so it is what will tell \
+                        you later whether it still fits."
+                .to_string());
         }
 
         match validate(source) {
@@ -744,53 +788,37 @@ impl BattleScript {
                     source: Some(source.to_string()),
                     armed: true,
                     last_failure: None,
-                    purpose: purpose.map(str::trim).filter(|p| !p.is_empty()).map(|p| {
-                        // `char_indices`, not a byte slice.
-                        match p.char_indices().nth(MAX_PURPOSE) {
-                            Some((at, _)) => format!("{}…", &p[..at]),
-                            None => p.to_string(),
-                        }
-                    }),
+                    purpose: None,
                     // Zeroed rather than carried over.
                     decided: 0,
                 };
                 self.persist();
-                format!("ok, armed. Validated on {} scenarios:\n{table}", SCENARIOS.len())
+                Ok(format!(
+                    "ok, armed: it decides from your next battle decision. Validated on {} scenarios:\n{table}",
+                    SCENARIOS.len(),
+                ))
             }
-            Err(why) => format!("Not armed, and nothing was changed. {why}"),
+            Err(why) => Err(format!("Not armed, and nothing was changed. {why}")),
         }
     }
 
-    /// `read_battle_script`.
-    pub fn read(&self) -> String {
-        let Some(source) = self.source() else {
-            return "There is no battle script, which should not be possible. \
-                    `set_battle_script` will install one."
-                .to_string();
-        };
-        let state = match (self.armed(), self.is_default(), self.last_failure()) {
-            // The same two facts the standing line carries, from the same accessor.
+    /// One line on what the installed script is doing, for the header of a read.
+    pub fn status(&self) -> String {
+        match (self.armed(), self.is_default(), self.last_failure()) {
             (true, _, _) => {
-                let standing = self.standing();
-                let mut armed = "Armed. This is deciding your battle turns.".to_string();
-                if let Some(purpose) = standing.purpose.as_deref() {
-                    armed.push_str(&format!(" You installed it for: \"{purpose}\"."));
-                }
-                armed.push_str(&match standing.decided {
-                    0 => " It has not decided a battle turn yet.".to_string(),
-                    1 => " It has decided 1 battle turn since.".to_string(),
-                    n => format!(" It has decided {n} battle turns since."),
-                });
-                armed
+                let decided = self.saved.decided;
+                format!(
+                    "armed, deciding your battle turns; it has decided {decided} battle turn{} since \
+                     you wrote it",
+                    if decided == 1 { "" } else { "s" },
+                )
             }
-            (false, true, _) => "**This is the default script and it decides nothing** — it hands \
-                                 every battle turn back to you, so each one costs a request. \
-                                 Replace it with `set_battle_script`."
+            (false, true, _) => "the default script, which decides nothing and hands every battle \
+                                 turn back to you"
                 .to_string(),
-            (false, false, Some(why)) => format!("**Disarmed** after it failed: {why}\n\nFix it and call `set_battle_script` again, or pass `null` to go back to the default."),
-            (false, false, None) => "Not armed.".to_string(),
-        };
-        format!("{state}\n\n```rhai\n{source}\n```")
+            (false, false, Some(why)) => format!("disarmed after it failed: {why}"),
+            (false, false, None) => "not armed".to_string(),
+        }
     }
 
     /// Keeps the script for the model to edit, deciding nothing until it is armed again.
@@ -826,7 +854,7 @@ pub enum ScriptState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScriptStanding {
-    /// The model's own words from `set_battle_script`; `None` for the default.
+    /// The first line of the script's top comment, in the model's own words; `None` for the default.
     pub purpose: Option<String>,
     /// Battle turns decided since this script was armed.
     pub decided: u32,
@@ -849,7 +877,7 @@ struct LiveInner {
 }
 
 impl Live {
-    /// Point the policy at a script or none, after a successful `set_battle_script` or a restart.
+    /// Point the policy at a script or none, after a write that armed one or a restart.
     pub fn arm(&self, source: Option<String>, state: ScriptState, standing: ScriptStanding) {
         let mut inner = self.locked();
         inner.source = source;
@@ -1097,7 +1125,19 @@ mod tests {
     }
 
     /// The shortest script that decides every scenario, as arming requires.
-    const ALWAYS_DECIDES: &str = "if battle.can_run { battle.run(); }\nbattle.ask();";
+    const ALWAYS_DECIDES: &str = "// a test\nif battle.can_run { battle.run(); }\nbattle.ask();";
+
+    /// A write of `source`, opening with `purpose` as its comment when it has none of its own.
+    fn set(script: &mut BattleScript, source: Option<&str>, purpose: Option<&str>) -> String {
+        let source = match (source, purpose) {
+            (None, _) => String::new(),
+            (Some(source), Some(purpose)) if purpose_of(source).is_none() => format!("// {}\n{source}", purpose.trim()),
+            (Some(source), _) => source.to_string(),
+        };
+        match script.write(&source) {
+            Ok(answer) | Err(answer) => answer,
+        }
+    }
 
     /// `switch` is reserved in rhai even in method position.
     #[test]
@@ -1381,7 +1421,7 @@ mod tests {
     #[test]
     fn a_script_that_fights_whatever_has_pp_is_refused_by_the_ghost_scenario() {
         let mut script = BattleScript::open(None);
-        let answer = script.set(Some("for mv in battle.moves { if mv.pp > 0 { battle.fight(mv); } }\nbattle.ask();"), Some("a test"));
+        let answer = set(&mut script, Some("for mv in battle.moves { if mv.pp > 0 { battle.fight(mv); } }\nbattle.ask();"), Some("a test"));
         assert!(!script.armed(), "it must not arm: {answer}");
         assert!(answer.contains("ghost in Pokemon Tower"), "the answer names the scenario:\n{answer}");
         assert!(answer.contains("Usable now: nothing"), "and says nothing could be used:\n{answer}");
@@ -1405,7 +1445,7 @@ mod tests {
     #[test]
     fn validation_arms_a_good_script_and_shows_what_it_chose() {
         let mut script = BattleScript::open(None);
-        let answer = script.set(Some(
+        let answer = set(&mut script, Some(
             "if battle.me.hp_frac < 0.1 && battle.can_run { battle.run(); }\n\
              if battle.best_move == () { battle.ask(); }\n\
              battle.fight(battle.best_move);",
@@ -1422,7 +1462,7 @@ mod tests {
     #[test]
     fn a_script_that_only_works_sometimes_is_not_armed() {
         let mut script = BattleScript::open(None);
-        let answer = script.set(Some("battle.fight(battle.best_move);"), Some("a test"));
+        let answer = set(&mut script, Some("battle.fight(battle.best_move);"), Some("a test"));
         assert!(!script.armed(), "it must not arm: {answer}");
         assert!(answer.contains("no damaging pp left"), "the answer names the scenario:\n{answer}");
         assert!(script.is_default(), "a refused script must not be stored: the default is left where it was");
@@ -1431,7 +1471,7 @@ mod tests {
     #[test]
     fn a_script_that_does_not_compile_says_why() {
         let mut script = BattleScript::open(None);
-        let answer = script.set(Some("if battle.me.hp_frac < { battle.run("), Some("a test"));
+        let answer = set(&mut script, Some("if battle.me.hp_frac < { battle.run("), Some("a test"));
         assert!(!script.armed());
         assert!(answer.starts_with("Not armed"), "{answer}");
         assert!(answer.len() > 40, "the parse error has to reach the model: {answer}");
@@ -1441,26 +1481,27 @@ mod tests {
     #[test]
     fn a_failure_disarms_but_keeps_the_script() {
         let mut script = BattleScript::open(None);
-        let answer = script.set(Some(ALWAYS_DECIDES), Some("a test"));
+        let answer = set(&mut script, Some(ALWAYS_DECIDES), Some("a test"));
         assert!(script.armed(), "{answer}");
 
         script.disarm("it chose a move BULBASAUR does not know");
         assert!(!script.armed(), "one failure is enough");
         assert_eq!(script.source(), Some(ALWAYS_DECIDES), "the source is what the model has to edit");
-        assert!(script.read().contains("Disarmed"), "read_battle_script says so: {}", script.read());
-        assert!(script.read().contains("does not know"), "and why: {}", script.read());
+        assert!(script.status().contains("disarmed"), "a read says so: {}", script.status());
+        assert!(script.status().contains("does not know"), "and why: {}", script.status());
     }
 
     /// A restarted process fights the next battle the way the model said.
     #[test]
     fn a_script_survives_the_process_that_wrote_it() {
         let scratch = Scratch::new("battle-script");
-        let source = "if battle.can_run && battle.me.hp_frac < 0.2 { battle.run(); }\n\
+        let source = "// a test\n\
+                      if battle.can_run && battle.me.hp_frac < 0.2 { battle.run(); }\n\
                       if battle.best_move == () { battle.ask(); }\n\
                       battle.fight(battle.best_move);";
 
         let mut written = BattleScript::open(Some(&scratch.0));
-        written.set(Some(source), Some("a test"));
+        set(&mut written, Some(source), Some("a test"));
         assert!(written.armed());
 
         written.record_decided(340);
@@ -1521,7 +1562,7 @@ mod tests {
     fn a_long_disarm_reason_is_cut_for_the_turn_but_not_for_the_file() {
         let scratch = Scratch::new("battle-script");
         let mut script = BattleScript::open(Some(&scratch.0));
-        script.set(Some(ALWAYS_DECIDES), Some("a test"));
+        set(&mut script, Some(ALWAYS_DECIDES), Some("a test"));
         // `é` throughout: the game's own names are full of it and a byte slice here panics.
         let long = "é".repeat(MAX_FAILURE * 2);
         script.disarm(&long);
@@ -1537,8 +1578,8 @@ mod tests {
     fn unsetting_goes_back_to_the_default() {
         let scratch = Scratch::new("battle-script");
         let mut script = BattleScript::open(Some(&scratch.0));
-        script.set(Some(ALWAYS_DECIDES), Some("a test"));
-        let answer = script.set(None, None);
+        set(&mut script, Some(ALWAYS_DECIDES), Some("a test"));
+        let answer = set(&mut script, None, None);
         assert!(!script.armed(), "the default is never armed: it decides nothing");
         assert!(script.is_default());
         assert_eq!(script.state(), ScriptState::Unedited);
@@ -1551,8 +1592,8 @@ mod tests {
     #[test]
     fn an_oversized_script_is_refused_without_disturbing_the_one_that_works() {
         let mut script = BattleScript::open(None);
-        script.set(Some(ALWAYS_DECIDES), Some("a test"));
-        let answer = script.set(Some(&"// padding\n".repeat(MAX_SOURCE)), Some("a test"));
+        set(&mut script, Some(ALWAYS_DECIDES), Some("a test"));
+        let answer = set(&mut script, Some(&"// padding\n".repeat(MAX_SOURCE)), Some("a test"));
         assert!(answer.contains(&MAX_SOURCE.to_string()), "{answer}");
         assert_eq!(script.source(), Some(ALWAYS_DECIDES), "the armed script is untouched");
         assert!(script.armed());
@@ -1610,26 +1651,71 @@ mod tests {
 
         // A script the model wrote is handed over.
         let mut script = BattleScript::open(None);
-        script.set(Some(ALWAYS_DECIDES), Some("a test"));
+        set(&mut script, Some(ALWAYS_DECIDES), Some("a test"));
         assert!(script.armed());
         assert_eq!(script.live_source().as_deref(), Some(ALWAYS_DECIDES));
         assert_eq!(script.state(), ScriptState::Armed);
     }
 
-    /// `read_battle_script` always has a file to show: the model edits rather than invents.
+    /// A fresh run always has a file to show: the model edits rather than invents.
     #[test]
-    fn reading_a_fresh_runs_script_answers_with_the_default_source() {
-        let answer = BattleScript::open(None).read();
-        assert!(answer.contains("default script"), "{answer}");
-        assert!(answer.contains("battle.ask()"), "the source itself, to edit: {answer}");
-        assert!(answer.contains("set_battle_script"), "and what to do about it: {answer}");
+    fn a_fresh_runs_script_is_the_default_source() {
+        let script = BattleScript::open(None);
+        assert!(script.status().contains("default script"), "{}", script.status());
+        assert!(script.source().is_some_and(|source| source.contains("battle.ask()")));
+        assert!(script.source().and_then(purpose_of).is_some(), "the default opens with a comment too");
+    }
+
+    /// An older build's default, its prose since reworded, is still the default.
+    #[test]
+    fn an_older_default_with_other_words_is_still_the_default() {
+        let script = BattleScript { path: None, saved: Saved {
+            source: Some("// This is the default battle script.\n// It decides nothing.\n\nbattle.ask();\n".to_string()),
+            ..Saved::default()
+        } };
+        assert!(script.is_default());
+        assert!(!script.armed(), "or the turn would claim battles are free");
+    }
+
+    /// A script with no comment saying what it is for is refused, and nothing changes.
+    #[test]
+    fn a_script_must_open_with_what_it_is_for() {
+        let mut script = BattleScript::open(None);
+        set(&mut script, Some(ALWAYS_DECIDES), None);
+        let refusal = script.write("if battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);")
+            .expect_err("no top comment");
+        assert!(refusal.contains("nothing was changed"), "{refusal}");
+        assert_eq!(script.source(), Some(ALWAYS_DECIDES));
+        assert_eq!(purpose_of("\n  /* catch the Abra */\nbattle.ask();").as_deref(), Some("catch the Abra"));
+        assert_eq!(purpose_of("//\nbattle.ask();"), None, "an empty comment says nothing");
+    }
+
+    /// An older file's `purpose` becomes the top comment of a source that had none.
+    #[test]
+    fn an_older_files_purpose_becomes_the_scripts_top_comment() {
+        let scratch = Scratch::new("battle-script-legacy");
+        let source = "if battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);";
+        let old = serde_json::json!({ "source": source, "armed": true, "purpose": "Misty's Staryu", "decided": 4 });
+        std::fs::write(scratch.0.join(files::BATTLE_SCRIPT), old.to_string()).expect("an old file");
+
+        let script = BattleScript::open(Some(&scratch.0));
+        assert_eq!(script.source(), Some(format!("// Misty's Staryu\n{source}").as_str()));
+        assert_eq!(script.standing().purpose.as_deref(), Some("Misty's Staryu"));
+        assert!(script.armed());
+        let written = std::fs::read_to_string(scratch.0.join(files::BATTLE_SCRIPT)).expect("rewritten");
+        assert!(!written.contains("\"purpose\""), "the field is gone from the file: {written}");
+
+        // A source that already opens with a comment keeps its own.
+        let old = serde_json::json!({ "source": ALWAYS_DECIDES, "armed": true, "purpose": "something else" });
+        std::fs::write(scratch.0.join(files::BATTLE_SCRIPT), old.to_string()).expect("an old file");
+        assert_eq!(BattleScript::open(Some(&scratch.0)).source(), Some(ALWAYS_DECIDES));
     }
 
     /// The deterministic policy's strategy, the one script known to finish the game, must arm.
     #[test]
     fn the_deterministic_strategy_still_arms_and_still_plays() {
         let mut script = BattleScript::open(None);
-        let answer = script.set(Some(DETERMINISTIC), Some("a test"));
+        let answer = set(&mut script, Some(DETERMINISTIC), Some("a test"));
         assert!(script.armed(), "the bundled strategy no longer arms:\n{answer}");
 
         for (scenario, expected) in [
@@ -1713,7 +1799,7 @@ mod tests {
     #[test]
     fn a_new_script_is_for_something_and_has_decided_nothing_yet() {
         let mut script = BattleScript { path: None, saved: Saved::default() };
-        let answer = script.set(Some("if battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);"), Some("  Misty's Staryu  "));
+        let answer = set(&mut script, Some("if battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);"), Some("  Misty's Staryu  "));
         assert!(answer.starts_with("ok, armed"), "{answer}");
 
         let standing = script.standing();
@@ -1725,13 +1811,13 @@ mod tests {
         assert_eq!(script.standing().decided, 340);
 
         // Replaced: the new one is for something else and has done nothing.
-        script.set(Some("// a different one\nif battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);"), Some("fleeing everything in the tower"));
+        set(&mut script, Some("// a different one\nif battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);"), Some("fleeing everything in the tower"));
         assert_eq!(script.standing().decided, 0, "the tally belongs to the script, not to the run");
-        assert_eq!(script.standing().purpose.as_deref(), Some("fleeing everything in the tower"));
+        assert_eq!(script.standing().purpose.as_deref(), Some("a different one"), "its own comment wins");
 
         // Back to the default is not a script and is for nothing — both fields go with it.
         script.record_decided(12);
-        script.set(None, None);
+        set(&mut script, None, None);
         assert_eq!(script.standing(), ScriptStanding::default());
     }
 
@@ -1741,7 +1827,7 @@ mod tests {
         let mut script = BattleScript { path: None, saved: Saved::default() };
         // Multi-byte on purpose: the prose is full of `é` and a byte slice would panic here.
         let long = "é".repeat(MAX_PURPOSE * 2);
-        let answer = script.set(Some("if battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);"), Some(&long));
+        let answer = set(&mut script, Some("if battle.best_move == () { battle.ask(); }\nbattle.fight(battle.best_move);"), Some(&long));
         assert!(answer.starts_with("ok, armed"), "the script is still installed: {answer}");
 
         let purpose = script.standing().purpose.expect("a purpose was given");

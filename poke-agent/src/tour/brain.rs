@@ -755,15 +755,13 @@ impl CompletionBrain {
             None => {
                 // The answer to the read just sent, never an older one: a second tidy built from
                 // the first tidy's bag tosses what is no longer there and frees nothing.
-                let bag = request.messages.last().filter(|m| m.role == "tool")
-                    .and_then(|m| serde_json::from_str::<serde_json::Value>(&m.text).ok())
-                    .filter(|value| value.get("slots_used").is_some() && value.get("items").is_some());
+                let bag = request.messages.last().filter(|m| m.role == "tool" && m.text.starts_with("bag.md"));
                 // On its own, so the turn carries on with the answer rather than ending.
                 let Some(bag) = bag else {
-                    return Some(Reply::Calls(vec![Call::new("read_bag", serde_json::json!({}))]));
+                    return Some(Reply::Calls(vec![Call::new("read_file", serde_json::json!({ "path": "bag.md" }))]));
                 };
-                let tossable = bag["items"].as_array().into_iter().flatten()
-                    .filter_map(|item| item["item"].as_str())
+                let tossable = bag.text.lines()
+                    .filter_map(|line| line.split_once(" ×").map(|(name, _)| name))
                     .filter(|name| {
                         let id = (1..=255u8).filter_map(ItemId::from_repr).find(|id| format!("{id:?}") == *name);
                         id.is_some_and(|id| !id.is_key_item() && !id.is_hm() && !KEEP.contains(&id))
@@ -796,16 +794,15 @@ impl CompletionBrain {
             Pc::ChangeBox(n) => Some(PcBoxOp::ChangeBox { n: n - 1 }),
             Pc::Withdraw(species) | Pc::Release(species) => {
                 // On its own, so the turn carries on with the answer rather than ending.
-                let Some(boxed) = request.messages.last().filter(|m| m.role == "tool")
-                    .and_then(|m| serde_json::from_str::<serde_json::Value>(&m.text).ok())
-                    .filter(|value| value.get("open_box").is_some())
+                let Some(boxed) = request.messages.last().filter(|m| m.role == "tool" && m.text.starts_with("pc.md"))
                 else {
-                    return Reply::Calls(vec![Call::new("read_pc", serde_json::json!({}))]);
+                    return Reply::Calls(vec![Call::new("read_file", serde_json::json!({ "path": "pc.md" }))]);
                 };
-                boxed["pokemon"].as_array().into_iter().flatten()
-                    .find(|mon| mon["species"].as_str().is_some_and(|s| same_species(s, species)))
-                    .and_then(|mon| mon["box_slot"].as_u64())
-                    .map(|box_slot| box_slot as u8)
+                // `box slot 3: Pidgey Lv5 (…)`
+                boxed.text.lines()
+                    .filter_map(|line| line.strip_prefix("box slot ")?.split_once(": "))
+                    .find(|(_, rest)| rest.split(" Lv").next().is_some_and(|name| same_species(name, species)))
+                    .and_then(|(box_slot, _)| box_slot.parse::<u8>().ok())
                     .map(|box_slot| match op {
                         Pc::Withdraw(_) => PcBoxOp::Withdraw { box_slot },
                         _ => PcBoxOp::Release { box_slot },
@@ -1409,7 +1406,10 @@ impl Brain for CompletionBrain {
         let mut reply = self.overworld(request);
         if !self.armed {
             self.armed = true;
-            let arm = Call::new("set_battle_script", serde_json::json!({ "script": SCRIPT, "purpose": "fight trainers, hand back wild battles" }));
+            let arm = Call::new("write_file", serde_json::json!({
+                "path": "battle-script.rhai",
+                "content": format!("// fight trainers, hand back wild battles\n{SCRIPT}"),
+            }));
             if let Reply::Calls(calls) = &mut reply {
                 calls.insert(0, arm);
             }

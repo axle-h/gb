@@ -9,7 +9,7 @@ use gb::game_boy::GameBoy;
 use poke_agent::llm::battle_script::BattleScript;
 use poke_agent::llm::config::{DEFAULT_COMPACT_ABOVE, DEFAULT_MAX_TOKENS, DEFAULT_REQUEST_TIMEOUT_SECS, LlmConfig};
 use poke_agent::llm::history::History;
-use poke_agent::llm::todo::TodoList;
+use poke_agent::llm::plan::Plan;
 use poke_agent::llm::worker;
 use poke_agent::pokemon::agent::PokemonAgent;
 use poke_agent::pokemon::llm_policy::LlmPolicy;
@@ -286,7 +286,7 @@ fn llm_policy(brain: Box<dyn poke_agent::tour::turn::Brain>) -> Result<Box<dyn P
         Box::new(BrainEndpoint::new(brain)),
         config,
         Published::new(),
-        TodoList::open(None),
+        Plan::open(None),
         BattleScript::open(None),
         History::open(None),
     );

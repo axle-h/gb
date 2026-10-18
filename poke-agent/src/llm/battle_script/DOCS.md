@@ -1,17 +1,16 @@
 # Scripting your battle turns
 
-A battle turn you answer costs a whole request. A battle turn your script answers costs nothing and
-happens instantly. Most battles in this game are mechanical, so write the mechanical part down once
-and keep your attention for the rest.
+A battle turn you answer costs a whole request; one your script answers costs nothing and happens
+instantly. Write the mechanical part down once and keep your attention for the rest.
 
-`set_battle_script` installs a script; it then decides every battle turn until it fails or you
-replace it. Passing no `script` removes it and battle turns come back to you one at a time, which is
-the default.
+`battle-script.rhai` is your script. A write or edit installs it from your next battle decision,
+until it fails or you replace it; empty goes back to the default, which hands every turn to you. It
+opens with a comment saying what it is for, shown back to you each overworld turn; a write without
+one is refused.
 
 ## The language
 
-**Rhai.** Close to Rust and JavaScript. Everything below is checked against the engine that actually
-runs your script, so it is what works rather than a family resemblance.
+**Rhai**, close to Rust and JavaScript. Everything below is checked against the engine that runs it.
 
 ```rhai
 let x = 3;                           // statements end with ;
@@ -139,10 +138,9 @@ trying to catch: ask, decide it yourself, and let the script have the routine on
 
 If the script fails — it errors, runs too long, chooses nothing, or chooses something the game will
 not accept — it is **disarmed** and that turn comes back to you with the reason. It stays on disk, so
-`read_battle_script` shows it to you, you fix it, and `set_battle_script` installs it again. It will
-never quietly keep failing.
+reading `battle-script.rhai` shows it and why it stopped, and a corrected write installs it again. It will never quietly keep failing.
 
-`set_battle_script` runs your script against seven made-up battles before installing it and tells you
+A write runs your script against seven made-up battles before installing it and tells you
 what it chose in each. Read that table: it is your only chance to notice that a rule you meant does
 something else. It is **not a proof** — every one of the seven is turn 1 of a made-up battle, so
 anything depending on `battle.turn`, on a Pokemon you do not have yet, or on the bag holding

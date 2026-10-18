@@ -1,7 +1,7 @@
 # The walkthrough the model is given
 
 Nine markdown files, one per badge the player has not won yet. `src/llm/guide.rs` picks one from
-the badges and `read_guide` hands it over verbatim, so what is in these files is exactly what the
+the badges and `guide/current.md` hands it over verbatim, so what is in these files is exactly what the
 model sees.
 
 ## Rules for a chapter
@@ -12,7 +12,7 @@ model sees.
 - Every chapter says what is shut and what opens it: an unstated gate is a walk the model repeats for
   ever.
 - Backticks mean "this is a `Map` variant" and nothing else, so a place name is the same string as the
-  turn's `Location:` line, the menu ids and `read_route`'s argument.
+  turn's `Location:` line, the menu ids and the `routes/<Map>.md` file names.
   `every_place_the_guide_names_is_a_real_map` fails on anything else, including a bare floor suffix
   (`` `B4F` ``) and a multi-floor collective name (`` `SilphCo` ``).
 - `chapter_index` reads only `wObtainedBadges`, so a prerequisite that is not badge-gated (the Silph

@@ -132,10 +132,10 @@ pub fn archive(job: &ArchiveJob) -> Result<String, String> {
         std::fs::copy(&moments, into.join(files::MOMENTS_LOG))
             .map_err(|e| format!("could not copy {}: {e}", moments.display()))?;
     }
-    let todo = job.run_dir.join(files::TODO);
-    if todo.exists() {
-        std::fs::copy(&todo, into.join(files::TODO))
-            .map_err(|e| format!("could not copy {}: {e}", todo.display()))?;
+    let plan = job.run_dir.join(files::PLAN);
+    if plan.exists() {
+        std::fs::copy(&plan, into.join(files::PLAN))
+            .map_err(|e| format!("could not copy {}: {e}", plan.display()))?;
     }
     let script = job.run_dir.join(files::BATTLE_SCRIPT);
     if script.exists() {
@@ -329,7 +329,7 @@ mod tests {
         // A run old enough to have a `memories/` directory, which the archive must still carry.
         std::fs::create_dir_all(run.path().join(files::MEMORIES)).expect("memories");
         std::fs::write(run.path().join(files::MEMORIES).join("plan.md"), "beat brock").expect("a memory");
-        std::fs::write(run.path().join(files::TODO), "[]").expect("a todo list");
+        std::fs::write(run.path().join(files::PLAN), "beat Brock").expect("a plan");
         std::fs::write(run.path().join(files::BATTLE_SCRIPT), "{}").expect("a battle script");
         std::fs::create_dir_all(run.path().join(files::MOMENTS)).expect("moments");
         std::fs::write(run.path().join(files::MOMENTS).join("0001-badge.gbst"), "GBSTbadge").expect("a moment");
@@ -357,7 +357,7 @@ mod tests {
         assert_eq!(std::fs::read(into.join(files::STATE)).unwrap(), b"GBSTwinning");
         assert_eq!(std::fs::read(into.join(files::SRAM)).unwrap(), b"sram");
         assert_eq!(std::fs::read_to_string(into.join(files::MEMORIES).join("plan.md")).unwrap(), "beat brock");
-        assert!(into.join(files::TODO).is_file(), "the model's plan travels with the run");
+        assert!(into.join(files::PLAN).is_file(), "the model's plan travels with the run");
         assert!(into.join(files::BATTLE_SCRIPT).is_file(), "the battle script travels with the run");
         assert!(into.join(files::MOMENTS_LOG).is_file(), "the moments travel with the run");
         assert_eq!(std::fs::read(into.join(files::MOMENTS).join("0001-badge.gbst")).unwrap(), b"GBSTbadge");

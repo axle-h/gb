@@ -7,9 +7,9 @@ argument lives in the code.
 ## The history
 
 - Message 0 is a constant re-minted on every start, because a prompt cache is keyed on the prefix.
-  The plan is a `user` message appended only when it differs from the last copy; stale copies stay,
-  and `compaction::is_turn_start` refuses to cut between a plan and its turn. After message 0 the
-  history only grows at the end.
+  After it the history only grows at the end. The plan is a file and never sent with a turn; the
+  turn closes on `prompt::PlanReminder`, louder on the first turn after a compaction, a restart or a
+  clear, and a rollback puts the louder one back (`Worker::roll_back_failed_turn`).
 - `protocol::history_safe` rewrites a tool call whose `arguments` is not a JSON object to `{}`, in
   place and only the broken ones: the assistant message is replayed on every request, so one bad
   completion poisons the rest of the run.
@@ -30,13 +30,16 @@ argument lives in the code.
 - Every turn ends with `choose_action`, whose spec is the same on every kind: what varies is the
   menu in the turn. Its `summary`, once per reply, is enforced by `classify_reply` rather than by the
   schema, because a field the schema requires and the parser allows is one a weak model omits.
-- `press:` is a row on the watchdog turn only, and refused on every other. `report_issue` does not
-  end the turn and its answer must not read like a fix. Both write a record whose save is taken for each edge into
+- `press:` is a row on the watchdog turn only, and refused on every other. A write under `issues/`
+  does not end the turn and its answer must not read like a fix. Both write a record whose save is taken for each edge into
   `AwaitingLlm` (`Published::asks`), never the periodic checkpoint, and waited for, since an
   endpoint can answer before the emulator thread's next tick.
-- Nothing a read answers may duplicate the situation. `read_route`'s `None` means "not walked there
-  yet", never "unreachable" — it answers out of the map-header graph while the action menu answers
-  out of walkable connectivity, so `route_answer` turns a route that cannot be *started* into a
+- The tools are the same four on every request (`tools::for_kind`); a file is readable, and the
+  writable ones writable, on every turn. `files::resolve` is the path table, and
+  `Node::on_the_emulator_thread` says which reads need the game.
+- Nothing a read answers may duplicate the situation. A route file's "not walked there yet" is
+  never "unreachable" — it answers out of the map-header graph while the action menu answers out
+  of walkable connectivity, so `files::route_text` turns a route that cannot be *started* into a
   warning naming what the terrace ends on.
 - `not_on_the_menu`'s "that id is for another map" clause must test against `Map::iter()`. Testing
   "the first id contains a colon" made the commonest refusal in a battle — an item the bag has run
@@ -101,6 +104,9 @@ argument lives in the code.
   around rhai reserved words.
 - Validation is not a proof; the disarm is. One strike disarms for the run and keeps the source. The
   policy disarms through the live cell and never writes the file.
+- A script opens with a comment saying what it is for, and a write leaving none is refused
+  (`battle_script::purpose_of`): that line is what the turn quotes back. A write arms it from the
+  next battle decision, whatever the turn it was written on.
 
 ## The battle report
 
@@ -141,12 +147,10 @@ argument lives in the code.
 
 - A failed turn is rolled back whole, to a *length* rather than by one `pop`: a turn can fail on its
   second tool step with an assistant message and its results already appended.
-- `turns_since_plan` is restored with it, or a run whose every request fails appends a fresh plan
-  message every tenth attempt and nothing removes one — 1373 copies, measured.
-- A compaction that can drop nothing says so. `trim_history` cuts only at turn boundaries and a plan
-  message is not one, so a history of unanswered plans had no boundary anywhere in it and published
-  `before == after` as a success. `drop_unanswered` is the pass below it. A compaction that still
-  reclaims nothing raises an error notice, because from there on every request is over the window.
+- A compaction that can drop nothing says so. `trim_history` cuts only at turn boundaries, so a
+  history of unanswered questions had no boundary anywhere in it and published `before == after` as
+  a success. `drop_unanswered` is the pass below it. A compaction that still reclaims nothing raises
+  an error notice, because from there on every request is over the window.
 - Only a refusal counts toward `RefusalPark`: an `Http` that `is_retryable` rejects. A timeout, a
   dropped connection or exhausted 5xx retries must neither count nor park, and any other answer
   resets the streak, or one bad hour of a flaky endpoint stops the game for thirty minutes.

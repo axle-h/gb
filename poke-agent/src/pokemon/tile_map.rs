@@ -516,7 +516,7 @@ impl MetaTileMap {
             .map(|s| s.name);
         let Some(name) = name else {
             return Some(format!(
-                "There is no boulder at ({}, {}). `read_map` gives the exact position of every one \
+                "There is no boulder at ({}, {}). `map.png` gives the exact position of every one \
                  on this map.", boulder.x, boulder.y));
         };
         // One flood fill for all four directions.

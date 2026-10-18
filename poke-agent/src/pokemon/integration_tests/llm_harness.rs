@@ -14,7 +14,7 @@ use crate::llm::battle_script::BattleScript;
 use crate::llm::client::{OpenAiClient, RetryPolicy};
 use crate::llm::config::LlmConfig;
 use crate::llm::history::History;
-use crate::llm::todo::TodoList;
+use crate::llm::plan::Plan;
 use crate::llm::worker::{self, RefusalPark};
 use crate::pokemon::integration_tests::fixture::TestFixture;
 use crate::pokemon::llm_policy::LlmPolicy;
@@ -418,7 +418,7 @@ impl LlmRunBuilder {
             client,
             config.clone(),
             Arc::clone(&published),
-            TodoList::open(dir),
+            Plan::open(dir),
             BattleScript::open(dir),
             History::open(dir),
         );
@@ -530,7 +530,7 @@ impl LlmRun {
             Box::new(OpenAiClient::new(&self.config)),
             self.config.clone(),
             Arc::clone(&self.published),
-            TodoList::open(dir),
+            Plan::open(dir),
             BattleScript::open(dir),
             History::open(dir),
         );

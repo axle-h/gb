@@ -206,7 +206,7 @@ pub(crate) fn policy_factory(
             })
         }
         ServePolicy::Llm => {
-            use poke_agent::llm::{todo::TodoList, worker};
+            use poke_agent::llm::{plan::Plan, worker};
             use poke_agent::pokemon::llm_policy::LlmPolicy;
 
             let (config, endpoint) = llm.ok_or("--policy llm needs an endpoint")?;
@@ -214,7 +214,7 @@ pub(crate) fn policy_factory(
             let stuck_timeout = config.stuck_timeout;
             // The plan, the battle script and the conversation live in the run directory, so they
             // survive both a compaction and a restart.
-            let todo = TodoList::open(Some(run.path()));
+            let plan = Plan::open(Some(run.path()));
             let battle_script = poke_agent::llm::battle_script::BattleScript::open(Some(run.path()));
             let history = poke_agent::llm::history::History::open(Some(run.path()));
             if let Some(restored) = history.restored() {
@@ -233,7 +233,7 @@ pub(crate) fn policy_factory(
             }
             // Incident records go to whichever run is current when the press happens, not to this
             // one; see `llm::incident`.
-            let (worker, handles) = worker::channels(endpoint, config, Arc::clone(published), todo, battle_script, history);
+            let (worker, handles) = worker::channels(endpoint, config, Arc::clone(published), plan, battle_script, history);
             let worker = worker.with_run(Arc::clone(current));
             // It ends when the emulator thread drops the policy and its channels close.
             worker.spawn()?;

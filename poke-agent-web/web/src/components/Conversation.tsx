@@ -213,6 +213,29 @@ function describeTool(entry: Extract<Entry, { type: 'tool' }>): string {
     return typeof value === 'string' && value !== '' ? value : undefined;
   };
   switch (entry.name) {
+    case 'read_file':
+      return describeRead(text('path'));
+    case 'write_file': {
+      const path = text('path') ?? '';
+      const content = typeof args.content === 'string' ? args.content : '';
+      if (path.startsWith('issues/')) return content ? `Reported: ${content}` : 'Reported a problem with the agent';
+      if (path === 'battle-script.rhai') {
+        if (content.trim() === '') return 'Stopped scripting its battles';
+        const lines = content.trim().split('\n').length;
+        return `Wrote a battle script (${lines} line${lines === 1 ? '' : 's'})`;
+      }
+      if (path === 'plan.md') return 'Rewrote its plan';
+      return `Wrote ${path || 'a file'}`;
+    }
+    case 'edit_file': {
+      const path = text('path');
+      if (path === 'plan.md') return 'Edited its plan';
+      if (path === 'battle-script.rhai') return 'Edited its battle script';
+      return path ? `Edited ${path}` : 'Edited a file';
+    }
+    case 'choose_action':
+      return describeAction(text('id'));
+    // The tools below are an older conversation's, which `/api/history` still replays.
     case 'read_map':
       return 'Read the map';
     case 'read_party':
@@ -250,9 +273,6 @@ function describeTool(entry: Extract<Entry, { type: 'tool' }>): string {
       const lines = script.trim().split('\n').length;
       return `Wrote a battle script (${lines} line${lines === 1 ? '' : 's'})`;
     }
-    case 'choose_action':
-      return describeAction(text('id'));
-    // The tools below are an older conversation's, which `/api/history` still replays.
     case 'choose_battle_action': {
       const id = text('id');
       return id ? `Chose ${id}` : 'Chose an action';
@@ -291,6 +311,28 @@ function describeTool(entry: Extract<Entry, { type: 'tool' }>): string {
       return rest ? `${entry.name} ${rest}` : entry.name;
     }
   }
+}
+
+/** A `read_file` path as a sentence. */
+function describeRead(path: string | undefined): string {
+  if (!path) return 'Read a file';
+  const fixed: Record<string, string> = {
+    'map.png': 'Read the map',
+    'screen.png': 'Looked at the screen',
+    'party.md': 'Read the party',
+    'bag.md': 'Read the bag',
+    'pc.md': 'Read the PC',
+    'plan.md': 'Read its plan',
+    'battle-script.rhai': 'Read its battle script',
+    'battle-script.md': 'Read how to script a battle',
+    'guide/current.md': 'Read the walkthrough',
+    'routes.md': 'Listed the maps it has walked',
+    'issues/': 'Listed the issues it has filed',
+  };
+  if (fixed[path]) return fixed[path];
+  if (path.startsWith('routes/')) return `Asked the way to ${path.slice('routes/'.length).replace(/\.md$/, '')}`;
+  if (path.startsWith('guide/')) return `Read the walkthrough's ${path.slice('guide/'.length)}`;
+  return `Read ${path}`;
 }
 
 /** A `choose_action` id as a sentence: its prefix says what kind of action it is. */

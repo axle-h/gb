@@ -119,12 +119,9 @@ pub fn apply_summary(messages: &mut Vec<Message>, summary: &str, keep: usize) ->
     before.saturating_sub(messages.len().saturating_sub(1))
 }
 
-/// Where the history may be cut: a `user` message opening a turn, never a plan or a picture.
+/// Where the history may be cut: a `user` message opening a turn, never a picture.
 pub fn is_turn_start(message: &Message) -> bool {
-    message.role == Role::User
-        && !message.has_image()
-        && !is_evicted_image(message)
-        && !crate::llm::prompt::is_plan(message)
+    message.role == Role::User && !message.has_image() && !is_evicted_image(message)
 }
 
 fn is_evicted_image(message: &Message) -> bool {

@@ -55,7 +55,7 @@ pub struct LlmPolicy {
     reports: Vec<String>,
     /// The orders after the first of a mart reply, queued for this visit; see [`Policy::next_mart_purchase`].
     mart_queue: std::collections::VecDeque<BagItem>,
-    /// The [`crate::llm::guide::chapter_index`] the last `read_guide` answered from, to spot a badge moving it.
+    /// The [`crate::llm::guide::chapter_index`] the current chapter was last read at, to spot a badge moving it.
     guide_chapter_read: Option<usize>,
     /// A report whose battle has ended, waiting for one more observation to close against.
     finishing: Option<BattleReport>,
@@ -390,9 +390,10 @@ impl LlmPolicy {
                 let mut note = script_note(
                     &format!(
                         "**Your battle script failed and is no longer deciding your battle turns.** \
-                         {why}\n\nAnswer this turn yourself. When you are next in the overworld, \
-                         `read_battle_script` to see it, fix it and `set_battle_script` again, or \
-                         leave it off and keep answering battles as you always have.",
+                         {why}\n\nAnswer this turn yourself. `battle-script.rhai` is the script: \
+                         fix it with `edit_file` or `write_file`, on this turn or any other, and it \
+                         decides again from the next battle decision; or leave it off and keep \
+                         answering battles as you always have.",
                     ),
                     &evaluation.prints,
                 );
@@ -598,11 +599,11 @@ impl Policy for LlmPolicy {
                 // All-or-nothing, from one observed state.
                 true => {
                     // From the state the answer was rendered from: the chapter it was handed.
-                    if batch.calls.iter().any(|call| call.function.name == tools::READ_GUIDE) {
+                    if batch.calls.iter().any(|call| crate::llm::files::reads_current_guide(call, state.badges)) {
                         self.guide_chapter_read = Some(crate::llm::guide::chapter_index(state.badges));
                     }
                     ToolBatchResult::Answered(
-                        batch.calls.iter().map(|call| tools::service_read(call, state, readout, graph)).collect(),
+                        batch.calls.iter().map(|call| crate::llm::files::service_read(call, state, readout, graph)).collect(),
                     )
                 }
                 // The tool is never executed.
@@ -1140,7 +1141,7 @@ mod tests {
                 Box::new(Forwarding(Arc::clone(&endpoint))),
                 config,
                 Arc::clone(&published),
-                crate::llm::todo::TodoList::open(run_dir),
+                crate::llm::plan::Plan::open(run_dir),
                 crate::llm::battle_script::BattleScript::open(run_dir),
                 crate::llm::history::History::open(run_dir),
             );
@@ -1436,14 +1437,14 @@ mod tests {
         let choose = format!(r#"{{"id":"{id}"}}"#);
         let said = "I am heading north out of Pallet Town to look for Oak.";
         rig.push(vec![
-            saying_calls(said, &[("todo_set", r#"{"text":"deliver the parcel to Oak"}"#), ("choose_action", &choose)]),
+            saying_calls(said, &[("write_file", r#"{"path":"plan.md","content":"1. deliver the parcel to Oak"}"#), ("choose_action", &choose)]),
             calls(&[("choose_action", &choose)]),
             calls(&[("choose_action", &choose)]),
         ]);
         assert!(rig.pump_overworld(&mut policy).is_some(), "turn 1 decides");
         let first_turn_messages = rig.requests()[0].messages.len();
         assert!(rig.pump_overworld(&mut policy).is_some(), "turn 2 decides");
-        let plan = scratch.0.join(crate::run::files::TODO);
+        let plan = scratch.0.join(crate::run::files::PLAN);
         assert!(plan.is_file(), "the precondition: the model wrote a plan down");
         assert!(
             rig.requests()[1].messages.len() > first_turn_messages,
@@ -1471,7 +1472,9 @@ mod tests {
             "and the model is told the erasure was deliberate",
         );
         history_is_well_formed(last);
-        assert!(!plan.is_file(), "todo.json outlived the clear, which is the whole thing it must not do");
+        assert!(!plan.is_file(), "plan.md outlived the clear, which is the whole thing it must not do");
+        assert!(last_user_message(last).contains(crate::llm::prompt::PlanReminder::Cleared.line()),
+                "and the turn says the plan went with it");
 
         drop(policy);
         drop(rig);
@@ -1635,239 +1638,68 @@ mod tests {
         assert!(asked.contains("the walk was given up"), "the cancelled turn's news went with it:\n{asked}");
     }
 
-    /// The plan is in the history exactly once, and the prefix in front of it never moves.
+    /// The plan is a file: written, edited and read back, never sent with the turn, and the
+    /// prefix in front of everything never moves.
     #[test]
-    fn the_plan_is_appended_and_never_disturbs_the_cacheable_prefix() {
+    fn the_plan_is_a_file_and_never_disturbs_the_cacheable_prefix() {
         let (mut rig, mut policy) = Rig::new(vec![]);
         let id = rig.first_action_id();
         let choose = format!(r#"{{"id":"{id}"}}"#);
         rig.push(vec![
             // Turn 1 decides without touching the plan at all.
             calls(&[("choose_action", &choose)]),
-            // Turn 2 edits the plan and decides in one message.
+            // Turn 2 writes the plan and decides in one message.
             calls(&[
-                ("todo_set", r#"{"text":"come back to Route 12 with the Poke Flute"}"#),
+                ("write_file", r#"{"path":"plan.md","content":"1. deliver the parcel to Oak\n2. buy Poke Balls\n"}"#),
                 ("choose_action", &choose),
             ]),
-            // Turns 3 and 4 change nothing, so neither may move the plan.
-            calls(&[("choose_action", &choose)]),
+            // Turn 3 edits it, once that cannot be placed and once that can, then reads it back.
+            calls(&[
+                ("edit_file", r#"{"path":"plan.md","old_string":"Pokeballs","new_string":"Potions"}"#),
+                ("edit_file", r#"{"path":"plan.md","old_string":"Poke Balls","new_string":"Potions"}"#),
+            ]),
+            calls(&[("read_file", r#"{"path":"plan.md"}"#)]),
             calls(&[("choose_action", &choose)]),
         ]);
-        for turn in 1..=4 {
+        for turn in 1..=3 {
             assert!(rig.pump_overworld(&mut policy).is_some(), "turn {turn} decides");
         }
 
         let requests = rig.requests();
-        assert_eq!(requests.len(), 4);
-        let plans = |request: &ChatRequest| -> Vec<String> {
-            request.messages.iter().filter(|m| crate::llm::prompt::is_plan(m))
-                .filter_map(Message::text).map(str::to_string).collect()
-        };
-
-        // The prefix.
-        for (n, request) in requests.iter().enumerate() {
-            assert_eq!(request.messages[0].role, Role::System);
-            assert_eq!(request.messages[0], requests[0].messages[0],
-                       "request {n}'s system message differs — the whole prefix cache is gone");
-        }
-
-        // The newest copy is the plan; the older ones are left where they are.
-        assert!(!plans(&requests[0]).last().expect("a plan").contains("Poke Flute"),
-                "nothing was planned yet");
-        assert!(plans(&requests[2]).last().expect("a plan").contains("Poke Flute"),
-                "the item added mid-turn is in the next turn: {:?}", plans(&requests[2]));
-        assert_eq!(plans(&requests[2]).len(), 2, "the empty opening plan is still there, untouched");
-
-        // And therefore the history is append-only, with no exceptions.
+        assert_eq!(requests.len(), 5);
+        // The prefix, and an append-only history.
         for n in 1..requests.len() {
+            assert_eq!(requests[n].messages[0], requests[0].messages[0], "request {n}'s system message differs");
             let sent = &requests[n - 1].messages;
             assert_eq!(&requests[n].messages[..sent.len()], &sent[..],
-                       "request {n} rewrote history request {} had already sent — the cache is gone",
-                       n - 1);
+                       "request {n} rewrote history request {} had already sent", n - 1);
         }
+        // Never sent: each turn closes on the one-line reminder instead.
+        for request in &requests {
+            assert!(!request.messages.iter().any(|m| m.text().is_some_and(|t| t.contains("deliver the parcel")
+                && m.role == Role::User)), "the plan rode along with a turn");
+        }
+        assert!(last_user_message(&requests[0]).ends_with("Your plan is in plan.md.\n"));
 
-        // The page is told too.
-        let published: Vec<Vec<String>> = rig
+        let answers: Vec<&str> = requests[4].messages.iter()
+            .filter(|m| m.role == Role::Tool).filter_map(Message::text).collect();
+        let refused = answers.iter().find(|a| a.contains("does not occur")).expect("the edit that missed says so");
+        assert!(refused.contains("plan.md"), "{refused}");
+        let read = answers.last().expect("the read");
+        assert_eq!(*read, "plan.md, lines 1–2 of 2\n1. deliver the parcel to Oak\n2. buy Potions\n");
+
+        // Every version goes to the page and the transcript.
+        let published: Vec<String> = rig
             .drained_events()
             .into_iter()
             .filter_map(|event| match event {
-                UiEventBody::Plan { items } => Some(items.into_iter().map(|item| item.text).collect()),
+                UiEventBody::Plan { text } => Some(text),
                 _ => None,
             })
             .collect();
-        // Two publishes across four turns: the opening one and the edit.
-        assert_eq!(published, [vec![], vec!["come back to Route 12 with the Poke Flute".to_string()]],
+        assert_eq!(published, ["", "1. deliver the parcel to Oak\n2. buy Poke Balls\n",
+                               "1. deliver the parcel to Oak\n2. buy Potions\n"],
                    "published on change, not on a timer");
-    }
-
-    /// An unchanged plan still comes back to the tail eventually.
-    #[test]
-    fn a_plan_nobody_edits_is_brought_back_to_the_tail_of_the_history() {
-        const REFRESH: usize = crate::llm::worker::PLAN_REFRESH_TURNS as usize;
-        let (mut rig, mut policy) = Rig::new(vec![]);
-        let id = rig.first_action_id();
-        let choose = format!(r#"{{"id":"{id}"}}"#);
-        // One edit on turn 1, then nothing at all for well past the refresh window.
-        let mut replies = vec![calls(&[
-            ("todo_set", r#"{"text":"deliver the parcel to Oak"}"#),
-            ("choose_action", &choose),
-        ])];
-        replies.extend((0..REFRESH + 3).map(|_| calls(&[("choose_action", &choose)])));
-        let turns = replies.len();
-        rig.push(replies);
-        for turn in 1..=turns {
-            assert!(rig.pump_overworld(&mut policy).is_some(), "turn {turn} decides");
-        }
-
-        let requests = rig.requests();
-        let plan_at = |request: &ChatRequest| -> usize {
-            request.messages.iter().rposition(|m| crate::llm::prompt::is_plan(m)).expect("a plan is carried")
-        };
-        // Request 1 first carries the edit, so the window runs from there.
-        let planted = plan_at(&requests[1]);
-        let due = REFRESH + 2;
-        assert_eq!(plan_at(&requests[due - 1]), planted,
-                   "the plan moved before it was due — every turn in between pays a re-prefill");
-        for request in 2..due {
-            let sent = &requests[request - 1].messages;
-            assert_eq!(&requests[request].messages[..sent.len()], &sent[..],
-                       "request {request} rewrote history the one before had already sent");
-        }
-        let refreshed = plan_at(&requests[due]);
-        assert!(refreshed > planted, "the plan is still buried at {refreshed} after {REFRESH} quiet turns");
-        assert_eq!(requests[due].messages[planted], requests[due - 1].messages[planted],
-                   "the older copy was disturbed — everything after it is a re-prefill");
-        assert_eq!(requests[due].messages[planted], requests[due].messages[refreshed],
-                   "and the refresh says the same thing, since nothing edited it");
-        assert_eq!(refreshed, requests[due].messages.len() - 2,
-                   "a refreshed plan belongs directly in front of the turn that reads it");
-        assert_eq!(plan_at(&requests[due + 1]), refreshed,
-                   "and the window starts again rather than moving it every turn from here on");
-
-        // Every turn that does not carry the plan says so.
-        for (n, request) in requests.iter().enumerate() {
-            let asked = last_user_message(request);
-            let carried = plan_at(request) == request.messages.len() - 2;
-            assert_eq!(!carried, asked.contains(crate::llm::prompt::PLAN_UNCHANGED),
-                       "request {n} carried={carried} but the note says otherwise: {asked}");
-        }
-    }
-
-    /// A refused plan call repeated inside the turn is answered, not run again.
-    #[test]
-    fn a_refused_plan_call_repeated_in_one_turn_is_not_serviced_twice() {
-        let (mut rig, mut policy) = Rig::new(vec![]);
-        let id = rig.first_action_id();
-        let choose = format!(r#"{{"id":"{id}"}}"#);
-        rig.push(vec![
-            // One real item, so the refusal has ids to name.
-            calls(&[("todo_set", r#"{"text":"deliver the parcel to Oak"}"#), ("choose_action", &choose)]),
-            calls(&[
-                ("todo_set", r#"{"id":5,"text":""}"#),
-                ("todo_set", r#"{"id":5,"text":""}"#),
-                ("todo_complete", r#"{"id":5}"#),
-                ("todo_complete", r#"{"id":5}"#),
-            ]),
-            calls(&[("choose_action", &choose)]),
-        ]);
-        assert!(rig.pump_overworld(&mut policy).is_some(), "turn 1 decides");
-        assert!(rig.pump_overworld(&mut policy).is_some(), "turn 2 decides after its read step");
-
-        // The tool results of the read step are in the request that followed it.
-        let requests = rig.requests();
-        let answers: Vec<String> = requests.last().expect("a third request")
-            .messages.iter()
-            .filter(|m| m.role == Role::Tool)
-            .filter_map(Message::text)
-            .filter(|text| text.contains("TODO 5") || text.contains("that exact call"))
-            .map(str::to_string)
-            .collect();
-        assert_eq!(answers.len(), 4, "every call still gets a result: {answers:?}");
-        for first in [&answers[0], &answers[2]] {
-            assert!(first.contains("There is no TODO 5"), "{first}");
-            assert!(first.contains("holds 1"), "the first refusal names the ids: {first}");
-        }
-        for repeat in [&answers[1], &answers[3]] {
-            assert!(repeat.contains("already made that exact call this turn"), "{repeat}");
-        }
-
-        // And none of it may have reached the list.
-        let plan = requests.last().expect("a third request").messages.iter()
-            .rposition(|m| crate::llm::prompt::is_plan(m))
-            .map(|at| requests.last().unwrap().messages[at].text().unwrap_or_default().to_string())
-            .expect("a plan is carried");
-        assert!(plan.contains("deliver the parcel to Oak"), "{plan}");
-        assert_eq!(plan.matches("- [").count(), 1, "the plan grew under a turn that only failed: {plan}");
-    }
-
-    /// The periodic refresh is an overworld thing, and an edit is not.
-    #[test]
-    fn a_battle_turn_never_pays_to_reposition_a_plan_it_cannot_act_on() {
-        const REFRESH: usize = crate::llm::worker::PLAN_REFRESH_TURNS as usize;
-        let (mut rig, mut policy) = Rig::new(vec![]);
-        let id = rig.first_action_id();
-        let choose = format!(r#"{{"id":"{id}"}}"#);
-        let mut replies = vec![calls(&[
-            ("todo_set", r#"{"text":"deliver the parcel to Oak"}"#),
-            ("choose_action", &choose),
-        ])];
-        // Well past the window, all of it in battle.
-        replies.extend((0..REFRESH + 4).map(|_| calls(&[("choose_action", r#"{"id":"run"}"#)])));
-        rig.push(replies);
-        assert!(rig.pump_overworld(&mut policy).is_some(), "the plan is planted by an overworld turn");
-        rig.enter_battle();
-        for turn in 0..REFRESH + 4 {
-            assert!(rig.pump_battle(&mut policy, Duration::from_secs(2)).is_some(), "battle turn {turn} decides");
-        }
-
-        let requests = rig.requests();
-        let plan_at = |request: &ChatRequest| -> usize {
-            request.messages.iter().rposition(|m| crate::llm::prompt::is_plan(m)).expect("a plan is carried")
-        };
-        // Request 1, a battle turn, moves the plan: the overworld turn before it edited it.
-        let planted = plan_at(&requests[1]);
-        assert_eq!(planted, requests[1].messages.len() - 2, "the edit is carried on the next turn");
-        assert!(!last_user_message(&requests[1]).contains(crate::llm::prompt::PLAN_UNCHANGED));
-
-        // Later battle turns leave the plan alone however long the window has been up.
-        for (n, request) in requests.iter().enumerate().skip(2) {
-            assert_eq!(plan_at(request), planted,
-                       "request {n} is a battle turn and repositioned the plan anyway");
-            assert!(last_user_message(request).contains(crate::llm::prompt::PLAN_UNCHANGED),
-                    "but it must still be told the plan is back there: request {n}");
-        }
-        assert!(requests.len() > REFRESH + 2, "the window has to have fallen due for this to mean anything");
-    }
-
-    /// A compaction can take the plan, and the next turn puts it back.
-    #[test]
-    fn a_compaction_that_drops_the_plan_does_not_break_the_chain() {
-        use crate::llm::compaction;
-        let mut todo = crate::llm::todo::TodoList::open(None);
-        todo.apply(crate::llm::todo::TodoCall::Set { id: None, text: Some("deliver the parcel".into()) });
-        let plan = crate::llm::prompt::plan_message(&todo);
-
-        let mut messages = vec![Message::system(crate::llm::prompt::SYSTEM_PROMPT)];
-        for turn in 0..6 {
-            if turn == 1 { messages.push(plan.clone()); }
-            messages.push(Message::user(format!("## Decision: turn {turn}")));
-            messages.push(Message::assistant(format!("did turn {turn}"), vec![]));
-        }
-        assert!(messages.iter().any(crate::llm::prompt::is_plan), "the plan starts in the history");
-
-        compaction::apply_summary(&mut messages, "I am in Pallet Town.", compaction::KEEP_MESSAGES);
-        assert_eq!(messages[0].role, Role::System, "and the system prompt is never compacted");
-        assert!(!messages.iter().any(crate::llm::prompt::is_plan),
-                "this history is long enough that the plan is inside the dropped middle — otherwise \
-                 the test proves nothing");
-
-        // The repair is `sync_plan`'s "there is no copy" arm, which is what the next turn runs.
-        assert!(messages.iter().position(|m| crate::llm::prompt::is_plan(m)).is_none());
-        messages.push(crate::llm::prompt::plan_message(&todo));
-        let restored = messages.last().expect("a plan was appended");
-        assert!(crate::llm::prompt::is_plan(restored));
-        assert!(restored.text().expect("prose").contains("deliver the parcel"),
-                "and it is re-rendered from the list on disk, so it cannot come back stale");
     }
 
     #[test]
@@ -1876,7 +1708,7 @@ mod tests {
         let id = rig.first_action_id();
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
-            replies.push_back(calls(&[("read_map", "{}"), ("read_party", "{}"), ("read_bag", "{}")]));
+            replies.push_back(calls(&[("read_file", r#"{"path":"map.png"}"#), ("read_file", r#"{"path":"party.md"}"#), ("read_file", r#"{"path":"bag.md"}"#)]));
             replies.push_back(calls(&[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]));
         }
 
@@ -1895,17 +1727,16 @@ mod tests {
         assert_eq!(results.len(), 3, "every call in the batch was answered, and in one go");
 
         let map = rig.state().map.map;
-        let expected = format!("\"{map}\"");
-        assert!(results[0].contains(&expected), "read_map: {}", &results[0][..results[0].len().min(200)]);
-        assert!(results[1].contains("\"slot\":0"), "read_party: {}", results[1]);
-        assert!(results[2].contains("\"slots_total\":20"), "read_bag: {}", results[2]);
+        assert!(results[0].starts_with(&format!("map.png\n{map}, ")), "map.png: {}", &results[0][..results[0].len().min(200)]);
+        assert!(results[1].starts_with("party.md, lines 1–1 of 1\n0. "), "party.md: {}", results[1]);
+        assert!(results[2].contains("of 20 used"), "bag.md: {}", results[2]);
     }
 
     /// A stuck turn may read first, and its press goes out through the escape hatch.
     #[test]
     fn a_stuck_turn_may_read_first_and_its_press_reaches_the_agent() {
         let (mut rig, mut policy) = Rig::new(vec![
-            calls(&[("read_map", "{}")]),
+            calls(&[("read_file", r#"{"path":"map.png"}"#)]),
             calls(&[("choose_action", r#"{"id":"press:a","summary":"a text box that will not close"}"#)]),
         ]);
 
@@ -1925,7 +1756,7 @@ mod tests {
         let answered: Vec<&str> =
             requests[1].messages.iter().filter(|m| m.role == Role::Tool).filter_map(Message::text).collect();
         assert_eq!(answered.len(), 1, "the read batch of a stuck turn has to be answered, not cancelled");
-        assert!(answered[0].contains(&format!("\"{}\"", rig.state().map.map)), "{}", answered[0]);
+        assert!(answered[0].contains(&format!("{}, ", rig.state().map.map)), "{}", answered[0]);
 
         let offered: Vec<&str> =
             requests[0].tools.iter().map(|tool| tool.function.name).collect();
@@ -1968,7 +1799,7 @@ mod tests {
         let (mut rig, mut policy) = Rig::new(vec![]);
         let id = rig.first_action_id();
         rig.push(vec![
-            thinking("Oak's lab is north.", calls(&[("read_map", "{}")])),
+            thinking("Oak's lab is north.", calls(&[("read_file", r#"{"path":"map.png"}"#)])),
             thinking("Yes, north.", saying_calls("Heading north.", &[("choose_action", &format!(r#"{{"id":"{id}"}}"#))])),
         ]);
 
@@ -2058,7 +1889,7 @@ mod tests {
         let (mut rig, mut policy) = Rig::new(vec![]);
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
-            replies.push_back(calls(&[("read_map", "{}")]));
+            replies.push_back(calls(&[("read_file", r#"{"path":"map.png"}"#)]));
             replies.push_back(calls(&[("choose_action", r#"{"id":"run"}"#)]));
         }
 
@@ -2118,9 +1949,9 @@ mod tests {
         // Four steps: three of reading, and the fourth is the one the warning is for.
         let (mut rig, mut policy) = Rig::with_config(
             vec![
-                calls(&[("read_map", "{}")]),
-                calls(&[("read_party", "{}")]),
-                calls(&[("read_bag", "{}")]),
+                calls(&[("read_file", r#"{"path":"map.png"}"#)]),
+                calls(&[("read_file", r#"{"path":"party.md"}"#)]),
+                calls(&[("read_file", r#"{"path":"bag.md"}"#)]),
                 calls(&[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]),
             ],
             |config| config.max_tool_steps = 4,
@@ -2443,9 +2274,9 @@ mod tests {
         assert!(requests.len() >= 2, "the refusal is a tool result, so the turn recovers");
         assert!(!last_user_message(&requests[0]).contains("press:"), "not even offered");
         let offered: Vec<&str> = requests[0].tools.iter().map(|tool| tool.function.name).collect();
-        assert!(offered.contains(&"report_issue"), "what replaced it: {offered:?}");
+        assert!(offered.contains(&"write_file"), "what replaced it, through `issues/`: {offered:?}");
 
-        // The refusal names the menu, and `report_issue` for a menu that is wrong.
+        // The refusal names the menu, and `issues/` for a menu that is wrong.
         let refusal = requests[1]
             .messages
             .iter()
@@ -2455,14 +2286,14 @@ mod tests {
             .expect("the refusal is answered as a tool result")
             .to_string();
         assert!(refusal.contains("the agent presses the buttons"), "{refusal}");
-        assert!(refusal.contains("report_issue"), "{refusal}");
+        assert!(refusal.contains("issues/"), "{refusal}");
     }
 
     /// Each menu prompt is its own turn with scoped tools, answered in its `pick_*`'s shape.
     #[test]
     fn the_menu_prompts_are_their_own_turns_and_can_use_read_tools() {
         let (mut rig, mut policy) = Rig::new(vec![
-            calls(&[("read_party", "{}")]),
+            calls(&[("read_file", r#"{"path":"party.md"}"#)]),
             calls(&[("choose_action", r#"{"id":"Bubbles"}"#)]),
         ]);
 
@@ -2480,7 +2311,7 @@ mod tests {
         let results: Vec<&str> =
             requests[1].messages.iter().filter(|m| m.role == Role::Tool).filter_map(Message::text).collect();
         assert_eq!(results.len(), 1);
-        assert!(results[0].contains("\"slot\":0"), "read_party: {}", results[0]);
+        assert!(results[0].starts_with("party.md, lines 1–1 of 1\n0. "), "party.md: {}", results[0]);
     }
 
     /// The wiring half of the guide nudge, which the prompt's own test cannot see.
@@ -2489,7 +2320,7 @@ mod tests {
         let (mut rig, mut policy) = Rig::new(vec![]);
         let id = rig.first_action_id();
         let decide = || calls(&[("choose_action", &format!(r#"{{"id":"{id}","summary":"on we go"}}"#))]);
-        for reply in [calls(&[("read_guide", "{}")]), decide()] {
+        for reply in [calls(&[("read_file", r#"{"path":"guide/current.md"}"#)]), decide()] {
             rig.endpoint.replies.lock().unwrap().push_back(reply);
         }
 
@@ -2703,7 +2534,7 @@ mod tests {
         let (mut rig, mut policy) = Rig::new(vec![]);
         let id = rig.first_action_id();
         rig.push(vec![
-            calls(&[("read_map", "{}")]),
+            calls(&[("read_file", r#"{"path":"map.png"}"#)]),
             saying_calls("North it is.", &[("choose_action", &format!(r#"{{"id":"{id}"}}"#))]),
         ]);
 
@@ -2715,7 +2546,7 @@ mod tests {
 
         assert_eq!(Rig::statuses(&events), [
             RunStatus::AwaitingLlm { kind: "overworld" },
-            RunStatus::RunningTool { name: "read_map".into() },
+            RunStatus::RunningTool { name: "read_file".into() },
             RunStatus::AwaitingLlm { kind: "overworld" },
             RunStatus::Streaming,
             RunStatus::Playing,
@@ -2761,6 +2592,10 @@ mod tests {
         rig.pump_overworld(&mut policy).expect("the run continues after a compaction");
         let requests = rig.requests();
         let last = requests.last().expect("requests were sent");
+        // And says that `plan.md` is what survived it, where every other turn has the plain line.
+        assert!(last_user_message(last).contains(crate::llm::prompt::PlanReminder::Compacted.line()),
+                "{}", last_user_message(last));
+        assert!(last_user_message(&requests[0]).contains(crate::llm::prompt::PlanReminder::Ordinary.line()));
         assert_eq!(last.messages[0].role, Role::System, "the system prompt is never compacted");
         assert!(
             last.messages[1].text().unwrap_or_default().starts_with("## The story so far"),
@@ -2925,9 +2760,19 @@ mod tests {
     // ── The battle script ────────────────────────────────────────────────────────────────────────
 
     /// A script that decides every validation scenario and the committed battle fixture.
-    const SCRIPT: &str = "if battle.best_move != () { battle.fight(battle.best_move); }\n\
+    const SCRIPT: &str = "// a test\n\
+                          if battle.best_move != () { battle.fight(battle.best_move); }\n\
                           if battle.can_run { battle.run(); }\n\
                           battle.ask();";
+
+    /// A write of `source` to `battle-script.rhai`, opening with a comment if it has none.
+    fn script_write(source: &str) -> String {
+        let content = match crate::llm::battle_script::purpose_of(source) {
+            Some(_) => source.to_string(),
+            None => format!("// a test\n{source}"),
+        };
+        serde_json::json!({ "path": "battle-script.rhai", "content": content }).to_string()
+    }
 
     /// A rig whose first overworld turn installs `source` and walks, plus `then` more replies.
     fn armed_with(source: &str, then: usize) -> (Rig, LlmPolicy) {
@@ -2937,7 +2782,7 @@ mod tests {
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
             replies.push_back(calls(&[
-                ("set_battle_script", &serde_json::json!({ "script": source, "purpose": "a test" }).to_string()),
+                ("write_file", &script_write(source)),
                 ("choose_action", &walk),
             ]));
             for _ in 0..then {
@@ -2954,11 +2799,11 @@ mod tests {
         assert!(armed.is_some(), "the overworld turn still has to decide something");
         let results: Vec<String> = rig
             .events_until(Duration::from_secs(5), |event| {
-                matches!(event, UiEventBody::ToolResult { name, .. } if name == "set_battle_script")
+                matches!(event, UiEventBody::ToolResult { name, .. } if name == "write_file")
             })
             .into_iter()
             .filter_map(|event| match event {
-                UiEventBody::ToolResult { name, content, .. } if name == "set_battle_script" => Some(content),
+                UiEventBody::ToolResult { name, content, .. } if name == "write_file" => Some(content),
                 _ => None,
             })
             .collect();
@@ -2975,7 +2820,7 @@ mod tests {
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
             replies.push_back(calls(&[
-                ("set_battle_script", &serde_json::json!({ "script": SCRIPT, "purpose": "a test" }).to_string()),
+                ("write_file", &script_write(SCRIPT)),
                 ("choose_action", &walk),
             ]));
             for _ in 0..3 {
@@ -3057,7 +2902,10 @@ mod tests {
         {
             let mut replies = rig.endpoint.replies.lock().unwrap();
             replies.push_back(calls(&[
-                ("set_battle_script", &serde_json::json!({ "script": SCRIPT }).to_string()),
+                ("write_file", &serde_json::json!({
+                    "path": "battle-script.rhai",
+                    "content": SCRIPT.split_once('\n').expect("a comment line").1,
+                }).to_string()),
                 ("choose_action", &format!(r#"{{"id":"{id}"}}"#)),
             ]));
         }
@@ -3066,13 +2914,13 @@ mod tests {
 
         // `events_until`, never `try_iter`: the worker thread publishes the tool result.
         let seen = rig.events_until(Duration::from_secs(5), |event| {
-            matches!(event, UiEventBody::ToolResult { name, .. } if name == "set_battle_script")
+            matches!(event, UiEventBody::ToolResult { name, .. } if name == "write_file")
         });
         let answer = seen.iter().find_map(|event| match event {
-            UiEventBody::ToolResult { name, content, .. } if name == "set_battle_script" => Some(content.clone()),
+            UiEventBody::ToolResult { name, content, .. } if name == "write_file" => Some(content.clone()),
             _ => None,
         }).expect("the tool answered");
-        assert!(answer.contains("needs a `purpose`"), "and says what is missing: {answer}");
+        assert!(answer.contains("opens with a comment"), "and says what is missing: {answer}");
         assert!(answer.contains("nothing was changed"), "and that the script was not taken: {answer}");
 
         // The refusal has to leave the run on the default rather than half-armed.
@@ -3095,8 +2943,8 @@ mod tests {
 
         let situation = rig.requests().last().expect("a second request").messages.last()
             .expect("a situation").text().unwrap_or_default().to_string();
-        // `armed_with` installs it with this purpose.
-        assert!(situation.contains("You installed it for: \"a test\""),
+        // `SCRIPT` opens with this comment.
+        assert!(situation.contains("It opens: \"a test\""),
                 "the standing line quotes the model's own words:\n{situation}");
         assert!(situation.contains("1 battle turn since you installed it"),
                 "and counts what it has decided:\n{situation}");
@@ -3174,7 +3022,7 @@ mod tests {
             .expect("a situation").text().unwrap_or_default().to_string();
         assert!(situation.contains("no longer deciding your battle turns"), "{situation}");
         assert!(situation.contains("Hydro Cannon"), "the reason names what it asked for: {situation}");
-        assert!(situation.contains("set_battle_script"), "and how to fix it: {situation}");
+        assert!(situation.contains("battle-script.rhai"), "and how to fix it: {situation}");
 
         // And it stays disarmed: the next battle turn is the model's too, not a second failure.
         assert!(policy.handles.live_script.source().is_none(), "one strike disarms for the run");
@@ -3294,22 +3142,17 @@ mod tests {
         let situation = rig.requests().last().expect("a battle request").messages.last()
             .expect("a situation").text().unwrap_or_default().to_string();
         assert!(situation.contains("still the default one"), "{situation}");
-        // The battle turn states the cost and names no tool, because it carries none of them.
-        for tool in ["read_battle_script", "get_battle_script_docs", "set_battle_script"] {
-            assert!(!situation.contains(tool), "the battle turn does not name {tool}: {situation}");
-        }
+        // The battle turn states the cost and names the file, which a battle turn can write too.
+        assert!(situation.contains("battle-script.rhai"), "{situation}");
 
-        // All three, in the order they have to be called, on the turn that has them.
+        // The file and its API, on the overworld turn.
         rig.gb.load_state(FIXTURE).expect("back to the overworld fixture");
         rig.pump_overworld(&mut policy).expect("the overworld turn lands");
         rig.wait_for_requests(2, Duration::from_secs(5));
         let overworld = rig.requests().last().expect("an overworld request").messages.last()
             .expect("a situation").text().unwrap_or_default().to_string();
         assert!(overworld.contains("still the default one"), "{overworld}");
-        let read = overworld.find("read_battle_script").unwrap_or_else(|| panic!("{overworld}"));
-        let docs = overworld.find("get_battle_script_docs").unwrap_or_else(|| panic!("{overworld}"));
-        let set = overworld.find("set_battle_script").unwrap_or_else(|| panic!("{overworld}"));
-        assert!(read < docs && docs < set, "named in the order they are called: {overworld}");
+        assert!(overworld.contains("battle-script.rhai") && overworld.contains("battle-script.md"), "{overworld}");
     }
 
     #[test]
@@ -3347,12 +3190,11 @@ mod tests {
             .expect("a situation").text().unwrap_or_default().to_string();
         assert!(next.contains("no longer deciding your battle turns"),
                 "a run whose script broke has to keep being told: {next}");
-        assert!(!next.contains("read_battle_script"),
-                "the battle turn does not name a tool it is not offered: {next}");
+        assert!(next.contains("battle-script.rhai"), "and where the reason is: {next}");
         assert!(!next.contains("Hydro Cannon"),
                 "nor repeat the reason it cannot act on: {next}");
 
-        // The overworld turn, which holds the tools, is where it all lands.
+        // The overworld turn quotes the reason.
         policy.on_event(&AgentEvent::BattleEnded);
         rig.gb.load_state(FIXTURE).expect("back to the overworld fixture");
         rig.pump_overworld(&mut policy).expect("the overworld turn after the failure lands");
@@ -3362,11 +3204,9 @@ mod tests {
         assert!(overworld.contains("no longer deciding your battle turns"),
                 "the state is said where it can be acted on: {overworld}");
         assert!(overworld.contains("Hydro Cannon"),
-                "with the reason, rather than a round trip away in `read_battle_script`: {overworld}");
-        assert!(overworld.contains("set_battle_script"),
-                "and the tool that arms a corrected one: {overworld}");
-        // The claim that the tools are here.
-        assert!(overworld.contains("this is a turn that can fix it"), "{overworld}");
+                "with the reason, rather than a read away: {overworld}");
+        assert!(overworld.contains("battle-script.rhai"),
+                "and the file a corrected one is written to: {overworld}");
     }
 
     /// `battle.ask()` hands back only the turns the script says are worth paying for.

@@ -9,17 +9,32 @@ pub fn system_message() -> crate::llm::protocol::Message {
     crate::llm::protocol::Message::system(SYSTEM_PROMPT)
 }
 
-/// The model's plan, as the message that carries it.
-pub fn plan_message(todo: &crate::llm::todo::TodoList) -> crate::llm::protocol::Message {
-    crate::llm::protocol::Message::user(todo.render())
+/// The line that closes every turn about `plan.md`, which is not sent with the turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PlanReminder {
+    #[default]
+    Ordinary,
+    /// The first turn after a compaction.
+    Compacted,
+    /// The first turn after a restart.
+    Resumed,
+    /// The first turn after `POST /api/clear`, which empties the plan as well.
+    Cleared,
 }
 
-/// Appended to the situation when the plan is not re-sent with it.
-pub const PLAN_UNCHANGED: &str =
-    "Your plan is unchanged since the last `## Your plan` message in this conversation — the one \
-     nearest the end — and that copy is still the current one. Read it back before you decide; if it \
-     no longer describes what you are doing, fix it with `todo_set` or `todo_complete` in this same \
-     turn.";
+impl PlanReminder {
+    pub fn line(self) -> &'static str {
+        match self {
+            Self::Ordinary => "Your plan is in plan.md.",
+            Self::Compacted => "Your earlier conversation was compacted; plan.md is the only thing you \
+                                wrote that survived it. Read it before deciding.",
+            Self::Resumed => "The program was restarted; plan.md is the plan you wrote before it, and \
+                              it was kept. Read it before deciding.",
+            Self::Cleared => "Your conversation was cleared, and plan.md with it, so it is empty. Work \
+                              out where you are and write a fresh plan to it before you go far.",
+        }
+    }
+}
 
 /// Appended once by [`History::open`](crate::llm::history::History::open) to a restored history.
 pub const RESUMED_NOTE: &str =
@@ -37,17 +52,11 @@ pub const CLEARED_NOTE: &str =
      The game itself was not touched and is exactly where you left it, possibly hours into a run \
      you can no longer remember any of. Nothing is broken, nothing was lost from the game, and \
      there is nothing to undo or repeat. Your battle script was not touched either, and the turn \
-     below says what it is doing. Work out where you are from the situation below, use `read_map` \
+     below says what it is doing. Work out where you are from the situation below, read `map.png` \
      if you need to, and write yourself a fresh plan before you go far.";
 
-/// Whether this is a message [`plan_message`] produced.
-pub fn is_plan(message: &crate::llm::protocol::Message) -> bool {
-    message.role == crate::llm::protocol::Role::User
-        && message.text().is_some_and(|text| text.starts_with(crate::llm::todo::PLAN_HEADING))
-}
-
 /// Never compacted. Everything that must stay true for the whole run lives here.
-pub const SYSTEM_PROMPT: &str = "\
+pub const SYSTEM_PROMPT: &str = concat!("\
 You are playing Pokémon Red on a Game Boy, through a text interface. You cannot see the screen \
 unless you ask for it; instead, an agent reads the game's memory for you, tells you what is \
 happening, and executes the decision you return.
@@ -58,9 +67,9 @@ not deliberate at length over routine steps — most decisions are simply 'walk 
 
 **Everything below is instruction rather than background**, and every line of it is here because a \
 run before yours lost hours to the mistake it names. Two of them are worth doing in your first few \
-turns, before you settle into playing: call `read_guide` for the stretch of the game you are in, \
-and `set_battle_script` so that routine battles stop costing you a decision each. Both pay for \
-themselves within the hour and neither gets cheaper by being put off.
+turns, before you settle into playing: read `guide/current.md` for the stretch of the game you are \
+in, and write `battle-script.rhai` so that routine battles stop costing you a decision each. Both \
+pay for themselves within the hour and neither gets cheaper by being put off.
 
 How the interface works:
 
@@ -77,29 +86,34 @@ How the interface works:
   order: talk to the Nurse, then take the door out. A walk a wild battle interrupts is taken up \
   again once the battle is over, unless a party member fainted in it. Both are pure saving; the \
   tool's description says what ends a chain.
-- Read tools do not end the turn, and **most turns should need none of them**: the situation \
-  already carries the party, the money, the badges, what is on screen and the menu, and a read \
-  whose answer you are already holding costs a whole round trip for nothing. Ask for the ones you \
-  do need together in one message; the list at the foot of each turn is the one that applies, and \
-  `screenshot` is the expensive one, for something the others do not describe.
+- Besides the menu there are your files, read with `read_file` and changed with `write_file` and \
+  `edit_file`. These do not end the turn, and **most turns should need none of them**: the \
+  situation already carries the party, the money, the badges, what is on screen and the menu, and \
+  a read whose answer you are already holding costs a whole round trip for nothing. Read the ones \
+  you do need together in one message. `screen.png` is the expensive one, for something the others \
+  do not describe. Every file, on every turn:
+
+", crate::llm::files::tree!(), "
+  Reading a directory lists it; `routes/` is the same list as `routes.md`.
 - Not everything is walking: teaching a move, using an item, flying, the lead, the PC, a lift and \
   the rest are overworld rows too, each offered only where the game would allow it. A row whose id \
   holds `<slot>` is one row for every party slot, and its description names the slots that work.
-- **The agent can be wrong, and `report_issue` is how you say so.** If the action menu does not \
-  describe what is in front of you, or an action keeps failing for a reason you cannot see, file \
-  one: what you were trying to do, what you expected, what happened instead. An action the game \
+- **The agent can be wrong, and a file under `issues/` is how you say so.** If the action menu \
+  does not describe what is in front of you, or an action keeps failing for a reason you cannot \
+  see, write one, as `issues/missing-ladder.md`: what you were trying to do, what you expected, \
+  what happened instead. An action the game \
   stopped with a message you were shown is **not** one of these — there the reason is the message, \
   and it is a thing to act on rather than to report. A developer reads these, and the screen and a \
-  save state are filed with it. ⚠️ It does **not** end your turn and \
-  nothing changes now — so having filed it, carry on and try a different way. Reporting a problem \
+  save state are filed with it. ⚠️ Writing it does **not** end your turn \
+  and nothing changes now — so having filed it, carry on and try a different way. Reporting a problem \
   and playing on are not alternatives. What can be wrong is the agent's *description* of the game — \
   a menu row, a route, a name — never the game itself.
 - **This conversation is not your memory.** When it fills up it is replaced by a summary, and \
-  everything not in that summary is gone. Your plan — `todo_set`, `todo_complete` and \
-  `todo_delete`, shown to you every turn under 'Your plan' — is what survives that. It is the only \
-  thing that does, so put \
+  everything not in that summary is gone. Your plan — `plan.md`, written with `write_file` and \
+  changed with `edit_file` — is what survives that. It is the only thing that does, so put \
   anything you will still need in an hour there, with the reason attached: somewhere you could not \
-  get into, something a person asked you for, something that did not work.
+  get into, something a person asked you for, something that did not work. It is not sent with the \
+  turn: each turn ends by reminding you it is there, and the turn after a compaction says so.
 
 The game is not broken, and you are not debugging it:
 
@@ -149,27 +163,18 @@ Your plan, and keeping it:
 
 - **Always have a plan, and treat it as a draft.** Keep two or three open items going even when \
   you are unsure — a rough plan you revise beats an empty one. Nothing on it is a commitment: when \
-  an item turns out wrong or impossible, `todo_set` with its number rewrites it and `todo_delete` \
-  with its number drops it. Replace it with what you now know rather than completing it or leaving \
-  it to mislead you later.
-- **The numbers are names, not places.** An item keeps the number it was given for as long as it \
-  is on the list, new ones carry on counting up, and a number is never reused — so a plan you have \
-  revised for a while holds numbers far higher than the number of items on it. Only ever use a \
-  number you can see beside an item in the plan message nearest the end of this conversation. If a \
-  call comes back saying there is no such item, it will tell you which numbers there are; use one \
-  of those rather than sending the same call again.
-- **It is short on purpose and finished items take up room in it.** The list is a plan, not a \
-  record of the run: tick things off as you finish them, and delete a finished item once it no \
-  longer explains what you are doing next. What you have already achieved comes back to you in the \
-  summary of this conversation; it does not need a line here.
-- **The order is yours and nothing reorders it.** Items stay where you put them, ticked or not, \
-  and a new one goes on the end — so write them in the order you mean to do them, and rewrite them \
-  when that changes.
-- **Expect to touch it most turns you learn anything.** Finished something? `todo_complete` it. \
-  Someone gave you an errand? Add it. Found out the way you meant to go is shut? Rewrite that item \
-  to say so and say what you will do instead. A plan you have not changed in a long stretch of \
-  turns is not a plan you are following; it is one you have forgotten about, and it is the first \
-  thing to check when you cannot say what you are doing or why.
+  an item turns out wrong or impossible, rewrite or delete it rather than leaving it to mislead you \
+  later.
+- **Numbered items or bullet points, and delete what is done.** It is a plan, not a record of the \
+  run: what you have already achieved comes back to you in the summary of this conversation and \
+  does not need a line here. Write the items in the order you mean to do them. It holds 10 KB, and \
+  a plan that long is one you have stopped reading.
+- **Expect to touch it most turns you learn anything.** Finished something? Delete it. Someone \
+  gave you an errand? Add it. Found out the way you meant to go is shut? Rewrite that item to say \
+  so and say what you will do instead. `edit_file` changes one line; `write_file` replaces the \
+  whole of it. A plan you have not changed in a long stretch of turns is not a plan you are \
+  following; it is one you have forgotten about, and it is the first thing to read back when you \
+  cannot say what you are doing or why.
 - Write items you could act on cold, after everything else you know has been thrown away — 'ask \
   the man in the Viridian mart what he wants, he would not let me past the north exit' rather than \
   'go north'.
@@ -185,10 +190,10 @@ Things worth knowing about this particular game:
 - Some things stay shut until you have a particular move and the badge that lets you use it outside \
   battle. While that is true they are not offered to you at all, and the turn says so plainly under \
   'Blocked here'. That is a different errand, not a thing to keep trying.
-- There is a walkthrough for this game, and `read_guide` hands you the stretch of it you are in \
+- There is a walkthrough for this game, and `guide/current.md` is the stretch of it you are in \
   now. Read it **once at the start of each badge**, before you spend turns wandering to work out \
   where you are meant to be, and put what you need out of it on your plan — it is keyed on your \
-  badges alone, so asking again before the next one buys a word-for-word copy. Read it again after \
+  badges alone, so reading it again before the next one buys a word-for-word copy. Read it again after \
   this conversation has been summarised: the chapter is not in the summary, and your plan is all \
   that is left of it.
 
@@ -198,7 +203,7 @@ Playing it well, and the clock you are playing against:
   finished run is ranked on it. What is being asked of you is the whole game, eight badges and then \
   the Elite Four, played properly and finished as soon as you can manage it. Exploring is not the \
   opposite of being quick: the hours go on circling the same three maps not knowing where you are \
-  supposed to be next, and what fixes that is `read_guide` and your plan, not hurrying.
+  supposed to be next, and what fixes that is the guide and your plan, not hurrying.
 - **Keep the party healthy.** Every turn lists each Pokémon's HP. A Pokémon Centre heals the whole \
   party, for nothing, in about two decisions: take the warp in, talk to the Nurse, accept. Do that \
   before a gym, a cave or a long route rather than after something has fainted.
@@ -214,8 +219,8 @@ Playing it well, and the clock you are playing against:
   always run from is one you never had: weaken it first, or put it to sleep or paralyse it, then \
   throw a Poké Ball from the battle's item rows. A party that covers several types is what gets \
   through a gym; a single strong Pokémon loses to the first thing it has no answer to, and takes \
-  the run down with it. **Your party holds six.** Anything caught past that is stored in a PC you \
-  have no way to reach through this interface, so the six you are carrying are the six you have.
+  the run down with it. **Your party holds six.** Anything caught past that goes to the PC's open \
+  box; at a Pokémon Center's PC the `pc:` rows deposit, withdraw and switch boxes.
 - **Experience is only paid out for a knockout.** The cartridge awards it when the opposing \
   Pokémon faints and at no other moment: running away pays nothing, and neither does catching it. \
   So a fight broken off halfway is the one outcome that costs you turns and buys nothing at all. \
@@ -231,13 +236,15 @@ Playing it well, and the clock you are playing against:
   ground appear in the action menu; pick them up as you pass.
 - **Write your battles down.** Most battle turns are the same decision: hit it with whatever does \
   the most damage, heal or switch when you are nearly dead, throw a ball at something you want. \
-  `set_battle_script` installs a short program that makes those decisions for you, and a turn it \
+  `battle-script.rhai` is a short program that makes those decisions for you, and a turn it \
   answers costs nothing at all, so a wild encounter on the way somewhere stops interrupting you. \
-  Read `get_battle_script_docs` once and write one early: the time it saves is the whole of the \
-  clock above, and the moves and type matchups are worked out for you. Keep the fights that matter \
-  by calling `battle.ask()` inside it, and change it when the report after a battle shows it doing \
-  something you did not intend.
-";
+  Read `battle-script.md` once and write one early: the time it saves is the whole of the clock \
+  above, and the moves and type matchups are worked out for you. A write is validated and decides \
+  from your next battle decision. Open it with a comment saying what it is for, since that line is \
+  shown back to you, and comment it through, since you will read it again long after you have \
+  forgotten writing it. Keep the fights that matter by calling `battle.ask()` inside it, and change \
+  it when the report after a battle shows it doing something you did not intend.
+");
 
 /// What a turn says about an armed battle script.
 fn script_standing_line(standing: &crate::llm::battle_script::ScriptStanding) -> String {
@@ -246,13 +253,13 @@ fn script_standing_line(standing: &crate::llm::battle_script::ScriptStanding) ->
          past are not being put to you and are costing you nothing. A battle report is the only \
          account you get of what it chose. If one shows it losing a Pokémon, fleeing from \
          something worth catching, or attacking with a move the enemy shrugs off, that is the \
-         script doing it and not the game: `read_battle_script` shows what it says and \
-         `set_battle_script` replaces it.",
+         script doing it and not the game: `battle-script.rhai` is the script, and a write or an \
+         edit of it replaces it.",
     );
 
     // Quoted, in the model's own words.
     if let Some(purpose) = standing.purpose.as_deref() {
-        out.push_str(&format!(" You installed it for: \"{purpose}\"."));
+        out.push_str(&format!(" It opens: \"{purpose}\"."));
     }
     out.push_str(&match standing.decided {
         0 => " It has not decided a battle turn yet.".to_string(),
@@ -272,22 +279,19 @@ fn overworld_script_line(
     state: ScriptState,
     standing: &crate::llm::battle_script::ScriptStanding,
 ) -> String {
-    // Each state has to say the three tools are on this turn.
-    const HERE: &str = "Those three tools are offered on an overworld turn and on no other kind, \
-                        so this is a turn that can fix it.";
     match state {
         ScriptState::Armed => script_standing_line(standing),
         ScriptState::Unedited => format!(
             "⚠️ Your battle script is still the default one, which decides nothing and hands every \
              battle straight back to you, so every battle you fight is costing you a request. \
-             `read_battle_script` shows you the file, `get_battle_script_docs` says what a script \
-             can do, and `set_battle_script` replaces it. {HERE}\n\n",
+             `battle-script.rhai` is the file and `battle-script.md` says what a script can do; a \
+             write of it decides from your next battle decision.\n\n",
         ),
         ScriptState::Disarmed => format!(
             "⚠️ Your battle script failed and is no longer deciding your battle turns, so they are \
              costing you a request each again.{} The script itself was kept, because it is the \
-             thing to edit: `read_battle_script` shows it, `get_battle_script_docs` is the API it \
-             is written against, and `set_battle_script` arms a corrected one. {HERE}\n\n",
+             thing to edit: `battle-script.rhai` is the file, `battle-script.md` the API it is \
+             written against, and a corrected write or edit arms it again.\n\n",
             match standing.failure.as_deref() {
                 // Quoted rather than paraphrased.
                 Some(why) => match why.trim_end() {
@@ -334,9 +338,8 @@ pub fn contract(kind: DecisionKind) -> String {
         "{ends} The call that ends the turn takes a `summary`: one or two sentences saying what you \
          are doing and why. Your thinking is not kept, so that sentence is the only thing you will \
          still have of this turn when you take the next one.\n\
-         These do not end the turn ({}) — call as many as you need, in one message, then finish \
-         with {}.",
-        crate::llm::tools::non_terminal_names(kind).join(", "),
+         {} do not end the turn — call as many as you need, in one message, then finish with {}.",
+        crate::llm::tools::non_terminal_names(kind).iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", "),
         terminal_names(kind).iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(" or "),
     )
 }
@@ -434,8 +437,8 @@ pub fn situation(
             // Only the stale case: a run that has never read the guide is not nagged.
             if let crate::llm::guide::GuideStatus::Stale { index } = guide {
                 out.push_str(&format!(
-                    "⚠️ You have won a badge since you last read the walkthrough, and `read_guide` \
-                     now answers with a different chapter: {}, and what stands in the way of it. \
+                    "⚠️ You have won a badge since you last read the walkthrough, and \
+                     `guide/current.md` is now a different chapter: {}, and what stands in the way of it. \
                      What you read before is the stretch of the game you have already finished, so \
                      anything you are still going on from it is out of date. Read it again on this \
                      turn, before you decide where to go.\n\n",
@@ -494,13 +497,13 @@ pub fn situation(
             ScriptState::Unedited => {
                 "⚠️ Your battle script is still the default one, which decides nothing and hands \
                  every battle straight back to you, so this turn costs a request exactly like \
-                 every other battle turn. Your next overworld turn carries the tools that change \
-                 that, and says so.\n\n"
+                 every other battle turn. A write of `battle-script.rhai` changes that from the \
+                 next battle decision, on this turn or any other.\n\n"
             }
             ScriptState::Disarmed => {
                 "⚠️ Your battle script failed and is no longer deciding your battle turns, so this \
-                 one is costing you a request again. Your next overworld turn carries the reason \
-                 it stopped and the tools to fix it.\n\n"
+                 one is costing you a request again. A read of `battle-script.rhai` says why it \
+                 stopped, and a corrected write or edit arms it from the next battle decision.\n\n"
             }
             // Armed but silent: a Safari battle, or a turn the model asked to `wait` through.
             ScriptState::Armed => {
@@ -514,7 +517,7 @@ pub fn situation(
              agent rather than a puzzle in the game, and no action menu can be shown.\n\n\
              What usually clears it is one button: `A` to advance a text box or confirm a prompt, \
              `B` to back out of a menu, a direction to step off a tile it cannot leave. Look at the \
-             screen if you are unsure — `screenshot` is worth it here, because the state description \
+             screen if you are unsure — reading `screen.png` is worth it here, because the state description \
              is exactly what has gone wrong. If you think the game genuinely needs a moment, `wait*N`.\n\n",
             stuck_for.as_secs(),
         )),
@@ -770,6 +773,13 @@ pub fn situation(
                  one of it. Whatever ends this battle other than a ball hides that object for good: \
                  run from it or knock it out and it is gone for the rest of the run.\n",
                 battle.enemy.species));
+        }
+        // Choosing a Disabled move bounces back to the move menu.
+        if let Some(disabled) = battle.player.disabled_move_slot
+            .and_then(|slot| battle.player.moves.get(usize::from(slot)).copied().flatten())
+        {
+            out.push_str(&format!("⚠️ Your {} is Disabled: it cannot be chosen until the effect \
+                                   wears off.\n", disabled.name));
         }
         if battle.enemy_trapping {
             // Every option still looks available, but a move chosen is replaced with "cannot move".
@@ -1027,16 +1037,6 @@ mod tests {
         .map(describe_event)
         .collect();
 
-        // A plan with something in it, as a message of its own (see `worker::sync_plan`).
-        let mut todo = crate::llm::todo::TodoList::open(None);
-        for item in [
-            "beat Erika for the Rainbow Badge; the gym is the one behind the trees, cut them",
-            "buy a Poke Doll in Celadon before Lavender: it is the only way past the Marowak ghost",
-            "come back to Route 12 with the Poke Flute, the Snorlax blocks the only path south",
-        ] {
-            todo.apply(crate::llm::todo::TodoCall::Set { id: None, text: Some(item.to_string()) });
-        }
-
         let config = LlmConfigForProbe::default();
 
         for kind in tools::ALL_KINDS {
@@ -1114,12 +1114,12 @@ mod tests {
                 DecisionKind::Nickname | DecisionKind::Stuck => Vec::new(),
             };
 
-            // In the order `worker::run_one` appends them: system message, plan, situation.
+            // As `worker::run_one` appends them: the situation, then the plan reminder.
+            let asked = situation(kind, &state, &snapshot, &events, &menu, context, &probe_reports(kind));
             let messages = vec![
                 system_message(),
-                plan_message(&todo),
                 // A battle report on the battle turn, the one block nothing else prints.
-                Message::user(situation(kind, &state, &snapshot, &events, &menu, context, &probe_reports(kind))),
+                Message::user(format!("{asked}\n{}\n", PlanReminder::Ordinary.line())),
             ];
             let request = ChatRequest {
                 model: config.model.clone(),
@@ -1209,24 +1209,27 @@ mod tests {
     /// The system message is a constant, and this is the test that keeps it one.
     #[test]
     fn the_system_message_never_changes_and_the_plan_is_not_in_it() {
-        let mut todo = crate::llm::todo::TodoList::open(None);
+        let mut plan = crate::llm::plan::Plan::open(None);
         let before = system_message();
-        todo.apply(crate::llm::todo::TodoCall::Set { id: None, text: Some("beat Brock".into()) });
-        assert_eq!(system_message(), before, "writing a TODO must not touch the cacheable prefix");
+        plan.write("1. beat Brock").expect("fits");
+        assert_eq!(system_message(), before, "writing the plan must not touch the cacheable prefix");
         assert_eq!(before.text().expect("prose"), SYSTEM_PROMPT);
-
-        let plan = plan_message(&todo);
-        assert!(plan.text().expect("prose").contains("beat Brock"), "{plan:?}");
-        // `sync_plan` appends rather than moves, so the message says which copy wins.
-        assert!(plan.text().expect("prose").contains("replaces any earlier"), "{plan:?}");
-        assert!(is_plan(&plan), "the worker finds the newest copy with this");
-        assert!(!crate::llm::compaction::is_turn_start(&plan),
-                "a cut between the plan and its turn would drop the one thing meant to survive");
-        assert!(!is_plan(&crate::llm::protocol::Message::user("Location: PalletTown")),
-                "an ordinary turn is not a plan");
+        assert!(!SYSTEM_PROMPT.contains("beat Brock"));
     }
 
-    /// Every script state is said on the overworld turn, the only one carrying the tools.
+    /// The turns after everything else was lost say so, and say that `plan.md` is what is left.
+    #[test]
+    fn the_plan_reminder_is_one_line_and_louder_after_a_loss() {
+        assert_eq!(PlanReminder::Ordinary.line(), "Your plan is in plan.md.");
+        assert!(PlanReminder::Compacted.line().contains("compacted"));
+        assert!(PlanReminder::Resumed.line().contains("restarted"));
+        assert!(PlanReminder::Cleared.line().contains("cleared"));
+        for reminder in [PlanReminder::Ordinary, PlanReminder::Compacted, PlanReminder::Resumed, PlanReminder::Cleared] {
+            assert!(reminder.line().contains("plan.md") && !reminder.line().contains('\n'), "{reminder:?}");
+        }
+    }
+
+    /// Every script state is said on the overworld turn, with the file that fixes it.
     #[test]
     fn every_battle_script_state_is_said_on_the_turn_that_can_do_something_about_it() {
         let mut gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
@@ -1241,21 +1244,19 @@ mod tests {
 
         let armed = overworld(ScriptState::Armed);
         assert!(armed.contains("battle script is armed"), "{armed}");
-        assert!(armed.contains("read_battle_script"), "and how to look at it: {armed}");
-        assert!(armed.contains("set_battle_script"), "and how to replace it: {armed}");
+        assert!(armed.contains("battle-script.rhai"), "and the file to look at and replace: {armed}");
         // It has to say that a bad battle is the script's doing rather than the game's.
         assert!(armed.contains("that is the script doing it"), "{armed}");
 
-        // The other two are said here too, and each has to claim the tools are on this turn.
+        // The other two are said here too, each naming the file and its API.
         for faulted in [ScriptState::Unedited, ScriptState::Disarmed] {
             let other = overworld(faulted);
             assert!(other.contains("battle script"), "{faulted:?} is silent here: {other}");
-            assert!(other.contains("read_battle_script") && other.contains("set_battle_script"),
-                    "{faulted:?} names the tools it is offered: {other}");
-            assert!(other.contains("this is a turn that can fix it"), "{faulted:?}: {other}");
+            assert!(other.contains("battle-script.rhai") && other.contains("battle-script.md"),
+                    "{faulted:?} names the files: {other}");
         }
 
-        // A disarm reason is quoted here rather than left in `read_battle_script`.
+        // A disarm reason is quoted here rather than left in the file's header.
         let reason = "`battle.fight` was given slot 3, which is not a move that can be used";
         let standing = crate::llm::battle_script::ScriptStanding {
             failure: Some(reason.to_string()), ..Default::default()
@@ -1273,7 +1274,7 @@ mod tests {
         // A disarm with no recorded reason invents none.
         let without = overworld(ScriptState::Disarmed);
         assert!(!without.contains("stopped because"), "no reason, no clause: {without}");
-        assert!(without.contains("read_battle_script"), "and the tool that has it is still named: {without}");
+        assert!(without.contains("battle-script.rhai"), "and the file is still named: {without}");
     }
 
     fn state_from(fixture: &[u8]) -> GameState {
@@ -1454,7 +1455,7 @@ mod tests {
         assert!(matches!(stale, GuideStatus::Stale { .. }), "the fixture is past chapter 0: {stale:?}");
         let rendered = overworld(stale);
         assert!(rendered.contains("won a badge since you last read"), "{rendered}");
-        assert!(rendered.contains("read_guide"), "and the tool that fixes it: {rendered}");
+        assert!(rendered.contains("guide/current.md"), "and the file that fixes it: {rendered}");
         // It names the chapter's subject rather than saying "a different one".
         assert!(
             rendered.contains(&crate::llm::guide::chapter_goal(crate::llm::guide::chapter_index(state.badges))),
@@ -1554,7 +1555,7 @@ mod tests {
 
         assert!(state.map.can_strength, "the deployed party can use Strength");
         let armed = rendered(&state);
-        // Reading order, which is the order `read_map`'s picture is scanned in.
+        // Reading order, which is the order `map.png` is scanned in.
         assert!(armed.contains("Boulders on this map: (14, 2), (2, 10), (5, 15)."), "{armed}");
         assert!(armed.contains("Boulder switches"), "{armed}");
         assert!(armed.contains("(17, 13)"), "the switch VictoryRoad1F's puzzle is about: {armed}");
@@ -1628,6 +1629,10 @@ mod tests {
         assert!(
             SYSTEM_PROMPT.contains("is what survives that. It is the only thing that does"),
             "the plan bullet no longer says what the plan is for",
+        );
+        assert!(
+            SYSTEM_PROMPT.contains(crate::llm::files::TREE),
+            "the system prompt lists every file",
         );
         assert!(
             !SYSTEM_PROMPT.contains("restart of the program"),

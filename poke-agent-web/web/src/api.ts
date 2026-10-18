@@ -68,10 +68,24 @@ export interface Status {
   run: RunStatus;
 }
 
+/** An item of the plan as older transcripts carried it, before the plan was a file. */
 export interface TodoView {
   id: number;
   text: string;
   done: boolean;
+}
+
+/** One version of `plan.md`, from the event that published it. */
+export interface PlanVersion {
+  seq: number;
+  at?: number;
+  text: string;
+}
+
+/** A `plan` event's text, rendering an older transcript's item list as lines. */
+export function planText(event: { text?: string; items?: TodoView[] }): string {
+  if (typeof event.text === 'string') return event.text;
+  return (event.items ?? []).map((item, index) => `${index + 1}. ${item.done ? '(done) ' : ''}${item.text}`).join('\n');
 }
 
 /** The battle script. A failed one keeps its source but is disarmed, so show `armed` and `source` apart. */
@@ -136,7 +150,8 @@ export type UiEvent = At &
     }
   | { seq: number; type: 'turn_cancelled'; turn: number; reason: string }
   | { seq: number; type: 'run_status'; status: RunStatus }
-  | { seq: number; type: 'plan'; items: TodoView[] }
+  /** `text` since the plan became a file; older transcripts carry `items`. */
+  | { seq: number; type: 'plan'; text?: string; items?: TodoView[] }
   /** For whatever tells the run's story afterwards; the page draws none of it. */
   | { seq: number; type: 'timeline' }
   /** A turning point, with a save state in the run directory. */

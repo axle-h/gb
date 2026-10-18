@@ -20,8 +20,6 @@ pub struct Restored {
     pub turn: u64,
     /// See [`Accounting::resumed`](crate::llm::accounting::Accounting::resumed).
     pub calibration: f64,
-    /// How many overworld turns had passed since the plan was last repositioned.
-    pub turns_since_plan: u32,
     /// Whether [`prompt::SYSTEM_PROMPT`] differs from the stored one, which is never restored.
     pub system_prompt_changed: bool,
 }
@@ -64,8 +62,6 @@ struct Saved {
     turn: u64,
     #[serde(default = "one")]
     calibration: f64,
-    #[serde(default)]
-    turns_since_plan: u32,
     /// Compared on open and never restored, so an edited prompt reaches the model.
     #[serde(default)]
     system_prompt: String,
@@ -143,7 +139,6 @@ impl History {
                 messages: count,
                 turn: saved.turn,
                 calibration: saved.calibration,
-                turns_since_plan: saved.turns_since_plan,
                 system_prompt_changed: changed,
             });
             // Appended after the watermark, so it is logged like anything else.
@@ -177,9 +172,9 @@ impl History {
     }
 
     /// Write the turn down: append whatever is new to the log, then rewrite the live file.
-    pub fn checkpoint(&mut self, turn: u64, calibration: f64, turns_since_plan: u32) {
+    pub fn checkpoint(&mut self, turn: u64, calibration: f64) {
         self.flush_log(turn);
-        self.save_with(turn, calibration, turns_since_plan);
+        self.save_with(turn, calibration);
     }
 
     /// Record what a compaction did, and put the log's watermark back.
@@ -235,14 +230,14 @@ impl History {
 
     /// The save taken at construction, before any turn has run.
     fn save(&mut self) {
-        let (turn, calibration, turns_since_plan) = match &self.restored {
-            Some(restored) => (restored.turn, restored.calibration, restored.turns_since_plan),
-            None => (0, 1.0, 0),
+        let (turn, calibration) = match &self.restored {
+            Some(restored) => (restored.turn, restored.calibration),
+            None => (0, 1.0),
         };
-        self.save_with(turn, calibration, turns_since_plan);
+        self.save_with(turn, calibration);
     }
 
-    fn save_with(&mut self, turn: u64, calibration: f64, turns_since_plan: u32) {
+    fn save_with(&mut self, turn: u64, calibration: f64) {
         let Some(dir) = self.dir.clone() else { return };
         let mut messages = self.messages[1.min(self.messages.len())..].to_vec();
         // A restored image would be priced at the default 85 tokens, and compaction never fire.
@@ -256,7 +251,6 @@ impl History {
             saved_at: crate::run::iso8601(std::time::SystemTime::now()),
             turn,
             calibration,
-            turns_since_plan,
             messages,
         };
         let bytes = match serde_json::to_vec(&saved) {
@@ -400,7 +394,7 @@ mod tests {
         let mut first = History::open(Some(&scratch.0));
         assert!(first.restored().is_none(), "an empty directory restores nothing");
         conversation(&mut first);
-        first.checkpoint(1, 1.0, 0);
+        first.checkpoint(1, 1.0);
         let before = first.len();
         drop(first);
 
@@ -453,7 +447,7 @@ mod tests {
         ));
         assert!(history.last().unwrap().has_image());
         assert!(history.last().unwrap().approximate_tokens() >= 3825, "a map is not an 85-token thumbnail");
-        history.checkpoint(1, 1.0, 0);
+        history.checkpoint(1, 1.0);
         drop(history);
 
         let text = std::fs::read_to_string(scratch.0.join(files::HISTORY)).expect("a file");
@@ -531,7 +525,7 @@ mod tests {
         assert!(history.restored().is_none());
         assert_eq!(history.len(), 1, "just the system prompt");
         history.push(Message::user("### Turn 1"));
-        history.checkpoint(1, 1.0, 0);
+        history.checkpoint(1, 1.0);
         assert!(History::open(Some(&scratch.0)).restored().is_some(), "the next process resumes normally");
     }
 
@@ -545,7 +539,7 @@ mod tests {
         for turn in 2..8 {
             history.push(Message::user(format!("### Turn {turn}\nordinary")));
         }
-        history.checkpoint(1, 1.0, 0);
+        history.checkpoint(1, 1.0);
 
         let dropped = compaction::apply_summary(&mut history, "the story so far", 2);
         history.note_compaction(8, &CompactionNote {
@@ -555,7 +549,7 @@ mod tests {
             dropped,
             summary: Some("the story so far".into()),
         });
-        history.checkpoint(8, 1.0, 0);
+        history.checkpoint(8, 1.0);
 
         assert!(
             !history.iter().any(|m| m.text().is_some_and(|t| t.contains(doomed))),
@@ -575,7 +569,7 @@ mod tests {
         let scratch = Scratch::new("history-marker");
         let mut history = History::open(Some(&scratch.0));
         conversation(&mut history);
-        history.checkpoint(1, 1.0, 0);
+        history.checkpoint(1, 1.0);
         history.note_compaction(2, &CompactionNote {
             before: 900,
             after: 100,
@@ -607,7 +601,7 @@ mod tests {
         let scratch = Scratch::new("history-newrun");
         let mut first = History::open(Some(&scratch.0));
         first.push(Message::user("### Turn 1\nthe old game"));
-        first.checkpoint(1, 1.0, 0);
+        first.checkpoint(1, 1.0);
         drop(first);
         assert!(std::fs::read_to_string(scratch.0.join(files::HISTORY)).unwrap().contains("the old game"));
 
@@ -626,7 +620,7 @@ mod tests {
         let scratch = Scratch::new("history-cleared");
         let mut first = History::open(Some(&scratch.0));
         first.push(Message::user("### Turn 1\nsomething the model would rather forget"));
-        first.checkpoint(1, 1.0, 0);
+        first.checkpoint(1, 1.0);
         drop(first);
 
         let cleared = History::cleared(Some(&scratch.0));
@@ -656,7 +650,7 @@ mod tests {
         let mut first = History::open(Some(&scratch.0));
         assert!(!first.iter().any(|m| m.text() == Some(prompt::RESUMED_NOTE)), "nothing to explain yet");
         conversation(&mut first);
-        first.checkpoint(1, 1.0, 0);
+        first.checkpoint(1, 1.0);
         drop(first);
 
         let second = History::open(Some(&scratch.0));
@@ -669,12 +663,34 @@ mod tests {
         let scratch = Scratch::new("history-calibration");
         let mut first = History::open(Some(&scratch.0));
         conversation(&mut first);
-        first.checkpoint(7, 2.75, 4);
+        first.checkpoint(7, 2.75);
         drop(first);
 
         let restored = History::open(Some(&scratch.0)).restored().expect("restored").clone();
         assert_eq!(restored.calibration, 2.75);
-        assert_eq!(restored.turns_since_plan, 4);
+    }
+
+    /// Older builds wrote a `turns_since_plan` that nothing reads any more.
+    #[test]
+    fn a_history_from_an_older_build_still_resumes() {
+        let scratch = Scratch::new("history-older");
+        let saved = serde_json::json!({
+            "version": VERSION,
+            "turn": 12,
+            "calibration": 1.5,
+            "turns_since_plan": 4,
+            "system_prompt": prompt::SYSTEM_PROMPT,
+            "messages": [
+                { "role": "user", "content": "## Your plan\n\n- [ ] 1 — beat Brock" },
+                { "role": "user", "content": "### Turn 1" },
+            ],
+        });
+        std::fs::write(scratch.0.join(files::HISTORY), saved.to_string()).expect("an old file");
+
+        let history = History::open(Some(&scratch.0));
+        let restored = history.restored().expect("restored");
+        assert_eq!((restored.messages, restored.turn, restored.calibration), (2, 12, 1.5));
+        assert_eq!(history[2].text(), Some("### Turn 1"));
     }
 
     #[test]
@@ -682,7 +698,7 @@ mod tests {
         let scratch = Scratch::new("history-crashloop");
         let mut first = History::open(Some(&scratch.0));
         conversation(&mut first);
-        first.checkpoint(9, 2.75, 3);
+        first.checkpoint(9, 2.75);
         drop(first);
 
         // A process that opens the run and then dies: no checkpoint, only the construction save.
@@ -691,7 +707,6 @@ mod tests {
         let saved: Saved =
             serde_json::from_slice(&std::fs::read(scratch.0.join(files::HISTORY)).expect("a file")).expect("json");
         assert_eq!(saved.calibration, 2.75, "the calibration survived a process that did nothing");
-        assert_eq!(saved.turns_since_plan, 3);
         assert_eq!(saved.turn, 9);
         assert_eq!(History::open(Some(&scratch.0)).restored().expect("restored").calibration, 2.75);
     }
@@ -729,7 +744,7 @@ mod tests {
         let scratch = Scratch::new("history-promptsame");
         let mut first = History::open(Some(&scratch.0));
         conversation(&mut first);
-        first.checkpoint(1, 1.0, 0);
+        first.checkpoint(1, 1.0);
         drop(first);
 
         let restored = History::open(Some(&scratch.0)).restored().expect("restored").clone();
@@ -772,7 +787,7 @@ mod tests {
         let scratch = Scratch::new("history-logprompt");
         let mut first = History::open(Some(&scratch.0));
         conversation(&mut first);
-        first.checkpoint(1, 1.0, 0);
+        first.checkpoint(1, 1.0);
         drop(first);
         drop(History::open(Some(&scratch.0)));
 
@@ -816,7 +831,7 @@ mod tests {
     fn a_conversation_with_no_run_directory_still_plays_it_just_forgets() {
         let mut history = History::open(None);
         conversation(&mut history);
-        history.checkpoint(1, 1.0, 0);
+        history.checkpoint(1, 1.0);
         assert!(history.restored().is_none());
         assert_eq!(history.len(), 5);
     }

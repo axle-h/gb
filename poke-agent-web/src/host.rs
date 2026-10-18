@@ -2131,8 +2131,11 @@ mod tests {
             if request.is_summary() {
                 return Reply::Content("I left my room.".to_string());
             }
-            if request.has_tool("report_issue") && !std::mem::replace(&mut reported, true) {
-                return Reply::call("report_issue", serde_json::json!({ "message": "Checking that an issue is filed." }));
+            if request.has_tool("write_file") && !std::mem::replace(&mut reported, true) {
+                return Reply::call("write_file", serde_json::json!({
+                    "path": "issues/check.md",
+                    "content": "Checking that an issue is filed.",
+                }));
             }
             let downstairs = request.menu_rows().into_iter().find(|(_, row)| row.contains("RedsHouse1F"));
             match (request.location().as_deref(), downstairs) {

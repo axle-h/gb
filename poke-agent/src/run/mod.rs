@@ -24,8 +24,10 @@ pub mod files {
     pub const TRANSCRIPT: &str = "transcript.jsonl";
     /// Legacy: nothing writes it, and only the archiver reads it.
     pub const MEMORIES: &str = "memories";
-    /// The model's plan: what outlives a compaction.
-    pub const TODO: &str = "todo.json";
+    /// The model's plan, as it last wrote it: what outlives a compaction. See [`crate::llm::plan`].
+    pub const PLAN: &str = "plan.md";
+    /// The plan as older runs kept it, rendered into [`PLAN`] once on open.
+    pub const LEGACY_TODO: &str = "todo.json";
     /// The model's battle script and whether it is armed. See [`crate::llm::battle_script`].
     pub const BATTLE_SCRIPT: &str = "battle-script.json";
     /// The live conversation, rewritten each turn: what a restart resumes on. See [`crate::llm::history`].
@@ -39,7 +41,7 @@ pub mod files {
     /// The run's moments, one JSON line each, naming its save state in `MOMENTS`. See [`super::moments`].
     pub const MOMENTS_LOG: &str = "moments.jsonl";
     pub const MOMENTS: &str = "moments";
-    /// One directory per `report_issue` call, with the screen and a save state. See [`crate::llm::incident`].
+    /// One directory per issue the model files, with the screen and a save state. See [`crate::llm::incident`].
     pub const ISSUES: &str = "issues";
     /// Where finished runs are filed, one level below the root, where `resumable` does not look.
     pub const HALL_OF_FAME: &str = "hall-of-fame";

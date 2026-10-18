@@ -37,8 +37,8 @@ fn plays_the_menu(request: &TurnRequest) -> Reply {
         // Both in one message: the read goes to the emulator thread and the screenshot to the
         // worker.
         return Reply::Calls(vec![
-            Call::new("read_map", serde_json::json!({})),
-            Call::new("screenshot", serde_json::json!({})),
+            Call::new("read_file", serde_json::json!({ "path": "map.png" })),
+            Call::new("read_file", serde_json::json!({ "path": "screen.png" })),
         ]);
     }
     match ids.iter().find(|id| id.ends_with(":Warp") || id.ends_with(":Connection")) {
@@ -68,15 +68,15 @@ fn the_llm_plays_from_a_fixture() {
         .requests()
         .iter()
         .flat_map(|request| request.messages.clone())
-        .find(|message| message.role == "tool" && message.text.contains("\"warps\""))
+        .find(|message| message.role == "tool" && message.text.starts_with("map.png\n"))
         .map(|message| message.text)
-        .expect("`read_map` was never answered — the tool round trip did not complete");
-    assert!(read.contains("\"PalletTown\""), "read_map answered from the wrong state: {read:.200}");
-    assert!(read.contains("\"is_dark\""), "read_map lost its shape: {read:.200}");
+        .expect("`map.png` was never answered — the tool round trip did not complete");
+    assert!(read.contains("PalletTown, "), "map.png answered from the wrong state: {read:.200}");
+    assert!(read.contains("warp at ("), "map.png lost its warps: {read:.200}");
     // The picture replaces the grid and legend, so the map is not read twice in two coordinate
     // systems.
-    assert!(!read.contains("\"grid\"") && !read.contains("\"legend\""),
-            "read_map is still shipping the ASCII grid: {read:.200}");
+    assert!(!read.contains("\"grid\"") && !read.contains("legend"),
+            "map.png is still shipping the ASCII grid: {read:.200}");
 
     // Both pictures came back, encoded by the worker in the multi-part content form.
     use image::GenericImageView;

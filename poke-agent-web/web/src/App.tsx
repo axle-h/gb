@@ -23,7 +23,8 @@ export function App() {
   // together. Every LLM run has a script from its first turn, the default; other policies never do.
   const scripted = battleScript?.source != null;
   const chosen: PaneTab = tab === 'script' && !scripted ? 'log' : tab;
-  const pane: PaneTab = chosen === 'plan' && plan.length === 0 ? 'log' : chosen;
+  const planned = plan.some((version) => version.text.trim() !== '');
+  const pane: PaneTab = chosen === 'plan' && !planned ? 'log' : chosen;
   // The leaderboard's cue that it is stale.
   const wins = useMemo(
     () => entries.filter((entry) => entry.type === 'agent' && entry.kind === 'hall_of_fame').length,
@@ -86,7 +87,7 @@ export function App() {
             <button className={pane === 'status' ? 'on' : ''} onClick={() => setTab('status')}>
               Trainer
             </button>
-            {plan.length > 0 && (
+            {planned && (
               <button className={pane === 'plan' ? 'on' : ''} onClick={() => setTab('plan')}>
                 Plan
               </button>

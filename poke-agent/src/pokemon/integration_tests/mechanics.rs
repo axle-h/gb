@@ -1018,13 +1018,13 @@ fn observation_views_describe_the_snapshot() {
         assert_eq!((slot.hp, slot.max_hp), (mon.hp, mon.max_hp));
     }
     assert!(!status.in_battle, "the Pallet Town snapshot is not in a battle");
-    assert!(observe::battle(&state).is_none(), "…so there is no battle to describe");
+    assert!(state.battle.is_none(), "…so there is no battle to describe");
 
     // The overworld loads no dialogue font, so there is nothing on screen to decode.
     assert_eq!(observe::screen_text(&api), None);
 }
 
-/// What `read_map` says about the map, and the picture that goes with it.
+/// What `map.png` says about the map, and the picture that goes with it.
 #[test]
 fn map_view_is_well_formed_stable_and_fully_documented() {
     use crate::pokemon::observe;
@@ -1121,7 +1121,7 @@ fn map_view_flags_every_warp_the_menu_cannot_offer() {
             if !matches!(action.tile, MetaTile::Warp { .. }) { continue }
             let at = (action.destination.x, action.destination.y);
             assert!(reachable.contains(&at),
-                    "{}: the menu offers the warp at {at:?} and `read_map` says there is no route to it",
+                    "{}: the menu offers the warp at {at:?} and `map.png` says there is no route to it",
                     path.display());
         }
         if view.warps.iter().any(|w| !w.reachable_from_here) { something_out_of_reach = true; }
@@ -1157,28 +1157,23 @@ fn the_badge_strip_reports_which_badges_not_only_how_many() {
     assert_eq!(earned, 8, "the post-Earth-Badge fixture should hold every badge, not {earned}");
 }
 
-/// The battle view of a live battle, including an option list that is never empty.
+/// A live battle as the turn reads it, including an option list that is never empty.
 #[test]
-fn battle_view_describes_a_live_battle() {
+fn a_live_battle_reads_whole() {
     use crate::pokemon::observe;
 
     let mut fixture = TestFixture::new(BATTLE_STATE, Duration::from_secs(10), vec![]);
     let state = fixture.game_state();
 
-    let battle = observe::battle(&state).expect("the battle snapshot should be in a battle");
-    assert!(battle.player.hp <= battle.player.max_hp);
-    assert!(battle.enemy.hp <= battle.enemy.max_hp);
+    let battle = state.battle.as_ref().expect("the battle snapshot should be in a battle");
+    assert!(battle.player.current_hp <= battle.player.stats.hp);
+    assert!(battle.enemy.current_hp <= battle.enemy.stats.hp);
     assert!(battle.player.level > 0 && battle.enemy.level > 0);
-    // The legal actions come from the turn's battle menu, not this view.
     assert!(!crate::pokemon::policy::battle_options(&state).unwrap_or_default().is_empty(),
             "a battle with no legal action would deadlock the agent");
-    assert!(!battle.player.moves.is_empty(), "the active Pokémon knows no moves");
+    assert!(battle.player.moves.iter().flatten().next().is_some(), "the active Pokémon knows no moves");
     assert_eq!(observe::status(&state, &fixture.api()).in_battle, true);
-    assert_eq!(battle.active_party_slot as usize, {
-        let slot = battle.active_party_slot as usize;
-        assert!(slot < state.pokemon.len(), "active slot {slot} is outside the party");
-        slot
-    });
+    assert!((battle.active_party_slot as usize) < state.pokemon.len(), "the active slot is outside the party");
 }
 
 /// Routes run only over visited maps: an absent map means unvisited, never unreachable.

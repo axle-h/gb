@@ -77,10 +77,13 @@ impl Brain for ScriptedBrain {
         if let Some(script) = self.script.filter(|_| !self.armed) {
             self.armed = true;
             calls.push(Call::new(
-                "set_battle_script",
+                "write_file",
                 serde_json::json!({
-                    "script": script,
-                    "purpose": "win every battle with the strongest move the lead knows",
+                    "path": "battle-script.rhai",
+                    "content": match crate::llm::battle_script::purpose_of(script) {
+                        Some(_) => script.to_string(),
+                        None => format!("// win every battle with the strongest move the lead knows\n{script}"),
+                    },
                 }),
             ));
         }

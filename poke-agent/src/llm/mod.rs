@@ -16,7 +16,8 @@ pub mod prompt;
 pub mod map_image;
 pub mod protocol;
 pub mod screenshot;
-pub mod todo;
+pub mod plan;
+pub mod files;
 pub mod tools;
 pub mod worker;
 

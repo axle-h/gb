@@ -2,17 +2,24 @@
 
 use crate::pokemon::badge::Badge;
 
+/// One chapter: its file under `guide/`, and what it says.
+macro_rules! chapter {
+    ($file:literal) => {
+        ($file, include_str!(concat!("guide/", $file)))
+    };
+}
+
 /// Chapter `i` is what to do when [`Badge::ORDER`]`[i]` is the next badge to win.
-const CHAPTERS: [&str; 9] = [
-    include_str!("guide/00-boulder-badge.md"),
-    include_str!("guide/01-cascade-badge.md"),
-    include_str!("guide/02-thunder-badge.md"),
-    include_str!("guide/03-rainbow-badge.md"),
-    include_str!("guide/04-soul-badge.md"),
-    include_str!("guide/05-marsh-badge.md"),
-    include_str!("guide/06-volcano-badge.md"),
-    include_str!("guide/07-earth-badge.md"),
-    include_str!("guide/08-elite-four.md"),
+const CHAPTERS: [(&str, &str); 9] = [
+    chapter!("00-boulder-badge.md"),
+    chapter!("01-cascade-badge.md"),
+    chapter!("02-thunder-badge.md"),
+    chapter!("03-rainbow-badge.md"),
+    chapter!("04-soul-badge.md"),
+    chapter!("05-marsh-badge.md"),
+    chapter!("06-volcano-badge.md"),
+    chapter!("07-earth-badge.md"),
+    chapter!("08-elite-four.md"),
 ];
 
 /// The index of the first badge in [`Badge::ORDER`] not held, or 8 when all of them are.
@@ -21,10 +28,20 @@ pub fn chapter_index(badges: Badge) -> usize {
 }
 
 pub fn chapter(badges: Badge) -> &'static str {
-    CHAPTERS[chapter_index(badges)]
+    CHAPTERS[chapter_index(badges)].1
 }
 
-/// What the model's last `read_guide` is worth on the turn being rendered.
+/// Every chapter's file name, in order.
+pub fn files() -> impl Iterator<Item = &'static str> {
+    CHAPTERS.iter().map(|(file, _)| *file)
+}
+
+/// The chapter at `index`: its file name and its text.
+pub fn chapter_at(index: usize) -> Option<(&'static str, &'static str)> {
+    CHAPTERS.get(index).copied()
+}
+
+/// What the model's last read of the current chapter is worth on the turn being rendered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum GuideStatus {
     /// The chapter last read is the one [`chapter`] would hand over now.
@@ -34,7 +51,7 @@ pub enum GuideStatus {
     Stale { index: usize },
 }
 
-/// Whether the [`chapter_index`] a `read_guide` was last answered from still matches `badges`.
+/// Whether the [`chapter_index`] last read still matches `badges`.
 pub fn status(badges: Badge, last_read: Option<usize>) -> GuideStatus {
     let now = chapter_index(badges);
     match last_read {
@@ -91,11 +108,11 @@ mod tests {
         assert_eq!(chapter_goal(8), "the Elite Four");
     }
 
-    /// A place name in the guide is a key the model copies into `read_route`.
+    /// A place name in the guide is a key the model copies into `routes/<Map>.md`.
     #[test]
     fn every_place_the_guide_names_is_a_real_map() {
         let mut checked = 0;
-        for (index, chapter) in CHAPTERS.iter().enumerate() {
+        for (index, (_, chapter)) in CHAPTERS.iter().enumerate() {
             for name in chapter.split('`').skip(1).step_by(2) {
                 assert!(
                     Map::iter().any(|map| map.to_string() == name),
@@ -110,7 +127,7 @@ mod tests {
     /// A chapter is paid for on every request until a compaction takes it.
     #[test]
     fn no_chapter_outgrows_what_it_costs_to_carry() {
-        for (index, chapter) in CHAPTERS.iter().enumerate() {
+        for (index, (_, chapter)) in CHAPTERS.iter().enumerate() {
             assert!(!chapter.is_empty(), "chapter {index} is empty");
             assert!(chapter.len() < 3_500, "chapter {index} is {} bytes", chapter.len());
         }

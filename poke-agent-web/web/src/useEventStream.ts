@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { STALE_MS } from './api';
+import { STALE_MS, planText } from './api';
 import type {
   BattleScriptView,
   Connection,
@@ -7,7 +7,7 @@ import type {
   EntryBody,
   RunStatus,
   Status,
-  TodoView,
+  PlanVersion,
   UiEvent,
   UsageView,
 } from './api';
@@ -88,8 +88,8 @@ export interface EventStream {
   speed: number | null;
   /** From the transition event; the heartbeat's copy is the late-joiner path. */
   run: RunStatus;
-  /** State, not a log row: each event replaces the whole list. */
-  plan: TodoView[];
+  /** State, not a log row: every version of `plan.md`, oldest first. */
+  plan: PlanVersion[];
   /** State, not a log row, like `plan`; `null` until a script is set. */
   battleScript: BattleScriptView | null;
 }
@@ -236,7 +236,7 @@ export function useEventStream(): EventStream {
   const [connection, setConnection] = useState<Connection>('connecting');
   const [usage, setUsage] = useState<UsageView | null>(null);
   const [run, setRun] = useState<RunStatus>({ state: 'booting' });
-  const [plan, setPlan] = useState<TodoView[]>([]);
+  const [plan, setPlan] = useState<PlanVersion[]>([]);
   const [battleScript, setBattleScript] = useState<BattleScriptView | null>(null);
   const [speed, setSpeed] = useState<number | null>(null);
   const anchor = useRef<{ wall: number; emulated: number } | null>(null);
@@ -262,9 +262,10 @@ export function useEventStream(): EventStream {
             break;
           }
           // The last plan and script in the backlog, unless the stream has delivered newer ones.
-          const planned = backlog.filter((event) => event.type === 'plan');
-          const latest = planned[planned.length - 1];
-          if (latest?.type === 'plan') setPlan((live) => (live.length > 0 ? live : latest.items));
+          const planned: PlanVersion[] = backlog.flatMap((event) =>
+            event.type === 'plan' ? [{ seq: event.seq, at: event.at, text: planText(event) }] : [],
+          );
+          setPlan((live) => mergeVersions(planned, live));
           const scripts = backlog.filter((event) => event.type === 'battle_script');
           const script = scripts[scripts.length - 1];
           if (script?.type === 'battle_script') {
@@ -328,7 +329,8 @@ export function useEventStream(): EventStream {
           return;
         }
         if (event.type === 'plan') {
-          setPlan(event.items);
+          const version: PlanVersion = { seq: event.seq, at: event.at, text: planText(event) };
+          setPlan((live) => mergeVersions(live, [version]));
           return;
         }
         if (event.type === 'battle_script') {
@@ -413,4 +415,12 @@ function sampleSpeed(
   setSpeed((current) =>
     current === null ? sample : current + (sample - current) * SPEED_SMOOTHING,
   );
+}
+
+/** Versions from both sources, one per `seq`, oldest first, a repeat of the one before dropped. */
+function mergeVersions(a: PlanVersion[], b: PlanVersion[]): PlanVersion[] {
+  const bySeq = new Map<number, PlanVersion>();
+  for (const version of [...a, ...b]) bySeq.set(version.seq, version);
+  const sorted = [...bySeq.values()].sort((x, y) => x.seq - y.seq);
+  return sorted.filter((version, index) => index === 0 || version.text !== sorted[index - 1].text);
 }

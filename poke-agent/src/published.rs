@@ -78,8 +78,8 @@ pub enum UiEventBody {
 
     #[serde(rename = "run_status")]
     Run { status: RunStatus },
-    /// The model's plan, in full, whenever it changes.
-    Plan { items: Vec<TodoView> },
+    /// The model's `plan.md`, in full, whenever it changes: the transcript keeps every version.
+    Plan { text: String },
     /// The model's battle script, whenever it changes.
     BattleScript { source: Option<String>, armed: bool, is_default: bool, last_failure: Option<String> },
     /// Where the player is and what they have, whenever that changes. See [`crate::run::moments`].
@@ -112,13 +112,6 @@ pub enum RunStatus {
     /// when it reopens, or the endpoint refused a streak of requests.
     Throttled { until_ms: u64, message: String },
     Error { message: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct TodoView {
-    pub id: u32,
-    pub text: String,
-    pub done: bool,
 }
 
 /// Context occupancy and the run's bill so far, published with every decision.
@@ -645,9 +638,9 @@ mod tests {
     #[test]
     fn a_joiner_is_handed_the_plan_as_well_as_the_heartbeat() {
         let published = Published::new();
-        let item = |id: u32, text: &str| TodoView { id, text: text.to_string(), done: false };
+        let plan = |text: &str| UiEventBody::Plan { text: text.to_string() };
 
-        published.publish_event(UiEventBody::Plan { items: vec![item(1, "get the Boulder Badge")] });
+        published.publish_event(plan("1. get the Boulder Badge"));
         for _ in 0..50 {
             published.publish_event(UiEventBody::AssistantReasoning { turn: 1, text: "…".into() });
         }
@@ -655,17 +648,17 @@ mod tests {
 
         let (_receiver, opening) = published.join_events();
         assert_eq!(opening.len(), 2, "the plan and the heartbeat: {opening:#?}");
-        let UiEventBody::Plan { items } = &opening[0].body else { panic!("the plan first") };
-        assert_eq!(items.len(), 1);
+        let UiEventBody::Plan { text } = &opening[0].body else { panic!("the plan first") };
+        assert_eq!(text, "1. get the Boulder Badge");
         assert!(matches!(opening[1].body, UiEventBody::Status(_)), "then the heartbeat");
 
-        published.publish_event(UiEventBody::Plan { items: vec![item(1, "done"), item(2, "Cerulean")] });
+        published.publish_event(plan("1. Cerulean"));
         let (_receiver, opening) = published.join_events();
-        let plan = opening.iter().find_map(|event| match &event.body {
-            UiEventBody::Plan { items } => Some(items),
+        let latest = opening.iter().find_map(|event| match &event.body {
+            UiEventBody::Plan { text } => Some(text.as_str()),
             _ => None,
         });
-        assert_eq!(plan.map(Vec::len), Some(2), "the latest list, not an accumulation of every one");
+        assert_eq!(latest, Some("1. Cerulean"), "the latest plan, not an accumulation of every one");
         assert!(opening.windows(2).all(|pair| pair[0].seq < pair[1].seq), "oldest first: {opening:#?}");
     }
 
@@ -685,11 +678,7 @@ mod tests {
         for _ in 0..50 {
             published.publish_event(UiEventBody::AssistantReasoning { turn: 1, text: "…".into() });
         }
-        published.publish_event(UiEventBody::Plan { items: vec![TodoView {
-            id: 1,
-            text: "get the Boulder Badge".to_string(),
-            done: false,
-        }] });
+        published.publish_event(UiEventBody::Plan { text: "1. get the Boulder Badge".to_string() });
         published.publish_status(snapshot("wait", 100));
 
         let (_receiver, opening) = published.join_events();
@@ -734,12 +723,12 @@ mod tests {
         let json = serde_json::to_value(UiEvent {
             seq: 7,
             at: 1_760_000_000_000,
-            body: UiEventBody::Run { status: RunStatus::RunningTool { name: "read_map".into() } },
+            body: UiEventBody::Run { status: RunStatus::RunningTool { name: "read_file".into() } },
         })
         .expect("serialises");
         assert_eq!(json["type"], "run_status");
         assert_eq!(json["status"]["state"], "running_tool");
-        assert_eq!(json["status"]["name"], "read_map");
+        assert_eq!(json["status"]["name"], "read_file");
 
         let json = serde_json::to_value(UiEventBody::Run { status: RunStatus::Booting }).expect("serialises");
         assert_eq!(json["status"]["state"], "booting", "a unit variant is still an object");
