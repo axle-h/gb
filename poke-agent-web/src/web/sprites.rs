@@ -17,6 +17,12 @@ pub const SPECIES_COUNT: usize = 151;
 /// The favicon is drawn at 2× so it stays crisp on a hidpi tab strip; 16 px doubled is 32.
 const FAVICON_SCALE: usize = 2;
 
+/// 16 px × 10 + 16 px each side is the 192 px a web manifest asks for.
+const HOME_SCREEN_SCALE: usize = 10;
+const HOME_SCREEN_MARGIN: usize = 16;
+/// The page's `--bg`.
+const HOME_SCREEN_GROUND: [u8; 4] = [0x0f, 0x11, 0x15, 0xff];
+
 /// The Game Boy's four shades as RGBA: 0 is a body's white fill, 3 its outline.
 const INK: [[u8; 4]; 4] = [
     [0xF2, 0xF5, 0xF9, 0xFF],
@@ -111,20 +117,32 @@ pub async fn favicon() -> Response {
     png_response(icon()).into_response()
 }
 
+/// `GET /icon.png`: the same ball for a home screen, which wants it large and on an opaque ground.
+pub async fn home_screen_icon() -> Response {
+    static ICON: OnceLock<Vec<u8>> = OnceLock::new();
+    png_response(ICON.get_or_init(|| ball(HOME_SCREEN_SCALE, HOME_SCREEN_MARGIN, Some(HOME_SCREEN_GROUND)))).into_response()
+}
+
 fn icon() -> &'static [u8] {
     static ICON: OnceLock<Vec<u8>> = OnceLock::new();
-    ICON.get_or_init(|| {
-        let shades = poke_ball_shades();
-        let size = (BALL_PX * FAVICON_SCALE) as u32;
-        let mut image = image::RgbaImage::new(size, size);
-        for y in 0..size as usize {
-            for x in 0..size as usize {
-                let shade = shades[(y / FAVICON_SCALE) * BALL_PX + x / FAVICON_SCALE];
-                image.put_pixel(x as u32, y as u32, image::Rgba(BALL_INK[shade as usize]));
+    ICON.get_or_init(|| ball(FAVICON_SCALE, 0, None))
+}
+
+/// The ball at `scale`, `margin` pixels in from each edge, over `ground` or transparency.
+fn ball(scale: usize, margin: usize, ground: Option<[u8; 4]>) -> Vec<u8> {
+    let shades = poke_ball_shades();
+    let size = (BALL_PX * scale + 2 * margin) as u32;
+    let mut image = image::RgbaImage::from_pixel(size, size, image::Rgba(ground.unwrap_or([0; 4])));
+    for y in 0..BALL_PX * scale {
+        for x in 0..BALL_PX * scale {
+            let ink = BALL_INK[shades[(y / scale) * BALL_PX + x / scale] as usize];
+            // The ball's own transparent ink shows the ground through.
+            if ink[3] != 0 {
+                image.put_pixel((x + margin) as u32, (y + margin) as u32, image::Rgba(ink));
             }
         }
-        encode(&image)
-    })
+    }
+    encode(&image)
 }
 
 fn encode(image: &image::RgbaImage) -> Vec<u8> {

@@ -6,14 +6,60 @@ export interface BadgeView {
   earned: boolean;
 }
 
+/** One move; `name` is the game's spelling, spaces and all. */
+export interface MoveView {
+  name: string;
+  pp: number;
+  max_pp: number;
+  /** `null` for a status move. */
+  power: number | null;
+  accuracy: number;
+  move_type: string;
+}
+
 /** One party slot; the sprite is the separately cached `/api/pokemon/{dex}/front.png`. */
 export interface PartyMonView {
   nickname: string;
+  /** The cartridge's spelling, in capitals like a default nickname. */
+  species: string;
   dex: number;
   level: number;
   hp: number;
   max_hp: number;
   status: string;
+  types: string[];
+  attack: number;
+  defense: number;
+  speed: number;
+  special: number;
+  moves: MoveView[];
+  exp: number;
+  /** Where this level's experience started and the next level's starts; `null` at 100. */
+  exp_level: number;
+  exp_next: number | null;
+}
+
+/** What the player is fighting; an unmasked ghost is `GHOST` with no dex number. */
+export interface OpponentView {
+  species: string;
+  dex: number | null;
+  level: number;
+  hp: number;
+  max_hp: number;
+  status: string;
+  types: string[];
+  battle: 'Wild' | 'Trainer' | 'Safari';
+  active_slot: number;
+}
+
+/** One line of `/api/moments`, and the body of a `moment` event. */
+export interface Moment {
+  n: number;
+  kind: string;
+  title: string;
+  map: string;
+  playtime: string;
+  badges: number;
 }
 
 export interface GameView {
@@ -28,6 +74,8 @@ export interface GameView {
   playtime: string;
   party: PartyMonView[];
   in_battle: boolean;
+  /** Absent from a build older than this page. */
+  opponent?: OpponentView | null;
 }
 
 export type RunStatus =
@@ -190,7 +238,7 @@ export type UiEvent = At &
   /** For whatever tells the run's story afterwards; the page draws none of it. */
   | { seq: number; type: 'timeline' }
   /** A turning point, with a save state in the run directory. */
-  | { seq: number; type: 'moment'; kind: string; title: string }
+  | ({ seq: number; type: 'moment' } & Moment)
   | ({ seq: number; type: 'battle_script' } & BattleScriptView)
   | {
       seq: number;
@@ -222,7 +270,9 @@ export type EntryBody =
     }
   | { type: 'decision'; turn: number; summary: string; narration?: string }
   | { type: 'cancelled'; turn: number; reason: string }
-  | { type: 'compacted'; before: number; after: number; summarised: boolean };
+  | { type: 'compacted'; before: number; after: number; summarised: boolean }
+  /** `n` is absent from a transcript older than `/api/moments`. */
+  | { type: 'moment'; kind: string; title: string; n?: number };
 
 /** One row of the log; `raw` is the wire event as it arrived, shown when the row is expanded. */
 export type Entry = EntryBody & {

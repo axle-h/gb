@@ -183,7 +183,7 @@ time**, the one figure that survives a resume without bookkeeping.
 ## The web UI
 
 `poke-agent-web/web/` is a Vite + React + TypeScript SPA, embedded into the binary by `rust-embed`
-and served by the same process that runs the emulator. Thirteen read-only endpoints and three that are
+and served by the same process that runs the emulator. Sixteen read-only endpoints and three that are
 not:
 
 | | |
@@ -195,18 +195,22 @@ not:
 | `/api/plan-history?limit=&before=` | the plan's versions, a page at a time back from the newest, for the plan panel |
 | `/api/battle-script-history?limit=&before=` | the same for the battle script |
 | `/api/leaderboard?limit=` | the runs that have finished the game, fastest first |
+| `/api/moments` | the run's turning points, for the Highlights pane |
+| `/api/moments/{n}/screen.png` | the screen a moment was taken on, read out of its save state |
 | `/api/badges.png` | the eight gym badges, decoded from the cartridge's trainer-card graphics |
 | `/api/pokemon/{dex}/front.png` | one Pokémon's battle sprite, from the disassembly's picture |
 | `/api/tool-image/{seq}/image.png` | the picture a tool answered with, while it is still held |
 | `/favicon.png` | the overworld Poké Ball, ditto |
+| `/icon.png` | the same ball at 192 px, for a phone's home screen |
 | `/api/healthz` | liveness |
 | `/version` | which build is running: crate version, build date, branch, short commit |
 | `/reset-game` | start the game over, in place — HTTP Basic, off unless `GB_ADMIN_TOKEN` is set |
 | `POST /api/new-run` | the same thing for a script, with an `X-GB-Token` header |
 | `POST /api/clear` | keep the run, wipe what the model remembers of it — same header |
 
-Every tool the model calls is a line in the log, as a sentence rather than a wire call, opening onto
-what was asked and what came back. Under the plan is the battle script, because `armed` is a live
+The log is a card per turn: the model's own sentence first, then what it did, then what the game
+said. Story shows that and the run's moments; Everything adds each file it read and each thought,
+opening onto what was asked and what came back. A party slot opens onto the mon's moves and stats. Under the plan is the battle script, because `armed` is a live
 fact and a scripted battle is otherwise invisible from outside.
 
 **No graphics are committed to this repo.** The badges, the sprites, the favicon and every tile,

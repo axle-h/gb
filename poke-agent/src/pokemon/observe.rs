@@ -136,11 +136,7 @@ pub fn party(state: &GameState) -> Vec<PartyMemberView> {
             max_hp: mon.stats.hp,
             status: format!("{}", mon.status),
             fainted: mon.current_hp == 0,
-            types: {
-                let mut types: Vec<String> = mon.types.iter().map(|t| format!("{t:?}")).collect();
-                types.dedup(); // a single-type mon stores its one type in both slots
-                types
-            },
+            types: type_names(&mon.types),
             attack: mon.stats.attack,
             defense: mon.stats.defense,
             speed: mon.stats.speed,
@@ -428,16 +424,47 @@ view! {
 }
 
 view! {
-    /// One party slot on the status panel: enough for a sprite, a name and a health bar.
+    /// One party slot on the status panel, and the sheet it opens onto.
     pub struct PartyMonView {
         /// The species name in upper case unless renamed.
         pub nickname: String,
+        /// The cartridge's own spelling, `NIDORAN♂` and `MR.MIME` included.
+        pub species: String,
         pub dex: u16,
         pub level: u8,
         pub hp: u16,
         pub max_hp: u16,
         /// `""` when healthy, so the client can test it without knowing the spelling of "None".
         pub status: String,
+        /// One entry for a single-typed mon.
+        pub types: Vec<String>,
+        pub attack: u16,
+        pub defense: u16,
+        pub speed: u16,
+        pub special: u16,
+        pub moves: Vec<MoveView>,
+        pub exp: u32,
+        /// The experience this level began at, and the next one begins at; `None` at 100.
+        pub exp_level: u32,
+        pub exp_next: Option<u32>,
+    }
+}
+
+view! {
+    /// What the player is fighting; a ghost the Silph Scope has not unmasked is `GHOST`, as on screen.
+    pub struct OpponentView {
+        pub species: String,
+        /// `None` for an unmasked ghost, which has no sprite to draw.
+        pub dex: Option<u16>,
+        pub level: u8,
+        pub hp: u16,
+        pub max_hp: u16,
+        pub status: String,
+        pub types: Vec<String>,
+        /// `Wild`, `Trainer` or `Safari`.
+        pub battle: String,
+        /// The party slot fighting it.
+        pub active_slot: u8,
     }
 }
 
@@ -457,6 +484,7 @@ view! {
         pub playtime: String,
         pub party: Vec<PartyMonView>,
         pub in_battle: bool,
+        pub opponent: Option<OpponentView>,
     }
 }
 
@@ -474,20 +502,65 @@ pub fn status(state: &GameState, readout: &(impl Readout + ?Sized)) -> StatusVie
         money: state.money,
         playtime: playtime(readout),
         party: state.pokemon.iter()
-            .map(|mon| PartyMonView {
-                nickname: mon.nickname.to_default_string(),
-                dex: mon.species.metadata().pokedex_number as u16,
-                level: mon.level,
-                hp: mon.current_hp,
-                max_hp: mon.stats.hp,
-                status: match mon.status {
-                    PokemonStatus::None => String::new(),
-                    other => format!("{other}"),
-                },
+            .map(|mon| {
+                let group = mon.species.metadata().experience_group;
+                PartyMonView {
+                    nickname: mon.nickname.to_default_string(),
+                    species: species_name(mon.species),
+                    dex: mon.species.metadata().pokedex_number as u16,
+                    level: mon.level,
+                    hp: mon.current_hp,
+                    max_hp: mon.stats.hp,
+                    status: status_word(mon.status),
+                    types: type_names(&mon.types),
+                    attack: mon.stats.attack,
+                    defense: mon.stats.defense,
+                    speed: mon.stats.speed,
+                    special: mon.stats.special,
+                    moves: mon.moves.iter().flatten()
+                        .map(|m| MoveView { name: m.name.to_string(), ..move_view(m) })
+                        .collect(),
+                    exp: mon.experience,
+                    exp_level: group.experience_for_level(mon.level.max(1)),
+                    exp_next: (mon.level < 100).then(|| group.experience_for_level(mon.level + 1)),
+                }
             })
             .collect(),
         in_battle: state.battle.is_some(),
+        opponent: state.battle.as_ref().map(|battle| {
+            let enemy = &battle.enemy;
+            let ghost = crate::pokemon::battle::is_ghost_battle(state.map.map, &state.bag, battle.battle_type);
+            OpponentView {
+                species: if ghost { "GHOST".into() } else { species_name(enemy.species) },
+                dex: (!ghost).then(|| enemy.species.metadata().pokedex_number as u16),
+                level: enemy.level,
+                hp: enemy.current_hp,
+                max_hp: enemy.stats.hp,
+                status: status_word(enemy.status),
+                types: if ghost { Vec::new() } else { type_names(&enemy.types) },
+                battle: battle.battle_type.to_string(),
+                active_slot: battle.active_party_slot,
+            }
+        }),
     }
+}
+
+fn species_name(species: crate::pokemon::species::PokemonSpecies) -> String {
+    poke_core::tables::MONSTER_NAMES[species as usize - 1].to_string()
+}
+
+fn status_word(status: PokemonStatus) -> String {
+    match status {
+        PokemonStatus::None => String::new(),
+        other => format!("{other}"),
+    }
+}
+
+/// A single-typed mon stores its one type in both slots.
+fn type_names(types: &[crate::pokemon::pokemon::PokemonType; 2]) -> Vec<String> {
+    let mut names: Vec<String> = types.iter().map(|t| format!("{t:?}")).collect();
+    names.dedup();
+    names
 }
 
 /// The maps the world graph knows, for a caller that wants the list without the edges.

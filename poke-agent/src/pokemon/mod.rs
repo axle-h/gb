@@ -22,7 +22,7 @@ use crate::pokemon::move_name::PokemonMoveName;
 use crate::pokemon::options::{GameOptions, GameOptionsReader};
 use crate::pokemon::pokedex::PokedexReader;
 use crate::pokemon::pokemon::Pokemon;
-use pokedex::Pokedex;
+pub use pokedex::Pokedex;
 use crate::pokemon::map_metadata::{MapMetadataCache, MapMetadataReader};
 use crate::pokemon::strings::PokemonString;
 

@@ -1,36 +1,96 @@
-import { memo, useLayoutEffect, useRef, useState } from 'react';
+import { memo, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import type { Entry } from '../api';
 import { lastModelSide } from '../useEventStream';
+import {
+  type ToolEntry,
+  category,
+  compact,
+  describeTool,
+  isAction,
+  isIssue,
+  pretty,
+  summarise,
+  toolChip,
+} from './describe';
 
 /** Within this many pixels of the bottom counts as following the stream. */
 const PIN_SLACK = 24;
+
+/** A card shows this many of its game lines until asked for the rest. */
+const GAME_LINES = 4;
+
+export type LogMode = 'story' | 'everything';
+
+type TurnEntry = Extract<Entry, { type: 'turn' }>;
+
+/** One turn and everything that happened until the next, or the rows before the first turn. */
+interface Card {
+  kind: 'card';
+  key: number;
+  turn?: TurnEntry;
+  /** The rest of a turn a moment interrupted, drawn without the turn's header. */
+  continued: boolean;
+  rows: Entry[];
+}
+
+interface Banner {
+  kind: 'moment';
+  key: number;
+  entry: Extract<Entry, { type: 'moment' }>;
+}
+
+/** A moment closes the card it lands in and the turn carries on below it, so the order is kept. */
+function group(entries: Entry[]): (Card | Banner)[] {
+  const out: (Card | Banner)[] = [];
+  let card: Card | null = null;
+  for (const entry of entries) {
+    if (entry.type === 'turn') {
+      card = { kind: 'card', key: entry.seq, turn: entry, continued: false, rows: [] };
+      out.push(card);
+    } else if (entry.type === 'moment') {
+      out.push({ kind: 'moment', key: entry.seq, entry });
+      card = null;
+    } else {
+      if (!card) {
+        const previous = [...out].reverse().find((item): item is Card => item.kind === 'card');
+        card = { kind: 'card', key: entry.seq, turn: previous?.turn, continued: previous?.turn !== undefined, rows: [] };
+        out.push(card);
+      }
+      card.rows.push(entry);
+    }
+  }
+  return out;
+}
 
 /** The log; `memo` so the status heartbeat never re-renders it. */
 export const Conversation = memo(function Conversation({
   entries,
   visible = true,
+  mode,
+  raw,
 }: {
   entries: Entry[];
   /** False while a phone shows another tab; see the pin effect. */
   visible?: boolean;
+  mode: LogMode;
+  /** Every card shows the wire JSON it was made from. */
+  raw: boolean;
 }) {
   const list = useRef<HTMLDivElement>(null);
   // The live thought scrolls in its own capped box, so its tail is followed separately.
-  const thought = useRef<HTMLSpanElement>(null);
+  const thought = useRef<HTMLDivElement>(null);
   const [thoughtPinned, setThoughtPinned] = useState(true);
   // Pinned to the bottom unless the viewer has scrolled up.
   const [pinned, setPinned] = useState(true);
-  const [showAllRaw, setShowAllRaw] = useState(false);
-  const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
-  // Finished thoughts the viewer reopened; separate from `expanded`, which shows wire JSON.
-  const [thoughts, setThoughts] = useState<Set<number>>(() => new Set());
+  // Rows the viewer opened, by `seq`: a tool's detail, a finished thought, a card's earlier game lines.
+  const [opened, setOpened] = useState<Set<number>>(() => new Set());
 
   // `visible` is a dependency, not a condition: a hidden pane has no height, so the pin is re-applied
   // on return, while on a desk `visible` can be stale-false with the pane on screen.
   useLayoutEffect(() => {
     const element = list.current;
     if (pinned && element) element.scrollTop = element.scrollHeight;
-  }, [entries, pinned, showAllRaw, expanded, thoughts, visible]);
+  }, [entries, pinned, raw, mode, opened, visible]);
 
   // The live thought follows its own tail, and re-pins when the next thought starts.
   const openBlock = lastModelSide(entries);
@@ -52,82 +112,30 @@ export const Conversation = memo(function Conversation({
   };
 
   const toggle = (seq: number) =>
-    setExpanded((current) => {
+    setOpened((current) => {
       const next = new Set(current);
       if (!next.delete(seq)) next.add(seq);
       return next;
     });
 
-  const toggleThought = (seq: number) =>
-    setThoughts((current) => {
-      const next = new Set(current);
-      if (!next.delete(seq)) next.add(seq);
-      return next;
-    });
+  const items = group(entries);
+  const lastCard = items[items.length - 1];
 
-  // Each turn's kind as of the row being drawn, filled in as the rows are: a restarted worker
-  // numbers its turns again, so the nearest `turn` row above is the one a call belongs to.
-  const turnKinds = new Map<number, string>();
+  // A run with no model has no turns to tell apart, so it has no Story.
+  const shown: LogMode = hasTurns(entries) ? mode : 'everything';
+  const view: View = { mode: shown, raw, opened, toggle, liveSeq, thought, onThoughtScroll };
 
   return (
     <div className="conversation">
-      <div className="conversation-bar">
-        <button
-          className={showAllRaw ? 'raw-toggle on' : 'raw-toggle'}
-          onClick={() => setShowAllRaw(!showAllRaw)}
-          title="Show the JSON behind every line, exactly as it arrived on /api/events"
-        >
-          raw
-        </button>
-      </div>
       <div className="conversation-list" ref={list} onScroll={onScroll}>
-        {entries.length === 0 && <p className="dim">waiting for the agent…</p>}
-        {entries.map((entry, index) => {
-          if (entry.type === 'turn') turnKinds.set(entry.turn, entry.kind);
-          // A thought is live exactly while it is the last row the model wrote, the same rule as `fold`.
-          const live = entry.type === 'reasoning' && index === openBlock;
-          const unfolded = live || thoughts.has(entry.seq);
-          const kind = entry.type === 'tool' ? turnKinds.get(entry.turn) : undefined;
-          const { gutter, body, title, modifier } = render(entry, unfolded, kind);
-          const open = showAllRaw || expanded.has(entry.seq);
-          const thinking = entry.type === 'reasoning';
-          return (
-            <div
-              key={entry.seq}
-              className={`entry ${entry.type} ${modifier}${open ? ' open' : ''}${live ? ' live' : ''}`}
-            >
-              {/* A row with no `at` gets a blank of the same width, so the column does not jump. */}
-              <time className="at" dateTime={entry.at ? new Date(entry.at).toISOString() : undefined} title={longTime(entry.at)}>
-                {shortTime(entry.at)}
-              </time>
-              <span className="chip" title={title}>
-                {gutter}
-              </span>
-              <span className="body" ref={live ? thought : undefined} onScroll={live ? onThoughtScroll : undefined}>
-                <button
-                  className="line"
-                  onClick={() => (thinking ? toggleThought(entry.seq) : toggle(entry.seq))}
-                  title={
-                    thinking
-                      ? 'What the model thought on its way to this turn'
-                      : entry.type === 'tool'
-                        ? 'What was asked and what came back'
-                        : 'Show the JSON this line was made from'
-                  }
-                >
-                  {body}
-                  {entry.type === 'tool' && <span className="disclose">{open ? '▾' : '▸'}</span>}
-                </button>
-                {entry.count > 1 && <span className="repeat">×{entry.count}</span>}
-                {/* A tool row opens onto what was asked and answered; its wire JSON is behind `raw`. */}
-                {open && entry.type === 'tool' && <ToolDetail entry={entry} />}
-                {open && (entry.type !== 'tool' || showAllRaw) && (
-                  <pre className="raw">{JSON.stringify(entry.raw, null, 2)}</pre>
-                )}
-              </span>
-            </div>
-          );
-        })}
+      {entries.length === 0 && <p className="dim">waiting for the agent…</p>}
+      {items.map((item) =>
+        item.kind === 'moment' ? (
+          <MomentBanner key={item.key} entry={item.entry} />
+        ) : (
+          <TurnCard key={item.key} card={item} view={view} last={item === lastCard} />
+        ),
+      )}
       </div>
       {!pinned && (
         <button className="jump" onClick={() => setPinned(true)}>
@@ -138,276 +146,308 @@ export const Conversation = memo(function Conversation({
   );
 });
 
-/** `HH:MM:SS` in the viewer's timezone; the full stamp is the `title`. */
+export function hasTurns(entries: Entry[]): boolean {
+  return entries.some((entry) => entry.type === 'turn');
+}
+
+/** Consecutive calls that read the same and ended the same are one line with a count. */
+function runs(tools: ToolEntry[], turnKind: string | undefined): { tool: ToolEntry; count: number }[] {
+  const out: { tool: ToolEntry; count: number; key: string }[] = [];
+  for (const tool of tools) {
+    const key = `${describeTool(tool, turnKind)}|${tool.ok}|${tool.kind}`;
+    const last = out[out.length - 1];
+    if (last && last.key === key) last.count += 1;
+    else out.push({ tool, count: 1, key });
+  }
+  return out;
+}
+
+interface View {
+  mode: LogMode;
+  raw: boolean;
+  opened: Set<number>;
+  toggle: (seq: number) => void;
+  liveSeq: number | null;
+  thought: RefObject<HTMLDivElement | null>;
+  onThoughtScroll: () => void;
+}
+
+function TurnCard({ card, view, last }: { card: Card; view: View; last: boolean }) {
+  const story = view.mode === 'story';
+  const turnKind = card.turn?.kind;
+  const tools = card.rows.filter((row): row is ToolEntry => row.type === 'tool');
+  const actions = tools.filter(isAction);
+  const issues = tools.filter(isIssue);
+  const lookups = tools.filter((tool) => !isAction(tool) && !isIssue(tool));
+  const decisions = card.rows.filter((row) => row.type === 'decision');
+  const thoughts = card.rows.filter((row) => row.type === 'reasoning');
+  const replies = card.rows.filter((row) => row.type === 'assistant' && row.text.trim() !== '');
+  const cancelled = card.rows.filter((row) => row.type === 'cancelled');
+  const notices = card.rows.filter((row) => row.type === 'notice' || row.type === 'compacted');
+  const game = card.rows.filter((row) => row.type === 'agent');
+  // The model's own words lead; the agent's summary stands in where it wrote none.
+  const said = [...new Set(decisions.flatMap((row) => (row.type === 'decision' && row.narration ? [row.narration] : [])))];
+  const summaries = said.length > 0 ? [] : [...new Set(decisions.map((row) => (row.type === 'decision' ? row.summary : '')))];
+  const live = thoughts.find((row) => row.seq === view.liveSeq);
+  // A turn thinks between every tool step; the finished thoughts open and close as one.
+  const finished = thoughts.filter((row) => row !== live);
+  const thinkingOpen = finished.length > 0 && view.opened.has(finished[0].seq);
+  const loudNotices = notices.filter((row) => row.type === 'notice' && (row.level === 'warn' || row.level === 'error'));
+
+  const hasModel = card.turn !== undefined && !card.continued;
+  // Rows before any turn: under a policy with no model that is the whole run, so its story is the game.
+  const loose = card.turn === undefined;
+  if (story && !hasModel && issues.length === 0 && loudNotices.length === 0 && !(loose && game.length > 0)) {
+    return null;
+  }
+
+  const at = card.rows[0]?.at ?? card.turn?.at;
+  const shownGame = view.opened.has(card.key) ? game : game.slice(-GAME_LINES);
+  const hidden = game.length - shownGame.length;
+
+  return (
+    <article className={`card${card.continued ? ' continued' : ''}${live ? ' live' : ''}`}>
+      {hasModel && card.turn && (
+        <header className="card-head" title={`${card.turn.kind} decision`}>
+          <span className="turn-no">#{card.turn.turn}</span>
+          {!card.turn.headline.startsWith(card.turn.kind) && (
+            <span className={`kind ${card.turn.kind}`}>{card.turn.kind.replace(/_/g, ' ')}</span>
+          )}
+          <span className={`headline ${card.turn.kind}`}>{card.turn.headline}</span>
+          <time dateTime={at ? new Date(at).toISOString() : undefined} title={longTime(at)}>
+            {shortTime(at)}
+          </time>
+        </header>
+      )}
+
+      {said.map((text) => (
+        <p className="narration" key={text}>
+          {text}
+        </p>
+      ))}
+      {summaries.map((text) => (
+        <p className="summary" key={text} title="the agent's account; the model wrote none">
+          {text}
+        </p>
+      ))}
+
+      {last && hasModel && decisions.length === 0 && cancelled.length === 0 && !live && (
+        <p className="pending dim">deciding…</p>
+      )}
+
+      {live && (
+        <div className="thought live" ref={view.thought} onScroll={view.onThoughtScroll}>
+          {live.text || '…'}
+        </div>
+      )}
+
+      {runs(actions, turnKind).map(({ tool, count }) => (
+        <ToolLine key={tool.seq} tool={tool} count={count} turnKind={turnKind} view={view} className="action" prefix="→ " />
+      ))}
+
+      {issues.map((tool) => (
+        <ToolLine key={tool.seq} tool={tool} count={1} turnKind={turnKind} view={view} className="issue" prefix="⚑ " />
+      ))}
+
+      {cancelled.map((row) => (
+        <p className="cancelled dim" key={row.seq}>
+          dropped: {row.type === 'cancelled' ? row.reason : ''}
+        </p>
+      ))}
+
+      {loudNotices.map((row) => (
+        <p className={`notice ${row.type === 'notice' ? row.level : ''}`} key={row.seq}>
+          {row.type === 'notice' ? row.message : ''}
+        </p>
+      ))}
+
+      {!story && (lookups.length > 0 || finished.length > 0) && (
+        <div className="chips">
+          {finished.length > 0 && (
+            <button
+              className={`chip thinking${thinkingOpen ? ' on' : ''}`}
+              onClick={() => view.toggle(finished[0].seq)}
+              title="What the model thought on its way to this turn"
+            >
+              💭 {summarise(finished.map((row) => (row.type === 'reasoning' ? row.text : '')).join(' ')).replace(/^thought for /, '')}
+            </button>
+          )}
+          {lookups.map((tool) => (
+            <button
+              key={tool.seq}
+              className={`chip${tool.ok === false ? ' refused' : ''}${view.opened.has(tool.seq) ? ' on' : ''}`}
+              onClick={() => view.toggle(tool.seq)}
+              title={describeTool(tool, turnKind)}
+            >
+              {toolChip(tool)}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {!story &&
+        thinkingOpen &&
+        finished.map((row) => (
+            <div className="thought" key={row.seq}>
+              {row.type === 'reasoning' ? row.text : ''}
+            </div>
+          ))}
+      {!story &&
+        lookups.filter((tool) => view.opened.has(tool.seq)).map((tool) => (
+          <ToolDetail key={tool.seq} entry={tool} title={describeTool(tool, turnKind)} />
+        ))}
+
+      {!story &&
+        replies.map((row) => (
+          <p className="reply" key={row.seq}>
+            {row.type === 'assistant' ? row.text : ''}
+          </p>
+        ))}
+
+      {!story &&
+        notices
+          .filter((row) => !loudNotices.includes(row))
+          .map((row) => (
+            <p className="notice quiet" key={row.seq}>
+              {row.type === 'compacted'
+                ? `context compacted ${row.before.toLocaleString()} → ${row.after.toLocaleString()} tokens${row.summarised ? ' (summarised)' : ''}`
+                : row.type === 'notice'
+                  ? row.message
+                  : ''}
+            </p>
+          ))}
+
+      {(!story || loose) && game.length > 0 && (
+        <ul className="game">
+          {hidden > 0 && (
+            <li>
+              <button className="more" onClick={() => view.toggle(card.key)}>
+                {hidden} earlier line{hidden === 1 ? '' : 's'}
+              </button>
+            </li>
+          )}
+          {shownGame.map((row) =>
+            row.type === 'agent' ? (
+              <li key={row.seq} className={`line ${category(row.kind).replace(/\s/g, '-')} ${row.kind}`} title={row.kind}>
+                {row.text}
+                {row.count > 1 && <span className="repeat">×{row.count}</span>}
+              </li>
+            ) : null,
+          )}
+          {hidden === 0 && game.length > GAME_LINES && (
+            <li>
+              <button className="more" onClick={() => view.toggle(card.key)}>
+                fewer
+              </button>
+            </li>
+          )}
+        </ul>
+      )}
+
+      {view.raw && (
+        <pre className="raw">{card.rows.map((row) => JSON.stringify(row.raw)).join('\n')}</pre>
+      )}
+    </article>
+  );
+}
+
+function ToolLine({
+  tool,
+  count,
+  turnKind,
+  view,
+  className,
+  prefix,
+}: {
+  tool: ToolEntry;
+  count: number;
+  turnKind: string | undefined;
+  view: View;
+  className: string;
+  prefix: string;
+}) {
+  const open = view.opened.has(tool.seq);
+  const refused = tool.ok === false || tool.kind === 'rejected';
+  const sentence = describeTool(tool, turnKind);
+  return (
+    <>
+      <button
+        className={`tool-line ${className}${refused ? ' refused' : ''}`}
+        onClick={() => view.toggle(tool.seq)}
+        title="What was asked and what came back"
+      >
+        {prefix}
+        {sentence}
+        {count > 1 && <span className="repeat">×{count}</span>}
+        {refused && <span className="tag">refused</span>}
+        <span className="disclose">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && <ToolDetail entry={tool} />}
+    </>
+  );
+}
+
+/** A moment is the run's story told in one line, with the screen it was taken on. */
+function MomentBanner({ entry }: { entry: Extract<Entry, { type: 'moment' }> }) {
+  const [screen, setScreen] = useState(true);
+  return (
+    <div className={`moment ${entry.kind}`}>
+      {entry.n !== undefined && screen && (
+        <img
+          src={`/api/moments/${entry.n}/screen.png`}
+          alt=""
+          width={80}
+          height={72}
+          loading="lazy"
+          onError={() => setScreen(false)}
+        />
+      )}
+      <span className="moment-icon">{momentIcon(entry.kind)}</span>
+      <span className="moment-title">{capitalise(entry.title)}</span>
+      <time className="dim" title={longTime(entry.at)}>
+        {shortTime(entry.at)}
+      </time>
+    </div>
+  );
+}
+
+export function momentIcon(kind: string): string {
+  switch (kind) {
+    case 'badge':
+      return '🏅';
+    case 'boss_battle':
+      return '⚔️';
+    case 'evolution':
+      return '✨';
+    case 'new_species':
+      return '📖';
+    case 'lull':
+      return '⏳';
+    default:
+      return '📸';
+  }
+}
+
+export function capitalise(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** `HH:MM` in the viewer's timezone; the full stamp is the `title`. */
 function shortTime(at: number | undefined): string {
   if (at === undefined) return '';
-  return new Date(at).toLocaleTimeString(undefined, { hour12: false });
+  return new Date(at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
 function longTime(at: number | undefined): string | undefined {
   return at === undefined ? undefined : new Date(at).toLocaleString();
 }
 
-interface Rendered {
-  gutter: string;
-  body: string;
-  title: string;
-  modifier: string;
-}
-
-/**
- * `unfolded` is only consulted for a `reasoning` row: every other kind renders the same either way.
- * `turnKind` is the kind of decision the row's turn was asked, where the page has seen it.
- */
-function render(entry: Entry, unfolded: boolean, turnKind: string | undefined): Rendered {
-  switch (entry.type) {
-    case 'agent':
-      return { gutter: category(entry.kind), body: entry.text, title: entry.kind, modifier: entry.kind };
-    case 'notice':
-      return { gutter: entry.level, body: entry.message, title: entry.level, modifier: entry.level };
-    case 'turn':
-      return { gutter: `#${entry.turn}`, body: entry.headline, title: `${entry.kind} decision`, modifier: entry.kind };
-    case 'assistant':
-      return { gutter: 'model', body: entry.text, title: `turn ${entry.turn}`, modifier: '' };
-    case 'reasoning':
-      // Shown while it happens and summarised once over, so it does not bury the reply.
-      return {
-        gutter: 'think',
-        body: unfolded ? entry.text : summarise(entry.text),
-        title: `turn ${entry.turn}: the model's own reasoning`,
-        modifier: unfolded ? 'unfolded' : '',
-      };
-    case 'tool':
-      // A sentence, not the wire call; the arguments are one click away.
-      return {
-        gutter: 'tool',
-        body: describeTool(entry, turnKind),
-        title: `turn ${entry.turn}: ${entry.name}`,
-        // A rejected call reads as refused before its result arrives.
-        modifier: entry.ok === false || entry.kind === 'rejected' ? 'refused' : entry.kind,
-      };
-    case 'decision':
-      // The model's own sentence leads when it wrote one.
-      return {
-        gutter: '→',
-        body: entry.narration ?? entry.summary,
-        title: `turn ${entry.turn}: ${entry.summary}`,
-        modifier: '',
-      };
-    case 'cancelled':
-      return { gutter: 'dropped', body: entry.reason, title: `turn ${entry.turn}`, modifier: '' };
-    case 'compacted': {
-      // A compaction changes what the model knows without it acting, so it gets a row.
-      return {
-        gutter: 'context',
-        body: `compacted ${entry.before.toLocaleString()} → ${entry.after.toLocaleString()} tokens${entry.summarised ? ' (summarised)' : ''}`,
-        title: 'the history was compacted to fit the context window',
-        modifier: 'compacted',
-      };
-    }
-  }
-}
-
-/** One tool call as a sentence; an unlisted tool falls back to its name and compact arguments. */
-function describeTool(entry: Extract<Entry, { type: 'tool' }>, turnKind: string | undefined): string {
-  const args = parseArguments(entry.arguments);
-  const text = (key: string): string | undefined => {
-    const value = args[key];
-    return typeof value === 'string' && value !== '' ? value : undefined;
-  };
-  switch (entry.name) {
-    case 'read_file':
-      return describeRead(text('path'));
-    case 'write_file': {
-      const path = text('path') ?? '';
-      const content = typeof args.content === 'string' ? args.content : '';
-      if (path.startsWith('issues/')) return content ? `Reported: ${content}` : 'Reported a problem with the agent';
-      if (path === 'battle-script.rhai') {
-        if (content.trim() === '') return 'Stopped scripting its battles';
-        const lines = content.trim().split('\n').length;
-        return `Wrote a battle script (${lines} line${lines === 1 ? '' : 's'})`;
-      }
-      if (path === 'plan.md') return 'Rewrote its plan';
-      return `Wrote ${path || 'a file'}`;
-    }
-    case 'edit_file': {
-      const path = text('path');
-      if (path === 'plan.md') return 'Edited its plan';
-      if (path === 'battle-script.rhai') return 'Edited its battle script';
-      return path ? `Edited ${path}` : 'Edited a file';
-    }
-    case 'choose_action':
-      return describeAction(text('id'), turnKind);
-    // The tools below are an older conversation's, which `/api/history` still replays.
-    case 'read_map':
-      return 'Read the map';
-    case 'read_party':
-      return 'Read the party';
-    case 'read_bag':
-      return 'Read the bag';
-    case 'read_battle':
-      return 'Read the battle';
-    case 'read_route': {
-      const to = text('to');
-      return to ? `Asked the way to ${to}` : 'Asked the way';
-    }
-    case 'screenshot':
-      return 'Looked at the screen';
-    // `todo_add` still appears in older transcripts.
-    case 'todo_add':
-    case 'todo_set': {
-      const item = text('text');
-      if (item) return args.id === undefined ? `Planned: ${item}` : `Revised plan item ${args.id}: ${item}`;
-      // No text with an id is the delete overload older transcripts carry.
-      return args.id === undefined ? 'Added to the plan' : `Dropped plan item ${args.id}`;
-    }
-    case 'todo_delete':
-      return args.id === undefined ? 'Dropped a plan item' : `Dropped plan item ${args.id}`;
-    case 'todo_complete':
-      return args.id === undefined ? 'Ticked something off' : `Ticked off plan item ${args.id}`;
-    case 'get_battle_script_docs':
-      return 'Read how to script a battle';
-    case 'read_battle_script':
-      return 'Read its battle script';
-    // The size, not the script, which would take over the log; the source is one click away.
-    case 'set_battle_script': {
-      const script = text('script');
-      if (!script) return 'Stopped scripting its battles';
-      const lines = script.trim().split('\n').length;
-      return `Wrote a battle script (${lines} line${lines === 1 ? '' : 's'})`;
-    }
-    case 'choose_battle_action': {
-      const id = text('id');
-      return id ? `Chose ${id}` : 'Chose an action';
-    }
-    case 'use_field_move': {
-      const move = text('move');
-      return move ? `Used ${move}` : 'Used a field move';
-    }
-    case 'press_buttons': {
-      const buttons = Array.isArray(args.buttons) ? args.buttons.join(', ') : undefined;
-      return buttons ? `Pressed ${buttons}` : 'Pressed buttons';
-    }
-    // Written to be read by a person, so the message is the row.
-    case 'report_issue': {
-      const message = text('message');
-      return message ? `Reported: ${message}` : 'Reported a problem with the agent';
-    }
-    case 'set_nickname': {
-      const name = text('name');
-      // Omitting the argument is the ordinary answer here, not a missing one.
-      return name ? `Named it ${name}` : 'Kept the default name';
-    }
-    case 'buy_item': {
-      const item = text('item');
-      const quantity = typeof args.quantity === 'number' ? ` ×${args.quantity}` : '';
-      return item ? `Bought ${item}${quantity}` : 'Bought nothing';
-    }
-    case 'forget_move':
-      return args.slot === undefined ? 'Declined the new move' : `Forgot the move in slot ${args.slot}`;
-    case 'mimic_move':
-      return args.slot === undefined ? 'Copied an enemy move' : `Copied the enemy's move in row ${args.slot}`;
-    case 'wait':
-      return args.ticks === undefined ? 'Waited' : `Waited ${args.ticks} ticks`;
-    default: {
-      const rest = compact(entry.arguments);
-      return rest ? `${entry.name} ${rest}` : entry.name;
-    }
-  }
-}
-
-/** A `read_file` path as a sentence. */
-function describeRead(path: string | undefined): string {
-  if (!path) return 'Read a file';
-  const fixed: Record<string, string> = {
-    'map.png': 'Read the map',
-    'screen.png': 'Looked at the screen',
-    'party.md': 'Read the party',
-    'bag.md': 'Read the bag',
-    'pc.md': 'Read the PC',
-    'plan.md': 'Read its plan',
-    'battle-script.rhai': 'Read its battle script',
-    'battle-script.md': 'Read how to script a battle',
-    'guide/current.md': 'Read the walkthrough',
-    'routes.md': 'Listed the maps it has walked',
-    'issues/': 'Listed the issues it has filed',
-  };
-  if (fixed[path]) return fixed[path];
-  if (path.startsWith('routes/')) return `Asked the way to ${path.slice('routes/'.length).replace(/\.md$/, '')}`;
-  if (path.startsWith('guide/')) return `Read the walkthrough's ${path.slice('guide/'.length)}`;
-  return `Read ${path}`;
-}
-
-/** A `choose_action` id as a sentence: its prefix says what kind of action it is, except on a naming turn. */
-function describeAction(id: string | undefined, turnKind: string | undefined): string {
-  if (!id) return 'Chose an action';
-  // The naming turn's id is the name itself, and `NONE` declines.
-  if (turnKind === 'nickname' && !/^wait(\*|$)/i.test(id)) {
-    return id.trim().toUpperCase() === 'NONE' ? 'Kept the species name' : `Named it ${id.trim()}`;
-  }
-  const [base, count] = id.split('*');
-  if (base === 'wait') return count ? `Waited ${count} ticks` : 'Waited';
-  if (base === 'leave') return 'Bought nothing';
-  if (base === 'keep') return 'Declined the new move';
-  if (base === 'take_over') return 'Took this battle over from its script';
-  if (base.startsWith('press:')) return `Pressed ${base.slice('press:'.length).split(',').join(', ')}`;
-  if (base.startsWith('buy:')) return `Bought ${base.slice('buy:'.length)}${count ? ` ×${count}` : ''}`;
-  if (base.startsWith('forget:')) return `Forgot the move in slot ${base.slice('forget:'.length)}`;
-  if (base.startsWith('mimic:')) return `Copied the enemy's move in row ${base.slice('mimic:'.length)}`;
-  const field = describeFieldRow(base, count);
-  return field ?? `Chose ${id}`;
-}
-
-/** An overworld row done where the player stands: `fly:`, `item:`, `teach:`, the PC's and the rest. */
-function describeFieldRow(base: string, count: string | undefined): string | undefined {
-  const [head, ...parts] = base.split(':');
-  const rest = parts.join(':');
-  const [thing, on] = rest.split('@');
-  let slot = '';
-  if (on?.endsWith(':stay')) slot = ` on slot ${on.slice(0, -':stay'.length)}, kept from evolving`;
-  else if (on !== undefined && /^\d+$/.test(on)) slot = ` on slot ${on}`;
-  else if (on !== undefined) slot = ` on ${on.split(':').pop()}`;
-  const many = count ? ` ×${count}` : '';
-  switch (head) {
-    case 'dig': return 'Dug out';
-    case 'teleport': return 'Teleported';
-    case 'flash': return 'Used Flash';
-    case 'fly': return `Flew to ${rest}`;
-    case 'lift': return `Rode the lift to ${rest}`;
-    case 'prize': return `Bought the ${rest} prize`;
-    case 'lead': return `Made slot ${rest} the leader`;
-    case 'toss': return `Tossed ${rest}${many}`;
-    case 'item': return `Used ${thing}${slot}`;
-    case 'teach': return `Taught ${thing}${slot}`;
-    case 'evolve': return `Used ${thing}${slot}`;
-    case 'daycare': return rest === 'withdraw' ? 'Collected a Pokémon from the Day Care' : `Boarded slot ${on} at the Day Care`;
-    case 'pc':
-      if (thing === 'box') return `Opened PC box ${count ?? '1'}`;
-      if (thing.startsWith('store:')) return `Stored ${thing.slice('store:'.length)}${many} in the PC`;
-      if (thing.startsWith('take:')) return `Took ${thing.slice('take:'.length)}${many} from the PC`;
-      if (thing === 'deposit') return `Deposited slot ${on} in the PC`;
-      if (thing === 'withdraw') return `Withdrew box slot ${on} from the PC`;
-      if (thing === 'release') return `Released box slot ${on}`;
-      return undefined;
-    default: return undefined;
-  }
-}
-
-/** The model's arguments, or an empty object — a call whose JSON will not parse is one to show raw. */
-function parseArguments(json: string): Record<string, unknown> {
-  try {
-    const parsed: unknown = JSON.parse(json.trim() || '{}');
-    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
-}
-
 /** An opened tool row. The image comes from a small server ring, so an old one 404s and is hidden. */
-function ToolDetail({ entry }: { entry: Extract<Entry, { type: 'tool' }> }) {
+function ToolDetail({ entry, title }: { entry: ToolEntry; title?: string }) {
   const args = compact(entry.arguments);
   return (
     <div className="tool-detail">
+      {title && <span className="tool-title">{title}</span>}
       {args && (
         <>
           <span className="tool-label">asked</span>
@@ -434,42 +474,4 @@ function ToolDetail({ entry }: { entry: Extract<Entry, { type: 'tool' }> }) {
       )}
     </div>
   );
-}
-
-function pretty(json: string): string {
-  const trimmed = json.trim();
-  try {
-    return JSON.stringify(JSON.parse(trimmed), null, 2);
-  } catch {
-    return trimmed;
-  }
-}
-
-/** A finished thought collapses to its word count: how long it deliberated. */
-function summarise(text: string): string {
-  const trimmed = text.trim();
-  if (trimmed === '') return 'thought about it';
-  const words = trimmed.split(/\s+/).length;
-  return `thought for ${words.toLocaleString()} word${words === 1 ? '' : 's'}`;
-}
-
-/** Arguments arrive as the model sent them, which may be pretty-printed across several lines. */
-function compact(json: string): string {
-  const trimmed = json.trim();
-  if (trimmed === '' || trimmed === '{}') return '';
-  try {
-    return JSON.stringify(JSON.parse(trimmed));
-  } catch {
-    return trimmed;
-  }
-}
-
-// The gutter names the part of the game talking, not the `AgentEvent` variant, which is the `title`.
-// The `text_box` arm is unreachable while `UNLOGGED` drops that kind.
-function category(kind: string): string {
-  if (kind.startsWith('battle')) return 'battle';
-  if (kind === 'text_box') return 'text';
-  // The end of the game gets the badge strip's trophy.
-  if (kind === 'hall_of_fame') return '🏆';
-  return kind.includes('overworld') ? 'overworld' : kind.replace(/_/g, ' ');
 }

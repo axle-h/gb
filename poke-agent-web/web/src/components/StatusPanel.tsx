@@ -1,10 +1,16 @@
-import type { CSSProperties } from 'react';
+import { useState, type CSSProperties } from 'react';
 import type { Status } from '../api';
+import { MonSheet } from './MonSheet';
+import { fillClass, shortStatus } from './mon';
 
 /** Where the player is, what they have, and how the party is holding up. */
 export function StatusPanel({ status, speed }: { status: Status | null; speed: number | null }) {
   const game = status?.game ?? null;
   const badges = game?.badges ?? [];
+  // A slot rather than the mon, so the sheet follows the live heartbeat.
+  const [open, setOpen] = useState<number | null>(null);
+  const opened = open === null ? undefined : game?.party[open];
+  const fighting = game?.opponent?.active_slot ?? null;
 
   return (
     <div className="status">
@@ -42,7 +48,12 @@ export function StatusPanel({ status, speed }: { status: Status | null; speed: n
       {/* `key` is the slot, since a party can hold two of one species. */}
       <ol className="party">
         {game?.party.map((mon, slot) => (
-          <li key={slot}>
+          <li key={slot} className={slot === fighting ? 'fighting' : undefined}>
+            <button
+              className="slot"
+              onClick={() => setOpen(slot)}
+              aria-label={`${mon.nickname}, level ${mon.level}: moves and stats`}
+            >
             <img className="sprite" src={`/api/pokemon/${mon.dex}/front.png`} alt="" loading="lazy" width={56} height={56} />
             <span className="mon" title={mon.nickname}>
               {mon.nickname}
@@ -60,12 +71,17 @@ export function StatusPanel({ status, speed }: { status: Status | null; speed: n
             <span className="hp">
               {mon.hp}/{mon.max_hp}
             </span>
+            </button>
           </li>
         ))}
       </ol>
 
-      {/* `agent_state` outgrows the column and is ellipsised, so the full string is the `title`.
-          Each row is classed so the narrow layout can drop it. */}
+      {opened && <MonSheet mon={opened} active={open === fighting} onClose={() => setOpen(null)} />}
+
+      {/* For whoever is debugging the agent, not for whoever is watching it. `agent_state` outgrows
+          the column and is ellipsised, so the full string is the `title`. */}
+      <details className="detail-toggle">
+        <summary>agent details</summary>
       <dl className="detail">
         <dt>mode</dt>
         <dd>{game ? (game.in_battle ? `${game.mode} · battle` : game.mode) : '(no game state)'}</dd>
@@ -74,6 +90,7 @@ export function StatusPanel({ status, speed }: { status: Status | null; speed: n
         <dt className="speed">speed</dt>
         <dd className="speed">{status ? describeSpeed(status, speed) : '—'}</dd>
       </dl>
+      </details>
     </div>
   );
 }
@@ -99,17 +116,7 @@ function spaced(name: string): string {
   return name.replace(/([a-z])([A-Z])/g, '$1 $2');
 }
 
-function fillClass(hp: number, max: number): string {
-  if (hp === 0) return 'fainted';
-  if (hp * 4 <= max) return 'low';
-  if (hp * 2 <= max) return 'hurt';
-  return '';
-}
 
-/** The game's own three-letter abbreviations, which is what a player expects to see. */
-function shortStatus(status: string): string {
-  return { Paralyzed: 'PAR', Asleep: 'SLP', Poisoned: 'PSN', Burned: 'BRN', Frozen: 'FRZ' }[status] ?? status;
-}
 
 function formatDuration(ms: number): string {
   const total = Math.floor(ms / 1000);

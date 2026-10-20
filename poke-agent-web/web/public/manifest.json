@@ -1,0 +1,10 @@
+{
+  "name": "gb · Pokémon",
+  "short_name": "gb",
+  "description": "A language model playing Pokémon Red, live.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f1115",
+  "theme_color": "#161920",
+  "icons": [{ "src": "/icon.png", "sizes": "192x192", "type": "image/png" }]
+}

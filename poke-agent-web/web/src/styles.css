@@ -27,63 +27,60 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* A phone's 100vh includes the toolbar it hides, which would put the log's foot off screen. */
+  height: 100dvh;
 }
 
-/* `flex-wrap`, so a long run status cannot push the connection pill off the edge. */
-header {
+/* One row at every width: whatever does not fit is in the menu, and the run word gives way first. */
+.topbar {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  padding: 10px 16px;
+  gap: 10px;
+  padding: 8px 16px;
+  padding-top: max(8px, env(safe-area-inset-top));
+  padding-left: max(16px, env(safe-area-inset-left));
+  padding-right: max(16px, env(safe-area-inset-right));
   border-bottom: 1px solid var(--line);
   background: var(--panel);
+  white-space: nowrap;
 }
 
-/* Who is playing wraps and truncates as one unit; the ellipsis falls on the model name. */
-header .who {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-}
-
-header .title {
+.topbar .title {
   font-weight: 600;
   letter-spacing: 0.04em;
-  white-space: nowrap;
 }
 
-header .policy {
-  color: var(--accent);
+.topbar .player {
+  color: var(--dim);
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-header .spacer {
-  flex: 1;
-}
-
-.pill {
-  padding: 2px 10px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
+.topbar .run {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--dim);
 }
 
-.pill.live {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+.topbar .spacer {
+  flex: 1;
 }
 
-.pill.live::before {
-  content: '● ';
+/* The connection: green and calm when live, amber and pulsing otherwise. */
+.dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--warn);
+  animation: thinking 1.2s ease-in-out infinite;
 }
 
-.pill.reconnecting,
-.pill.connecting {
-  color: var(--warn);
+.dot.live {
+  background: var(--accent);
+  animation: none;
 }
 
 main {
@@ -130,6 +127,105 @@ main {
   /* An `outline`, not a border, which under `border-box` would take the canvas off an exact multiple. */
   outline: 1px solid var(--line);
   border-radius: 4px;
+}
+
+.screen {
+  cursor: zoom-in;
+}
+
+/* Enlarged: the whole viewport, black, the canvas as big as its 10:9 allows. */
+.screen.big {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: #000;
+  cursor: zoom-out;
+}
+
+.screen.big canvas {
+  width: min(100vw, calc(100dvh * 10 / 9));
+  outline: 0;
+  border-radius: 0;
+}
+
+/* The stage is the screen and what stands under it: the opponent and what the model said last. */
+.stage {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.now {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+  /* Two lines; the whole sentence is the `title` and the newest card. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.now::before {
+  content: '“';
+  color: var(--dim);
+}
+
+.now::after {
+  content: '”';
+  color: var(--dim);
+}
+
+.opponent {
+  display: grid;
+  grid-template-columns: 40px 1fr auto;
+  grid-template-areas: 'sprite who types' 'sprite bar hp';
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 2px;
+  padding: 4px 8px;
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line));
+  border-radius: 4px;
+  background: var(--panel);
+}
+
+.opponent .sprite {
+  grid-area: sprite;
+  width: 40px;
+  height: 40px;
+  image-rendering: pixelated;
+  display: grid;
+  place-items: center;
+}
+
+.opponent .who {
+  grid-area: who;
+  white-space: nowrap;
+}
+
+.opponent .types {
+  grid-area: types;
+  justify-self: end;
+  display: flex;
+  gap: 4px;
+}
+
+.opponent .bar {
+  grid-area: bar;
+}
+
+.opponent .hp {
+  grid-area: hp;
+  font-size: 12px;
+}
+
+.ailment {
+  color: var(--warn);
+  font-size: 11px;
+  letter-spacing: 0.06em;
 }
 
 /* A parked run keeps its last frame, dimmed, under the plate. */
@@ -250,14 +346,35 @@ main {
   gap: 6px 12px;
 }
 
-/* Every cell is placed explicitly, so the conditional status chip cannot reflow the card. */
-.party li {
+/* Every cell is placed explicitly, so the conditional status chip cannot reflow the card. A
+   button, so a slot opens its sheet from the keyboard too. */
+.party .slot {
+  width: 100%;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   display: grid;
   grid-template-columns: 56px minmax(0, 1fr) auto;
   grid-template-rows: auto auto;
   column-gap: 8px;
   row-gap: 3px;
   align-items: center;
+}
+
+.party .slot:hover,
+.party .slot:focus-visible {
+  border-color: var(--line);
+  background: var(--bg);
+}
+
+/* The one in battle. */
+.party .fighting .slot {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
 }
 
 .party .sprite {
@@ -285,12 +402,6 @@ main {
   align-items: baseline;
   gap: 6px;
   color: var(--dim);
-}
-
-.party .ailment {
-  color: var(--warn);
-  font-size: 11px;
-  letter-spacing: 0.06em;
 }
 
 .party .bar {
@@ -329,13 +440,23 @@ main {
   text-align: right;
 }
 
+.detail-toggle {
+  margin: 10px 0 0;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+
+.detail-toggle summary {
+  color: var(--dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .detail {
   display: grid;
   grid-template-columns: max-content 1fr;
   gap: 0 12px;
-  margin: 12px 0 0;
-  border-top: 1px solid var(--line);
-  padding-top: 8px;
+  margin: 6px 0 0;
 }
 
 .detail dt {
@@ -365,15 +486,10 @@ main {
   border-radius: 4px;
 }
 
-.conversation-bar {
-  display: flex;
-  justify-content: flex-end;
-  padding: 4px 12px;
-  border-bottom: 1px solid var(--line);
-}
-
-.raw-toggle {
-  padding: 0 8px;
+.right-tabs button,
+.right-tabs button,
+.pane-tabs button {
+  padding: 3px 12px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: none;
@@ -382,9 +498,10 @@ main {
   cursor: pointer;
 }
 
-.raw-toggle.on {
-  color: #7fa8d4;
-  border-color: color-mix(in srgb, #7fa8d4 40%, var(--line));
+.right-tabs button.on,
+.pane-tabs button.on {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
 }
 
 .conversation-list {
@@ -392,91 +509,291 @@ main {
   min-height: 0;
   overflow-y: auto;
   padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
-.entry {
-  display: grid;
-  grid-template-columns: 8ch 10ch 1fr;
-  gap: 10px;
-  padding: 1px 0;
+/* ── A turn ── */
+
+.card {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  overflow-wrap: anywhere;
 }
 
-/* `tabular-nums`, so the times line up between rows. */
-.entry .at {
+/* The rest of a turn a moment interrupted reads as part of the card above the banner. */
+.card.continued {
+  border-style: dashed;
+}
+
+.card.live {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+}
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 12px;
   color: var(--dim);
-  opacity: 0.65;
+}
+
+.card-head .turn-no {
+  color: var(--text);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 
-.entry .chip {
-  color: var(--dim);
-  text-align: right;
+.card-head .kind {
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.card-head .kind.battle,
+.card-head .headline.battle {
+  color: var(--warn);
+}
+
+.card-head .headline {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.entry .body {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+.card-head time {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
 }
 
-/* A button for keyboard reach, styled as plain text. */
-.entry .body .line {
-  display: inline;
-  padding: 0;
+.card p {
+  margin: 2px 0;
+  white-space: pre-wrap;
+}
+
+/* The model's own sentence is the card: it is written for a person. */
+.card .narration {
+  font-size: 1.08em;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+/* The agent's account of a turn the model left unexplained: the same place, quieter. */
+.card .summary {
+  color: var(--dim);
+}
+
+.card .reply {
+  color: var(--dim);
+}
+
+.card .pending {
+  font-style: italic;
+}
+
+.card .cancelled {
+  font-style: italic;
+}
+
+.card .notice.warn {
+  color: var(--warn);
+}
+
+.card .notice.error {
+  color: var(--bad);
+}
+
+.card .notice.quiet {
+  color: var(--dim);
+  font-style: italic;
+  font-size: 12px;
+}
+
+/* A button for keyboard reach, styled as a line of text. */
+.tool-line {
+  display: block;
+  width: 100%;
+  margin: 2px 0;
+  padding: 2px 0;
   border: 0;
   background: none;
-  color: inherit;
+  color: var(--accent);
   font: inherit;
   text-align: left;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
   cursor: pointer;
 }
 
-.entry .body .line:hover {
+.tool-line:hover {
   text-decoration: underline dotted;
   text-underline-offset: 3px;
 }
 
-.entry .repeat {
+.tool-line.refused {
+  color: var(--warn);
+}
+
+/* A write under `issues/` is meant for a person, so it is the loudest line a card has. */
+.tool-line.issue {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.tool-line .repeat {
   margin-left: 6px;
   color: var(--dim);
 }
 
-.entry .raw {
+.tool-line .tag {
+  margin-left: 8px;
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.disclose {
+  margin-left: 6px;
+  opacity: 0.55;
+  /* `line-height: 1` keeps the larger glyph from growing the line box. */
+  font-size: 1.2em;
+  line-height: 1;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 6px 0 2px;
+}
+
+.chips .chip {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: #7fa8d4;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chips .chip.thinking {
+  color: var(--dim);
+  font-style: italic;
+}
+
+.chips .chip.refused {
+  color: var(--warn);
+}
+
+.chips .chip.on {
+  border-color: color-mix(in srgb, #7fa8d4 50%, var(--line));
+}
+
+/* The model's thinking: dimmed, and a live one capped in its own scrolling box. */
+.thought {
+  margin: 4px 0;
+  padding: 6px 8px;
+  border-left: 2px solid var(--line);
+  color: var(--dim);
+  font-style: italic;
+  white-space: pre-wrap;
+}
+
+.thought.live {
+  max-height: 9em;
+  overflow-y: auto;
+}
+
+.thought.live::before {
+  content: '💭 ';
+  font-style: normal;
+}
+
+/* What the game said while the turn played out, quieter than anything the model said. */
+.game {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 4px 0 0;
+  border-top: 1px dashed var(--line);
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.game .line {
+  white-space: pre-wrap;
+}
+
+.game .line.battle {
+  color: color-mix(in srgb, var(--warn) 75%, var(--dim));
+}
+
+.game .line.watchdog {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.game .line.hall_of_fame {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.game .repeat {
+  margin-left: 6px;
+}
+
+.game .more {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #7fa8d4;
+  font: inherit;
+  cursor: pointer;
+}
+
+.raw {
   margin: 4px 0 6px;
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 4px;
-  background: var(--bg);
+  background: var(--panel);
   color: #7fa8d4;
+  font-size: 12px;
   overflow-x: auto;
   white-space: pre;
 }
 
-.entry.agent .body {
-  color: var(--accent);
+/* ── A moment ── */
+
+.moment {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel));
 }
 
-.entry.text_box .body {
-  color: var(--text);
+.moment img {
+  flex: none;
+  width: 80px;
+  height: 72px;
+  border-radius: 3px;
+  image-rendering: pixelated;
 }
 
-.entry.notice .body {
-  color: var(--warn);
+.moment-icon {
+  font-size: 1.3em;
 }
 
-.entry.error .body {
-  color: var(--bad);
-}
-
-/* A bug report rather than narration, so it stands out from the log. */
-.entry.watchdog .chip,
-.entry.watchdog .body {
-  color: var(--bad);
+.moment-title {
+  flex: 1;
   font-weight: 600;
 }
 
@@ -495,6 +812,38 @@ main {
 
 /* The phone's pane tabs, switched on only in the 640px block. */
 .pane-tabs {
+  display: none;
+}
+
+/* The desk's choice of what the right-hand column shows. */
+.right {
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Log | Highlights on the left, Story | Everything on the right; a phone keeps only the second. */
+.right-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.right-tabs .desk,
+.right-tabs .modes {
+  display: flex;
+  gap: 4px;
+}
+
+.right-tabs .spacer {
+  flex: 1;
+}
+
+/* Gone with nothing in it, so a run without a model loses the row on a phone. */
+.right-tabs:not(:has(button)) {
+  display: none;
+}
+
+.right.show-highlights .conversation {
   display: none;
 }
 
@@ -522,14 +871,14 @@ main {
 
 /* ── The model's side of the conversation ───────────────────────────────────────────────────── */
 
-header .context {
+.menu .context {
   color: var(--dim);
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
-header .gauge {
+.menu .gauge {
   width: 56px;
   height: 6px;
   border: 1px solid var(--line);
@@ -537,85 +886,31 @@ header .gauge {
   overflow: hidden;
 }
 
-header .gauge .fill {
+.menu .gauge .fill {
   display: block;
   height: 100%;
   background: var(--accent);
 }
 
 /* `playing` is the quiet state; the others are worth noticing. */
-header .run {
+.topbar .run {
   color: var(--dim);
 }
 
-header .run.awaiting_llm,
-header .run.streaming,
-header .run.running_tool,
-header .run.compacting {
+.topbar .run.awaiting_llm,
+.topbar .run.streaming,
+.topbar .run.running_tool,
+.topbar .run.compacting {
   color: var(--accent);
 }
 
-header .run.rate_limited {
+.topbar .run.rate_limited {
   color: var(--warn);
 }
 
-header .run.error {
+.topbar .run.error,
+.topbar .run.throttled {
   color: var(--bad);
-  max-width: 40ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.entry.compacted .chip,
-.entry.compacted .body {
-  color: var(--dim);
-  font-style: italic;
-}
-
-.entry.turn {
-  margin-top: 10px;
-  border-top: 1px solid var(--line);
-  padding-top: 6px;
-}
-
-.entry.turn .chip {
-  color: var(--text);
-}
-
-.entry.turn .body {
-  color: var(--dim);
-}
-
-.entry.battle .chip {
-  color: var(--warn);
-}
-
-.entry.assistant .body {
-  color: var(--text);
-}
-
-/* The model's thinking, dimmed; it collapses once another model row follows it. */
-.entry.reasoning .chip,
-.entry.reasoning .body {
-  color: var(--dim);
-  font-style: italic;
-}
-
-/* A live thought is capped and scrolls in its own box. */
-.entry.reasoning.live .body {
-  display: block;
-  max-height: 9em;
-  overflow-y: auto;
-}
-
-.entry.reasoning .chip::after {
-  content: '';
-}
-
-.entry.reasoning.live .chip::after {
-  content: '…';
-  animation: thinking 1.2s steps(4, end) infinite;
 }
 
 @keyframes thinking {
@@ -631,34 +926,10 @@ header .run.error {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .entry.reasoning.live .chip::after {
+  .dot,
+  .sheet {
     animation: none;
   }
-}
-
-.entry.tool .chip,
-.entry.tool .body {
-  color: #7fa8d4;
-}
-
-.entry.tool.refused .chip,
-.entry.tool.refused .body {
-  color: var(--warn);
-}
-
-/* A write under `issues/` is meant for a person, so it is the one tool row not in the calm blue. */
-.entry.tool.issue .chip,
-.entry.tool.issue .body {
-  color: var(--warn);
-  font-weight: 600;
-}
-
-.entry .disclose {
-  margin-left: 6px;
-  opacity: 0.55;
-  /* `line-height: 1` keeps the larger glyph from growing the line box. */
-  font-size: 1.2em;
-  line-height: 1;
 }
 
 .tool-detail {
@@ -701,74 +972,6 @@ header .run.error {
   object-fit: contain;
 }
 
-.entry.decision .chip,
-.entry.decision .body {
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.entry.cancelled .chip,
-.entry.cancelled .body {
-  color: var(--dim);
-  font-style: italic;
-}
-
-/* ── The Hall of Fame ─────────────────────────────────────────────────────────────────────────── */
-
-.entry.hall_of_fame .chip,
-.entry.hall_of_fame .body {
-  color: var(--accent);
-  font-weight: 700;
-}
-
-header .trophy {
-  padding: 2px 8px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--panel);
-  color: var(--text);
-  font: inherit;
-  line-height: 1.2;
-  cursor: pointer;
-}
-
-header .trophy:hover {
-  border-color: var(--accent);
-}
-
-.links {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.links a {
-  display: inline-flex;
-  color: var(--dim);
-  line-height: 0;
-}
-
-.links a:hover {
-  color: var(--text);
-}
-
-.links .face {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  border: 1px solid var(--line);
-  object-fit: cover;
-}
-
-.links a:hover .face {
-  border-color: var(--accent);
-}
-
-/* Phone-only; see the 640px block. */
-.about {
-  display: none;
-}
-
 .overlay {
   position: fixed;
   inset: 0;
@@ -805,16 +1008,6 @@ header .trophy:hover {
 
 .leaderboard header .title {
   font-weight: 700;
-}
-
-.leaderboard .close {
-  padding: 0 6px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--bg);
-  color: var(--dim);
-  font: inherit;
-  cursor: pointer;
 }
 
 .leaderboard p {
@@ -1108,48 +1301,21 @@ header .trophy:hover {
     line-height: 1.5;
   }
 
-  header {
-    gap: 6px;
-    padding: 8px 10px;
-  }
-
-  /* The gauge and links move to the Trainer tab's foot (`.about`); the trophy stays. */
-  header .context,
-  header .links {
-    display: none;
-  }
-
-  .about {
-    display: flex;
-    align-items: center;
+  .topbar {
     gap: 8px;
-    padding: 6px 0;
-    border-top: 1px solid var(--line);
+    padding-left: max(10px, env(safe-area-inset-left));
+    padding-right: max(10px, env(safe-area-inset-right));
   }
 
-  .about .spacer {
-    flex: 1;
-  }
-
-  /* Without this the pill takes a line of its own. */
-  header .spacer {
+  /* The model's name is in the menu and the tab title. */
+  .topbar .player {
     display: none;
-  }
-
-  header .who .policy {
-    max-width: 22ch;
-  }
-
-  header .run {
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   main {
     gap: 8px;
     padding: 8px;
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
     /* The log takes whatever the screen and panels leave, and never less than 38vh. */
     grid-template-rows: minmax(0, auto) minmax(38vh, 1fr);
   }
@@ -1162,39 +1328,34 @@ header .trophy:hover {
 
   /* ── The pane tabs ──
      One pane gets the height under the screen and is the only thing that scrolls. Panes are hidden,
-     never unmounted, so the log keeps its scroll position and open rows. */
+     never unmounted, so the log keeps its scroll position and open cards. */
   .pane-tabs {
     display: flex;
-    gap: 6px;
+    gap: 4px;
   }
 
+  /* `auto`, not `1`, so a long label takes its width from a short one rather than overflowing. */
   .pane-tabs button {
-    flex: 1;
-    padding: 3px 0;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: none;
-    color: var(--dim);
-    font: inherit;
-    cursor: pointer;
+    flex: 1 1 auto;
+    min-height: 38px;
+    padding: 0 6px;
   }
 
-  .pane-tabs button.on {
-    color: var(--accent);
-    border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  .right-tabs .desk {
+    display: none;
   }
 
   main.tab-log .status,
-  main.tab-log .about,
   main.tab-log .plan,
   main.tab-log .battle-script,
+  main.tab-highlights .status,
+  main.tab-highlights .plan,
+  main.tab-highlights .battle-script,
   main.tab-status .plan,
   main.tab-status .battle-script,
   main.tab-plan .status,
-  main.tab-plan .about,
   main.tab-plan .battle-script,
   main.tab-script .status,
-  main.tab-script .about,
   main.tab-script .plan {
     display: none;
   }
@@ -1258,15 +1419,16 @@ header .trophy:hover {
     gap: 4px 10px;
   }
 
-  .party li {
-    grid-template-columns: 32px minmax(0, 1fr) auto;
+  .party .slot {
+    grid-template-columns: 40px minmax(0, 1fr) auto;
     column-gap: 6px;
     row-gap: 2px;
+    min-height: 44px;
   }
 
   .party .sprite {
-    width: 32px;
-    height: 32px;
+    width: 40px;
+    height: 40px;
   }
 
   .party .hp,
@@ -1275,13 +1437,7 @@ header .trophy:hover {
   }
 
   .detail {
-    margin-top: 8px;
-    padding-top: 6px;
     line-height: 1.4;
-  }
-
-  .detail .speed {
-    display: none;
   }
 
   /* No height cap: on a phone the plan is its own tab. */
@@ -1300,45 +1456,55 @@ header .trophy:hover {
     overflow-y: visible;
   }
 
-  /* The log stops being a grid: the time and gutter become an inline prefix the line wraps under. */
   .conversation-list {
-    padding: 8px 10px;
+    padding: 8px;
   }
 
-  .entry {
-    display: block;
-    padding: 2px 0;
+  .card {
+    padding: 8px;
   }
 
-  .entry .at {
-    margin-right: 6px;
-    font-size: 12px;
-  }
-
-  .entry .chip {
-    display: inline;
-    margin-right: 6px;
-    text-align: left;
-    font-size: 12px;
-  }
-
-  .entry .body {
-    display: inline;
-  }
-
-  /* …except a live thought, which is still its own scrolling box — inline it would be unbounded. */
-  .entry.reasoning.live .body {
-    display: block;
+  .thought.live {
     max-height: 7em;
   }
 
-  .entry.turn {
-    margin-top: 8px;
+  .moment img {
+    width: 60px;
+    height: 54px;
+  }
+
+  /* A sheet from the bottom edge, the phone's own idiom for "more about this". */
+  .sheet-backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .sheet {
+    max-width: none;
+    border-radius: 14px 14px 0 0;
+    border-bottom: 0;
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+    animation: rise 160ms ease-out;
+  }
+
+  .sheet-grip {
+    display: block;
+  }
+
+}
+
+@keyframes rise {
+  from {
+    transform: translateY(40%);
+    opacity: 0.4;
   }
 }
 
-/* The speaker borrows the trophy's box, so the row reads as one set of controls. */
-header .sound {
+/* The speaker and the menu share a box, so the row reads as one set of controls. */
+.topbar .sound,
+.menu-button {
+  min-width: 40px;
+  min-height: 36px;
   padding: 2px 8px;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -1349,12 +1515,333 @@ header .sound {
   cursor: pointer;
 }
 
-header .sound:hover,
-header .sound:focus-visible {
+.topbar .sound:hover,
+.topbar .sound:focus-visible,
+.menu-button:hover,
+.menu-button:focus-visible {
   border-color: var(--accent);
 }
 
-/* On, marked with the accent as `.pill.live` is. */
-header .sound.on {
+/* On, marked with the accent as the live dot is. */
+.topbar .sound.on,
+.menu-button.on {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+
+/* ── The party sheet ──────────────────────────────────────────────────────────────────────────── */
+
+.sheet {
+  width: 100%;
+  max-width: 440px;
+  max-height: 88dvh;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 50%);
+}
+
+/* Phone-only: the handle that says it came up from the bottom. */
+.sheet-grip {
+  display: none;
+  width: 40px;
+  height: 4px;
+  margin: 0 auto 10px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.sheet-head {
+  display: grid;
+  grid-template-columns: 96px 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.sheet-head .sprite {
+  width: 96px;
+  height: 96px;
+  image-rendering: pixelated;
+}
+
+.sheet-head .who {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sheet-head .name {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.sheet-head .types {
+  display: flex;
+  gap: 4px;
+}
+
+.sheet-head .level {
+  align-self: start;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.sheet-head .close,
+.leaderboard .close {
+  align-self: start;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+}
+
+.sheet-row {
+  display: grid;
+  grid-template-columns: 4ch 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.sheet-row .label {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.sheet-row .value {
+  font-variant-numeric: tabular-nums;
+}
+
+.bar.exp .fill {
+  background: #7fa8d4;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.stats div {
+  padding: 4px 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  text-align: center;
+}
+
+.stats dt {
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+
+.stats dd {
+  margin: 0;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.moves {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.moves li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  grid-template-areas: 'name type pp' 'meta meta meta';
+  align-items: center;
+  column-gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+.moves .move-name {
+  grid-area: name;
+  font-weight: 600;
+}
+
+.moves .type-chip {
+  grid-area: type;
+}
+
+.moves .pp {
+  grid-area: pp;
+  font-variant-numeric: tabular-nums;
+}
+
+.moves .move-meta {
+  grid-area: meta;
+  font-size: 12px;
+}
+
+.moves li.spent {
+  opacity: 0.5;
+}
+
+/* The fifteen Gen 1 types, coloured as every later game colours them, darkened for this page. */
+.type-chip {
+  padding: 0 6px;
+  border-radius: 3px;
+  background: #555;
+  color: #fff;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.t-normal { background: #7a7a5a; }
+.t-fighting { background: #9e2a22; }
+.t-flying { background: #7a68c8; }
+.t-poison { background: #85358a; }
+.t-ground { background: #a88a42; }
+.t-rock { background: #8a7a30; }
+.t-bug { background: #7a8a1a; }
+.t-ghost { background: #574775; }
+.t-fire { background: #c8601e; }
+.t-water { background: #4a6ec8; }
+.t-grass { background: #4e8a32; }
+.t-electric { background: #b0901a; }
+.t-psychic { background: #c8406a; }
+.t-ice { background: #5a9a9a; }
+.t-dragon { background: #5a2ec8; }
+
+/* ── Highlights ───────────────────────────────────────────────────────────────────────────────── */
+
+.highlights {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.highlights .moments {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.highlights li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.highlights img {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 10 / 9;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #000;
+  image-rendering: pixelated;
+}
+
+.highlights .title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* ── The menu ─────────────────────────────────────────────────────────────────────────────────── */
+
+.menu {
+  position: relative;
+}
+
+.menu-button {
+  font-size: 16px;
+}
+
+.menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 15;
+  width: max-content;
+  min-width: 240px;
+  max-width: min(360px, calc(100vw - 20px));
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 50%);
+  white-space: normal;
+}
+
+.menu-panel hr {
+  margin: 6px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.menu-item.static {
+  min-height: 0;
+  cursor: default;
+  justify-content: space-between;
+}
+
+.menu-item:not(.static):hover,
+.menu-item:not(.static):focus-visible {
+  background: var(--bg);
+}
+
+.menu-player {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.menu-item .face {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+/* After the base rule, which would otherwise win. */
+@media (width < 640px) {
+  .highlights .moments {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
 }

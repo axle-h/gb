@@ -339,6 +339,8 @@ fn routes() -> Router<AppState> {
         .route("/api/plan-history", get(plan_history))
         .route("/api/battle-script-history", get(battle_script_history))
         .route("/api/leaderboard", get(leaderboard::leaderboard))
+        .route("/api/moments", get(moments))
+        .route("/api/moments/{n}/screen.png", get(moment_screen))
         .route("/api/video", get(video_stream))
         .route("/api/audio", get(audio_stream))
         .route("/api/badges.png", get(badges::badges))
@@ -349,6 +351,7 @@ fn routes() -> Router<AppState> {
         .route("/reset-game", get(reset_game))
         .route("/favicon.png", get(sprites::favicon))
         .route("/favicon.ico", get(sprites::favicon))
+        .route("/icon.png", get(sprites::home_screen_icon))
         // At the root: it is for an operator asking what is deployed, not for the SPA.
         .route("/version", get(version::version))
         // Last, so the catch-all cannot shadow an API route it happens to match.
@@ -582,6 +585,23 @@ async fn versions_of(state: &AppState, file: &'static str, page: VersionPage) ->
     let limit = page.limit.unwrap_or(VERSIONS_PAGE).clamp(1, MAX_VERSIONS_PAGE);
     let page = tokio::task::spawn_blocking(move || versions::page(&path, limit, page.before));
     Json(page.await.unwrap_or_default())
+}
+
+/// The run's turning points, oldest first, for the highlights pane.
+async fn moments(State(state): State<AppState>) -> Json<Vec<poke_agent::run::moments::Moment>> {
+    let path = state.run.get().path().to_path_buf();
+    Json(tokio::task::spawn_blocking(move || poke_agent::run::moments::all(&path)).await.unwrap_or_default())
+}
+
+/// The screen a moment was taken on, out of its save state.
+async fn moment_screen(State(state): State<AppState>, Path(n): Path<u32>) -> Response {
+    let path = state.run.get().path().to_path_buf();
+    match tokio::task::spawn_blocking(move || poke_agent::run::moments::screen(&path, n)).await.ok().flatten() {
+        // Not immutable: a new run in place numbers its moments from 1 again.
+        Some(png) => ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "public, max-age=300")], png)
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "no such moment, or its state holds no screen").into_response(),
+    }
 }
 
 /// The conversation and status stream.

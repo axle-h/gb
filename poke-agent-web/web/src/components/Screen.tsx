@@ -8,6 +8,17 @@ export function Screen({ pausedUntil }: { pausedUntil: number | null }) {
   const [connection, setConnection] = useState<Connection>('connecting');
   // A decode error makes the palette suspect; reconnecting brings a fresh keyframe.
   const [generation, resync] = useReducer((n: number) => n + 1, 0);
+  // Enlarged by CSS rather than the Fullscreen API, which an iPhone offers only to a <video>.
+  const [big, setBig] = useState(false);
+
+  useEffect(() => {
+    if (!big) return;
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setBig(false);
+    };
+    window.addEventListener('keydown', escape);
+    return () => window.removeEventListener('keydown', escape);
+  }, [big]);
 
   useEffect(() => {
     const context = canvas.current?.getContext('2d');
@@ -35,7 +46,11 @@ export function Screen({ pausedUntil }: { pausedUntil: number | null }) {
   }, [generation]);
 
   return (
-    <div className="screen">
+    <div
+      className={big ? 'screen big' : 'screen'}
+      onClick={() => setBig(!big)}
+      title={big ? 'tap to shrink' : 'tap to enlarge'}
+    >
       <canvas className={pausedUntil ? 'paused' : undefined} ref={canvas} width={WIDTH} height={HEIGHT} />
       {pausedUntil !== null && <PausedOverlay until={pausedUntil} />}
       {connection !== 'live' && <div className="screen-overlay">{connection}…</div>}

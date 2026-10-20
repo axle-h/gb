@@ -180,7 +180,7 @@ export function fold(entries: Entry[], event: UiEvent): Entry[] {
     case 'usage':
       return entries; // handled separately — none of these may re-render the log
     case 'moment':
-      return push(entries, { type: 'notice', level: 'info', message: `📸 ${event.title}` }, event);
+      return push(entries, { type: 'moment', kind: event.kind, title: event.title, n: event.n }, event);
     case 'turn_started':
       return push(entries, { type: 'turn', turn: event.turn, kind: event.kind, headline: event.headline }, event);
     case 'tool_call':

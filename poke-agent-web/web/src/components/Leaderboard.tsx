@@ -4,9 +4,8 @@ import { gameName, type Completion } from '../api';
 /** What the overlay asks for. The server clamps anything larger. */
 const LIMIT = 10;
 
-/** Finished runs behind the header's trophy, fetched on open and whenever another run wins. */
-export function Leaderboard({ wins }: { wins: number }) {
-  const [open, setOpen] = useState(false);
+/** Finished runs, opened from the menu; fetched on open and whenever another run wins. */
+export function Leaderboard({ wins, open, onClose }: { wins: number; open: boolean; onClose: () => void }) {
   const [rows, setRows] = useState<Completion[] | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -26,25 +25,22 @@ export function Leaderboard({ wins }: { wins: number }) {
   useEffect(() => {
     if (!open) return;
     const escape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false);
+      if (event.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
-  }, [open]);
+  }, [open, onClose]);
 
   return (
     <>
-      <button className="trophy" onClick={() => setOpen(true)} title="runs that have finished the game">
-        🏆
-      </button>
       {open && (
-        <div className="overlay" onClick={() => setOpen(false)}>
+        <div className="overlay" onClick={onClose}>
           {/* Swallow the click the backdrop closes on. */}
           <div className="leaderboard" onClick={(event) => event.stopPropagation()}>
             <header>
               <span className="title">🏆 Hall of Fame</span>
               <span className="spacer" />
-              <button className="close" onClick={() => setOpen(false)} title="close (Esc)">
+              <button className="close" onClick={onClose} title="close (Esc)">
                 ✕
               </button>
             </header>

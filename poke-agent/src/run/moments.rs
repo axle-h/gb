@@ -79,7 +79,10 @@ pub struct Landmarks {
 
 impl Landmarks {
     pub fn of(state: &GameState, readout: &(impl Readout + ?Sized)) -> Self {
-        let mut owned_dex: Vec<(u8, &'static str)> = state.pokedex_owned.species().iter()
+        // Nothing is owned before the first Pokémon: the cartridge's `StarterDex` owns the
+        // starters and Ivysaur for the length of the page it shows in Oak's lab.
+        let owned = if state.pokemon.len() == 0 { Vec::new() } else { state.pokedex_owned.species() };
+        let mut owned_dex: Vec<(u8, &'static str)> = owned.iter()
             .map(|species| (species.metadata().pokedex_number, species.metadata().name))
             .collect();
         owned_dex.sort_unstable();
@@ -271,6 +274,27 @@ pub fn last(run_dir: &Path) -> Option<Moment> {
         .last()
 }
 
+/// Every line of `run_dir`'s `moments.jsonl`, oldest first.
+pub fn all(run_dir: &Path) -> Vec<Moment> {
+    let Ok(file) = std::fs::File::open(run_dir.join(files::MOMENTS_LOG)) else { return Vec::new() };
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Moment>(&line).ok())
+        .collect()
+}
+
+/// The PNG moment `n` was taken on, read out of its save state of either kind.
+pub fn screen(run_dir: &Path, n: u32) -> Option<Vec<u8>> {
+    let moment = all(run_dir).into_iter().find(|moment| moment.n == n)?;
+    let state = std::fs::read(run_dir.join(&moment.state)).ok()?;
+    if moment.state.ends_with(".pkrd") {
+        pokered::saved_screenshot(&state).ok()?.map(<[u8]>::to_vec)
+    } else {
+        gb::savestate::screenshot(&state).ok()?
+    }
+}
+
 /// Write `state` where `moment` says and then its line, which therefore never names a missing file.
 /// `seq` is the transcript's `moment` event.
 pub fn record(run_dir: &Path, moment: &Moment, seq: u64, state: &[u8]) -> Result<(), String> {
@@ -293,6 +317,7 @@ pub fn record(run_dir: &Path, moment: &Moment, seq: u64, state: &[u8]) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pokemon::Pokedex;
 
     fn member(nickname: &str, species: &str, dex: u8, level: u8) -> Member {
         Member { nickname: nickname.into(), species: species.into(), dex, level }
@@ -377,6 +402,26 @@ mod tests {
         assert_eq!(observed.moments[0].title, "earned the BOULDERBADGE");
     }
 
+    struct Clock;
+
+    impl Readout for Clock {
+        fn screen_text(&self) -> Option<String> { None }
+        fn play_time(&self) -> (u8, u8, u8) { (0, 1, 0) }
+        fn price(&self, _: crate::pokemon::item::ItemId) -> Option<u32> { None }
+        fn pc_items(&self) -> crate::pokemon::bag::Bag { Default::default() }
+        fn mart_stock(&self) -> Vec<crate::pokemon::item::ItemId> { Vec::new() }
+    }
+
+    #[test]
+    fn the_starters_dex_page_owns_nothing_before_the_first_pokemon() {
+        // Bulbasaur, Ivysaur, Charmander and Squirtle: `wPokedexOwned` while `StarterDex` is up.
+        let mut bytes = [0; Pokedex::BYTES_LENGTH];
+        bytes[0] = 0b0100_1011;
+        let state = GameState { pokedex_owned: Pokedex::try_from_slice(&bytes).unwrap(), ..GameState::default() };
+        let sample = Landmarks::of(&state, &Clock);
+        assert_eq!((sample.owned, sample.owned_dex.len()), (0, 0));
+    }
+
     #[test]
     fn an_evolution_is_one_moment_even_when_it_registers_a_species() {
         let mut tracker = MomentTracker::default();
@@ -434,6 +479,24 @@ mod tests {
         assert_eq!((last.n, last.playtime_seconds), (7, 3600));
         let line = std::fs::read_to_string(dir.join(files::MOMENTS_LOG)).unwrap();
         assert!(line.contains("\"seq\":42"), "{line}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn every_moment_is_listed_oldest_first_and_one_with_no_screen_has_none() {
+        let dir = std::env::temp_dir().join(format!("gb-moments-all-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(all(&dir).is_empty());
+        for (n, kind) in [(1, "badge"), (2, "catch")] {
+            let found = Found { kind, title: format!("moment {n}") };
+            record(&dir, &Moment::new(n, &found, &landmarks(n * 60), "gbst"), u64::from(n), b"not a state").unwrap();
+        }
+
+        let listed: Vec<_> = all(&dir).into_iter().map(|moment| (moment.n, moment.kind)).collect();
+        assert_eq!(listed, [(1, "badge".to_string()), (2, "catch".to_string())]);
+        assert_eq!(screen(&dir, 2), None);
+        assert_eq!(screen(&dir, 3), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
