@@ -14,8 +14,9 @@ data:
 
   # `anthropic` is the Messages API with the Secret's ANTHROPIC_API_KEY; `openai` (the default) is any
   # OpenAI-compatible endpoint at OPENAI_BASE_URL with its OPENAI_API_KEY.
-  GB_PROVIDER: "anthropic"
-  GB_MODEL: "claude-opus-5-5"
+  GB_PROVIDER: "openai"
+  OPENAI_BASE_URL: "https://openrouter.ai/api/v1"
+  GB_MODEL: "openrouter/free"
   # Anthropic's effort, `low` to `max`; billed thinking grows with it.
   GB_REASONING_EFFORT: "medium"
 
