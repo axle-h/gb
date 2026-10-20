@@ -98,7 +98,7 @@ impl Script<'_, '_> {
         self.ow.rt.events.dex_rating_text
     }
 
-    /// `StarterDex`: the data page of `dex` with the three starters and Ivysaur owned for its length.
+    /// `StarterDex`: the data page of `dex`, in full though nothing is owned.
     pub fn starter_dex(&mut self, dex: u8) -> Then {
         Then::call(Label::StarterDex(dex))
     }
@@ -361,16 +361,11 @@ pub(super) fn resume(s: &mut Script, label: Label) -> Flow {
             Flow::Return
         }
         StarterDex(dex) => {
-            s.ctx.world.pokedex.owned[0] = 1 << (index_to_pokedex(PokemonSpecies::Bulbasaur as u8) - 1)
-                | 1 << (index_to_pokedex(PokemonSpecies::Ivysaur as u8) - 1)
-                | 1 << (index_to_pokedex(PokemonSpecies::Charmander as u8) - 1)
-                | 1 << (index_to_pokedex(PokemonSpecies::Squirtle as u8) - 1);
-            let page = PokedexMenu::data_page(dex);
+            let page = PokedexMenu::starter_page(dex);
             Then::block(Block::Mode(Box::new(Mode::Pokedex(page)))).then(StarterDexShown)
         }
         // `OaksLabShowPokeBallPokemonScript`'s `ReloadMapData` and `DelayFrames 10` after the page.
         StarterDexShown => {
-            s.ctx.world.pokedex.owned[0] = 0;
             reload_map_data(s);
             s.delay_frames(10).ret()
         }

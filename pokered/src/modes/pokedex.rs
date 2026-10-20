@@ -96,6 +96,10 @@ pub struct PokedexMenu {
     /// and the page closes the mode.
     #[serde(default)]
     page_only: bool,
+    /// The page is drawn in full whether or not the mon is owned, which the cartridge gets by
+    /// owning the starters for the page's length. Owning nothing keeps the Pokédex's bits honest.
+    #[serde(default)]
+    as_owned: bool,
     /// `hTileAnimations` while the data page is up, which stops the animation: the picture's tile
     /// ids are the water's and the flower's.
     #[serde(default)]
@@ -129,6 +133,7 @@ impl PokedexMenu {
             answered: 0,
             answers: 0,
             page_only: false,
+            as_owned: false,
             tile_animations: 0,
         }
     }
@@ -136,6 +141,11 @@ impl PokedexMenu {
     /// `ShowPokedexData` for `dex`, from outside the dex.
     pub fn data_page(dex: u8) -> Self {
         Self { dex, page_only: true, phase: Phase::DataPrinting, ..Self::new() }
+    }
+
+    /// `StarterDex`'s page for `dex`: drawn as if owned.
+    pub fn starter_page(dex: u8) -> Self {
+        Self { as_owned: true, ..Self::data_page(dex) }
     }
 
     /// How many times the side menu has answered, which is how a driver sees its press land.
@@ -417,7 +427,7 @@ impl PokedexMenu {
         if !ctx.audio.sound_finished() {
             return Transition::Stay;
         }
-        if !is_set(&ctx.world.pokedex.owned, self.dex) {
+        if !self.as_owned && !is_set(&ctx.world.pokedex.owned, self.dex) {
             self.phase = Phase::DataWaiting;
             return self.wait_for_button(ctx);
         }
@@ -855,6 +865,18 @@ mod tests {
         assert_eq!(game.status(), Status::Busy);
         until_waiting(&mut game, Decision::PokedexData);
         assert!(game.audio().sound_finished());
+    }
+
+    /// A starter's page in Oak's lab is the whole entry with nothing owned, and owns nothing.
+    #[test]
+    fn a_starter_page_is_drawn_in_full_and_owns_nothing() {
+        let world = World { pokedex: dex(0, 0), ..World::default() };
+        let mut game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
+        game.push(Mode::Pokedex(PokedexMenu::starter_page(1)));
+        until_waiting(&mut game, Decision::PokedexData);
+        assert_eq!(row_text(&game, 6, 13..18), encode("2′04″").unwrap(), "the height");
+        assert_ne!(game.ui().get(1, 11), UiSurface::BLANK, "and the description");
+        assert_eq!(game.world().pokedex.owned, [0; 19]);
     }
 
     /// `.choseCry` plays the cry and leaves the cursor where it is, with no wait.
