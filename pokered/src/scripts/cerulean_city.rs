@@ -28,14 +28,16 @@ const PAD_CTRL_PAD: Joypad = Joypad::UP.union(Joypad::DOWN).union(Joypad::LEFT).
 const ROCKET_COORDS: [(u8, u8); 2] = [(30, 7), (30, 9)];
 /// `CeruleanCityCoords2`: the bridge's two middle squares, where the rival drops in from above.
 const RIVAL_COORDS: [(u8, u8); 2] = [(20, 6), (21, 6)];
-/// The right-hand of the two: the rival stands where he already is rather than being moved across.
-const RIGHT_OF_BRIDGE: u8 = 20;
-/// `CeruleanCityMovement1`, and the two he leaves by: from the left square he goes right first and
-/// from the right one left, so either way he walks round the player and off south.
+/// The left-hand of the two, which the rival's map object already stands over; the cartridge's
+/// comment on this compare calls it the right side, and it is not.
+const LEFT_OF_BRIDGE: u8 = 20;
+/// `CeruleanCityMovement1`, and the two he leaves by (`Movement4` and `Movement3`): above the left
+/// square he steps right first and above the right one left, so either way he walks round the
+/// player and off south without leaving the bridge.
 const RIVAL_ARRIVES: [u8; 4] = [NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, END];
-const RIVAL_LEAVES_LEFT: [u8; 8] = [NPC_MOVEMENT_RIGHT, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN,
+const RIVAL_LEAVES_FROM_LEFT: [u8; 8] = [NPC_MOVEMENT_RIGHT, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN,
     NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, END];
-const RIVAL_LEAVES_RIGHT: [u8; 8] = [NPC_MOVEMENT_LEFT, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN,
+const RIVAL_LEAVES_FROM_RIGHT: [u8; 8] = [NPC_MOVEMENT_LEFT, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN,
     NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, NPC_MOVEMENT_DOWN, END];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,8 +101,8 @@ fn default_script(rt: &mut Script) -> Flow {
     rt.play_music(sounds::MUSIC_MEET_RIVAL);
     rt.clear_joy_held();
     rt.joy_ignore(PAD_CTRL_PAD);
-    // He is one sprite for both squares: standing over the left one, he is moved across first.
-    if rt.x() != RIGHT_OF_BRIDGE {
+    // He is one sprite for both squares: for the right one he is moved across first.
+    if rt.x() != LEFT_OF_BRIDGE {
         let mut at = rt.sprite_position(CERULEANCITY_RIVAL);
         at.map_x = 25;
         rt.set_sprite_position(CERULEANCITY_RIVAL, at);
@@ -224,9 +226,9 @@ pub fn resume(rt: &mut Script, label: Label) -> Flow {
             rt.play_sound(SoundId::STOP_ALL_MUSIC);
             rt.music_rival_alternate_start();
             rt.set_sprite_movement_bytes_to_ff(CERULEANCITY_RIVAL);
-            let path = match rt.x() == RIGHT_OF_BRIDGE {
-                true => RIVAL_LEAVES_RIGHT,
-                false => RIVAL_LEAVES_LEFT,
+            let path = match rt.x() == LEFT_OF_BRIDGE {
+                true => RIVAL_LEAVES_FROM_LEFT,
+                false => RIVAL_LEAVES_FROM_RIGHT,
             };
             rt.move_sprite(CERULEANCITY_RIVAL, &path);
             rt.maps().cerulean_city.cur_script = SCRIPT_CERULEANCITY_RIVAL_CLEANUP;

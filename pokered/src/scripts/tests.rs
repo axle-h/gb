@@ -773,6 +773,33 @@ fn the_cerulean_rival_walks_off_south_once_he_is_beaten() {
     assert!(game.world().location.is_hidden(TOGGLE_CERULEAN_RIVAL as u8), "he is off the map again");
 }
 
+/// From either bridge square he walks round the player on the other one, never off the bridge's edge.
+#[test]
+fn the_beaten_cerulean_rival_leaves_by_the_bridge_square_the_player_is_not_on() {
+    use poke_core::symbols::pokered_map_scripts::{CERULEANCITY_RIVAL, SCRIPT_CERULEANCITY_DEFAULT};
+    for x in [20, 21] {
+        let mut game = game(Map::CeruleanCity, x, 7, SpriteFacing::Up, 8, |world| {
+            one_shot(world);
+            world.scripts.rival_starter = PokemonSpecies::Squirtle as u8;
+            world.events.set(EVENT_BEAT_CERULEAN_ROCKET_THIEF);
+        });
+        play_until(&mut game, 600, free);
+        command(&mut game, Command::Step(Direction::Up));
+        play_until(&mut game, 20_000, |game| game.world().events.is_set(EVENT_BEAT_CERULEAN_RIVAL));
+        let mut columns = std::collections::BTreeSet::new();
+        play_until(&mut game, 40_000, |game| {
+            if let Some(overworld) = game.modes().iter().find_map(|mode| match mode {
+                Mode::Overworld(overworld) => Some(overworld),
+                _ => None,
+            }) {
+                columns.insert(overworld.sprites()[CERULEANCITY_RIVAL as usize].map_x - 4);
+            }
+            game.world().scripts.maps.cerulean_city.cur_script == SCRIPT_CERULEANCITY_DEFAULT && free(game)
+        });
+        assert_eq!(columns.into_iter().collect::<Vec<_>>(), vec![20, 21], "player on x {x}");
+    }
+}
+
 /// The thief who robbed the house hands TM28 back, and the hole he came out of is a guard again.
 #[test]
 fn the_cerulean_thief_hands_back_tm28_and_a_guard_takes_his_place() {
