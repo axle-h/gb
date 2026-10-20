@@ -15,9 +15,9 @@ data:
   # `anthropic` is the Messages API with the Secret's ANTHROPIC_API_KEY; `openai` (the default) is any
   # OpenAI-compatible endpoint at OPENAI_BASE_URL with its OPENAI_API_KEY.
   GB_PROVIDER: "anthropic"
-  GB_MODEL: "claude-haiku-5-5"
+  GB_MODEL: "claude-opus-5-5"
   # Anthropic's effort, `low` to `max`; billed thinking grows with it.
-  GB_REASONING_EFFORT: "high"
+  GB_REASONING_EFFORT: "medium"
 
   # What is played: `emulated`, the cartridge, or `native`, the recreation. A run is resumed only by
   # a process playing its kind, so changing this starts a new game.

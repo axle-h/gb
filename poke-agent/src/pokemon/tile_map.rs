@@ -599,6 +599,7 @@ impl MetaTileMap {
         use std::collections::{HashMap, HashSet, VecDeque};
         /// Layouts explored before giving up.
         const MAX_STATES: usize = 50_000;
+        const NONE: u32 = u32::MAX;
         // Only visible boulders are present and pushable.
         let mut boulders: Vec<Point8> = self.sprites.iter()
             .filter(|s| s.name.starts_with("Boulder") && !s.hidden)
@@ -611,87 +612,108 @@ impl MetaTileMap {
             boulders.swap(0, at);
             boulders[1..].sort_by_key(|p| (p.y, p.x));
         }
+        // Every search below runs thousands of flood fills, so the terrain is flattened into
+        // tables indexed `x + y * width` once, and reading order is index order.
+        let n = self.width * self.height;
+        let index = |p: Point8| p.x as usize + p.y as usize * self.width;
+        let point = |i: usize| Point8 { x: (i % self.width) as u8, y: (i / self.width) as u8 };
+        let dirs = [JoypadButton::Up, JoypadButton::Down, JoypadButton::Left, JoypadButton::Right];
         // The solver tracks boulders itself, so each starting square counts as floor although the
         // live tiles call it occupied.
         let initial: HashSet<Point8> = boulders.iter().copied().collect();
-        let dirs = [(0i32, -1i32, JoypadButton::Up), (0, 1, JoypadButton::Down),
-                    (-1, 0, JoypadButton::Left), (1, 0, JoypadButton::Right)];
-        let inb = |x: i32, y: i32| x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height;
-        let mv = |p: Point8, dx: i32, dy: i32| -> Option<Point8> {
-            let (x, y) = (p.x as i32 + dx, p.y as i32 + dy);
-            inb(x, y).then(|| Point8 { x: x as u8, y: y as u8 })
-        };
         // A tile the player may stand on to push: floor, or a warp tile.
-        let floor = |p: Point8| initial.contains(&p)
-            || matches!(self.tile_at(p), MetaTile::Empty | MetaTile::Grass | MetaTile::Warp { .. });
+        let floor: Vec<bool> = (0..n).map(|i| initial.contains(&point(i))
+            || matches!(self.meta_tiles[i], MetaTile::Empty | MetaTile::Grass | MetaTile::Warp { .. })).collect();
         // A tile a boulder may land on: floor, or `switch` itself, which may be a hole.
         let dest_floor = |p: Point8| p == switch || initial.contains(&p)
             || matches!(self.tile_at(p), MetaTile::Empty | MetaTile::Grass);
-        // Tiles the player can reach from `from` with this layout's boulders as walls.
-        let reach = |bs: &[Point8], from: Point8| -> HashSet<Point8> {
-            let mut seen = HashSet::from([from]);
-            let mut q = VecDeque::from([from]);
-            while let Some(p) = q.pop_front() {
-                for &(dx, dy, _) in &dirs {
-                    if let Some(n) = mv(p, dx, dy) {
-                        if floor(n) && !bs.contains(&n) && !self.pair_blocked(p, n) && seen.insert(n) {
-                            q.push_back(n);
-                        }
+        // The player's step from each tile in each direction, `NONE` where floor or a pair forbids it.
+        let walk: Vec<[u32; 4]> = (0..n).map(|i| dirs.map(|d| match self.step(point(i), d) {
+            Some(next) if floor[index(next)] && !self.pair_blocked(point(i), next) => index(next) as u32,
+            _ => NONE,
+        })).collect();
+        // Where a boulder on each tile lands when shoved each way, as far as terrain alone decides:
+        // `NONE` unless there is floor behind it, `dest_floor` ahead, and neither of
+        // `CheckForCollisionWhenPushingBoulder`'s extra refusals applies (the player's tile, `side`).
+        let shove: Vec<[u32; 4]> = (0..n).map(|i| dirs.map(|d| {
+            let (Some(side), Some(dest)) = (self.step(point(i), opposite_dir(d)), self.step(point(i), d))
+                else { return NONE };
+            if !floor[index(side)] || !dest_floor(dest) || self.boulder_push_terrain_refusal(side, dest).is_some() {
+                return NONE;
+            }
+            index(dest) as u32
+        })).collect();
+        // Every tile some sequence of terrain-legal shoves carries a boulder from onto `switch`,
+        // whatever the other boulders do: a layout putting the tracked one elsewhere is dead.
+        let mut can_finish = vec![false; n];
+        can_finish[index(switch)] = true;
+        let mut back = VecDeque::from([index(switch)]);
+        while let Some(to) = back.pop_front() {
+            for from in 0..n {
+                if !can_finish[from] && shove[from].contains(&(to as u32)) {
+                    can_finish[from] = true;
+                    back.push_back(from);
+                }
+            }
+        }
+        // The flood fill, over stamps rather than a fresh set per call: it returns its component
+        // (lowest tile) and the stamp `seen` marks the tiles it reached with.
+        let mut seen = vec![0u32; n];
+        let mut stamp = 0u32;
+        let mut occupied = vec![0u32; n];
+        let mut stack = Vec::with_capacity(n);
+        let mut flood = |bs: &[Point8], from: Point8, seen: &mut Vec<u32>| -> (usize, u32) {
+            stamp += 1;
+            for b in bs { occupied[index(*b)] = stamp; }
+            let start = index(from);
+            seen[start] = stamp;
+            stack.push(start);
+            let mut lowest = start;
+            while let Some(i) = stack.pop() {
+                lowest = lowest.min(i);
+                for &next in &walk[i] {
+                    if next == NONE { continue }
+                    let next = next as usize;
+                    if occupied[next] != stamp && seen[next] != stamp {
+                        seen[next] = stamp;
+                        stack.push(next);
                     }
                 }
             }
-            seen
-        };
-        let norm = |set: &HashSet<Point8>| -> Point8 { *set.iter().min_by_key(|p| (p.y, p.x)).unwrap() };
-
-        // An optimistic pre-filter, because an unsolvable pair is what costs the cap.
-        let could_possibly_reach = |from: Point8| -> bool {
-            let mut seen = HashSet::from([from]);
-            let mut q = VecDeque::from([from]);
-            while let Some(b) = q.pop_front() {
-                if b == switch { return true; }
-                for &(dx, dy, _) in &dirs {
-                    let (Some(side), Some(dest)) = (mv(b, -dx, -dy), mv(b, dx, dy)) else { continue };
-                    // Standing behind and landing in front depend on terrain alone, whatever the
-                    // other boulders do.
-                    if !floor(side) || !dest_floor(dest) { continue }
-                    if self.boulder_push_terrain_refusal(side, dest).is_some() { continue }
-                    if seen.insert(dest) { q.push_back(dest); }
-                }
-            }
-            false
+            (lowest, stamp)
         };
         // Memoised, or `actions()` runs this search on every 20 ms tick.
-        let start_reach = reach(&boulders, self.player_position);
         let key = PlanKey {
             map: self.map,
             walkable: self.walkable_bits().to_vec(),
             layout: boulders.clone(),
-            component: norm(&start_reach),
+            component: point(flood(&boulders, self.player_position, &mut seen).0),
             tracked,
             target: switch,
         };
         if let Some(hit) = PLAN_CACHE.with(|c| c.borrow().get(&key).cloned()) { return hit }
 
         // A closure, so both exits land in the cache.
-        let search = || {
+        let mut search = || {
+        let alive = |bs: &[Point8]| match tracked {
+            Some(_) => can_finish[index(bs[0])],
+            None => bs.iter().any(|b| can_finish[index(*b)]),
+        };
         // Inside the closure, so that a "no" is cached too.
-        match tracked {
-            // One named boulder: it alone has to be able to get there.
-            Some(t) => if !could_possibly_reach(t) { return None },
-            // Any boulder will do, so the floor is hopeless only if none of them can.
-            None => if !boulders.iter().any(|b| could_possibly_reach(*b)) { return None },
-        }
+        if !alive(&boulders) { return None }
 
         type Key = (Vec<Point8>, Point8);           // (boulder layout, player component)
         // The component is only known once a state is popped (it needs a flood fill), so dedup
         // happens at pop time and the queue carries the parent link to record on first arrival.
+        // `queued` drops an exact repeat before it costs a flood: FIFO pops the first one first.
         let mut visited: HashSet<Key> = HashSet::new();
+        let mut queued: HashSet<(Vec<Point8>, Point8)> = HashSet::from([(boulders.clone(), self.player_position)]);
         let mut came: HashMap<Key, (Key, Point8, JoypadButton)> = HashMap::new();
         let mut q: VecDeque<(Vec<Point8>, Point8, Option<(Key, Point8, JoypadButton)>)> =
             VecDeque::from([(boulders.clone(), self.player_position, None)]);
         while let Some((bs, player_at, parent)) = q.pop_front() {
-            let key: Key = (bs.clone(), norm(&reach(&bs, player_at)));
+            let (component, reached) = flood(&bs, player_at, &mut seen);
+            let key: Key = (bs.clone(), point(component));
             if !visited.insert(key.clone()) { continue; }
             if let Some(link) = parent { came.insert(key.clone(), link); }
             let solved = match tracked {
@@ -717,22 +739,23 @@ impl MetaTileMap {
                 }
                 break;
             }
-            let r = reach(&bs, player_at);
+            // `seen` still holds this layout's flood: the player must reach the square behind.
             for (i, &b) in bs.iter().enumerate() {
-                for &(dx, dy, dir) in &dirs {
-                    let (Some(side), Some(dest)) = (mv(b, -dx, -dy), mv(b, dx, dy)) else { continue };
-                    // The player must reach the square behind, the destination must be floor, and
-                    // neither of `CheckForCollisionWhenPushingBoulder`'s extra refusals may apply.
-                    if !r.contains(&side) || bs.contains(&dest) || !dest_floor(dest) { continue; }
-                    // `side`, not `b`: the cartridge tests the player's tile.
-                    if self.boulder_push_terrain_refusal(side, dest).is_some() { continue; }
+                for (d, &dir) in dirs.iter().enumerate() {
+                    let dest = shove[index(b)][d];
+                    if dest == NONE { continue }
+                    let dest = point(dest as usize);
+                    let side = self.step(b, opposite_dir(dir)).expect("a legal shove has a side");
+                    if seen[index(side)] != reached || bs.contains(&dest) { continue; }
                     let mut next = bs.clone();
                     next[i] = dest;
                     match tracked {
                         Some(_) => next[1..].sort_by_key(|p| (p.y, p.x)),
                         None => next.sort_by_key(|p| (p.y, p.x)),
                     }
+                    if !alive(&next) { continue }
                     // After the push the player stands on the boulder's old tile.
+                    if !queued.insert((next.clone(), b)) { continue }
                     q.push_back((next, b, Some((key.clone(), b, dir))));
                 }
             }
