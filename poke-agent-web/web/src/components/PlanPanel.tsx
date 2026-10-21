@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { shownPlanIndex, type PlanVersion } from '../api';
+import { Markdown } from './Markdown';
 
 /** The model's `plan.md` as it wrote it, newest first, with every earlier version a step away. */
 export function PlanPanel({ plan, onOlder }: { plan: PlanVersion[]; onOlder: () => void }) {
@@ -46,7 +47,13 @@ export function PlanPanel({ plan, onOlder }: { plan: PlanVersion[]; onOlder: () 
           </span>
         )}
       </div>
-      {shown.text.trim() === '' ? <p className="plan-text dim">(empty)</p> : <pre className="plan-text">{shown.text}</pre>}
+      {shown.text.trim() === '' ? (
+        <p className="plan-text dim">(empty)</p>
+      ) : (
+        <div className="plan-text">
+          <Markdown source={shown.text} />
+        </div>
+      )}
     </div>
   );
 }

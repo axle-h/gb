@@ -143,11 +143,6 @@ export function App() {
           <div className="stage">
             <Screen pausedUntil={run.state === 'throttled' ? run.until_ms : null} />
             {opponent && <Opponent opponent={opponent} />}
-            {now && (
-              <p className="now" title={now}>
-                {now}
-              </p>
-            )}
           </div>
           {/* Phone-only tabs. The buttons key off `pane`, not `tab`, so a fallback moves the highlight. */}
           <nav className="pane-tabs">
@@ -171,7 +166,7 @@ export function App() {
               </PaneButton>
             )}
           </nav>
-          <StatusPanel status={status} speed={speed} />
+          <StatusPanel status={status} speed={speed} now={now} />
           <PlanPanel plan={plan} onOlder={loadOlderPlans} />
           <BattleScriptPanel script={battleScript} alwaysOpen={pane === 'script'} />
         </section>

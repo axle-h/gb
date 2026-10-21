@@ -4,7 +4,16 @@ import { MonSheet } from './MonSheet';
 import { fillClass, shortStatus } from './mon';
 
 /** Where the player is, what they have, and how the party is holding up. */
-export function StatusPanel({ status, speed }: { status: Status | null; speed: number | null }) {
+export function StatusPanel({
+  status,
+  speed,
+  now,
+}: {
+  status: Status | null;
+  speed: number | null;
+  /** What the model last said it was doing, as the trainer's own words. */
+  now: string | null;
+}) {
   const game = status?.game ?? null;
   const badges = game?.badges ?? [];
   // A slot rather than the mon, so the sheet follows the live heartbeat.
@@ -14,6 +23,12 @@ export function StatusPanel({ status, speed }: { status: Status | null; speed: n
 
   return (
     <div className="status">
+      {now && (
+        <p className="now" title={now}>
+          {now}
+        </p>
+      )}
+
       {/* The save's name, which can differ from the header's model after a resume. */}
       <div className="status-line">
         <span className="trainer">{game ? game.trainer : '—'}</span>

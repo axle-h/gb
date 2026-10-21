@@ -23,6 +23,12 @@ body {
   color: var(--text);
 }
 
+/* The browser's own scrollbars are a light-theme grey slab beside every dark panel. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
 .app {
   display: flex;
   flex-direction: column;
@@ -150,18 +156,21 @@ main {
   border-radius: 0;
 }
 
-/* The stage is the screen and what stands under it: the opponent and what the model said last. */
+/* The stage is the screen and what stands under it: the opponent, in a battle. */
 .stage {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
+/* The trainer's own words, heading their card. */
 .now {
-  margin: 0;
+  margin: 0 0 8px;
+  padding: 0 0 8px;
+  border-bottom: 1px solid var(--line);
   color: var(--text);
-  font-size: 12px;
-  line-height: 1.4;
+  font-style: italic;
+  line-height: 1.45;
   /* Two lines; the whole sentence is the `title` and the newest card. */
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -486,7 +495,6 @@ main {
   border-radius: 4px;
 }
 
-.right-tabs button,
 .right-tabs button,
 .pane-tabs button {
   padding: 3px 12px;
@@ -1118,14 +1126,165 @@ main {
   margin-left: auto;
 }
 
-/* The model's own text, its line breaks kept and long lines wrapped. */
 .plan-text {
   margin: 0;
-  font: inherit;
   font-size: 12px;
-  line-height: 1.45;
-  white-space: pre-wrap;
+  line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+/* ── Markdown, as the model writes it in its plan ── */
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown p,
+.markdown ul,
+.markdown ol,
+.markdown blockquote,
+.markdown pre,
+.markdown .table {
+  margin: 0 0 8px;
+}
+
+.markdown h3,
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+  margin: 12px 0 4px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.markdown h3 {
+  font-size: 14px;
+  color: var(--accent);
+}
+
+.markdown h4 {
+  font-size: 13px;
+}
+
+.markdown h5,
+.markdown h6 {
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.markdown ul,
+.markdown ol {
+  padding-left: 2.2ch;
+}
+
+.markdown li > ul,
+.markdown li > ol,
+.markdown li > p {
+  margin: 2px 0 0;
+}
+
+.markdown li::marker {
+  color: var(--dim);
+}
+
+/* A checklist: the box stands where the bullet would. */
+.markdown li.task {
+  list-style: none;
+  position: relative;
+  margin-left: -2.2ch;
+  padding-left: 18px;
+}
+
+.markdown .tick {
+  position: absolute;
+  left: 0;
+  top: 0.25em;
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--dim);
+  border-radius: 3px;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--bg);
+}
+
+.markdown li.task.done > .tick {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.markdown li.task.done,
+.markdown li.task.done strong {
+  color: var(--dim);
+}
+
+.markdown strong {
+  color: #fff;
+}
+
+.markdown s {
+  color: var(--dim);
+}
+
+.markdown code {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--line);
+  font-size: 11px;
+}
+
+.markdown pre {
+  padding: 6px 8px;
+  border-radius: 3px;
+  background: var(--bg);
+  overflow-x: auto;
+  font: inherit;
+  font-size: 11px;
+}
+
+.markdown blockquote {
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid var(--warn);
+  color: var(--text);
+}
+
+.markdown hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 10px 0;
+}
+
+.markdown .link {
+  color: #7fb2e5;
+}
+
+.markdown .table {
+  overflow-x: auto;
+}
+
+.markdown table {
+  border-collapse: collapse;
+}
+
+.markdown th,
+.markdown td {
+  padding: 2px 10px 2px 0;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown th {
+  color: var(--dim);
+  font-weight: 600;
 }
 
 .plan-steps {
@@ -1334,11 +1493,13 @@ main {
     gap: 4px;
   }
 
-  /* `auto`, not `1`, so a long label takes its width from a short one rather than overflowing. */
+  /* `auto`, not `1`, so a long label takes its width from a short one rather than overflowing; five
+     tabs at 12px still fit a 320px screen. */
   .pane-tabs button {
     flex: 1 1 auto;
     min-height: 38px;
-    padding: 0 6px;
+    padding: 0 4px;
+    font-size: 12px;
   }
 
   .right-tabs .desk {
