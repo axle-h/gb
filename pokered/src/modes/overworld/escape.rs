@@ -66,6 +66,9 @@ pub fn arm_escape_warp(ctx: &mut Ctx) {
     ctx.world.location.escape_warp = true;
     ctx.world.events.clear(poke_core::symbols::pokered_events::EVENT_IN_SAFARI_ZONE);
     ctx.world.safari_balls = 0;
+    // Left armed, the gate greets the next walk in from Fuchsia with its "leaving early?" and walks
+    // the player down off the map.
+    ctx.world.scripts.maps.safari_zone_gate.cur_script = poke_core::symbols::pokered_map_scripts::SCRIPT_SAFARIZONEGATE_DEFAULT;
 }
 
 /// `DungeonWarpList` and `DungeonWarpData`: where a hole on `map`'s floor above drops the player.

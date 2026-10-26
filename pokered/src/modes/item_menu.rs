@@ -642,6 +642,7 @@ mod tests {
         let mut game = game(&[(ItemId::EscapeRope, 1)], 10);
         let mut world = game.world().clone();
         world.location.map = poke_core::map::Map::MtMoon1F;
+        world.scripts.maps.safari_zone_gate.cur_script = poke_core::symbols::pokered_map_scripts::SCRIPT_SAFARIZONEGATE_LEAVING_SAFARI;
         game = Game::new(world, GameRng::seeded(0), Pacing::Faithful);
         game.push(Mode::ItemMenu(ItemMenu::new()));
         answer(&mut game, Decision::List, Command::ChooseListEntry(0));
@@ -656,6 +657,8 @@ mod tests {
         assert_eq!(game.world().bag.quantity_of(ItemId::EscapeRope), 0, "and the rope is spent");
         assert!(game.world().location.escape_warp);
         assert_eq!(game.world().location.fly_warp, Some(game.world().location.last_blackout_map));
+        assert_eq!(game.world().scripts.maps.safari_zone_gate.cur_script,
+            poke_core::symbols::pokered_map_scripts::SCRIPT_SAFARIZONEGATE_DEFAULT, "and the Safari Zone gate disarmed");
     }
 
     #[test]
