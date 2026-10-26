@@ -310,7 +310,8 @@ fn completion_phase_celadon() {
         Map::PokemonTower2F, Map::Route12Gate1F, Map::Route12Gate2F, Map::Route8, Map::Route8Gate,
         Map::UndergroundPathRoute8, Map::UndergroundPathWestEast, Map::UndergroundPathRoute7, Map::Route7,
         Map::Route7Gate, Map::BikeShop,
-    ], &[Entry::Way(Way::WildOnACaveFloor), Entry::KeyItem(vec![ItemId::Bicycle as u8])]);
+    ], &[Entry::Way(Way::WildOnACaveFloor), Entry::KeyItem(vec![ItemId::Bicycle as u8]),
+         Entry::Machine(ItemId::Hm05Flash as u8)]);
     cut(&mut played, "completion-celadon");
     // On the water by the Power Plant, for the phase after Surf.
     let later = [Entry::Trainer { map: Map::Route10, index: 0 }];
@@ -453,7 +454,7 @@ fn completion_phase_volcano_badge() {
         Map::CinnabarLabFossilRoom, Map::PokemonMansion1F, Map::PokemonMansion2F,
         Map::PokemonMansion3F, Map::PokemonMansionB1F, Map::CinnabarGym,
     ], &[Entry::Badge(6), Entry::CinnabarQuiz, Entry::Way(Way::RevivedFossil),
-         Entry::Machine(ItemId::Tm35Metronome as u8),
+         Entry::Machine(ItemId::Tm35Metronome as u8), Entry::Machine(ItemId::Tm38FireBlast as u8),
          Entry::KeyItem(vec![ItemId::SecretKey as u8])]);
     cut(&mut played, "completion-volcano");
     // 3F's scientist stands behind a block only the switch on opens, and this phase leaves the
@@ -546,7 +547,8 @@ fn completion_phase_eastern_routes() {
                           to_the_eastern_routes(), 900, Duration::from_secs(3600));
     let missing = missing_on(&mut played, &[
         Map::Route13, Map::Route14, Map::Route15, Map::Route15Gate1F, Map::Route15Gate2F,
-    ], &[Entry::ItemBall { map: Map::Route12, object: 9, item: ItemId::Tm16PayDay as u8 }]);
+    ], &[Entry::ItemBall { map: Map::Route12, object: 9, item: ItemId::Tm16PayDay as u8 },
+         Entry::KeyItem(vec![ItemId::ExpAll as u8])]);
     cut(&mut played, "completion-east");
     assert!(missing.is_empty(), "the phase left {missing:?}");
 }
@@ -572,7 +574,7 @@ fn completion_phase_north_errands() {
     let missing = missing_on(&mut played, &[Map::Route5Gate], &[
         Entry::Trainer { map: Map::Route4, index: 0 },
         Entry::Machine(ItemId::Tm42DreamEater as u8),
-        Entry::Machine(ItemId::Hm05Flash as u8), Entry::KeyItem(vec![ItemId::OldAmber as u8]),
+        Entry::KeyItem(vec![ItemId::OldAmber as u8]),
         Entry::Trade(crate::pokemon::species::PokemonSpecies::Poliwhirl),
         Entry::Way(Way::DayCareWithdrawn), Entry::Way(Way::SuperRod),
         Entry::ItemBall { map: Map::Route25, object: 10, item: ItemId::Tm19SeismicToss as u8 },
@@ -591,7 +593,6 @@ fn completion_phase_middle_errands() {
     let missing = missing_on(&mut played, &[Map::Route6Gate, Map::Route11Gate1F, Map::Route11Gate2F], &[
         Entry::Machine(ItemId::Tm41Softboiled as u8),
         Entry::Machine(ItemId::Tm31Mimic as u8), Entry::KeyItem(vec![ItemId::Itemfinder as u8]),
-        Entry::KeyItem(vec![ItemId::ExpAll as u8]),
         Entry::Trade(PokemonSpecies::Nidorino), Entry::Trade(PokemonSpecies::Slowbro),
         Entry::Trade(PokemonSpecies::NidoranMale), Entry::Way(Way::EvolvedByRareCandy),
     ]);
@@ -608,7 +609,6 @@ fn completion_phase_cinnabar_errands() {
         Entry::Way(Way::RevivedOldAmber),
         Entry::Trade(PokemonSpecies::Ponyta), Entry::Trade(PokemonSpecies::Raichu),
         Entry::Trade(PokemonSpecies::Venonat),
-        Entry::Machine(ItemId::Tm38FireBlast as u8),
         Entry::Way(Way::EvolutionCancelled),
         Entry::Trainer { map: crate::pokemon::map::Map::PokemonMansion3F, index: 1 },
     ]);

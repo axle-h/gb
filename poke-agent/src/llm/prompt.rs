@@ -410,6 +410,36 @@ pub enum TurnContext<'a> {
 /// What every [`situation`] opens with, and so where a compaction may cut.
 pub const DECISION: &str = "## Decision: ";
 
+/// Why an unlit cave offers one walk, and the one thing standing between the party and Flash.
+fn dark_cave(state: &GameState) -> String {
+    use crate::pokemon::badge::Badge;
+    use crate::pokemon::item::ItemId;
+    use crate::pokemon::learnset::can_learn;
+    use crate::pokemon::move_name::PokemonMoveName;
+    let known = state.pokemon.iter().any(|mon| mon.moves.iter().flatten().any(|m| m.name == PokemonMoveName::Flash));
+    let held = state.bag.iter().any(|entry| entry.id == ItemId::Hm05Flash);
+    let taker = state.pokemon.iter().position(|mon| can_learn(mon.species, ItemId::Hm05Flash));
+    let badged = state.badges.contains(Badge::BoulderBadge);
+    let owned = state.pokedex_owned.species().len();
+    let what = match (known, held, taker, badged) {
+        (true, _, _, true) => "The `flash` row lights it, and every row comes back once it is lit.".to_string(),
+        (true, _, _, false) => "A party member knows Flash, but the game will not let it be used outside \
+            battle without the BoulderBadge, from Pewter City's gym.".to_string(),
+        (false, true, Some(slot), _) => format!("Flash would light it. Hm05Flash is in your bag and slot \
+            {slot} can learn it, so its `teach:Hm05Flash@{slot}` row is the first step{}.",
+            if badged { "" } else { ", and the BoulderBadge from Pewter City's gym the second" }),
+        (false, true, None, _) => "Flash would light it. Hm05Flash is in your bag, but nothing in your \
+            party can learn it, so a Pokémon that can has to be caught or swapped in first.".to_string(),
+        (false, false, _, _) => format!("Flash would light it, and it is taught by Hm05Flash, which you \
+            do not have. Professor Oak's aide in Route2Gate gives it to a trainer who owns at least 10 \
+            species of Pokémon; you own {owned}. It then has to be taught to a party member that can \
+            learn it{}.", if badged { "" } else { ", and needs the BoulderBadge from Pewter City's gym" }),
+    };
+    format!("It is pitch dark: this cave is unlit, so you cannot see where you are going, and the only \
+             walk in the menu below is the nearest way out. {what} Leaving and coming back in puts the \
+             dark back.\n")
+}
+
 /// The user message that opens a turn.
 pub fn situation(
     kind: DecisionKind,
@@ -590,6 +620,12 @@ pub fn situation(
                  Nothing in the menu below leads past it, and retrying will not change that.\n",
                 point_list(&trees),
             ));
+        }
+
+        // The menu below is cut to one door in the dark (`tools::way_out_of_the_dark`), so say why
+        // and what would light it.
+        if state.map_is_dark {
+            out.push_str(&dark_cave(state));
         }
 
         // Boulders, said every turn there are any, whether or not they can be moved.
@@ -1503,6 +1539,40 @@ mod tests {
     }
 
     /// What the map will not let you do is said once, in the turn.
+    #[test]
+    fn a_dark_cave_says_why_and_what_stands_between_the_party_and_flash() {
+        use crate::pokemon::item::ItemId;
+        use crate::pokemon::move_name::PokemonMoveName;
+        let mut gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);
+        gb.load_state(include_bytes!("../pokemon/data/soak-rock-tunnel.bin")).expect("the fixture loads");
+        let mut state = { use crate::pokemon::PokemonApiTrait; crate::pokemon::PokemonApi::new(&mut gb).game_state() }
+            .expect("the fixture has a readable state");
+        assert!(state.map_is_dark, "the fixture is Rock Tunnel unlit");
+        assert!(!state.bag.iter().any(|entry| entry.id == ItemId::Hm05Flash), "the scripted route crosses it without the HM");
+        let rendered = |state: &GameState| situation(
+            DecisionKind::Overworld, state, &ApiSnapshot::default(), &[], &[], TurnContext::None, &[],
+        );
+
+        let without = rendered(&state);
+        assert!(without.contains("this cave is unlit"), "{without}");
+        assert!(without.contains("Route2Gate") && without.contains("at least 10"), "where the HM is: {without}");
+
+        state.bag.push(crate::pokemon::bag::BagItem { id: ItemId::Hm05Flash, quantity: 1 }).expect("room");
+        state.pokemon = Default::default();
+        state.pokemon.push(crate::pokemon::pokemon::Pokemon::maxed(
+            crate::pokemon::species::PokemonSpecies::Pidgey, "MON", [PokemonMoveName::Gust; 4], "AI", 1)).expect("room");
+        assert!(rendered(&state).contains("nothing in your party can learn it"), "{}", rendered(&state));
+
+        state.pokemon.get_mut(0).expect("one member").species = crate::pokemon::species::PokemonSpecies::Abra;
+        assert!(rendered(&state).contains("`teach:Hm05Flash@0`"), "{}", rendered(&state));
+
+        state.pokemon.get_mut(0).expect("one member").moves[0] = Some(crate::pokemon::move_name::PokemonMove::with_max_pp(PokemonMoveName::Flash));
+        state.badges.remove(crate::pokemon::badge::Badge::BoulderBadge);
+        assert!(rendered(&state).contains("without the BoulderBadge"), "{}", rendered(&state));
+        state.badges |= crate::pokemon::badge::Badge::BoulderBadge;
+        assert!(rendered(&state).contains("The `flash` row lights it"), "{}", rendered(&state));
+    }
+
     #[test]
     fn an_obstacle_the_party_cannot_pass_is_named_rather_than_silently_dropped() {
         let mut gb = gb::game_boy::GameBoy::dmg(crate::pokemon::roms::POKERED);

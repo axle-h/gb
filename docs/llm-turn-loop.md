@@ -68,6 +68,9 @@ argument lives in the code.
 - An action the game would refuse is not offered, on the map so scripted policies are held to it too.
   `prompt`'s `Blocked here:` line names what would clear a cuttable tree and nothing else — naming
   water fired on every coast.
+- An unlit cave offers one walk, its nearest way out, until Flash lights it
+  (`tools::way_out_of_the_dark`); held in the menu rather than `actions()`, so the scripted route,
+  which crosses Rock Tunnel unlit, is untouched.
 - There is no way to name a party member, so the Day Care and the Name Rater are declined rather than
   guessed at. All nine in-game trades work, because each has exactly one legal answer and the agent
   gives it.

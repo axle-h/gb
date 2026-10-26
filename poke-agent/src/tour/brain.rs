@@ -885,6 +885,10 @@ impl CompletionBrain {
         if let Some(reply) = self.tidy(request) {
             return reply;
         }
+        // An unlit cave offers nothing but its way out until it is lit, whatever the step wants.
+        if request.menu_rows().iter().any(|(id, _)| id == "flash") {
+            return field_row("flash", "lighting the cave");
+        }
         // A walk given up on the way did not happen: take it back, and the step with it. Where it
         // was stopped is what says whether trying again is worth it. A walk stopped somewhere new
         // each time is getting closer, whatever stopped it; a walk stopped at the same place for

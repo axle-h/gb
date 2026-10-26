@@ -1862,6 +1862,9 @@ pub fn overworld_menu(state: &GameState, arrival: Option<crate::pokemon::world_g
     actions.retain(|action| !matches!(action.tile, MetaTile::Sprite(name)
         if state.map.sprites.iter().any(|s| s.name == name
             && s.picture_id == crate::pokemon::sprite::PictureId::Boulder)));
+    if state.map_is_dark {
+        actions = way_out_of_the_dark(actions);
+    }
     // `id_kind`, not `kind`: two people can share the tile an action approaches them from.
     actions.sort_by_key(|action| (action.destination.y, action.destination.x, action.tile.id_kind()));
     // Two doors of one building are two places, so the rows say which side.
@@ -1890,6 +1893,23 @@ pub fn overworld_menu(state: &GameState, arrival: Option<crate::pokemon::world_g
             },
         })
         .chain(field)
+        .collect()
+}
+
+/// An unlit cave is one the player cannot see, so the only walk it offers is the nearest door out
+/// of it; Flash is the row that brings the rest back. The cartridge darkens Rock Tunnel 1F on the way
+/// in from outside and B1F inherits it, so a door into either does not lead out.
+fn way_out_of_the_dark(actions: Vec<OverworldAction>) -> Vec<OverworldAction> {
+    use crate::pokemon::tile::MetaTile;
+    let leads_to = |action: &OverworldAction| match action.tile {
+        MetaTile::Warp { to_map, .. } | MetaTile::Connection { to_map, .. } | MetaTile::ConnectionWater(to_map) => Some(to_map),
+        _ => None,
+    };
+    actions.into_iter()
+        .filter_map(|action| leads_to(&action).map(|to| (matches!(to, Map::RockTunnel1F | Map::RockTunnelB1F), action)))
+        .min_by_key(|(dark, action)| (*dark, action.route.len()))
+        .map(|(_, action)| action)
+        .into_iter()
         .collect()
 }
 
@@ -3940,6 +3960,30 @@ mod tests {
             name: PokemonMoveName::Flash, slot: None });
         assert!(untaught.contains("HM"), "{untaught}");
         assert!(!untaught.contains("BoulderBadge"), "the badge is held: {untaught}");
+    }
+
+    /// In the dark the menu walks only to the nearest way out, until Flash lights the cave.
+    #[test]
+    fn a_dark_cave_offers_its_nearest_way_out_and_flash_and_no_other_walk() {
+        let mut state = state_from(include_bytes!("../pokemon/data/soak-rock-tunnel.bin"));
+        assert!(state.map_is_dark, "the fixture is Rock Tunnel unlit");
+        let walks = |menu: &[MenuItem]| menu.iter()
+            .filter(|row| row.id.starts_with(&format!("{}:", state.map.map))).count();
+
+        let dark = overworld_menu(&state, None);
+        assert_eq!(walks(&dark), 1, "{dark:#?}");
+        let out = dark.iter().find(|row| row.id.starts_with(&format!("{}:", state.map.map))).unwrap();
+        assert!(!out.description.contains("RockTunnel"), "the one walk leaves the cave: {out:?}");
+        assert!(!dark.iter().any(|row| row.id == "flash"), "no one knows Flash yet: {dark:#?}");
+
+        state.pokemon.get_mut(0).expect("a party").moves[3] = Some(PokemonMove::with_max_pp(PokemonMoveName::Flash));
+        state.badges |= crate::pokemon::badge::Badge::BoulderBadge;
+        let flash = overworld_menu(&state, None);
+        assert_eq!(walks(&flash), 1, "{flash:#?}");
+        assert!(flash.iter().any(|row| row.id == "flash"), "{flash:#?}");
+
+        state.map_is_dark = false;
+        assert!(walks(&overworld_menu(&state, None)) > 1, "a lit cave offers every walk again");
     }
 
     /// A cut or push the game would refuse is a row that is not there.

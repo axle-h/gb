@@ -242,14 +242,23 @@ pub fn to_celadon() -> Vec<Step> {
         Collect(true),
         // Out of the gym's corner, which the tree closes again behind every visit.
         Take("cut down the tree"),
-        GoTo("Route11"), GoTo("DiglettsCaveRoute11"), Clear(&[]), GoTo("DiglettsCave"),
+        // Route 2's aide wants ten species owned before he hands over Flash, and without these the
+        // count reaches nine. Named, because `*` reads the party and the traded Spearow is owned.
+        GoTo("Route11"),
+        Hunt { species: "Ekans", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "Route11" },
+        Hunt { species: "Drowzee", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "Route11" },
+        GoTo("DiglettsCaveRoute11"), Clear(&[]), GoTo("DiglettsCave"),
         Hunt { species: "*", row: "Pace", ball: "MasterBall", way: Way::WildOnACaveFloor, on: "" },
         GoTo("DiglettsCaveRoute2"), Clear(&[]), GoTo("Route2"),
         Explore { maps: &["Route2", "Route2TradeHouse", "Route2Gate"], patience: 300 },
         // The exploring can spend its whole idle allowance re-cutting the trees every battle
         // regrows before the trade house's door comes up, and the Abra is for its trade.
         GoTo("Route2TradeHouse"), Clear(&[]),
-        GoTo("DiglettsCaveRoute2"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute11"), GoTo("Route11"),
+        // Rock Tunnel is dark and offers nothing but its way out until Flash lights it. The aide
+        // hands over the HM once ten species are owned, and the Mr. Mime the trade just gave is in
+        // the party for both passes through the tunnel.
+        GoTo("Route2Gate"), Talk("OaksAide"), Teach { item: "Hm05Flash", species: "MrMime" },
+        GoTo("Route2"), GoTo("DiglettsCaveRoute2"), GoTo("DiglettsCave"), GoTo("DiglettsCaveRoute11"), GoTo("Route11"),
         GoTo("VermilionCity"), GoTo("Route6"), GoTo("UndergroundPathRoute6"), GoTo("UndergroundPathNorthSouth"),
         GoTo("UndergroundPathRoute5"), GoTo("Route5"), GoTo("CeruleanCity"),
         // The Fan Club's voucher buys the bicycle, and the cycling road south of Celadon is the
@@ -283,6 +292,8 @@ pub fn to_celadon() -> Vec<Step> {
         steps.extend(visit(building, "LavenderTown"));
     }
     steps.extend([
+        // Flash is taught and an HM cannot be tossed, so the HM would cost the Safari Zone a pickup.
+        GoTo("LavenderPokecenter"), Field("pc:store:Hm05Flash"), GoTo("LavenderTown"),
         GoTo("PokemonTower1F"), Clear(&[]), GoTo("PokemonTower2F"), Clear(&[]),
         GoTo("PokemonTower1F"), GoTo("LavenderTown"),
         GoTo("Route12"), Clear(&["Snorlax"]), GoTo("Route12Gate1F"), Clear(&[]), GoTo("Route12Gate2F"), Clear(&[]),
@@ -1031,8 +1042,8 @@ pub fn to_the_safari_game() -> Vec<Step> {
     steps
 }
 
-/// The north, walked from the Hall of Fame's own doorstep: the gifts a full bag refused in
-/// Viridian and at Route 2's gate, Pikachu in the forest and the stone that makes it the Raichu
+/// The north, walked from the Hall of Fame's own doorstep: the gift a full bag refused in
+/// Viridian, Pikachu in the forest and the stone that makes it the Raichu
 /// Cinnabar wants, the Old Amber from the museum's back room, then Mt Moon to Cerulean, its trade,
 /// Routes 9 and 10 by water, the Day Care, and Nugget Bridge.
 pub fn to_the_north_errands() -> Vec<Step> {
@@ -1052,7 +1063,7 @@ pub fn to_the_north_errands() -> Vec<Step> {
         GoTo("ViridianCity"),
         Talk("Fisher"),
         GoTo("ViridianGym"), Talk("Giovanni"), GoTo("ViridianCity"),
-        GoTo("Route2"), GoTo("Route2Gate"), Talk("OaksAide"),
+        GoTo("Route2"), GoTo("Route2Gate"),
         GoTo("Route2"), GoTo("ViridianForestSouthGate"), GoTo("ViridianForest"),
         Hunt { species: "Pikachu", row: "Grass", ball: "MasterBall", way: Way::WildInGrass, on: "ViridianForest" },
         Evolve { item: "ThunderStone", species: "Pikachu" },
@@ -1106,7 +1117,7 @@ pub fn to_the_north_errands() -> Vec<Step> {
 }
 
 /// The middle of the map, walked back up from Fuchsia: the Slowbro trade over Route 18, the Exp.
-/// All on Route 15, the eastern routes north to Lavender, Celadon's TM41 and the Copycat's Poké
+/// All on Route 15 if the eastern routes came by it short of fifty species, the eastern routes north to Lavender, Celadon's TM41 and the Copycat's Poké
 /// Doll, the trade under Route 5, Lt. Surge's machine, and Route 11's trade and its aide.
 pub fn to_the_middle_errands() -> Vec<Step> {
     use Step::*;
@@ -1172,7 +1183,7 @@ pub fn to_the_middle_errands() -> Vec<Step> {
 }
 
 /// Cinnabar's loose ends, which close the tour's loop: the Mansion's Ponyta, the lab's three
-/// trades, the Old Amber revived, and the TM Blaine held back for want of bag room.
+/// trades, the Old Amber revived, and the TM Blaine holds back if the bag had no room for it.
 pub fn to_the_cinnabar_errands() -> Vec<Step> {
     use Step::*;
     vec![
